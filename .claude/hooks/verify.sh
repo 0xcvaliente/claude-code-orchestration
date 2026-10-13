@@ -19,6 +19,8 @@ log_gate() { # decision reason
 agent_type="$(printf '%s' "$input" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 agent_id="$(printf '%s' "$input" | sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 
+agent_type="${agent_type##*:}" # plugin agents arrive namespaced ("orchestration:implementer")
+
 # Only gate implementers when the event reports an agent type.
 if [ -n "$agent_type" ] && [ "$agent_type" != "implementer" ]; then
   exit 0

@@ -43,7 +43,9 @@ const events = readFileSync(file, "utf8")
   })
   .filter((e) => e && e.hook_event_name === "SubagentStop" && e.session_id === input.session_id);
 
-const lastImpl = events.map((e) => e.agent_type).lastIndexOf("implementer");
+// Plugin agents arrive namespaced ("orchestration:implementer"); compare the bare role name.
+const role = (e) => String(e.agent_type ?? "").split(":").pop();
+const lastImpl = events.map(role).lastIndexOf("implementer");
 if (lastImpl === -1) decide("allow", "no_implementer_in_session", 0);
 
 const gateLog = join(stateDir, "gates.jsonl");
@@ -52,7 +54,7 @@ const priorBlocks = existsSync(gateLog)
   : 0;
 const capped = (reason, code) => (priorBlocks >= MAX_BLOCKS ? decide("allow", "max_blocks_reached", 0) : decide("block", reason, code));
 
-const reviews = events.slice(lastImpl + 1).filter((e) => e.agent_type === "reviewer");
+const reviews = events.slice(lastImpl + 1).filter((e) => role(e) === "reviewer");
 if (reviews.length === 0) {
   console.error("Review gate: an implementer finished but no reviewer has run since. Send the result to a reviewer before replying.");
   capped("no_reviewer_after_last_implementer", 2);
