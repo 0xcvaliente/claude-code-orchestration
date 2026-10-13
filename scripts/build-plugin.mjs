@@ -34,7 +34,7 @@ const hooks = {
     SubagentStart: [{ hooks: [{ type: "command", command: run("telemetry.mjs") }] }],
     SubagentStop: [
       { hooks: [{ type: "command", command: run("telemetry.mjs") }] },
-      { matcher: "implementer", hooks: [{ type: "command", command: run("verify.sh") }] },
+      { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh") }] },
     ],
     Stop: [{ hooks: [{ type: "command", command: run("review-gate.mjs") }] }],
   },

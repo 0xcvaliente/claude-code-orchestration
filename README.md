@@ -96,7 +96,7 @@ Confirmed: hook payloads carry `session_id`, `agent_type`, `agent_id`, `cwd` and
 
 The review gate has blocked in real sessions (`gates.jsonl`: `no_reviewer_after_last_implementer`, then `max_blocks_reached`).
 
-Not yet exercised: the test gate actually blocking (it has only logged `tests_passed`), the opus second reviewer (needs a `risky` slice), `omitClaudeMd`, the plugin build at runtime, the scripted workflow.
+Not yet exercised: the test gate actually blocking (it has only logged `tests_passed`), the opus second reviewer (needs a `risky` slice), `omitClaudeMd`, the scripted workflow.
 
 Observed weakness: the orchestrator reviewed one branch before running the integrator, against its prompt, and that reviewer tried `cd /tmp && git -C ...`, which the cd-plus-git guard refused. It recovered with a second review of the merged tree. Order is advisory in the native session; the scripted workflow fixes it.
 
@@ -126,7 +126,7 @@ Reading it: still no correctness separation, since the plain session also passed
 ### Keep in sync and share
 
 - `npm run sync-agents` rewrites model, effort and `maxTurns` in the agent files from `src/config.ts`; `npm run check-agents` fails on drift.
-- `npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist to `orchestration:<name>`; this is untested at runtime. Project permission denies are not part of a plugin.
+- `npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. Verified in two live headless runs (2026-10-13): agents route, and both gates log (`tests_passed`, `reviewer_passed`). The first run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Project permission denies are not part of a plugin.
 
 ## Tune cost
 

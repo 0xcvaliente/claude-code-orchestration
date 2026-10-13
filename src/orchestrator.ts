@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
 import { count, usd } from "./args.js";
@@ -152,7 +153,8 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const budget = usd("runBudgetUsd", opts.runBudgetUsd ?? LIMITS.runBudgetUsd);
   const concurrency = count("concurrency", opts.concurrency ?? LIMITS.concurrency, 1);
   const maxRetries = count("maxRetries", opts.maxRetries ?? LIMITS.maxRetries, 0);
-  const run = new Run(new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14), opts.outRoot);
+  // Second-resolution timestamp plus a random suffix: two runs in one second must not share branch names.
+  const run = new Run(`${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomBytes(2).toString("hex")}`, opts.outRoot);
   const base = await headRef(opts.repo);
   const report: Report = {
     runId: run.id, base, slices: [], merged: [], conflicted: [], spentUsd: 0, costByRole: {},
