@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Headless native orchestration: run the orchestrator agent non-interactively, print its JSON,
+# and log cost and turns to <repo>/.claude/state/runs.jsonl.
+# Usage: scripts/orchestrate.sh "task description" [repo]   (repo defaults to the current directory)
+# The repo needs .claude/agents/ (copy this project's .claude/ into it, or install it at user level).
+# Env: ORCH_BUDGET_USD (default 5; an estimate at list price, a safety cap on a subscription),
+#      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
+#      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
+#      ORCH_ADD_DIR (extra directory the agents may read, e.g. a project to analyse),
+#      ORCH_ADVISOR (e.g. opus; passes --advisor to claude, experimental),
+#      ORCH_DRY_RUN=1 (print the claude arguments, one per line, and exit).
+set -uo pipefail
+
+task="${1:?usage: orchestrate.sh \"task\" [repo]}"
+repo="${2:-$PWD}"
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$repo" || exit 1
+
+agent="${ORCH_AGENT:-orchestrator}" # "none" runs a plain session, used as a baseline
+if [ "$agent" != none ] && [ ! -d .claude/agents ]; then
+  echo "no .claude/agents in $repo" >&2
+  exit 1
+fi
+
+# dontAsk denies everything not listed, so an unattended run can never prompt or widen its own access.
+# One rule per element: rules contain spaces, so never split them on whitespace.
+tools=(
+  "Read" "Grep" "Glob" "Agent" "Edit" "Write"
+  "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
+  "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
+  "Bash(git -C *)" "Bash(cd *)"
+  "Bash(npm *)" "Bash(node *)" "Bash(ls*)"
+)
+if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
+  tools=()
+  while IFS= read -r rule; do
+    [ -n "$rule" ] && tools+=("$rule")
+  done <<< "$ORCH_ALLOWED_TOOLS"
+fi
+
+args=(-p "$task")
+[ "$agent" != none ] && args+=(--agent "$agent")
+args+=(--output-format json --permission-mode dontAsk --max-budget-usd "${ORCH_BUDGET_USD:-5}" --no-session-persistence)
+# Experimental advisor (second, stronger model consulted at decision points); see the docs' /advisor page.
+[ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
+[ -n "${ORCH_ADD_DIR:-}" ] && args+=(--add-dir "$ORCH_ADD_DIR")
+args+=(--allowedTools "${tools[@]}") # variadic: keep it last
+
+if [ -n "${ORCH_DRY_RUN:-}" ]; then
+  printf '%s\n' "${args[@]}"
+  exit 0
+fi
+
+code=0
+out="$(claude "${args[@]}")" || code=$?
+
+printf '%s\n' "$out"
+printf '%s' "$out" | node "$here/log-run.mjs" "$task" || true
+exit "$code"

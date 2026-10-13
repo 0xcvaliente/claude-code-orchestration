@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Code orchestration</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f7f4ec;color:#172b36;font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:1280px;margin:auto;padding:36px 24px}header{max-width:760px;margin-bottom:24px}h1{font-size:clamp(26px,4vw,42px);line-height:1.12;letter-spacing:-.035em;margin:8px 0 16px}h2{font-size:20px;margin:28px 0 12px}p{margin:0 0 12px}.eyebrow{color:#50636d;font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
+.canvas,.table-wrap{max-width:100%;overflow-x:auto}.canvas{border:1px solid #7d898a;border-radius:8px}.canvas svg{display:block;width:100%;min-width:1290px;height:auto}.canvas:focus-visible,.table-wrap:focus-visible{outline:3px solid #be3b21;outline-offset:3px}.hint{color:#50636d;font-size:13px;margin-top:10px}
+table{border-collapse:collapse;width:100%;min-width:680px;font-size:13px;text-align:left}th,td{padding:10px 12px;border-bottom:1px solid #7d898a;vertical-align:top}td:last-child{overflow-wrap:anywhere}thead{background:#ffffff}th{font-weight:650;white-space:nowrap}li{margin-bottom:6px}
+@media(max-width:600px){main{padding:24px 16px}}@media print{body{font-size:12px}main{max-width:none;padding:0}header{max-width:none;margin-bottom:12px}h1{font-size:26px;margin:4px 0 10px}h2{font-size:16px;break-after:avoid}.canvas svg{min-width:0;width:auto;max-width:100%;height:auto;max-height:135mm;margin:auto}.canvas{overflow:visible;break-inside:avoid}.hint{display:none}table{min-width:0;font-size:10px}th,td{padding:6px}tr{break-inside:avoid}}
+</style></head><body><main><header><p class="eyebrow">Diagram Craft · editable system view</p><h1>Claude Code orchestration</h1><p>A trigger starts an orchestrator that plans, dispatches cheap explorer and mid-tier writer workers, gates results through a fresh-context verifier, and either ships or retries with feedback.</p></header>
+<div class="canvas" tabindex="0" role="region" aria-label="Scrollable diagram"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1290 700" width="1290" height="700" role="img" aria-labelledby="dc-b669bb5e24-title dc-b669bb5e24-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="dc-b669bb5e24-title">Claude Code orchestration</title>
+<desc id="dc-b669bb5e24-desc">A trigger starts an orchestrator that plans, dispatches cheap explorer and mid-tier writer workers, gates results through a fresh-context verifier, and either ships or retries with feedback.</desc>
+<defs><marker id="dc-b669bb5e24-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#50636d"/></marker></defs>
+<rect width="1290" height="700" fill="#f7f4ec" aria-hidden="true"/>
+<rect x="685" y="30" width="270" height="400" rx="8" fill="none" stroke="#7d898a" stroke-dasharray="4 4"/>
+<text x="701" y="54" font-size="13" font-weight="600" fill="#50636d" text-anchor="start"><tspan x="701" dy="0">WORKER POOL · WORKTREES</tspan></text>
+<polyline data-edge="task" points="230,350 340,350" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="persist" points="460,290 460,190" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="dispatch" points="580,300 650,300 650,160 700,160" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="assign" points="580,350 700,350" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="summary" points="700,100 580,100" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="review" points="940,350 1050,350" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="pass" points="1150,410 1150,510" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)"/>
+<polyline data-edge="fail" points="1090,410 1090,470 520,470 520,410" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="log" points="380,410 380,570 230,570" fill="none" stroke="#50636d" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-b669bb5e24-arrow)" stroke-dasharray="6 5"/>
+<g id="dc-b669bb5e24-node-trigger" data-node="trigger" data-x="40" data-y="290" data-w="190" data-h="120">
+<rect x="40" y="290" width="190" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<text x="58" y="327.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="trigger"><tspan x="58" dy="0">Trigger</tspan></text>
+<text x="58" y="353.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="trigger"><tspan x="58" dy="0">CLI · CI · issue ·</tspan><tspan x="58" dy="18">cron</tspan></text>
+<text x="58" y="395" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="trigger"><tspan x="58" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-orchestrator" data-node="orchestrator" data-x="340" data-y="290" data-w="240" data-h="120">
+<rect x="340" y="290" width="240" height="120" rx="6" fill="#fdeee6" stroke="#be3b21" stroke-width="2"/>
+<text x="358" y="327.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="orchestrator"><tspan x="358" dy="0">Orchestrator</tspan></text>
+<text x="358" y="353.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="orchestrator"><tspan x="358" dy="0">Agent SDK · plans, routes,</tspan><tspan x="358" dy="18">budgets</tspan></text>
+<text x="358" y="395" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="orchestrator"><tspan x="358" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-state" data-node="state" data-x="340" data-y="70" data-w="240" data-h="120">
+<rect x="340" y="70" width="240" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<path d="M350 79 H570 M350 181 H570" stroke="#7d898a" fill="none"/>
+<text x="358" y="107.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="state"><tspan x="358" dy="0">Shared state</tspan></text>
+<text x="358" y="133.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="state"><tspan x="358" dy="0">Plan · status · summaries ·</tspan><tspan x="358" dy="18">cost log</tspan></text>
+<text x="358" y="175" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="state"><tspan x="358" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-explorer" data-node="explorer" data-x="700" data-y="70" data-w="240" data-h="120">
+<rect x="700" y="70" width="240" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<text x="718" y="107.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="explorer"><tspan x="718" dy="0">Explorer workers</tspan></text>
+<text x="718" y="133.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="explorer"><tspan x="718" dy="0">Cheap model · read-only</tspan><tspan x="718" dy="18">tools</tspan></text>
+<text x="718" y="175" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="explorer"><tspan x="718" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-writer" data-node="writer" data-x="700" data-y="290" data-w="240" data-h="120">
+<rect x="700" y="290" width="240" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<text x="718" y="327.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="writer"><tspan x="718" dy="0">Writer workers</tspan></text>
+<text x="718" y="353.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="writer"><tspan x="718" dy="0">Mid-tier model · tool</tspan><tspan x="718" dy="18">allowlist</tspan></text>
+<text x="718" y="395" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="writer"><tspan x="718" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-verifier" data-node="verifier" data-x="1050" data-y="290" data-w="200" data-h="120">
+<rect x="1050" y="290" width="200" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<text x="1068" y="327.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="verifier"><tspan x="1068" dy="0">Verifier</tspan></text>
+<text x="1068" y="353.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="verifier"><tspan x="1068" dy="0">Fresh context ·</tspan><tspan x="1068" dy="18">tests, lint, review</tspan></text>
+<text x="1068" y="395" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="verifier"><tspan x="1068" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-output" data-node="output" data-x="1050" data-y="510" data-w="200" data-h="120">
+<rect x="1050" y="510" width="200" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<text x="1068" y="547.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="output"><tspan x="1068" dy="0">PR / report</tspan></text>
+<text x="1068" y="573.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="output"><tspan x="1068" dy="0">Merge after gate</tspan><tspan x="1068" dy="18">passes</tspan></text>
+<text x="1068" y="615" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="output"><tspan x="1068" dy="0">PROPOSED</tspan></text>
+</g>
+<g id="dc-b669bb5e24-node-telemetry" data-node="telemetry" data-x="40" data-y="510" data-w="190" data-h="120">
+<rect x="40" y="510" width="190" height="120" rx="6" fill="#ffffff" stroke="#7d898a" stroke-width="1.5"/>
+<path d="M50 519 H220 M50 621 H220" stroke="#7d898a" fill="none"/>
+<text x="58" y="547.5" font-size="18" font-weight="650" fill="#172b36" text-anchor="start" data-node-text="telemetry"><tspan x="58" dy="0">Telemetry</tspan></text>
+<text x="58" y="573.5" font-size="13" font-weight="400" fill="#50636d" text-anchor="start" data-node-text="telemetry"><tspan x="58" dy="0">Transcripts · cost</tspan><tspan x="58" dy="18">per worker</tspan></text>
+<text x="58" y="615" font-size="11" font-weight="700" fill="#172b36" text-anchor="start" data-node-text="telemetry"><tspan x="58" dy="0">PROPOSED</tspan></text>
+</g>
+<g data-label="task" data-x="245" data-y="316" data-w="80" data-h="30"><rect x="245" y="316" width="80" height="30" rx="4" fill="#f7f4ec"/>
+<text x="253" y="335" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="253" dy="0">Task</tspan></text>
+</g>
+<g data-label="persist" data-x="470" data-y="222" data-w="90" data-h="30"><rect x="470" y="222" width="90" height="30" rx="4" fill="#f7f4ec"/>
+<text x="478" y="241" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="478" dy="0">Persist</tspan></text>
+</g>
+<g data-label="dispatch" data-x="596" data-y="222" data-w="80" data-h="30"><rect x="596" y="222" width="80" height="30" rx="4" fill="#f7f4ec"/>
+<text x="604" y="241" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="604" dy="0">Dispatch</tspan></text>
+</g>
+<g data-label="assign" data-x="596" data-y="318" data-w="80" data-h="30"><rect x="596" y="318" width="80" height="30" rx="4" fill="#f7f4ec"/>
+<text x="604" y="337" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="604" dy="0">Assign</tspan></text>
+</g>
+<g data-label="summary" data-x="596" data-y="64" data-w="80" data-h="30"><rect x="596" y="64" width="80" height="30" rx="4" fill="#f7f4ec"/>
+<text x="604" y="83" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="604" dy="0">Summary</tspan></text>
+</g>
+<g data-label="review" data-x="962" data-y="316" data-w="70" data-h="30"><rect x="962" y="316" width="70" height="30" rx="4" fill="#f7f4ec"/>
+<text x="970" y="335" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="970" dy="0">Diff</tspan></text>
+</g>
+<g data-label="pass" data-x="1162" data-y="448" data-w="70" data-h="30"><rect x="1162" y="448" width="70" height="30" rx="4" fill="#f7f4ec"/>
+<text x="1170" y="467" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="1170" dy="0">Pass</tspan></text>
+</g>
+<g data-label="fail" data-x="700" data-y="438" data-w="240" data-h="30"><rect x="700" y="438" width="240" height="30" rx="4" fill="#f7f4ec"/>
+<text x="708" y="457" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="708" dy="0">Fail: retry with feedback</tspan></text>
+</g>
+<g data-label="log" data-x="248" data-y="536" data-w="110" data-h="30"><rect x="248" y="536" width="110" height="30" rx="4" fill="#f7f4ec"/>
+<text x="256" y="555" font-size="13" font-weight="400" fill="#172b36" text-anchor="start"><tspan x="256" dy="0">Logs · cost</tspan></text>
+</g>
+</svg></div>
+<p class="hint">On narrow screens, scroll the diagram horizontally. The relationships and evidence are also listed below.</p>
+<h2>Notes and assumptions</h2><ul><li>Design proposal, not an observed system: every element is proposed.</li><li>Solid arrows are control flow; dashed arrows are returned results, retries, and logging.</li><li>Model tiers are roles (cheap, mid-tier, strongest); pick concrete models per role after measuring.</li><li>Retry limits, timeouts, and the merge policy are unspecified.</li></ul>
+<h2>Entities and evidence</h2><div class="table-wrap" tabindex="0" role="region" aria-label="Entity evidence table"><table><thead><tr><th scope="col">ID</th><th scope="col">Entity</th><th scope="col">Status</th><th scope="col">Source</th></tr></thead><tbody><tr><th scope="row">trigger</th><td>Trigger</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">orchestrator</th><td>Orchestrator</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">state</th><td>Shared state</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">explorer</th><td>Explorer workers</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">writer</th><td>Writer workers</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">verifier</th><td>Verifier</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">output</th><td>PR / report</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">telemetry</th><td>Telemetry</td><td>proposed</td><td>Design proposal in this conversation</td></tr></tbody></table></div>
+<h2>Relationships and evidence</h2><div class="table-wrap" tabindex="0" role="region" aria-label="Relationship evidence table"><table><thead><tr><th scope="col">ID</th><th scope="col">Direction</th><th scope="col">Meaning</th><th scope="col">Status</th><th scope="col">Source</th></tr></thead><tbody><tr><th scope="row">task</th><td>trigger → orchestrator</td><td>Task</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">persist</th><td>orchestrator → state</td><td>Persist</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">dispatch</th><td>orchestrator → explorer</td><td>Dispatch</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">assign</th><td>orchestrator → writer</td><td>Assign</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">summary</th><td>explorer → state</td><td>Summary</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">review</th><td>writer → verifier</td><td>Diff</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">pass</th><td>verifier → output</td><td>Pass</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">fail</th><td>verifier → orchestrator</td><td>Fail: retry with feedback</td><td>proposed</td><td>Design proposal in this conversation</td></tr><tr><th scope="row">log</th><td>orchestrator → telemetry</td><td>Logs · cost</td><td>proposed</td><td>Design proposal in this conversation</td></tr></tbody></table></div>
+</main></body></html>
