@@ -31,7 +31,7 @@ claude --agent orchestrator
 | Agent | Model / effort | Tools |
 |---|---|---|
 | `orchestrator` | opus, high | `Agent(researcher, implementer, integrator, reviewer)`, Read, Grep, Glob |
-| `researcher` | haiku, low | Read, Grep, Glob |
+| `researcher` | haiku, low | Read, Grep, Glob, read-only `git` (`log`, `ls-files`, `rev-list`, `rev-parse`, `status`, `show`), `wc`, `ls`, `du` |
 | `implementer` | sonnet, medium | default |
 | `integrator` | sonnet, low | Read, Grep, Glob, Bash |
 | `reviewer` | sonnet, medium | Read, Grep, Glob, Bash |
@@ -144,3 +144,6 @@ Check `telemetry.jsonl`, then move each role to the cheapest model that still pa
 - The deny lists (`UNSAFE_BASH` in `src/config.ts`, `permissions.deny` in `.claude/settings.json`; `policy.test.ts` keeps them equal) guard against mistakes, not malice. Native headless mode allows `Bash(npm *)` and `Bash(node *)`, which can run any code, including a push.
 - Workers branch from `HEAD`; uncommitted changes are not visible to them.
 - Slices that edit the same file conflict at merge time; conflicting branches are reported, not auto-resolved.
+
+
+Verified 2026-10-13 from the researcher's own transcript: `git log`, `git ls-files` and `date` run, `git tag` is refused. Added after a 14-repo analysis where file-only researchers read `.git/logs/HEAD` (a reflog across all branches) and got dates, tracked-file claims and counts wrong. A `date` is allowed because Claude Code auto-allows it as read-only.
