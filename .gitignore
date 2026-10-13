@@ -1,0 +1,5 @@
+node_modules/
+runs/
+dist/
+.claude/state/
+*.log

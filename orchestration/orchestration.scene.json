@@ -1,0 +1,382 @@
+{
+  "title": "Claude Code orchestration",
+  "description": "A trigger starts an orchestrator that plans, dispatches cheap explorer and mid-tier writer workers, gates results through a fresh-context verifier, and either ships or retries with feedback.",
+  "width": 1290,
+  "height": 700,
+  "theme": "light",
+  "regions": [
+    {
+      "id": "pool",
+      "label": "WORKER POOL \u00b7 WORKTREES",
+      "x": 685,
+      "y": 30,
+      "w": 270,
+      "h": 400
+    }
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "label": "Trigger",
+      "detail": "CLI \u00b7 CI \u00b7 issue \u00b7 cron",
+      "x": 40,
+      "y": 290,
+      "w": 190,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "label": "Orchestrator",
+      "detail": "Agent SDK \u00b7 plans, routes, budgets",
+      "x": 340,
+      "y": 290,
+      "w": 240,
+      "h": 120,
+      "emphasis": true,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "state",
+      "label": "Shared state",
+      "detail": "Plan \u00b7 status \u00b7 summaries \u00b7 cost log",
+      "shape": "store",
+      "x": 340,
+      "y": 70,
+      "w": 240,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "explorer",
+      "label": "Explorer workers",
+      "detail": "Cheap model \u00b7 read-only tools",
+      "x": 700,
+      "y": 70,
+      "w": 240,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "writer",
+      "label": "Writer workers",
+      "detail": "Mid-tier model \u00b7 tool allowlist",
+      "x": 700,
+      "y": 290,
+      "w": 240,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "verifier",
+      "label": "Verifier",
+      "detail": "Fresh context \u00b7 tests, lint, review",
+      "x": 1050,
+      "y": 290,
+      "w": 200,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "output",
+      "label": "PR / report",
+      "detail": "Merge after gate passes",
+      "x": 1050,
+      "y": 510,
+      "w": 200,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "telemetry",
+      "label": "Telemetry",
+      "detail": "Transcripts \u00b7 cost per worker",
+      "shape": "store",
+      "x": 40,
+      "y": 510,
+      "w": 190,
+      "h": 120,
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "task",
+      "from": "trigger",
+      "to": "orchestrator",
+      "label": "Task",
+      "label_at": [
+        245,
+        316
+      ],
+      "label_w": 80,
+      "points": [
+        [
+          230,
+          350
+        ],
+        [
+          340,
+          350
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "persist",
+      "from": "orchestrator",
+      "to": "state",
+      "label": "Persist",
+      "label_at": [
+        470,
+        222
+      ],
+      "label_w": 90,
+      "points": [
+        [
+          460,
+          290
+        ],
+        [
+          460,
+          190
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "dispatch",
+      "from": "orchestrator",
+      "to": "explorer",
+      "label": "Dispatch",
+      "label_at": [
+        596,
+        222
+      ],
+      "label_w": 80,
+      "points": [
+        [
+          580,
+          300
+        ],
+        [
+          650,
+          300
+        ],
+        [
+          650,
+          160
+        ],
+        [
+          700,
+          160
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "assign",
+      "from": "orchestrator",
+      "to": "writer",
+      "label": "Assign",
+      "label_at": [
+        596,
+        318
+      ],
+      "label_w": 80,
+      "points": [
+        [
+          580,
+          350
+        ],
+        [
+          700,
+          350
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "summary",
+      "from": "explorer",
+      "to": "state",
+      "label": "Summary",
+      "label_at": [
+        596,
+        64
+      ],
+      "label_w": 80,
+      "points": [
+        [
+          700,
+          100
+        ],
+        [
+          580,
+          100
+        ]
+      ],
+      "style": "dashed",
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "review",
+      "from": "writer",
+      "to": "verifier",
+      "label": "Diff",
+      "label_at": [
+        962,
+        316
+      ],
+      "label_w": 70,
+      "points": [
+        [
+          940,
+          350
+        ],
+        [
+          1050,
+          350
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "pass",
+      "from": "verifier",
+      "to": "output",
+      "label": "Pass",
+      "label_at": [
+        1162,
+        448
+      ],
+      "label_w": 70,
+      "points": [
+        [
+          1150,
+          410
+        ],
+        [
+          1150,
+          510
+        ]
+      ],
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "fail",
+      "from": "verifier",
+      "to": "orchestrator",
+      "label": "Fail: retry with feedback",
+      "label_at": [
+        700,
+        438
+      ],
+      "label_w": 240,
+      "points": [
+        [
+          1090,
+          410
+        ],
+        [
+          1090,
+          470
+        ],
+        [
+          520,
+          470
+        ],
+        [
+          520,
+          410
+        ]
+      ],
+      "style": "dashed",
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    },
+    {
+      "id": "log",
+      "from": "orchestrator",
+      "to": "telemetry",
+      "label": "Logs \u00b7 cost",
+      "label_at": [
+        248,
+        536
+      ],
+      "label_w": 110,
+      "points": [
+        [
+          380,
+          410
+        ],
+        [
+          380,
+          570
+        ],
+        [
+          230,
+          570
+        ]
+      ],
+      "style": "dashed",
+      "status": "proposed",
+      "sources": [
+        "Design proposal in this conversation"
+      ]
+    }
+  ],
+  "notes": [
+    "Design proposal, not an observed system: every element is proposed.",
+    "Solid arrows are control flow; dashed arrows are returned results, retries, and logging.",
+    "Model tiers are roles (cheap, mid-tier, strongest); pick concrete models per role after measuring.",
+    "Retry limits, timeouts, and the merge policy are unspecified."
+  ]
+}
