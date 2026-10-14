@@ -178,7 +178,7 @@ flowchart TD
 | 2 or more independent slices and (4 or more files, or 1,500 or more lines) | pipeline: parallel worktrees pay off; an interface-first plan lets slices run in parallel even across few files |
 | anything else | plain (a large but sequential change stays in one context) |
 
-The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMaxLines` 200 are the line limits). The `/route` skill applies the same rules, so it also works without a checkout of this repo: with no `node_modules` at `$ORCH_HOME` it sizes the task in-session (skim the repo, estimate the four facts, apply the rules) instead of calling the triager. A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Every decision is appended to `routes.jsonl` (`runs/routes.jsonl` for the SDK, `.claude/state/routes.jsonl` for native), so you can tune thresholds against what happened. In the one benchmark where triage chose the pipeline for a two-file-per-slice task, it cost twice a plain session for the same result, so `minParallelFiles` may deserve a raise once there is more data.
+The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMaxLines` 200 are the line limits). The `/route` skill applies the same rules, so it also works without a checkout of this repo: with no `node_modules` at `$ORCH_HOME` it sizes the task in-session (skim the repo, estimate the four facts, apply the rules) instead of calling the triager. A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Every decision is appended to `routes.jsonl`, so you can tune thresholds against what happened: `runs/routes.jsonl` for the SDK; for native, `.claude/state/routes.jsonl` under `npm run auto` or in a repo that registers the hooks itself, and the plugin's per-user state dir when `/route` runs for a plugin install. In the one benchmark where triage chose the pipeline for a two-file-per-slice task, it cost twice a plain session for the same result, so `minParallelFiles` may deserve a raise once there is more data.
 
 ## Two ways to run it
 
@@ -231,7 +231,7 @@ The marketplace manifest `.claude-plugin/marketplace.json` points at the committ
 
 The orchestrator reads those settings before a parallel wave; if `baseRef` is not `"head"` it runs the slices one after another in the shared tree and says so in its report. The scripted workflow takes the same fact as the argument `baseRefHead`.
 
-**Logs stay out of your repo.** The plugin's hooks log to `$CLAUDE_PLUGIN_DATA/state/<project path>` (a per-user dir), not to `.claude/state/` in your project. In a repo that registers its own copy of the hooks, such as this one, the plugin's copies step aside so nothing runs twice. Details in [docs/native-mode.md](docs/native-mode.md#gates).
+**Logs stay out of your repo.** The plugin's hooks log to `$CLAUDE_PLUGIN_DATA/state/<project path>` (a per-user dir), not to `.claude/state/` in your project, and `/route` appends its decisions to `routes.jsonl` there. `npm run report -- /path/to/your/repo` in a checkout finds that dir and writes `report.html` beside the logs. In a repo that registers its own copy of the hooks, such as this one, the plugin's copies step aside so nothing runs twice. Details in [docs/native-mode.md](docs/native-mode.md#gates).
 
 **No checkout needed for routing.** `/route` and the session nudge work in a plugin-only install: without this repo at `~/claude-code-orchestration` (or `$ORCH_HOME`, with `node_modules`) the skill sizes the task itself with the same thresholds.
 
@@ -307,7 +307,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check; both must pass before finishing |
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin`, or fail when the committed build is stale |
-| `npm run report` | HTML timeline from `.claude/state/` |
+| `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
 | `npm run compare`, `compare:hard`, `compare:validate`, `compare:mutate` | The A/B benchmark ([docs/benchmarks.md](docs/benchmarks.md)); `compare` takes `--variants` (A to F, including C plain Sonnet and F plain Opus), `--tasks`, `--repeat N`, `--snapshot-every SEC` and `--timeout SEC`. Tasks may carry `setup/` and a `score.mjs` |
 
 ### Tuning cost

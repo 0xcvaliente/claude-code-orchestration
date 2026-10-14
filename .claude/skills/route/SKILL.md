@@ -9,10 +9,10 @@ Size the task before doing it.
    - If `${ORCH_HOME:-$HOME/claude-code-orchestration}` contains both `package.json` and `node_modules`, run the triager. `--repo` is the project the task is about; substitute its absolute path for `$PWD_OF_TASK_REPO`:
 
      ```bash
-     (cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && npm run --silent route -- --repo "$PWD_OF_TASK_REPO" --task "$ARGUMENTS")
+     (cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" npm run --silent route -- --repo "$PWD_OF_TASK_REPO" --task "$ARGUMENTS")
      ```
 
-     It makes one cheap read-only model call and prints JSON: `mode`, `reason`, and the `facts` behind it. It also appends the decision to that project's `.claude/state/routes.jsonl`.
+     It makes one cheap read-only model call and prints JSON: `mode`, `reason`, and the `facts` behind it. It also appends the decision to `routes.jsonl` in that project's state dir: `.claude/state/` when the project registers the orchestration hooks itself, otherwise the plugin's per-user dir, so nothing is written into the repo.
    - Otherwise (no checkout, e.g. a plugin-only install) size the task yourself. Skim the repo, then estimate `filesToTouch`, `independentSlices` (parts buildable at the same time with no shared files and no dependency; 1 when sequential or small), `linesToChange` (lines added or changed, new files included) and `risky` (security, authentication, payments, data migrations, public API changes, or several modules where a wrong change is costly). Apply these rules in order, the same as `TRIAGE` in `src/config.ts`:
      1. risky, fewer than 2 independent slices, at most 3 files and at most 200 lines: `reviewed`.
      2. risky otherwise: `orchestrate`.

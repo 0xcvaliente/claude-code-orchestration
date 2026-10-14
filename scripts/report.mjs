@@ -1,11 +1,20 @@
 #!/usr/bin/env node
-// Renders .claude/state/telemetry.jsonl and runs.jsonl as a local HTML report (.claude/state/report.html).
+// Renders a repo's state dir (runs, agent events, triage and gate decisions) as a local HTML report.html in that dir.
 // Usage: node scripts/report.mjs [repo]   (repo defaults to the current directory). Nothing is published.
+// Reads <repo>/.claude/state when it has telemetry, else the per-user dir the plugin hooks log to for that repo
+// (.claude/hooks/state.mjs), so a plugin install's report stays out of the repo too. With no logs anywhere it
+// writes an empty report where this repo's writers would log.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
 
 const repo = resolve(process.argv[2] ?? process.cwd());
-const dir = join(repo, ".claude", "state");
+const candidates = [join(repo, ".claude", "state"), ...userStateDirs(repo)];
+const has = (names) => (d) => names.some((n) => existsSync(join(d, n)));
+const dir =
+  candidates.find(has(["telemetry.jsonl", "runs.jsonl"])) ??
+  candidates.find(has(["routes.jsonl", "gates.jsonl"])) ??
+  stateDirFor(repo).dir;
 
 const read = (name) =>
   existsSync(join(dir, name))
@@ -24,6 +33,10 @@ const read = (name) =>
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const runs = read("runs.jsonl");
 const events = read("telemetry.jsonl");
+const routes = read("routes.jsonl");
+const gates = read("gates.jsonl");
+const table = (heads, rows) =>
+  `<table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 
 const bySession = new Map();
 for (const e of events) {
@@ -46,10 +59,12 @@ const sessions = [...bySession.entries()]
 
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orchestration report</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #8884;padding:.4rem .6rem;text-align:left;font-size:13px}th{font-weight:600}</style></head>
-<body><h1>Orchestration report</h1><p>${esc(repo)}</p>
+<body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: <code>${esc(dir)}</code></p>
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Cost USD</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
-<h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}</body></html>`;
+<h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
+<h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}
+<h2>Gate decisions</h2>${gates.length ? table(["Time", "Gate", "Decision", "Reason", "Agent or session"], gates.map((g) => [g.ts, g.gate, g.decision, g.reason, g.agent_type || g.session_id])) : "<p>No gate decisions yet.</p>"}</body></html>`;
 
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, "report.html"), html);
-console.log(`wrote ${join(dir, "report.html")} (${runs.length} runs, ${events.length} events)`);
+console.log(`wrote ${join(dir, "report.html")} (${runs.length} runs, ${events.length} events, ${routes.length} routes, ${gates.length} gates)`);

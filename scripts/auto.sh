@@ -6,7 +6,8 @@
 # A triaged plain or reviewed run that fails falls back to the orchestrator (ORCH_NO_ESCALATE=1 turns that off).
 # Usage: scripts/auto.sh "task description" [repo]   (repo defaults to the current directory)
 # Env: ORCH_MODE (auto|plain|reviewed|orchestrate, default auto: triage decides), plus everything scripts/orchestrate.sh reads.
-# Decisions are appended to <repo>/.claude/state/routes.jsonl.
+# Decisions are appended to <repo>/.claude/state/routes.jsonl (--project-state: beside runs.jsonl, even when the
+# repo does not register the hooks).
 set -uo pipefail
 
 task="${1:?usage: auto.sh \"task\" [repo]}"
@@ -15,7 +16,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 requested="${ORCH_MODE:-auto}"
 
-decision="$(cd "$root" && npx --no-install tsx src/route.ts --repo "$repo" --task "$task" --mode "$requested")" || exit $?
+decision="$(cd "$root" && npx --no-install tsx src/route.ts --repo "$repo" --task "$task" --mode "$requested" --project-state)" || exit $?
 field() { printf '%s' "$decision" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).$1"; }
 mode="$(field mode)" || exit 1
 echo "route: $mode - $(field reason)" >&2
