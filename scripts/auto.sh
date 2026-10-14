@@ -26,6 +26,15 @@ requested="${ORCH_MODE:-auto}"
 nl=$'\n'
 source "$here/../.claude/hooks/test-cmd.sh" # orch_detect_test_cmd, orch_allow_rules
 
+# The same budget checks as orchestrate.sh, here first: triage is a model call that must not run under a bad or old cap.
+if [ -n "${ORCH_BUDGET_USD:-}" ]; then
+  echo "ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS (a token count such as 2M)" >&2
+  exit 1
+fi
+if [ -n "${ORCH_BUDGET_TOKENS:-}" ]; then
+  node "$here/tokens.mjs" budget-usd "$ORCH_BUDGET_TOKENS" > /dev/null || exit 1
+fi
+
 decision="$(cd "$root" && npx --no-install tsx src/route.ts --repo "$repo" --task "$task" --mode "$requested" --project-state)" || exit $?
 field() { printf '%s' "$decision" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).$1"; }
 mode="$(field mode)" || exit 1

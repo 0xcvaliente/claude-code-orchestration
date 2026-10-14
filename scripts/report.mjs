@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
+import { TOKENS_PER_USD, formatTokens } from "./tokens.mjs";
 
 const repo = resolve(process.argv[2] ?? process.cwd());
 const candidates = [join(repo, ".claude", "state"), ...userStateDirs(repo)];
@@ -49,8 +50,16 @@ for (const e of events) {
   (bySession.get(k) ?? bySession.set(k, []).get(k)).push(e);
 }
 
+// Tokens of a run; a legacy row (cost_usd, no tokens) shows "≈" + an estimate from its list-price cost.
+let estimated = false;
+const tokenCell = (r) => {
+  if (typeof r.tokens === "number") return formatTokens(r.tokens);
+  if (typeof r.cost_usd !== "number") return "n/a";
+  estimated = true;
+  return `≈${formatTokens(Math.round(r.cost_usd * TOKENS_PER_USD))}`;
+};
 const runRows = runs
-  .map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.task)}</td><td>${r.ok ? "ok" : "failed"}</td><td>${esc(r.cost_usd?.toFixed?.(4) ?? "n/a")}</td><td>${esc(r.turns ?? "n/a")}</td><td>${esc(Object.entries(r.subagents).map(([k, v]) => `${k}:${v}`).join(" "))}</td></tr>`)
+  .map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.task)}</td><td>${r.ok ? "ok" : "failed"}</td><td>${esc(tokenCell(r))}</td><td>${esc(r.turns ?? "n/a")}</td><td>${esc(Object.entries(r.subagents).map(([k, v]) => `${k}:${v}`).join(" "))}</td></tr>`)
   .join("");
 
 const sessions = [...bySession.entries()]
@@ -68,7 +77,7 @@ const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orchestration report</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #8884;padding:.4rem .6rem;text-align:left;font-size:13px}th{font-weight:600}</style></head>
 <body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
-<h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Cost USD</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
+<h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}
 <h2>Gate decisions</h2>${gates.length ? table(["Time", "Gate", "Decision", "Reason", "Agent or session"], gates.map((g) => [g.ts, g.gate, g.decision, g.reason, g.agent_type || g.session_id])) : "<p>No gate decisions yet.</p>"}</body></html>`;
