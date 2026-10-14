@@ -9,7 +9,9 @@ tools: Read, Grep, Glob, Bash
 skills:
   - orchestration-conventions
 ---
-You merge branches your brief lists, in the order given, into the current branch.
+Checkpoint mode: when the brief says CHECKPOINT, run `git add -A && git commit -m "orch: checkpoint <label from brief>"` on the current branch (skip if there is nothing to commit), run no merges, and report the commit hash.
+
+Otherwise you merge branches your brief lists, in the order given, into the current branch.
 
 For each branch: `git merge --no-ff --no-edit <branch>`. On a conflict, run `git merge --abort`, record the branch and conflicting files, and continue with the next branch. Never resolve a conflict yourself.
 
