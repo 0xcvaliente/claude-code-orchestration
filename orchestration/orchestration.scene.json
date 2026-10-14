@@ -45,7 +45,7 @@
     {
       "id": "state",
       "label": "Shared state",
-      "detail": "Plan \u00b7 status \u00b7 summaries \u00b7 cost log",
+      "detail": "Plan \u00b7 status \u00b7 summaries \u00b7 token log",
       "shape": "store",
       "x": 340,
       "y": 70,
@@ -111,7 +111,7 @@
     {
       "id": "telemetry",
       "label": "Telemetry",
-      "detail": "Transcripts \u00b7 cost per worker",
+      "detail": "Transcripts \u00b7 tokens per worker",
       "shape": "store",
       "x": 40,
       "y": 510,
@@ -346,7 +346,7 @@
       "id": "log",
       "from": "orchestrator",
       "to": "telemetry",
-      "label": "Logs \u00b7 cost",
+      "label": "Logs \u00b7 tokens",
       "label_at": [
         248,
         536
