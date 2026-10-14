@@ -1,0 +1,74 @@
+[
+  {
+    "name": "head-of-line blocking",
+    "file": "index.js",
+    "from": "continue;\n      free--;",
+    "to": "break;\n      free--;"
+  },
+  {
+    "name": "priority ascending",
+    "file": "index.js",
+    "from": "b.j.priority - a.j.priority",
+    "to": "a.j.priority - b.j.priority"
+  },
+  {
+    "name": "skip only direct dependents",
+    "file": "index.js",
+    "from": "let changed = true;",
+    "to": "let changed = false; for (const o of st.values()) if (o.status === \"pending\" && o.j.deps.includes(r.id)) o.status = \"skipped\";"
+  },
+  {
+    "name": "one retry too few",
+    "file": "index.js",
+    "from": "s.attempt < 1 + s.j.maxRetries",
+    "to": "s.attempt < s.j.maxRetries"
+  },
+  {
+    "name": "one retry too many",
+    "file": "index.js",
+    "from": "s.attempt < 1 + s.j.maxRetries",
+    "to": "s.attempt < 2 + s.j.maxRetries"
+  },
+  {
+    "name": "ties choose largest path",
+    "file": "index.js",
+    "from": "(c.length === top.length && lexLess(c.path, top.path))",
+    "to": "(c.length === top.length && lexLess(top.path, c.path))"
+  },
+  {
+    "name": "fail when attempt equals failAttempts",
+    "file": "index.js",
+    "from": "s.attempt > s.j.failAttempts",
+    "to": "s.attempt >= s.j.failAttempts"
+  },
+  {
+    "name": "resources not released",
+    "file": "index.js",
+    "from": "for (const [k, n] of Object.entries(st.get(r.id).j.needs)) avail[k] += n;",
+    "to": ""
+  },
+  {
+    "name": "gantt marks failures as success",
+    "file": "index.js",
+    "from": "cover.some((a) => a.ok) ? \"#\" : cover.length ? \"x\" : \".\"",
+    "to": "cover.length ? \"#\" : \".\""
+  },
+  {
+    "name": "id tiebreak descending",
+    "file": "index.js",
+    "from": "cmpStr(a.j.id, b.j.id)",
+    "to": "cmpStr(b.j.id, a.j.id)"
+  },
+  {
+    "name": "no cycle detection message ids",
+    "file": "index.js",
+    "from": "throw new Error(`cycle: ${[...cyc, id].join(\" -> \")}`);",
+    "to": "throw new Error(\"cycle\");"
+  },
+  {
+    "name": "makespan ignores failed attempts",
+    "file": "index.js",
+    "from": "attempts.reduce((m, a) => Math.max(m, a.end), 0)",
+    "to": "attempts.filter((a) => a.ok).reduce((m, a) => Math.max(m, a.end), 0)"
+  }
+]
