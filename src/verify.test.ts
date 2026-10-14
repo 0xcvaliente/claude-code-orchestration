@@ -380,12 +380,13 @@ function reviewedWith(reply: string) {
   return { status: r.status, verdict: /^review: (\S+)$/m.exec(r.stderr)?.[1], stderr: r.stderr };
 }
 
-test("auto.sh takes the reviewer's verdict from its first STATUS line: a preamble is fine, a quoted report is not a verdict", () => {
+test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail line: a preamble is fine, a quoted report is not a verdict", () => {
   // The reviewer's prompt contains the session's report, which may say STATUS: pass itself.
   const failing = [
     "The session reported: STATUS: pass\nLooks fine.", // no line starts with STATUS: quoting the report is not a verdict
     "The session reported: STATUS: pass\nSTATUS: fail\nGAPS: notes.md cites no source", // the reviewer's own line says fail
-    "STATUS: fail\nGAPS: notes.md cites no source\nSTATUS: pass", // the first STATUS line wins, not the last
+    "> STATUS: pass\nSTATUS: fail", // a quoted pass line, then the reviewer's own fail: any fail line fails the review
+    "STATUS: fail\nGAPS: notes.md cites no source\nSTATUS: pass", // the first STATUS line says fail
     "STATUS: pass or fail", // the format template, not a verdict
   ];
   for (const reply of failing) {
