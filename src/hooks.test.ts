@@ -98,7 +98,8 @@ test("session nudge: tells the session to route non-trivial tasks of any kind, n
   assert.match(context, /orchestration:route/);
   for (const kind of ["code", "research", "writing", "analysis", "operations"]) assert.match(context, new RegExp(`\\b${kind}\\b`), `the nudge covers ${kind}`);
   assert.match(context, /Only for code in a git repository: parallel slices use isolation: worktree/, "git machinery is for code only");
-  assert.match(context, /Other work runs in the shared folder/);
+  assert.match(context, /Work that changes no code runs in the shared folder, and its slices with disjoint files may run in parallel; code outside a git repository runs one slice at a time/);
+  assert.match(context, /send the draft and its sources to orchestration:reviewer before you reply/, "an answer the session writes itself is reviewed too");
   assert.match(context, /Skip routing for quick questions/);
   const off = run({ ORCH_NO_NUDGE: "1" });
   assert.equal(off.status, 0);
@@ -254,16 +255,25 @@ test("test gate: when only prose files changed, judged from git status and not f
   // Untracked prose with spaces, an upper-case extension and non-ASCII letters, and a staged rename of a modified file.
   writeFileSync(join(dir, "notes with spaces.TXT"), "x\n");
   mkdirSync(join(dir, "docs"));
-  writeFileSync(join(dir, "docs", "ünï.mdx"), "x\n");
+  writeFileSync(join(dir, "docs", "ünï.markdown"), "x\n");
+  writeFileSync(join(dir, "docs", "Setup.ADOC"), "x\n");
   git("mv", "README.md", "docs/GUIDE.rst");
   const more = testGate(dir, {}, "a2");
   assert.equal(more.status, 0, more.stderr);
   assert.equal(lastGateEntry(dir).reason, "no_code_changes");
 });
 
-test("test gate: any changed code path still runs the tests, and the failing test script blocks", () => {
+test("test gate: any changed code, build or dependency path still runs the tests, and the failing test script blocks", () => {
   const changes: Record<string, (dir: string, git: (...args: string[]) => void) => void> = {
     "a modified code file": (dir) => writeFileSync(join(dir, "app.js"), "export const x = 1;\n"),
+    "only a requirements.txt": (dir) => writeFileSync(join(dir, "requirements.txt"), "left-pad==1.0\n"),
+    "a requirements file in a folder": (dir) => {
+      mkdirSync(join(dir, "requirements"));
+      writeFileSync(join(dir, "requirements", "base.txt"), "x\n");
+    },
+    "a constraints file in upper case": (dir) => writeFileSync(join(dir, "Constraints-dev.TXT"), "x\n"),
+    "a CMakeLists.txt": (dir) => writeFileSync(join(dir, "CMakeLists.txt"), "project(x)\n"),
+    "an .mdx file, which is JSX": (dir) => writeFileSync(join(dir, "page.mdx"), "<Hero />\n"),
     "an untracked code file": (dir) => writeFileSync(join(dir, "extra.JS"), "export {};\n"),
     "a deleted code file": (dir) => unlinkSync(join(dir, "app.js")),
     "prose and code together": (dir) => {
