@@ -14,3 +14,5 @@ paths:
 - Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter; keep gates in `settings.json` or `hooks.json`.
 - After changing model, effort or maxTurns, edit `src/config.ts` and run `npm run sync-agents` instead of editing the agent file.
 - The orchestrator's "Size the task first" step mirrors `TRIAGE` in `src/config.ts` (the SDK and `npm run auto` use those numbers). Change both together. `npm run build-plugin` after any change under `.claude/agents`, `skills` or `hooks`: `dist/plugin` is committed and `npm run check-plugin` fails when stale.
+- `worktree.baseRef` must be `"head"` in settings for checkpoint commits and for parallel slices on unpushed or feature-branch work; the default starts worktrees from the remote default branch.
+- Resume an implementer with `SendMessage` (to its agent id) to send reviewer gaps; it keeps its context instead of re-reading the code.

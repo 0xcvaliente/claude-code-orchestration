@@ -10,11 +10,13 @@ export const meta = {
   ],
 }
 
-// args: { task: string, maxSlices?: number, maxRetries?: number }
+// args: { task: string, maxSlices?: number, maxRetries?: number, baseRefHead?: boolean }
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
 const MAX_SLICES = (args && args.maxSlices) || 6
 const MAX_RETRIES = (args && args.maxRetries) || 2
+// true when settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
+const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
 
 const QUESTIONS = {
   type: 'object',
@@ -99,14 +101,23 @@ while (left.length) {
 }
 
 const results = []
+const sharedFiles = []
 for (const wave of waves) {
-  // Isolate only parallel slices. Later waves run in the shared tree: worktrees branch from the default branch
-  // and would not see earlier waves' work.
-  const isolated = wave.length > 1
+  // Isolate only parallel slices. Worktrees see only committed work, and only from the local HEAD when
+  // baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
+  const isolated = wave.length > 1 && BASE_REF_HEAD
+  if (wave.length > 1 && !BASE_REF_HEAD) {
+    log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head", so worktrees would branch from the remote default branch; running one after another in the shared tree`)
+  }
+  if (isolated) {
+    // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
+    await agent(
+      `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash.`,
+      { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator' },
+    )
+  }
   phase('Build')
-  const out = await pipeline(
-    wave,
-    async (s) => {
+  const runSlice = async (s) => {
       let feedback = ''
       let work = null
       let reviews = []
@@ -137,9 +148,16 @@ for (const wave of waves) {
         feedback = gaps.join('\n')
       }
       return { slice: s, status: 'failed', attempts: MAX_RETRIES + 1, branch: (work && work.branch) || '', gaps: feedback ? [feedback] : [] }
-    },
-  )
+  }
+  let out
+  if (isolated || wave.length === 1) {
+    out = await pipeline(wave, runSlice)
+  } else {
+    out = []
+    for (const s of wave) out.push(await runSlice(s))
+  }
   const built = out.filter(Boolean)
+  if (!isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
   results.push(...built)
 
   if (isolated) {
