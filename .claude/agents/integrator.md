@@ -9,7 +9,7 @@ tools: Read, Grep, Glob, Bash
 skills:
   - orchestration-conventions
 ---
-Checkpoint mode: when the brief says CHECKPOINT, run `git add -A && git commit -m "orch: checkpoint <label from brief>"` on the current branch (skip if there is nothing to commit), run no merges, and report the commit hash.
+Checkpoint mode: when the brief says CHECKPOINT, the brief names the files or directories that finished slices own. Run `git status --short`, then `git add -- <those paths>` (tracked modifications under those paths included) and `git commit -m "orch: checkpoint <label from brief>"` on the current branch (skip if nothing is staged). Never run `git add -A`. Run no merges. Report the commit hash, and report any other untracked or modified paths under OPEN without staging them.
 
 Otherwise you merge branches your brief lists, in the order given, into the current branch.
 
