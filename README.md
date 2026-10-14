@@ -46,17 +46,27 @@ Start a new chat afterwards. The plugin's `SessionStart` hook then tells Claude 
 
 ```bash
 npm install
-npm start -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
+npm start -- --repo /path/to/git/repo \
+  --task "add rate limiting to the API" --test-cmd "npm test"
 ```
 
 `--mode auto` is the default: triage decides. Useful variations:
 
 ```bash
-npm start -- --repo . --task "..." --plan-only            # plan only, the cheapest way to try it
-npm start -- --repo . --task "..." --mode plain           # skip triage, one plain session
-npm run route -- --repo . --task "..."                    # triage only: prints the decision as JSON
-npm run auto -- "task" /path/to/repo                      # native headless: triage, then claude -p or the orchestrator agent
-claude --agent orchestrator                               # native interactive orchestrator
+# Plan only: the cheapest way to try it
+npm start -- --repo . --task "..." --plan-only
+
+# Skip triage: one plain session
+npm start -- --repo . --task "..." --mode plain
+
+# Triage only: prints the decision as JSON
+npm run route -- --repo . --task "..."
+
+# Native headless: triage, then claude -p or the orchestrator agent
+npm run auto -- "task" /path/to/repo
+
+# Native interactive orchestrator
+claude --agent orchestrator
 ```
 
 ## How it works
@@ -65,15 +75,15 @@ Every task goes through triage. The three routes differ in how much machinery th
 
 ```mermaid
 flowchart TD
-    T([Your task]) --> TR{{"Triage<br/>Sonnet, read-only, about $0.05"}}
-    TR -->|"small or sequential"| P["Plain session<br/>one agent, edits stay uncommitted"]
-    TR -->|"small but risky"| R["Plain session + reviewer<br/>fresh-context review of git diff"]
-    TR -->|"parallel, large or risky"| O["Pipeline<br/>orchestrator plus specialised workers"]
-    P --> D1(["Uncommitted edits in your working tree"])
-    R --> D1
-    P -. "tests fail" .-> O
-    R -. "review or tests fail" .-> O
-    O --> D2(["Branches orch/id/slice and orch/id/result"])
+    T([Your task]) --> TR{{"Triage<br/>Sonnet, read-only<br/>about $0.05"}}
+    TR -->|"small or sequential"| P["Plain session<br/>one agent"]
+    TR -->|"small but risky"| R["Plain session<br/>+ fresh reviewer"]
+    TR -->|"parallel, large or risky"| O["Pipeline<br/>orchestrator + workers"]
+    P --> C{"Checks<br/>pass?"}
+    R --> C
+    C -->|yes| W(["Uncommitted edits<br/>in your working tree"])
+    C -.->|"no: escalate"| O
+    O --> B(["Branches orch/id/*"])
 ```
 
 | Route | What runs | Result lands in | Verified by |
@@ -82,21 +92,21 @@ flowchart TD
 | Reviewed | The same, then one fresh-context reviewer; its issues go back to the session (up to `--retries` times). In the headless `npm run auto` the reviewer is read-only but may run the repo's detected test command (pytest, cargo, go ...) | Uncommitted working tree | Tests plus the reviewer |
 | Pipeline | Planner, researchers, implementers in worktrees, verifiers, integrator | Git branches; your checkout is untouched | Tests, a verifier per slice, merge check |
 
-The dotted arrows are **escalation**: if a triaged plain or reviewed run fails, the task reruns through the pipeline. The failed attempt's edits stay uncommitted in your working tree and are never reverted, because they may sit beside your own changes; the pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off, and a forced `--mode` never escalates.
+The dotted arrow is **escalation**: if a triaged plain or reviewed run fails its checks (tests, plus the review on the reviewed route), the task reruns through the pipeline. The failed attempt's edits stay uncommitted in your working tree and are never reverted, because they may sit beside your own changes; the pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off, and a forced `--mode` never escalates.
 
 ## The pipeline
 
 ```mermaid
 flowchart TD
-    A["Plan: questions<br/>Opus, read-only"] --> B["Explore, in parallel<br/>Haiku, read-only"]
-    B --> C["Plan: up to 6 slices<br/>disjoint files, acceptance check each"]
-    C --> D["Write, in parallel<br/>Sonnet, one git worktree per slice"]
-    D --> E{"Test gate<br/>runs your command, no model"}
-    E -->|fail| D
-    E -->|pass| F{"Verify<br/>fresh-context reviewer"}
-    F -->|"gaps, up to 2 retries"| D
-    F -->|pass| G["Integrate<br/>merge passing branches, never push"]
-    G --> H(["Result branch orch/id/result"])
+    A["Plan questions<br/>Opus, read-only"] --> B["Explore in parallel<br/>Haiku, read-only"]
+    B --> C["Plan up to 6 slices<br/>disjoint files<br/>one acceptance check each"]
+    C --> D["Write in parallel<br/>Sonnet, one worktree each"]
+    D --> E{{"Test gate<br/>your command, no model"}}
+    E -->|pass| F{{"Verify<br/>fresh-context reviewer"}}
+    F -->|pass| G["Integrate<br/>merge passing branches<br/>never pushes"]
+    G --> H(["Result branch<br/>orch/id/result"])
+    E -.->|fail| D
+    F -.->|gaps| D
 ```
 
 Why each step is shaped this way:
@@ -105,23 +115,24 @@ Why each step is shaped this way:
 - **Fresh contexts.** Workers start with no history. They get a brief and return a short report, so the orchestrator's context stays small.
 - **A gate that does not trust the agent.** The test command runs in the harness, not inside the model, and a failing run costs no verifier call.
 - **A verifier that did not write the code.** It sees the diff and the goal, not the implementer's reasoning.
-- **Retries carry feedback.** A rejected slice goes back to a writer with the failing output or the reviewer's gaps.
+- **Retries carry feedback.** A rejected slice (the dotted arrows) goes back to a writer with the failing output or the reviewer's gaps, up to 2 times (`--retries`).
 - **Disjoint files per slice.** Parallel slices never edit the same file, so merges are clean. A slice that needs another's output lists it in `dependsOn` and starts from a worktree that already contains it.
 
 One slice's life:
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> Writing
-    Writing --> Testing: worker finished
-    Testing --> Writing: tests fail, output fed back
+    Writing --> Testing: done
+    Testing --> Writing: tests fail
     Testing --> Reviewing: tests pass
-    Reviewing --> Writing: gaps found, retry
-    Reviewing --> Passed: reviewer passes
-    Writing --> Failed: retries exhausted
-    Failed --> Replaced: replan supplies new slices
-    Passed --> Merged: integrated into result branch
+    Reviewing --> Writing: gaps
+    Reviewing --> Passed: pass
+    Passed --> Merged: integrated
     Merged --> [*]
+    Writing --> Failed: retries used up
+    Failed --> Replaced: replanned
 ```
 
 ### The roles
@@ -159,16 +170,18 @@ The triager only reports four facts about a task: how many files it will touch, 
 
 ```mermaid
 flowchart TD
-    S([Facts from the triager]) --> Q1{"risky?"}
-    Q1 -->|yes| Q2{"3 files or fewer, 200 lines or fewer<br/>and a single slice?"}
+    S([Facts from the triager]) --> Q1{"Risky?"}
+    Q1 -->|yes| Q2{"Small?"}
+    Q1 -->|no| Q3{"12+ files?"}
     Q2 -->|yes| REV["Reviewed"]
     Q2 -->|no| ORC["Pipeline"]
-    Q1 -->|no| Q3{"12 files or more?"}
     Q3 -->|yes| ORC
-    Q3 -->|no| Q4{"2 or more independent slices and<br/>4 or more files, or 1500 or more lines?"}
+    Q3 -->|no| Q4{"Parallel?"}
     Q4 -->|yes| ORC
     Q4 -->|no| PLA["Plain"]
 ```
+
+*Small* is at most 3 files, at most 200 lines and one slice. *Parallel* is 2 or more independent slices and either 4 or more files or 1,500 or more lines. In full:
 
 | Facts | Route |
 |---|---|
@@ -199,20 +212,20 @@ Natively, the gates are hooks that block an agent from finishing:
 sequenceDiagram
     participant O as Orchestrator
     participant I as Implementer
-    participant V as verify.sh (SubagentStop)
+    participant V as verify.sh<br/>SubagentStop
     participant R as Reviewer
-    participant G as review-gate.mjs (Stop)
-    O->>I: brief with goal, files, acceptance check
+    participant G as review-gate.mjs<br/>Stop
+    O->>I: brief: goal, files, check
     I-->>V: tries to finish
     alt tests fail
-        V-->>I: blocked with the test output
+        V-->>I: blocked, with test output
     else tests pass
         V-->>O: allowed
     end
     O->>R: review the slice
-    R-->>O: STATUS pass or fail
+    R-->>O: STATUS: pass or fail
     O->>G: final reply
-    G-->>O: blocked until a reviewer has passed the last implementer
+    G-->>O: blocked until a reviewer passes<br/>the last implementer
 ```
 
 The review gate reads the worker's `STATUS` from its last message or, when that is empty, from the `SubagentHandback` message or last text block in its transcript. A reviewer with no status at all blocks too (`last_reviewer_no_status`). The loop guard allows 2 blocks after each implementer run (a later implementer resets it); then the reply goes out with a `systemMessage` saying the work is unverified (`max_blocks_reached`), so the gate never gives up silently.
@@ -318,21 +331,27 @@ Models, effort and turn caps are in `src/config.ts`. Check `telemetry.jsonl`, th
 
 ```
 src/
-  triage.ts, auto.ts, solo.ts     router, route execution, the plain and reviewed sessions
-  orchestrator.ts                 the pipeline: plan, explore, write, gate, verify, merge, replan, resume
-  agent.ts, retry.ts, verdict.ts  one worker = one query(); transient retry; reviewer verdict schema
-  config.ts                       roles, limits and triage thresholds (source of truth)
+  triage.ts, auto.ts, solo.ts     router, route runner, plain and reviewed runs
+  orchestrator.ts                 the pipeline: plan, explore, write, gate,
+                                  verify, merge, replan, resume
+  agent.ts, retry.ts, verdict.ts  one worker per query(), transient retry,
+                                  reviewer verdict schema
+  config.ts                       roles, limits, triage thresholds (source of
+                                  truth)
   cli.ts, route.ts                entry points
-  git.ts, state.ts, args.ts       worktree and merge helpers, run directory and telemetry, number checks
+  git.ts, state.ts, args.ts       worktrees and merges, run state, number checks
 .claude/
-  agents/                         orchestrator, researcher, implementer, integrator, reviewer
-  hooks/                          verify.sh, test-cmd.sh, review-gate.mjs, telemetry.mjs, state.mjs, nudge.mjs
+  agents/                         orchestrator, researcher, implementer,
+                                  integrator, reviewer
+  hooks/                          verify.sh, test-cmd.sh, review-gate.mjs,
+                                  telemetry.mjs, state.mjs, nudge.mjs
   skills/                         route, orchestration-conventions
   workflows/orchestrate.js        the scripted flow
-  settings.json, rules/           gates and permission denies, rules for editing the above
+  settings.json, rules/           gates, permission denies, editing rules
 .claude-plugin/marketplace.json   makes the repo installable
 dist/plugin/                      the built plugin (committed)
-scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs, report, compare/ benchmark
+scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
+                                  report.mjs, compare/ (the benchmark)
 docs/                             benchmarks.md, native-mode.md
 orchestration/                    the original architecture diagram
 ```
@@ -341,7 +360,7 @@ orchestration/                    the original architecture diagram
 
 ```bash
 npm install
-npm test               # unit tests against a scripted fake model in temp git repos
+npm test               # unit tests: scripted fake model, temp git repos
 npm run typecheck
 npm run check-agents   # agents in sync with src/config.ts
 npm run check-plugin   # committed plugin build is current
