@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # SubagentStop gate: block an implementer from finishing while the test command fails.
-# Test command: $ORCH_TEST_CMD, else `npm test` when package.json defines a test script.
+# Test command: $ORCH_TEST_CMD, else detected by test-cmd.sh (npm, pytest/unittest, cargo, go, swift, make).
+# Isolated worktrees (cwd under .claude/worktrees/) follow ORCH_GATE_ISOLATED, because sibling slices
+# may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
+# block (gate as usual), skip (do not run tests).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
 # Every decision is appended to .claude/state/gates.jsonl so a run can show whether the gate fired.
 set -u
+
+# shellcheck source=test-cmd.sh
+source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -34,18 +40,27 @@ else
   cd "$project" || exit 0
 fi
 
-cmd="${ORCH_TEST_CMD:-}"
+isolated=0
+case "$PWD" in */.claude/worktrees/*) isolated=1 ;; esac
+mode="${ORCH_GATE_ISOLATED:-warn}"
+if [ "$isolated" = 1 ] && [ "$mode" = skip ]; then
+  log_gate allow isolated_skipped
+  exit 0
+fi
+
+cmd="$(orch_detect_test_cmd "$PWD")"
 if [ -z "$cmd" ]; then
-  if [ -f package.json ] && grep -q '"test"' package.json; then
-    cmd="npm test --silent"
-  else
-    log_gate allow no_test_command
-    exit 0
-  fi
+  log_gate allow no_test_command
+  exit 0
 fi
 
 if out="$(bash -c "$cmd" 2>&1)"; then
   log_gate allow tests_passed
+  exit 0
+fi
+
+if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+  log_gate warn tests_failed_isolated
   exit 0
 fi
 
