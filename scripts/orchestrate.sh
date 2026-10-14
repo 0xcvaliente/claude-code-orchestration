@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Headless native orchestration: run the orchestrator agent non-interactively, print its JSON,
 # and log cost and turns to <repo>/.claude/state/runs.jsonl.
-# Usage: scripts/orchestrate.sh "task description" [repo]   (repo defaults to the current directory)
-# The repo needs .claude/agents/ (copy this project's .claude/ into it, or install it at user level).
+# Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
+# The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
+# code work that uses worktrees. To run an agent (not ORCH_AGENT=none) it needs .claude/agents/ (copy this project's
+# .claude/ into it, or install it at user level).
 # Env: ORCH_BUDGET_USD (optional spend cap, an estimate at list price; unset = no dollar cap),
 #      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
-#      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list),
+#      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list; the default list has
+#        no web tools, so add WebSearch and WebFetch for research, scripts/auto.sh does it for a task that is not code),
 #      ORCH_MODEL (passes --model, e.g. sonnet or opus, for plain-model baselines),
 #      ORCH_TEST_CMD (test command; its permission rules are added automatically, else detected from the repo),
 #      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
