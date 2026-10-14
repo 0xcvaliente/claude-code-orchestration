@@ -8,6 +8,10 @@ import { auto, MODES, type RequestedMode } from "./auto.js";
 
 const runAgent = withTransientRetry(baseAgent);
 
+// The pipeline plans, branches and merges in git worktrees, so it is for code in a git repository only.
+const SCOPE = "The SDK pipeline (npm start) works on code in a git repository.";
+const OTHER_TASKS = "For other tasks (research, writing, analysis, operations) use the plugin's /route, `claude --agent orchestrator` or `npm run auto`.";
+
 const { values } = parseArgs({
   options: {
     repo: { type: "string" },
@@ -31,7 +35,7 @@ if (!values.repo || !(values.task || values.resume)) {
   console.error(
     'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
       "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget USD] [--concurrency N] [--retries N] [--replans N] " +
-      "[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]",
+      `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]\n${SCOPE} ${OTHER_TASKS}`,
   );
   process.exit(2);
 }
@@ -60,7 +64,7 @@ try {
     console.warn("warning: the repo has uncommitted changes; workers branch from HEAD and will not see them.");
   }
 } catch {
-  console.error(`error: ${repo} is not a git repository (or does not exist)`);
+  console.error(`error: ${repo} is not a git repository (or does not exist). ${SCOPE} ${OTHER_TASKS}`);
   process.exit(2);
 }
 
