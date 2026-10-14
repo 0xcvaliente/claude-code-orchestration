@@ -1,0 +1,29 @@
+{
+  "name": "lite",
+  "seed": 1,
+  "groups": [
+    {
+      "tasks": [
+        "t1-parallel",
+        "t2-single",
+        "h1-query-engine",
+        "h2-scheduler",
+        "k1-stdlib-toolkit",
+        "h3-sql-engine"
+      ],
+      "arms": [
+        "P-S",
+        "P-O",
+        "O-mix",
+        "O-O",
+        "AUTO"
+      ],
+      "cells": [
+        {
+          "id": "main"
+        }
+      ],
+      "reps": 2
+    }
+  ]
+}

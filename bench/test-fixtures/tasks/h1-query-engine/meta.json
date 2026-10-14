@@ -1,0 +1,13 @@
+{
+  "id": "h1-query-engine",
+  "title": "Fixture h1-query-engine",
+  "tier": "medium",
+  "shape": "fixture",
+  "lang": "node",
+  "cap_min": 45,
+  "test_cmd": "npm test",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}

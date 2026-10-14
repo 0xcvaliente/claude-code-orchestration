@@ -1,0 +1,13 @@
+{
+  "id": "t1-parallel",
+  "title": "Fixture t1-parallel",
+  "tier": "small",
+  "shape": "fixture",
+  "lang": "node",
+  "cap_min": 30,
+  "test_cmd": "npm test",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}

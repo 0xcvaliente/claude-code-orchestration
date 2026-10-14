@@ -1,0 +1,13 @@
+{
+  "id": "t2-single",
+  "title": "Fixture t2-single",
+  "tier": "small",
+  "shape": "fixture",
+  "lang": "node",
+  "cap_min": 20,
+  "test_cmd": "npm test",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}
