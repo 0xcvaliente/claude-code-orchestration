@@ -4,13 +4,31 @@ import { LIMITS, TRIAGE } from "./config.js";
 /** reviewed: a plain session, then one independent reviewer (with retries on its feedback). */
 export type Mode = "plain" | "reviewed" | "orchestrate";
 
-/** What the triager reports about a task. The policy in `decide` turns these facts into a mode. */
+/**
+ * What the triager reports about a task, of any kind: code, research, writing, analysis or operations.
+ * The policy in `decide` turns these facts into a mode.
+ */
 export interface Facts {
+  /**
+   * True when the task creates or changes source code, tests, build or CI configuration in a repository. False for
+   * research, writing, analysis, planning or operations whose output is documents, data, answers or commands run.
+   * It does not take part in `decide`: callers use it to decide whether the test and git gates apply.
+   */
+  code: boolean;
+  /** Files the task will create or change, of any kind (source, docs, reports, data, config). */
   filesToTouch: number;
-  /** Estimated lines added or changed. */
+  /** Estimated lines added or changed across them, prose and data included. */
   linesToChange: number;
-  /** Parts that could be built at the same time with no shared files and no dependency on each other. */
+  /**
+   * Parts separate workers could do at the same time with no shared output file and no dependency on each other:
+   * modules, documents, or research questions whose findings are combined at the end. 1 when sequential or small.
+   */
   independentSlices: number;
+  /**
+   * A wrong result is costly: security, authentication, payments, data migrations or deletion, public API changes,
+   * production operations (deploys, infrastructure, credentials), content sent or published outside the team, or
+   * changes spanning several modules where a wrong change is costly.
+   */
   risky: boolean;
   reason: string;
 }
@@ -27,27 +45,33 @@ export interface Decision {
 export const TRIAGE_SCHEMA = {
   type: "object",
   properties: {
+    code: { type: "boolean" },
     filesToTouch: { type: "integer", minimum: 0 },
     linesToChange: { type: "integer", minimum: 0 },
     independentSlices: { type: "integer", minimum: 1, maximum: LIMITS.maxSlices },
     risky: { type: "boolean" },
     reason: { type: "string" },
   },
-  required: ["filesToTouch", "linesToChange", "independentSlices", "risky", "reason"],
+  required: ["code", "filesToTouch", "linesToChange", "independentSlices", "risky", "reason"],
   additionalProperties: false,
 };
 
 const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null;
 
-/** Model output is untrusted input: anything that is not a well-formed fact sheet is rejected, numbers are clamped. */
+/**
+ * Model output is untrusted input: anything that is not a well-formed fact sheet is rejected, numbers are clamped.
+ * `code` is the one lenient field: a sheet from an older caller or a logged line has none, and a missing or non-boolean
+ * `code` means true, the conservative choice that keeps the test and git gates on.
+ */
 export function parseFacts(x: unknown): Facts | undefined {
   if (!isRecord(x)) return undefined;
-  const { filesToTouch, linesToChange, independentSlices, risky, reason } = x;
+  const { code, filesToTouch, linesToChange, independentSlices, risky, reason } = x;
   if (typeof filesToTouch !== "number" || !Number.isFinite(filesToTouch)) return undefined;
   if (typeof linesToChange !== "number" || !Number.isFinite(linesToChange)) return undefined;
   if (typeof independentSlices !== "number" || !Number.isFinite(independentSlices)) return undefined;
   if (typeof risky !== "boolean") return undefined;
   return {
+    code: typeof code === "boolean" ? code : true,
     filesToTouch: Math.max(0, Math.round(filesToTouch)),
     linesToChange: Math.max(0, Math.round(linesToChange)),
     independentSlices: Math.min(LIMITS.maxSlices, Math.max(1, Math.round(independentSlices))),
@@ -68,7 +92,7 @@ export function decide(f: Facts): { mode: Mode; reason: string } {
   if (f.independentSlices >= TRIAGE.minParallelSlices && (f.filesToTouch >= TRIAGE.minParallelFiles || f.linesToChange >= TRIAGE.bigLines)) {
     return {
       mode: "orchestrate",
-      reason: `${f.independentSlices} independent slices over ${f.filesToTouch} files, ~${f.linesToChange} lines: parallel worktrees pay off`,
+      reason: `${f.independentSlices} independent slices over ${f.filesToTouch} files, ~${f.linesToChange} lines: parallel slices pay off`,
     };
   }
   if (f.linesToChange >= TRIAGE.bigLines) {
@@ -83,18 +107,27 @@ export function decide(f: Facts): { mode: Mode; reason: string } {
 export function triagePrompt(task: string): string {
   return (
     `Task:\n${task}\n\n` +
-    `Skim the repository only as much as needed to size this task. Do not plan or implement it. Report:\n` +
-    `- filesToTouch: files you expect to change or create.\n` +
-    `- linesToChange: estimated lines added or changed in total, counting new files; a 2,000-line engine in 3 files is 2000.\n` +
-    `- independentSlices: parts that different people could build at the same time with no shared files and no dependency ` +
-    `on each other. Each must be substantial work, not a one-line edit. Use 1 when the work is sequential or small.\n` +
-    `- risky: true only for security-sensitive code, authentication, payments, data migrations, public API changes, or ` +
-    `changes spanning several modules where a wrong change is costly.\n` +
+    `The task may be code, research, writing, analysis, planning or operations. Skim the folder (a code repository or any ` +
+    `other folder; it may hold little for a research task) only as much as needed to size the task. Do not plan or implement it. Report:\n` +
+    `- code: true when the task creates or changes source code, tests, build or CI configuration in a repository; false for ` +
+    `research, writing, analysis, planning or operations whose output is documents, data, answers or commands run.\n` +
+    `- filesToTouch: files the task will create or change, of any kind (source, docs, reports, data, config).\n` +
+    `- linesToChange: estimated lines added or changed across them, prose and data included, counting new files; a ` +
+    `2,000-line engine in 3 files is 2000, and a 400-line report in 1 file is 400.\n` +
+    `- independentSlices: parts separate workers could do at the same time with no shared output file and no dependency on ` +
+    `each other: modules, documents, or research questions whose findings are combined at the end. Each must be substantial ` +
+    `work, not a one-line edit. Use 1 when the work is sequential or small.\n` +
+    `- risky: true when a wrong result is costly: security, authentication, payments, data migrations or deletion, public ` +
+    `API changes, production operations (deploys, infrastructure, credentials), content sent or published outside the team, ` +
+    `or changes spanning several modules where a wrong change is costly.\n` +
     `- reason: one sentence.`
   );
 }
 
-/** One cheap read-only call, then the policy. A failed triage falls back to the full pipeline, the pre-triage behaviour. */
+/**
+ * One cheap read-only call, then the policy. A failed triage falls back to the full pipeline, the pre-triage behaviour.
+ * `repo` is the folder the task is about: any folder works, a git repository is not required, and triage never calls git.
+ */
 export async function triage(opts: { run: RunAgent; repo: string; task: string }): Promise<Decision> {
   const r = await opts.run({ role: "triager", cwd: opts.repo, schema: TRIAGE_SCHEMA, prompt: triagePrompt(opts.task) });
   const costUsd = Number.isFinite(r.costUsd) ? r.costUsd : 0;
