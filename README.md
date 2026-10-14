@@ -1,209 +1,330 @@
 # Claude Code orchestrator
 
-Deterministic TypeScript pipeline on the Claude Agent SDK. Architecture: `orchestration/orchestration.html`.
+Split a coding task across specialised agents when that pays off, and keep it in one plain session when it does not.
 
-```
-plan (strongest) → explore (cheap, parallel) → plan slices → write (own worktree, parallel)
-  → test gate (no model) → verify (fresh context) → retry with feedback → merge passing slices
-```
+It does two jobs:
 
-## Use
+1. **A pipeline** that plans a task, builds independent slices in parallel git worktrees, gates each slice on tests, has a fresh-context reviewer check it, retries with feedback, and merges what passes.
+2. **A router** that sizes each task first and picks the cheapest route that fits: a plain session, a plain session plus an independent reviewer, or the full pipeline.
 
-```bash
-npm install
-npm start -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
-npm start -- --repo . --task "..." --plan-only     # plan only: cheapest way to try it
-```
+It runs two ways with the same roles: as a TypeScript pipeline on the Claude Agent SDK, and natively inside Claude Code (agents, hooks and a skill, also shipped as a plugin).
 
-Flags: `--budget USD` (optional run cap; unset means no dollar cap, and turn limits and worker timeouts still apply), `--concurrency N` (3), `--retries N` (2), `--out DIR` (`runs`), `--setup-cmd CMD` (runs in each new worktree before the writer, e.g. `npm ci`; worktrees have no `node_modules`), `--keep-worktrees` (by default passing slices' and the result worktree are removed after the run; branches always stay, failed slices' worktrees are kept for debugging). Invalid numbers exit 2; a failed plan exits 1.
+## Contents
 
-Output per run in `runs/<id>/`: `plan.json`, `findings.md`, `telemetry.jsonl` (cost, turns, model per worker), `report.json`, and `worktrees/`.
-Results land on git branches `orch/<id>/<slice>` and `orch/<id>/result`. Nothing is pushed.
+- [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
+- [The pipeline](#the-pipeline) · [Choosing a route](#choosing-a-route-triage) · [Two ways to run it](#two-ways-to-run-it)
+- [Resilience](#resilience-retry-resume-replan) · [Safety and limits](#safety-and-limits)
+- [Reference](#reference) · [Repository layout](#repository-layout) · [Development](#development)
 
-## Plain session or pipeline: triage
+## Why a router
 
-The pipeline cost 1.1x to 2x a plain session and did not improve correctness (see the benchmark below); it was faster only when slices ran in parallel. So a triage step picks the route per task:
+Measured on the same tasks (details in [docs/benchmarks.md](docs/benchmarks.md)):
 
-```
-task → triager (Sonnet, low effort, read-only, 12 turns max) → facts → decide() → plain | reviewed | pipeline
-```
+| | Plain session | Pipeline |
+|---|---|---|
+| Hidden-test correctness | passed | passed (never better) |
+| Cost | 1x | 1.1x to 2x |
+| Small task | fastest (20s) | slower (60s+) |
+| Parallel task | slower | faster (250s against 397s on a hard one) |
+| Verification | you, or the agent's own word | test gate, independent reviewer, review gate |
+| Unverified work | may be reported as done | reported as failed |
 
-The triager only reports facts: `filesToTouch`, `independentSlices`, `risky`. The thresholds are code, not model judgement (`TRIAGE` in `src/config.ts`, tested in `triage.test.ts`):
+So the pipeline buys speed on parallel work and hard guarantees on risky work, and costs more everywhere else. The router spends one cheap read-only call (about $0.05) to decide which you need.
 
-| Facts | Route |
-|---|---|
-| `risky` and at most 3 files, one slice | reviewed: a plain session, then one independent reviewer |
-| `risky` otherwise | pipeline (independent review per slice) |
-| `filesToTouch >= 12` | pipeline (too big for one context) |
-| `independentSlices >= 2` and `filesToTouch >= 4` | pipeline (parallel worktrees) |
-| anything else | plain session |
+## Quick start
 
-A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Triage spend appears as `triager` in `costByRole`. Every decision is appended to `routes.jsonl` (`runs/routes.jsonl` for the SDK, `.claude/state/routes.jsonl` for native) so thresholds can be tuned against what happened.
-
-```bash
-npm start -- --repo . --task "..." --test-cmd "npm test"                 # --mode auto is the default
-npm start -- --repo . --task "..." --mode plain|reviewed|orchestrate     # skip triage
-npm run route -- --repo . --task "..."                                   # triage only: prints the decision JSON
-npm run auto -- "task" /path/to/repo                                     # native headless: triage, then claude -p or the orchestrator agent
-```
-
-- **Plain route:** one `solo` agent (Sonnet, medium) in the repo itself: no worktree or planner. Changes stay uncommitted in the working tree. With `--test-cmd` the tests run afterwards and a failure fails the run.
-- **Reviewed route:** the same, then a fresh-context reviewer reads `git diff HEAD`. Its issues go back to the session (up to `--retries` times) and it is reviewed again. Native `auto.sh` runs one review pass with the `reviewer` agent and no feedback loop.
-- **Escalation:** a triaged plain or reviewed run that fails (agent error, failing tests, rejected review) is rerun through the pipeline. The failed attempt's edits stay uncommitted in the working tree: they are never reverted, because they may sit beside your own changes. The pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off; a forced `--mode` never escalates. Earlier spend is carried into the report.
-- `--plan-only` and `--resume` imply the pipeline.
-
-Interactive `claude --agent orchestrator` cannot hand over to a plain session (it has no Edit or Bash by design). Its prompt has a light path for small tasks instead: one implementer, one reviewer, no exploration, worktrees or integrator. The `/route <task>` skill (in `.claude/skills/route`, also in the plugin) runs triage from any session and says which route to take; it expects the orchestration repo at `~/claude-code-orchestration` or `$ORCH_HOME`.
-
-## Resilience: retry, resume, replan
-
-- **Transient errors** (`src/retry.ts`): a rate limit, overload, 5xx or dropped stream is retried up to twice with exponential backoff (2s, 8s) on the same request. It is not counted as a task failure and its cost is added up. A turn cap, our own timeout or a refusal is never retried.
-- **Resume:** every pipeline run writes `runs/<id>/journal.json` (task, base commit, plan, finished slices) after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Spend in the report covers the resumed session only.
-- **Replan:** `--replans N` (0 to 3, default 0). When a pass leaves failed slices, the planner sees what finished and what failed and plans only the missing work. A new slice may depend on a finished one. Replaced slices stay in the report as `replaced`, and their branches are never merged. It stops when the planner offers nothing usable.
-
-## Install as a plugin
+**Install as a Claude Code plugin** (agents, gates, the `/route` skill and a session nudge):
 
 ```
 /plugin marketplace add 0xcvaliente/claude-code-orchestration
 /plugin install orchestration --marketplace 0xcvaliente/claude-code-orchestration
 ```
 
-The marketplace manifest is `.claude-plugin/marketplace.json` and points at the committed `dist/plugin`. After changing anything under `.claude/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. The plugin carries the agents, hooks, the worker contract and the `/route` skill, not the permission denies (add those to your own settings).
+Start a new chat afterwards. The plugin's `SessionStart` hook then tells Claude to run `orchestration:route` before any non-trivial coding task and follow the result. `/route <task>` runs the same triage on demand.
 
-A `SessionStart` hook (`.claude/hooks/nudge.mjs`, plugin only) tells every new main session to run `orchestration:route` before a non-trivial coding task and follow it: plain stays in the session, reviewed adds a reviewer, orchestrate makes the main session act as the orchestrator and delegate to the `orchestration:*` agents. Headless runs started by `scripts/orchestrate.sh` set `ORCH_NO_NUDGE=1` and are not nudged. To turn the nudge off for one shell, `export ORCH_NO_NUDGE=1`.
-
-## Native Claude Code mode
-
-Same roles as the pipeline, run inside an interactive session with no SDK code. Definitions are in `.claude/agents/`.
+**Run the SDK pipeline from a checkout:**
 
 ```bash
-claude --agent orchestrator
+npm install
+npm start -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
 ```
 
-| Agent | Model / effort | Tools |
-|---|---|---|
-| `orchestrator` | opus, high | `Agent(researcher, implementer, integrator, reviewer)`, Read, Grep, Glob |
-| `researcher` | haiku, low | Read, Grep, Glob, read-only `git` (`log`, `ls-files`, `rev-list`, `rev-parse`, `status`, `show`), `wc`, `ls`, `du` |
-| `implementer` | sonnet, medium | default |
-| `integrator` | sonnet, low | Read, Grep, Glob, Bash |
-| `reviewer` | sonnet, medium | Read, Grep, Glob, Bash |
-
-- The orchestrator has no Edit, Write or Bash, so it can only delegate. Its plan lives in the conversation and in worker briefs. Do not add `memory:` to it or the reviewer: that auto-enables Write and Edit.
-- Do not set `CLAUDE_CODE_EFFORT_LEVEL` or `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`; both override per-agent settings.
-- Workers preload `.claude/skills/orchestration-conventions` (reply format, evidence rule, scope limits).
-
-### Gates (hooks in `.claude/settings.json`)
-
-| Hook | Script | Effect |
-|---|---|---|
-| `SubagentStop` (implementer) | `verify.sh` | Blocks finishing while `$ORCH_TEST_CMD` (default `npm test`) fails; runs in the agent's cwd |
-| `Stop` | `review-gate.mjs` | Blocks the final reply if an implementer finished and no reviewer has since, or the last reviewer said `STATUS: fail`. Allows one forced retry (`stop_hook_active`). |
-| `SubagentStart`, `SubagentStop` | `telemetry.mjs` | Appends events to `.claude/state/telemetry.jsonl` (gitignored) |
-
-### Parallel slices
-
-For independent slices the orchestrator launches implementers with `isolation: "worktree"`, each commits on its own branch, and the `integrator` merges the branches (`git merge --no-ff`, aborting on conflict) and runs the acceptance check. Conflicted slices are retried one at a time in the shared tree. Dependent slices run sequentially in the shared tree and nothing is committed.
-
-### Headless, CI and unattended
+`--mode auto` is the default: triage decides. Useful variations:
 
 ```bash
-npm run native -- "task description" /path/to/repo
+npm start -- --repo . --task "..." --plan-only            # plan only, the cheapest way to try it
+npm start -- --repo . --task "..." --mode plain           # skip triage, one plain session
+npm run route -- --repo . --task "..."                    # triage only: prints the decision as JSON
+npm run auto -- "task" /path/to/repo                      # native headless: triage, then claude -p or the orchestrator agent
+claude --agent orchestrator                               # native interactive orchestrator
 ```
 
-Runs `claude -p --agent orchestrator` with `dontAsk`, an optional budget cap (`ORCH_BUDGET_USD`, off by default) and an explicit tool allowlist (`ORCH_ALLOWED_TOOLS` replaces it). The target repo needs `.claude/` copied in, and `.claude/state/` and `.claude/worktrees/` in its `.gitignore`.
+## How it works
 
-Two live runs ended the same way: both implementers wrote code but could not run `npm test` or commit, and the orchestrator correctly reported the slices as unverified instead of passed. What the evidence showed:
+Every task goes through triage. The three routes differ in how much machinery they use.
 
-- Cause, confirmed by the third run: `orchestrate.sh` split the allowlist on whitespace, so `Bash(git status*)` became the broken tokens `Bash(git` and `status*)` and no `Bash(...)` rule with a space ever applied. The script now keeps one rule per array element (`ORCH_DRY_RUN=1` prints the exact arguments). Background implementers are fine: with the fix they ran in the background and `npm test` and `git commit` worked.
-- The reviewers were refused `cd <worktree> && git status && ... && npm test`: Claude Code prompts for `cd` into another directory followed by `git` (git could run that directory's hooks), and `dontAsk` turns a prompt into a denial whatever the allow rules say. Agents are now told to use `git -C <dir>` and `npm --prefix <dir>`, and reviewers examine the integrated result in the project directory.
-- The macOS `/var` vs `/private/var` symlink was a wrong first guess; the failure reproduced under `~/orch-test`.
-- `ORCH_ALLOWED_TOOLS` takes one rule per line, for example `ORCH_ALLOWED_TOOLS=$'Read\nBash(npm test*)'`. For a session that keeps going until a condition holds, use `/goal` with your acceptance check.
-
-### Project context and cost
-
-- `CLAUDE.md` holds commands and rules every session needs. `.claude/rules/agents.md` loads only when you touch agent, hook, settings or workflow files.
-- `researcher` and `integrator` set `omitClaudeMd: true`: they take everything from the brief, so they skip `CLAUDE.md`.
-- Security-sensitive or cross-module slices get a second `reviewer` on `model: "opus"`; the slice passes only if both pass.
-- `npm run native` logs cost, turns and subagent counts per headless run to `.claude/state/runs.jsonl`. `npm run report` renders it and the agent events as `.claude/state/report.html` (local file, nothing published).
-
-### Scripted flow (workflow)
-
-`.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt: plan, explore (`researcher`), build (`implementer`, isolated when slices run in parallel), review (`reviewer`, plus an opus reviewer on risky slices), integrate (`integrator`). Ask Claude for it explicitly, for example "run the orchestrate workflow with task ...". Dependent slices run in the shared tree because worktrees branch from the default branch.
-
-### Optional: TypeScript code intelligence
-
-Gives Claude type errors after edits and symbol lookup. Not installed by this repo; it downloads software, so run it yourself:
-
-```bash
-npm install -g typescript-language-server typescript
+```mermaid
+flowchart TD
+    T([Your task]) --> TR{{"Triage<br/>Sonnet, read-only, about $0.05"}}
+    TR -->|"small or sequential"| P["Plain session<br/>one agent, edits stay uncommitted"]
+    TR -->|"small but risky"| R["Plain session + reviewer<br/>fresh-context review of git diff"]
+    TR -->|"parallel, large or risky"| O["Pipeline<br/>orchestrator plus specialised workers"]
+    P --> D1(["Uncommitted edits in your working tree"])
+    R --> D1
+    P -. "tests fail" .-> O
+    R -. "review or tests fail" .-> O
+    O --> D2(["Branches orch/id/slice and orch/id/result"])
 ```
 
-then, inside `claude`: `/plugin install typescript-lsp@claude-plugins-official`.
+| Route | What runs | Result lands in | Verified by |
+|---|---|---|---|
+| Plain | One `solo` agent in your repo | Uncommitted working tree | Your `--test-cmd`, run by the harness, not the agent |
+| Reviewed | The same, then one fresh-context reviewer; its issues go back to the session (up to `--retries` times) | Uncommitted working tree | Tests plus the reviewer |
+| Pipeline | Planner, researchers, implementers in worktrees, verifiers, integrator | Git branches; your checkout is untouched | Tests, a verifier per slice, merge check |
 
-### Verified in a live run (2026-10-13)
+The dotted arrows are **escalation**: if a triaged plain or reviewed run fails, the task reruns through the pipeline. The failed attempt's edits stay uncommitted in your working tree and are never reverted, because they may sit beside your own changes; the pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off, and a forced `--mode` never escalates.
 
-Task: two independent modules with tests, in a throwaway repo, headless. Result: researcher, two parallel implementers in worktrees, integrator, reviewers; both slices merged, `npm test` 11/11 on the merged tree, about $0.38 at list price.
+## The pipeline
 
-Confirmed: hook payloads carry `session_id`, `agent_type`, `agent_id`, `cwd` and `hook_event_name`; `isolation: "worktree"` creates `worktree-agent-*` branches and commits merge cleanly; the `Agent(...)` allowlist holds; per-agent models route (haiku, sonnet, opus all billed); `runs.jsonl` and `report.html` work; an unverifiable slice is reported as failed, not passed.
+```mermaid
+flowchart TD
+    A["Plan: questions<br/>Opus, read-only"] --> B["Explore, in parallel<br/>Haiku, read-only"]
+    B --> C["Plan: up to 6 slices<br/>disjoint files, acceptance check each"]
+    C --> D["Write, in parallel<br/>Sonnet, one git worktree per slice"]
+    D --> E{"Test gate<br/>runs your command, no model"}
+    E -->|fail| D
+    E -->|pass| F{"Verify<br/>fresh-context reviewer"}
+    F -->|"gaps, up to 2 retries"| D
+    F -->|pass| G["Integrate<br/>merge passing branches, never push"]
+    G --> H(["Result branch orch/id/result"])
+```
 
-The review gate has blocked in real sessions (`gates.jsonl`: `no_reviewer_after_last_implementer`, then `max_blocks_reached`).
+Why each step is shaped this way:
 
-Not yet exercised: the test gate actually blocking (it has only logged `tests_passed`), the opus second reviewer (needs a `risky` slice), `omitClaudeMd`, the scripted workflow.
+- **Strongest model plans, cheap models read, mid-tier writes.** The expensive model only decides; Haiku answers narrow questions in parallel; Sonnet does the edits.
+- **Fresh contexts.** Workers start with no history. They get a brief and return a short report, so the orchestrator's context stays small.
+- **A gate that does not trust the agent.** The test command runs in the harness, not inside the model, and a failing run costs no verifier call.
+- **A verifier that did not write the code.** It sees the diff and the goal, not the implementer's reasoning.
+- **Retries carry feedback.** A rejected slice goes back to a writer with the failing output or the reviewer's gaps.
+- **Disjoint files per slice.** Parallel slices never edit the same file, so merges are clean. A slice that needs another's output lists it in `dependsOn` and starts from a worktree that already contains it.
 
-Observed weakness: the orchestrator reviewed one branch before running the integrator, against its prompt, and that reviewer tried `cd /tmp && git -C ...`, which the cd-plus-git guard refused. It recovered with a second review of the merged tree. Order is advisory in the native session; the scripted workflow fixes it.
+One slice's life:
 
-### Benchmark: orchestrator vs advisor vs plain session
+```mermaid
+stateDiagram-v2
+    [*] --> Writing
+    Writing --> Testing: worker finished
+    Testing --> Writing: tests fail, output fed back
+    Testing --> Reviewing: tests pass
+    Reviewing --> Writing: gaps found, retry
+    Reviewing --> Passed: reviewer passes
+    Writing --> Failed: retries exhausted
+    Failed --> Replaced: replan supplies new slices
+    Passed --> Merged: integrated into result branch
+    Merged --> [*]
+```
 
-`npm run compare` runs 3 tasks (parallel, single, dependent) under 3 setups in fresh repos and scores each with hidden tests the agent never sees (`npm run compare:validate` checks the tests against reference solutions, no model calls). Results land in `runs/compare/`.
+### The roles
 
-First run (2026-10-13, one run per cell, costs at list price): all 9 runs passed 100% of hidden tests.
+| Role | Model, effort | Tools | Job |
+|---|---|---|---|
+| Orchestrator / planner | Opus, high | read-only | Plans slices; in native mode it can only delegate |
+| Researcher / explorer | Haiku, low | read-only, read-only `git` | Answers one narrow question with file paths |
+| Implementer / writer | Sonnet, medium | read, edit, write, bash | Builds one slice in its own worktree |
+| Reviewer / verifier | Sonnet, medium | read, bash | Independent check of one slice; never edits |
+| Integrator | Sonnet, low | read, bash | Merges passing branches, runs the acceptance check, never resolves conflicts |
+| Triager | Sonnet, low | read-only | Sizes a task for the router |
+| Solo | Sonnet, medium | read, edit, write, bash | The plain-session route |
 
-| Setup | Cost per task (t1 / t2 / t3) | Wall time (t1 / t2 / t3) |
+Models, effort and turn caps live in `src/config.ts`, the single source of truth; `npm run sync-agents` copies them into the native agent files.
+
+### What a run leaves behind
+
+```
+runs/<id>/
+  plan.json          questions and slices
+  findings.md        what the explorers found
+  journal.json       state after every slice, for --resume
+  telemetry.jsonl    cost, turns and model per worker
+  report.json        slice results, merged and conflicted branches, cost by role
+  worktrees/         kept only for failed slices, or with --keep-worktrees
+runs/routes.jsonl    one line per triage decision
+```
+
+Branches `orch/<id>/<slice>` hold each slice and `orch/<id>/result` holds the merge. Nothing is ever pushed.
+
+## Choosing a route (triage)
+
+The triager only reports three facts about a task: how many files it will touch, how many parts could be built independently, and whether it is risky. The decision is then plain code, so it is testable and tunable without a model.
+
+```mermaid
+flowchart TD
+    S([Facts from the triager]) --> Q1{"risky?"}
+    Q1 -->|yes| Q2{"3 files or fewer<br/>and a single slice?"}
+    Q2 -->|yes| REV["Reviewed"]
+    Q2 -->|no| ORC["Pipeline"]
+    Q1 -->|no| Q3{"12 files or more?"}
+    Q3 -->|yes| ORC
+    Q3 -->|no| Q4{"2 or more independent slices<br/>and 4 or more files?"}
+    Q4 -->|yes| ORC
+    Q4 -->|no| PLA["Plain"]
+```
+
+| Facts | Route |
+|---|---|
+| risky, at most 3 files, one slice | reviewed |
+| risky, anything else | pipeline: independent review per slice |
+| 12 or more files | pipeline: too big for one context |
+| 2 or more independent slices and 4 or more files | pipeline: parallel worktrees pay off |
+| anything else | plain |
+
+The thresholds are `TRIAGE` in `src/config.ts`. A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Every decision is appended to `routes.jsonl` (`runs/routes.jsonl` for the SDK, `.claude/state/routes.jsonl` for native), so you can tune thresholds against what happened. In the one benchmark where triage chose the pipeline for a two-file-per-slice task, it cost twice a plain session for the same result, so `minParallelFiles` may deserve a raise once there is more data.
+
+## Two ways to run it
+
+| | SDK pipeline | Native Claude Code |
 |---|---|---|
-| A: Opus orchestrator | $0.39 / $0.23 / $0.32 | 64s / 43s / 65s |
-| B: Sonnet orchestrator + Opus advisor | $0.45 / $0.23 / $0.29 | 110s / 79s / 85s |
-| C: Plain session (Sonnet) | $0.20 / $0.11 / $0.15 | 20s / 22s / 36s |
+| Where | `src/` (TypeScript on the Agent SDK) | `.claude/` (agents, hooks, skill, workflow) |
+| Run | `npm start -- --repo ...` | `claude --agent orchestrator`, `npm run auto`, or the plugin |
+| Order is enforced by | Code | The orchestrator's prompt plus hook gates (the optional scripted workflow fixes order in code) |
+| Test gate | The harness runs `--test-cmd` | `verify.sh` hook on `SubagentStop` |
+| Review gate | Verifier per slice in code | `review-gate.mjs` hook on `Stop` |
+| Isolation | One worktree per slice | `isolation: "worktree"` on parallel implementers |
+| Resume, replan, retry | Yes | No (re-run the task) |
+| Needs | An API login for the Agent SDK | A logged-in `claude` |
 
-Reading it: these tasks were too easy to separate the setups on correctness, and the orchestrator roughly doubled cost and tripled time. The advisor billed Opus tokens in only one of three B runs, so it was consulted rarely. Use a plain session for small tasks; judging the orchestrator needs harder tasks and several runs per cell.
+Natively, the gates are hooks that block an agent from finishing:
 
-Second run, harder tasks (2026-10-13; a SQL query engine and a job-scheduler simulator, 13 hidden tests each, one run per cell, list-price cost): 7 of 8 runs passed 13/13.
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant I as Implementer
+    participant V as verify.sh (SubagentStop)
+    participant R as Reviewer
+    participant G as review-gate.mjs (Stop)
+    O->>I: brief with goal, files, acceptance check
+    I-->>V: tries to finish
+    alt tests fail
+        V-->>I: blocked with the test output
+    else tests pass
+        V-->>O: allowed
+    end
+    O->>R: review the slice
+    R-->>O: STATUS pass or fail
+    O->>G: final reply
+    G-->>O: blocked until a reviewer has passed the last implementer
+```
 
-| Task | C: plain session | A: Opus orchestrator | D: Sonnet orchestrator | B: Sonnet + Opus advisor |
-|---|---|---|---|---|
-| Query engine | $1.34, 508s, pass | $1.52, 308s, pass | $2.88, 805s, pass | $3.26, 875s, pass |
-| Scheduler | $1.03, 397s, pass | $2.00, 250s, pass | $1.82, 519s, pass | $0.83, 1636s, FAIL |
+The interactive orchestrator cannot hand over to a plain session, because it has no Edit or Bash by design. So it has a **light path** for small tasks: one implementer and one reviewer, with no exploration, worktrees or integrator. Everything native (agents, gates, headless runs, lessons from the first live runs) is in [docs/native-mode.md](docs/native-mode.md).
 
-Reading it: still no correctness separation, since the plain session also passed both. The Opus orchestrator was the fastest setup on both tasks (parallel slices), at 1.1x to 1.9x the plain session's cost. A Sonnet orchestrator launched more agents (5 implementers and 5 reviewers on the query engine) and cost about twice as much. The advisor setup added cost and time and had the only failure. That failure was the orchestrator ending its turn ("waiting for completion") while its one implementer was still running, with no root `index.js` (the task text then did not say where `index.js` lives; it does now). The orchestrator prompt now forbids ending a reply while workers run. B on the scheduler should be rerun before it is counted against the advisor.
+### The plugin
 
-Third run, auto routing (2026-10-14; easy tasks t1-parallel and t2-single, one run per cell, list-price cost; E excludes the triage call, about $0.01 to $0.05):
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the worker contract and the `/route` skill, but not your permission denies (add `git push`, `sudo` and `rm -rf` denies to your own settings).
 
-| Task | C: plain session | A: Opus orchestrator | E: auto | E routed to |
-|---|---|---|---|---|
-| t1-parallel | $0.21, 20s | $0.45, 68s | $0.44, 70s | pipeline |
-| t2-single | $0.10, 18s | $0.19, 46s | $0.10, 27s | plain |
+A `SessionStart` hook (`.claude/hooks/nudge.mjs`) nudges every new main session to route non-trivial coding tasks. Headless runs started by `scripts/orchestrate.sh` set `ORCH_NO_NUDGE=1` and are skipped; `export ORCH_NO_NUDGE=1` silences it in one shell. The `/route` skill expects this repo at `~/claude-code-orchestration` or `$ORCH_HOME`.
 
-All six runs passed every hidden test. Reading it: triage picked the route a person would have, so auto paid pipeline cost only on the parallel task and plain-session cost on the single one. On t1-parallel the pipeline still cost twice the plain session for the same result, so these tasks are too easy to say the pipeline's parallel route was worth choosing; triage's threshold may be too eager there. One run per cell: treat it as a smoke test of the router, not a measurement.
+After changing anything under `.claude/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. Bump the `version` in `package.json` for installed copies to pick up a change.
 
-### Keep in sync and share
+## Resilience: retry, resume, replan
 
-- `npm run sync-agents` rewrites model, effort and `maxTurns` in the agent files from `src/config.ts`; `npm run check-agents` fails on drift.
-- `npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. Verified in two live headless runs (2026-10-13): agents route, and both gates log (`tests_passed`, `reviewer_passed`). The first run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Project permission denies are not part of a plugin.
+- **Transient errors** (`src/retry.ts`): a rate limit, overload, 5xx or dropped stream is retried up to twice with exponential backoff (2s, 8s) on the same request. It is not counted as a task failure and its cost is added up. A turn cap, our own 15-minute timeout or a refusal is never retried.
+- **Resume**: every pipeline run writes `runs/<id>/journal.json` after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Spend in the report covers the resumed session only.
+- **Replan**: `--replans N` (0 to 3, default 0). When a pass leaves failed slices, the planner sees what finished and what failed and plans only the missing work; a new slice may depend on a finished one. Replaced slices stay in the report as `replaced` and their branches are never merged. It stops when the planner offers nothing usable.
+- **Dollar caps are opt-in.** There is no default budget. Runs are bounded by turn caps, worker timeouts, and retry and slice limits. Set `--budget USD` (SDK) or `ORCH_BUDGET_USD` (native) to add a cap; spend is always reported either way.
 
-## Tune cost
+## Safety and limits
 
-Models, effort and turn caps live in `src/config.ts`. Override models with
-`ORCH_MODEL_PLANNER`, `ORCH_MODEL_EXPLORER`, `ORCH_MODEL_WRITER`, `ORCH_MODEL_VERIFIER`.
-Check `telemetry.jsonl`, then move each role to the cheapest model that still passes verification.
-
-## Test
-
-`npm test` runs the control flow against a scripted fake model in temp git repos (no API calls).
-
-## Limits
-
+- Nothing in either path pushes to a remote. Project settings deny `git push`, `git remote`, `sudo` and `rm -rf`, and workers have the same deny list (`UNSAFE_BASH`, kept equal to `permissions.deny` by `policy.test.ts`).
 - Worktrees isolate git state, not the filesystem: a worker with Bash can still write outside its worktree. Run in a container or VM for untrusted repos.
-- The deny lists (`UNSAFE_BASH` in `src/config.ts`, `permissions.deny` in `.claude/settings.json`; `policy.test.ts` keeps them equal) guard against mistakes, not malice. Native headless mode allows `Bash(npm *)` and `Bash(node *)`, which can run any code, including a push.
+- The deny lists guard against mistakes, not malice. Native headless mode allows `Bash(npm *)` and `Bash(node *)`, which can run any code, including a push.
 - Workers branch from `HEAD`; uncommitted changes are not visible to them.
 - Slices that edit the same file conflict at merge time; conflicting branches are reported, not auto-resolved.
+- Model output is treated as untrusted input: plans, slice ids, verdicts and triage facts are validated and clamped before use.
 
+## Reference
 
-Verified 2026-10-13 from the researcher's own transcript: `git log`, `git ls-files` and `date` run, `git tag` is refused. Added after a 14-repo analysis where file-only researchers read `.git/logs/HEAD` (a reflog across all branches) and got dates, tracked-file claims and counts wrong. A `date` is allowed because Claude Code auto-allows it as read-only.
+### CLI flags (`npm start -- ...`)
+
+| Flag | Meaning |
+|---|---|
+| `--repo DIR`, `--task TEXT` | The git repo and what to do (`--task` is not needed with `--resume`) |
+| `--mode auto\|plain\|reviewed\|orchestrate` | Route. `auto` (default) lets triage decide; anything else skips triage |
+| `--no-escalate` | Do not rerun a failed plain or reviewed run through the pipeline |
+| `--test-cmd CMD` | The acceptance command, run by the harness after each worker |
+| `--setup-cmd CMD` | Runs in each new worktree before its writer, for example `npm ci` (worktrees have no `node_modules`) |
+| `--budget USD` | Optional run cap; unset means no dollar cap |
+| `--concurrency N`, `--retries N` | Parallel workers (3) and retries per slice (2) |
+| `--replans N` | Replanning rounds after failures, 0 to 3 (default 0) |
+| `--plan-only` | Stop after planning (implies the pipeline) |
+| `--resume ID` | Continue a run (implies the pipeline) |
+| `--keep-worktrees` | Keep every worktree; by default passing slices' and the result worktree are removed and branches always stay |
+| `--out DIR` | Where runs are written (`runs`) |
+
+Invalid numbers exit 2; a failed plan exits 1.
+
+### Environment
+
+| Variable | Used by | Meaning |
+|---|---|---|
+| `ORCH_MODEL_PLANNER`, `_EXPLORER`, `_WRITER`, `_VERIFIER`, `_TRIAGER`, `_SOLO` | SDK | Override a role's model |
+| `ORCH_MODE` | `auto.sh` | `auto`, `plain`, `reviewed` or `orchestrate` |
+| `ORCH_NO_ESCALATE` | `auto.sh` | Turn escalation off |
+| `ORCH_BUDGET_USD` | `orchestrate.sh` | Optional spend cap for a headless run |
+| `ORCH_ALLOWED_TOOLS` | `orchestrate.sh` | Replace the tool allowlist, one rule per line |
+| `ORCH_AGENT` | `orchestrate.sh` | Agent to run; `none` is a plain session |
+| `ORCH_ADD_DIR`, `ORCH_ADVISOR`, `ORCH_DRY_RUN` | `orchestrate.sh` | Extra readable dir, experimental advisor model, print arguments and exit |
+| `ORCH_TEST_CMD` | `verify.sh` | The test gate's command (default `npm test`) |
+| `ORCH_NO_NUDGE` | plugin hook | Silence the session nudge |
+| `ORCH_HOME` | `/route` skill | Where this repo lives (default `~/claude-code-orchestration`) |
+
+### npm scripts
+
+| Script | What it does |
+|---|---|
+| `npm start` | SDK pipeline with triage |
+| `npm run route` | Triage only, prints JSON |
+| `npm run auto`, `npm run native` | Headless native run, with or without triage |
+| `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check; both must pass before finishing |
+| `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
+| `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin`, or fail when the committed build is stale |
+| `npm run report` | HTML timeline from `.claude/state/` |
+| `npm run compare`, `compare:hard`, `compare:validate`, `compare:mutate` | The A/B benchmark ([docs/benchmarks.md](docs/benchmarks.md)) |
+
+### Tuning cost
+
+Models, effort and turn caps are in `src/config.ts`. Check `telemetry.jsonl`, then move each role to the cheapest model that still passes verification.
+
+## Repository layout
+
+```
+src/
+  triage.ts, auto.ts, solo.ts     router, route execution, the plain and reviewed sessions
+  orchestrator.ts                 the pipeline: plan, explore, write, gate, verify, merge, replan, resume
+  agent.ts, retry.ts, verdict.ts  one worker = one query(); transient retry; reviewer verdict schema
+  config.ts                       roles, limits and triage thresholds (source of truth)
+  cli.ts, route.ts                entry points
+  git.ts, state.ts, args.ts       worktree and merge helpers, run directory and telemetry, number checks
+.claude/
+  agents/                         orchestrator, researcher, implementer, integrator, reviewer
+  hooks/                          verify.sh, review-gate.mjs, telemetry.mjs, nudge.mjs
+  skills/                         route, orchestration-conventions
+  workflows/orchestrate.js        the scripted flow
+  settings.json, rules/           gates and permission denies, rules for editing the above
+.claude-plugin/marketplace.json   makes the repo installable
+dist/plugin/                      the built plugin (committed)
+scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs, report, compare/ benchmark
+docs/                             benchmarks.md, native-mode.md
+orchestration/                    the original architecture diagram
+```
+
+## Development
+
+```bash
+npm install
+npm test               # 54 tests against a scripted fake model in temp git repos
+npm run typecheck
+npm run check-agents   # agents in sync with src/config.ts
+npm run check-plugin   # committed plugin build is current
+```
+
+Rules for contributors are in `CLAUDE.md` and `.claude/rules/agents.md`. In short: change models, effort and triage thresholds in `src/config.ts` and run `npm run sync-agents`; rebuild the plugin after touching agents, skills or hooks; the native orchestrator's "size the task first" step mirrors `TRIAGE`, so change both together.
