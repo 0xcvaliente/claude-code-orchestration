@@ -1,0 +1,7 @@
+{
+  "tier": "large",
+  "graded_paths": [
+    "src/**/*.js"
+  ],
+  "cap_min": 30
+}
