@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Appends one summary line per headless run to .claude/state/runs.jsonl.
+// tokens = input + output + cache read + cache write over every model (null when the output is unparsed); usage = that breakdown.
 // Usage: <claude -p --output-format json output> | node scripts/log-run.mjs "task"   (run from the target repo)
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { totalTokens, usageOf } from "./tokens.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -19,7 +21,8 @@ const line = {
   ts: new Date().toISOString(),
   task: (process.argv[2] ?? "").slice(0, 200),
   ok: Boolean(r) && r.is_error === false,
-  cost_usd: r?.total_cost_usd ?? null,
+  tokens: r ? totalTokens(r) : null,
+  usage: r ? usageOf(r) : null,
   duration_ms: r?.duration_ms ?? null,
   turns: r?.num_turns ?? null,
   terminal_reason: r?.terminal_reason ?? "unparsed output",

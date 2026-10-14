@@ -34,7 +34,17 @@ const report = (repo: string, env: Record<string, string>) =>
 const logRun = (repo: string) =>
   spawnSync("node", [join(root, "scripts", "log-run.mjs"), "headless task"], {
     cwd: repo,
-    input: JSON.stringify({ is_error: false, total_cost_usd: 0.5, num_turns: 3, subagent_stats: { by_type: { "orchestration:implementer": 1 } } }),
+    input: JSON.stringify({
+      is_error: false,
+      total_cost_usd: 0.5,
+      num_turns: 3,
+      usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, // main loop only: ignored while modelUsage has entries
+      modelUsage: {
+        "claude-opus-4-7": { inputTokens: 1000, outputTokens: 500, cacheReadInputTokens: 100000, cacheCreationInputTokens: 2000, costUSD: 0.4 },
+        "claude-haiku-4-5": { inputTokens: 200, outputTokens: 100, cacheReadInputTokens: 3000, cacheCreationInputTokens: 200, costUSD: 0.1 },
+      },
+      subagent_stats: { by_type: { "orchestration:implementer": 1 } },
+    }),
     env: envWith({}),
     encoding: "utf8",
   });
@@ -150,8 +160,14 @@ test("report: a headless run with the plugin's agents shows the folder's runs an
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.includes(`${join(own, "report.html")} (1 runs, 1 events, 1 routes, 1 gates)`), r.stdout);
   assert.ok(r.stdout.includes(`also read telemetry.jsonl, gates.jsonl from ${user}`), r.stdout);
+  const logged = JSON.parse(readFileSync(join(own, "runs.jsonl"), "utf8").trim());
+  assert.equal(logged.tokens, 107_000, "input + output + cache read + cache write over both models");
+  assert.deepEqual(logged.usage, { input: 1200, output: 600, cacheRead: 103_000, cacheWrite: 2200 });
+  assert.equal("cost_usd" in logged, false);
   const html = readFileSync(join(own, "report.html"), "utf8");
-  assert.match(html, /<td>headless task<\/td><td>ok<\/td>/);
+  assert.match(html, /<td>headless task<\/td><td>ok<\/td><td>107k<\/td>/);
+  assert.match(html, /<th>Tokens<\/th>/);
+  assert.doesNotMatch(html, /Cost USD|≈/);
   assert.match(html, /<td>plain<\/td><td>forced<\/td>/);
   assert.match(html, /Session s1.*<td>SubagentStart<\/td><td>orchestration:implementer<\/td>/);
   assert.match(html, /<td>test<\/td><td>allow<\/td><td>tests_passed<\/td>/);
@@ -167,4 +183,16 @@ test("report: a headless run with the plugin's agents shows the folder's runs an
   const page = readFileSync(join(own, "report.html"), "utf8");
   assert.doesNotMatch(page, /Session s1|tests_passed/);
   assert.equal(page.includes(user), false);
+});
+
+test("report: a legacy runs.jsonl line with only cost_usd shows an estimate from list-price cost, with a note", () => {
+  const repo = tmp("orch-repo-");
+  mkdirSync(join(repo, ".claude", "state"), { recursive: true });
+  const legacy = { ts: "t", task: "old task", ok: true, cost_usd: 0.5, duration_ms: 1, turns: 3, terminal_reason: "completed", subagents: {}, result: "" };
+  writeFileSync(join(repo, ".claude", "state", "runs.jsonl"), `${JSON.stringify(legacy)}\n`);
+  const r = report(repo, {});
+  assert.equal(r.status, 0, r.stderr);
+  const html = readFileSync(join(repo, ".claude", "state", "report.html"), "utf8");
+  assert.match(html, /<td>old task<\/td><td>ok<\/td><td>≈500k<\/td>/);
+  assert.match(html, /≈ marks runs logged before token tracking/);
 });
