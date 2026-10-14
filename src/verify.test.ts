@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -28,7 +28,8 @@ const rules = (cmd: string) =>
 
 test("detect: each runner, and nothing for an empty project", () => {
   assert.equal(detect({ "package.json": '{"scripts":{"test":"x"}}' }), "npm test --silent");
-  assert.match(detect({ "pyproject.toml": "" }), /^python3 -m (pytest -q|unittest discover -q)$/);
+  assert.match(detect({ "pyproject.toml": "", "tests/test_a.py": "" }), /^python3 -m (pytest -q|unittest discover -q)$/);
+  assert.match(detect({ "pkg/foo_test.py": "" }), /^python3 -m /);
   assert.match(detect({ "tests/test_a.py": "" }), /^python3 -m /);
   assert.equal(detect({ "Cargo.toml": "" }), "cargo test --quiet");
   assert.equal(detect({ "go.mod": "" }), "go test ./...");
@@ -77,6 +78,8 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
   const repo = tmp();
   mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
   writeFileSync(join(repo, "pyproject.toml"), "");
+  mkdirSync(join(repo, "tests"));
+  writeFileSync(join(repo, "tests", "test_a.py"), "");
   const run = (env: Record<string, string>) =>
     spawnSync("bash", [orchestrateSh, "t", repo], {
       env: { ...process.env, ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ...env },
@@ -91,4 +94,37 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
   assert.equal(lines[lines.indexOf("--model") + 1], "sonnet");
   assert.ok(lines.includes("Bash(ruff*)") && lines.includes("Bash(mypy*)"));
   assert.ok(lines.indexOf("--allowedTools") > lines.indexOf("--model"), "--allowedTools stays last");
+});
+
+test("detect: config markers alone are not a Python test suite", () => {
+  assert.equal(detect({ "pyproject.toml": "[tool.ruff]\n", "setup.cfg": "", "conftest.py": "" }), "");
+});
+
+test("detect: a planted pytest.py in the repo is never imported", () => {
+  const marker = join(tmp(), "pwned");
+  const dir = tmp();
+  writeFileSync(join(dir, "pytest.py"), `open(${JSON.stringify(marker)}, "w").write("x")\n`);
+  writeFileSync(join(dir, "test_a.py"), "");
+  const r = spawnSync("bash", ["-c", `cd "${dir}"; source "${testCmdSh}"; orch_detect_test_cmd "${dir}"`], {
+    env: { ...process.env, ORCH_TEST_CMD: "" },
+    encoding: "utf8",
+  });
+  assert.match(r.stdout, /^python3 -m /);
+  assert.equal(existsSync(marker), false);
+});
+
+test("allow rules: trims, ignores empty, rejects multi-line", () => {
+  assert.deepEqual(rules("  custom run  "), ["Bash(custom run*)"]);
+  assert.deepEqual(rules(""), []);
+  assert.deepEqual(rules("   "), []);
+  const r = spawnSync("bash", ["-c", `source "${testCmdSh}"; orch_allow_rules "$1"`, "x", "a\nRead*)"], { encoding: "utf8" });
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /multi-line/);
+  assert.deepEqual(rules("a\rb"), []);
+});
+
+test("verify.sh: pytest exit 5 (no tests collected) is allowed", () => {
+  const r = verify({ ORCH_TEST_CMD: "python3 -m pytest -q; exit 5", ORCH_GATE_ISOLATED: "block" });
+  assert.equal(r.status, 0);
+  assert.match(r.log, /"reason":"no_tests_collected"/);
 });

@@ -54,10 +54,20 @@ if [ -z "$cmd" ]; then
   exit 0
 fi
 
-if out="$(bash -c "$cmd" 2>&1)"; then
+rc=0
+out="$(bash -c "$cmd" 2>&1)" || rc=$?
+if [ "$rc" = 0 ]; then
   log_gate allow tests_passed
   exit 0
 fi
+case "$cmd" in
+  *pytest*)
+    if [ "$rc" = 5 ]; then # pytest: no tests collected
+      log_gate allow no_tests_collected
+      exit 0
+    fi
+    ;;
+esac
 
 if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
   log_gate warn tests_failed_isolated
