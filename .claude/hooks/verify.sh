@@ -4,10 +4,11 @@
 # Test command: $ORCH_TEST_CMD, else detected by test-cmd.sh (npm, pytest/unittest, cargo, go, swift, make).
 # No code changed (only when ORCH_TEST_CMD is unset; an explicit command always runs): the agent's folder is
 # inside a git work tree and every changed path, staged, unstaged or untracked, is prose (*.md, *.markdown, *.rst,
-# *.adoc and *.txt, any case; not .mdx, which is JSX; a .txt is not prose when it is CMakeLists.txt or its path
-# names requirements or constraints, the build and dependency files). Logs allow no_code_changes and skips the
-# tests. Judged from git, never from what the agent says. A clean tree (an isolated slice that already committed),
-# a folder that is not a git work tree and any other path keep the test run.
+# *.adoc and *.txt, any case). Not prose: .mdx (JSX); a .txt that is CMakeLists.txt or whose path names requirements
+# or constraints (build and dependency files); anything under a directory named test, tests, testdata, __tests__,
+# spec, fixtures, __fixtures__, golden, snapshots or __snapshots__ (golden files and snapshots feed the tests).
+# Logs allow no_code_changes and skips the tests. Judged from git, never from what the agent says. A clean tree (an
+# isolated slice that already committed), a folder that is not a git work tree and any other path keep the test run.
 # Isolated worktrees (cwd under .claude/worktrees/) follow ORCH_GATE_ISOLATED, because sibling slices
 # may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
 # block (gate as usual), skip (do not run tests).
@@ -44,18 +45,25 @@ log_gate() { # decision reason
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" >> "$state/gates.jsonl" 2>/dev/null || true
 }
 
-is_prose() { # path: documentation or plain text by extension, any case (patterns, so no bash 4 lowercasing)
-  case "$1" in
-    *.[mM][dD] | *.[mM][aA][rR][kK][dD][oO][wW][nN] | *.[rR][sS][tT] | *.[aA][dD][oO][cC]) return 0 ;; # not .mdx: that is JSX
-    *.[tT][xX][tT]) # prose, unless a build or dependency file: CMakeLists.txt, or a path naming requirements or constraints
+# Prose: documentation or plain text by extension, any case (nocasematch: bash 3.2 has no ${var,,}). Not prose:
+# .mdx (JSX); a .txt that is CMakeLists.txt or whose path names requirements or constraints (build and dependency
+# files); anything under a test-data directory, whatever its extension (golden files and snapshots feed the tests).
+is_prose() { # path
+  local rc=1 had=0
+  shopt -q nocasematch && had=1
+  shopt -s nocasematch
+  case "/$1" in # the leading slash lets a first-level folder match too
+    */test/* | */tests/* | */testdata/* | */__tests__/* | */spec/* | */fixtures/* | */__fixtures__/* | */golden/* | */snapshots/* | */__snapshots__/*) ;;
+    *.md | *.markdown | *.rst | *.adoc) rc=0 ;;
+    *.txt)
       case "$1" in
-        [cC][mM][aA][kK][eE][lL][iI][sS][tT][sS].[tT][xX][tT] | */[cC][mM][aA][kK][eE][lL][iI][sS][tT][sS].[tT][xX][tT]) return 1 ;;
-        *[rR][eE][qQ][uU][iI][rR][eE][mM][eE][nN][tT][sS]* | *[cC][oO][nN][sS][tT][rR][aA][iI][nN][tT][sS]*) return 1 ;;
+        CMakeLists.txt | */CMakeLists.txt | *requirements* | *constraints*) ;;
+        *) rc=0 ;;
       esac
-      return 0
       ;;
   esac
-  return 1
+  [ "$had" = 1 ] || shopt -u nocasematch
+  return "$rc"
 }
 
 # True when the current folder is in a git work tree and it lists changed paths, all of them prose. False for a

@@ -10,7 +10,8 @@ skills:
 ---
 You did not write this work. Review what your brief describes against its goal and acceptance check.
 
-- Code: review the working-tree changes (`git diff HEAD`, `git status`) or the commit range the brief names, and run the acceptance command.
+- Code in a git repository: review the working-tree changes (`git diff HEAD`, `git status`) or the commit range the brief names, and run the acceptance command.
+- Code outside a git repository: read the files the brief names, and run the acceptance command.
 - Other work (documents, analysis, research, operations): read the files or the answer the brief names, check every item of the checklist, and check each claim against the source it cites (open the source with WebFetch or Read when you can).
 
 Report only gaps that affect correctness or the stated requirements: bugs, wrong or unsupported claims, missing required items, unrelated changes. Do not report style preferences. If the work is sound, say so; do not invent findings.
