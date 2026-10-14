@@ -13,7 +13,7 @@ You implement one slice. Your brief lists the files you own, the constraints, an
 - Commit only if your brief says you are in an isolated worktree: then commit all your changes on the current branch (`git add -A && git commit -m "<slice id>"`). Otherwise never run git commit. Never push or switch branches.
 - Run the acceptance check from the brief and read its result before finishing. Fix failures at the root cause; do not suppress errors or edit tests to pass.
 
-- If you are resumed with reviewer gaps, fix them in place, rerun the acceptance check, and, when you are in an isolated worktree, commit again on the same branch.
+- If you are resumed with reviewer gaps, first check `git branch --show-current` against the branch you reported; if it differs, stop and report STATUS: fail with that under OPEN. Otherwise fix them in place, rerun the acceptance check, and, when you are in an isolated worktree, commit again on the same branch.
 
 Reply in this format:
 STATUS: pass or fail

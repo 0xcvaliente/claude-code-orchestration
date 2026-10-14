@@ -101,21 +101,20 @@ while (left.length) {
 }
 
 const results = []
-let treeChanged = false
+const sharedFiles = []
 for (const wave of waves) {
   // Isolate only parallel slices. Worktrees see only committed work, and only from the local HEAD when
   // baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
-  let isolated = wave.length > 1
-  if (isolated && treeChanged && !BASE_REF_HEAD) {
-    log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head" and earlier waves changed the tree; running one after another in the shared tree`)
-    isolated = false
+  const isolated = wave.length > 1 && BASE_REF_HEAD
+  if (wave.length > 1 && !BASE_REF_HEAD) {
+    log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head", so worktrees would branch from the remote default branch; running one after another in the shared tree`)
   }
-  if (isolated && treeChanged) {
-    await agent('CHECKPOINT after-earlier-waves: commit the shared tree so isolated worktrees see it. Run no merges and report the commit hash.', {
-      label: 'checkpoint',
-      phase: 'Integrate',
-      agentType: 'integrator',
-    })
+  if (isolated) {
+    // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
+    await agent(
+      `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash.`,
+      { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator' },
+    )
   }
   phase('Build')
   const runSlice = async (s) => {
@@ -158,7 +157,7 @@ for (const wave of waves) {
     for (const s of wave) out.push(await runSlice(s))
   }
   const built = out.filter(Boolean)
-  treeChanged = true
+  if (!isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
   results.push(...built)
 
   if (isolated) {

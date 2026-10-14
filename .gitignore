@@ -3,4 +3,5 @@ runs/
 dist/*
 !dist/plugin/
 .claude/state/
+.claude/worktrees/
 *.log
