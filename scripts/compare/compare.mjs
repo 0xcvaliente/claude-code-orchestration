@@ -170,11 +170,12 @@ for (const id of tasks) {
       }
       const s = await scoreDir(id, dir);
       const timeline = [];
+      let firstPass = null;
       for (const sn of snaps) {
         const ss = await scoreDir(id, sn.dest);
-        timeline.push([sn.secs, ss.pass ? 1 : 0]);
+        timeline.push([sn.secs, ss.passed]);
+        if (ss.pass && firstPass === null) firstPass = sn.secs;
       }
-      const firstPass = timeline.find((t) => t[1] === 1);
       const byModel = Object.fromEntries(Object.entries(j?.modelUsage ?? {}).map(([m, u]) => [m.replace("claude-", ""), Number(u.costUSD.toFixed(4))]));
       const row = {
         task: id, variant, rep, label: v.label, pass: s.pass, hidden_passed: s.passed, hidden_failed: s.failed,
@@ -184,7 +185,7 @@ for (const id of tasks) {
       };
       if (snapEvery > 0) {
         row.timeline = timeline;
-        row.first_pass_s = firstPass ? firstPass[0] : null;
+        row.first_pass_s = firstPass;
       }
       appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
       console.log(`${id} ${variant}#${rep} pass=${row.pass} (${s.passed}/${s.passed + s.failed}) cost=${row.cost_usd} wall=${(wall / 1000).toFixed(0)}s denials=${row.denials}${row.timed_out ? " TIMEOUT" : ""}`);
