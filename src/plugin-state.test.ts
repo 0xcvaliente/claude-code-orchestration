@@ -30,6 +30,21 @@ const pluginTelemetry = (repo: string, data: string) =>
   });
 const report = (repo: string, env: Record<string, string>) =>
   spawnSync("node", [join(root, "scripts", "report.mjs"), repo], { env: envWith(env), encoding: "utf8" });
+// What orchestrate.sh pipes into log-run.mjs from the target folder after `claude -p --output-format json`.
+const logRun = (repo: string) =>
+  spawnSync("node", [join(root, "scripts", "log-run.mjs"), "headless task"], {
+    cwd: repo,
+    input: JSON.stringify({ is_error: false, total_cost_usd: 0.5, num_turns: 3, subagent_stats: { by_type: { "orchestration:implementer": 1 } } }),
+    env: envWith({}),
+    encoding: "utf8",
+  });
+// The plugin copy of verify.sh, run as hooks.json runs it when the plugin's implementer stops.
+const pluginVerify = (repo: string, data: string) =>
+  spawnSync("bash", [join(root, ".claude", "hooks", "verify.sh"), "--plugin"], {
+    input: JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s1", agent_type: "orchestration:implementer", agent_id: "a1", cwd: repo }),
+    env: envWith({ CLAUDE_PROJECT_DIR: repo, CLAUDE_PLUGIN_DATA: data, ORCH_TEST_CMD: "exit 0" }),
+    encoding: "utf8",
+  });
 
 // A repo that registers its own copy of the hooks, as this one does.
 function withHooks(repo: string) {
@@ -101,13 +116,55 @@ test("report: prefers .claude/state when it has telemetry, and falls back when i
   assert.equal(pluginTelemetry(repo, data).status, 0);
   const key = readdirSync(join(data, "state"))[0] ?? "";
 
-  // Only a routes.jsonl in the repo (an older /route call): the plugin telemetry wins.
+  // Only a routes.jsonl in the repo (an older /route call): report.html goes beside the plugin telemetry, and the
+  // repo's routes are read too.
   mkdirSync(join(repo, ".claude", "state"), { recursive: true });
   writeFileSync(join(repo, ".claude", "state", "routes.jsonl"), `${JSON.stringify({ mode: "plain" })}\n`);
-  assert.ok(report(repo, { CLAUDE_PLUGIN_DATA: data }).stdout.includes(`${join(data, "state", key, "report.html")} `));
+  const before = report(repo, { CLAUDE_PLUGIN_DATA: data });
+  assert.ok(before.stdout.includes(`${join(data, "state", key, "report.html")} (0 runs, 1 events, 1 routes, 0 gates)`), before.stdout);
+  assert.ok(before.stdout.includes(`also read routes.jsonl from ${join(repo, ".claude", "state")}`), before.stdout);
 
   // Project telemetry (native mode or this repo): the project's state wins.
   writeFileSync(join(repo, ".claude", "state", "telemetry.jsonl"), `${JSON.stringify({ hook_event_name: "SubagentStart", session_id: "s2" })}\n`);
   const r = report(repo, { CLAUDE_PLUGIN_DATA: data });
   assert.ok(r.stdout.includes(`${join(repo, ".claude", "state", "report.html")} (0 runs, 1 events, 1 routes`), r.stdout);
+});
+
+test("report: a headless run with the plugin's agents shows the folder's runs and routes and the plugin hooks' events and gates", () => {
+  const repo = tmp("orch-repo-");
+  const config = tmp("orch-config-");
+  const data = join(config, "plugins", "data", "orchestration-some-marketplace");
+  // npm run auto in a folder without .claude/agents: auto.sh logs the route and log-run.mjs the run in the folder,
+  // while the plugin's hooks log to its per-user dir.
+  assert.equal(route(repo, { CLAUDE_PLUGIN_DATA: data }, "--project-state").status, 0);
+  assert.equal(logRun(repo).status, 0);
+  assert.equal(pluginTelemetry(repo, data).status, 0);
+  assert.equal(pluginVerify(repo, data).status, 0);
+  const own = join(repo, ".claude", "state");
+  const user = join(data, "state", readdirSync(join(data, "state"))[0] ?? "");
+  assert.deepEqual(readdirSync(own).sort(), [".gitignore", "routes.jsonl", "runs.jsonl"]);
+  assert.deepEqual(readdirSync(user).sort(), ["gates.jsonl", "telemetry.jsonl"]);
+
+  // From a terminal (no CLAUDE_PLUGIN_DATA): report.html stays beside runs.jsonl, as before, with all four logs.
+  const r = report(repo, { CLAUDE_CONFIG_DIR: config });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes(`${join(own, "report.html")} (1 runs, 1 events, 1 routes, 1 gates)`), r.stdout);
+  assert.ok(r.stdout.includes(`also read telemetry.jsonl, gates.jsonl from ${user}`), r.stdout);
+  const html = readFileSync(join(own, "report.html"), "utf8");
+  assert.match(html, /<td>headless task<\/td><td>ok<\/td>/);
+  assert.match(html, /<td>plain<\/td><td>forced<\/td>/);
+  assert.match(html, /Session s1.*<td>SubagentStart<\/td><td>orchestration:implementer<\/td>/);
+  assert.match(html, /<td>test<\/td><td>allow<\/td><td>tests_passed<\/td>/);
+  assert.ok(html.includes(`<code>${user}</code> (telemetry.jsonl, gates.jsonl)`), "the page says where each log came from");
+  assert.equal(existsSync(join(user, "report.html")), false);
+
+  // Once .claude/state has every log (a repo with its own hooks, like this one), nothing comes from the per-user dir.
+  writeFileSync(join(own, "telemetry.jsonl"), `${JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s2", agent_type: "implementer" })}\n`.repeat(2));
+  writeFileSync(join(own, "gates.jsonl"), `${JSON.stringify({ gate: "review", decision: "block", reason: "no_reviewer_after_last_implementer", session_id: "s2" })}\n`.repeat(2));
+  const mine = report(repo, { CLAUDE_CONFIG_DIR: config });
+  assert.ok(mine.stdout.includes(`${join(own, "report.html")} (1 runs, 2 events, 1 routes, 2 gates)`), mine.stdout);
+  assert.doesNotMatch(mine.stdout, /also read/);
+  const page = readFileSync(join(own, "report.html"), "utf8");
+  assert.doesNotMatch(page, /Session s1|tests_passed/);
+  assert.equal(page.includes(user), false);
 });
