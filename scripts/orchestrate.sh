@@ -5,6 +5,9 @@
 # The repo needs .claude/agents/ (copy this project's .claude/ into it, or install it at user level).
 # Env: ORCH_BUDGET_USD (optional spend cap, an estimate at list price; unset = no dollar cap),
 #      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
+#      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list),
+#      ORCH_MODEL (passes --model, e.g. sonnet or opus, for plain-model baselines),
+#      ORCH_TEST_CMD (test command; its permission rules are added automatically, else detected from the repo),
 #      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
 #      ORCH_ADD_DIR (extra directory the agents may read, e.g. a project to analyse),
 #      ORCH_ADVISOR (e.g. opus; passes --advisor to claude, experimental),
@@ -37,6 +40,15 @@ if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
   while IFS= read -r rule; do
     [ -n "$rule" ] && tools+=("$rule")
   done <<< "$ORCH_ALLOWED_TOOLS"
+else
+  # Let the repo's own test runner through (pytest, cargo, go, swift, make ...), then any extra rules.
+  source "$here/../.claude/hooks/test-cmd.sh"
+  while IFS= read -r rule; do
+    [ -n "$rule" ] && tools+=("$rule")
+  done < <(orch_allow_rules "$(orch_detect_test_cmd "$repo")")
+  while IFS= read -r rule; do
+    [ -n "$rule" ] && tools+=("$rule")
+  done <<< "${ORCH_EXTRA_ALLOWED_TOOLS:-}"
 fi
 
 args=(-p "$task")
@@ -45,6 +57,7 @@ args+=(--output-format json --permission-mode dontAsk --no-session-persistence)
 [ -n "${ORCH_BUDGET_USD:-}" ] && args+=(--max-budget-usd "$ORCH_BUDGET_USD")
 # Experimental advisor (second, stronger model consulted at decision points); see the docs' /advisor page.
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
+[ -n "${ORCH_MODEL:-}" ] && args+=(--model "$ORCH_MODEL")
 [ -n "${ORCH_ADD_DIR:-}" ] && args+=(--add-dir "$ORCH_ADD_DIR")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last
 
