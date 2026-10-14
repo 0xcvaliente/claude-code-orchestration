@@ -14,10 +14,14 @@ export interface RoleConfig {
 const env = (key: string, fallback: string) => process.env[key] || fallback;
 
 // Never let a worker publish or escalate; the orchestrator owns git history.
-// `git * push*` also catches `git -C dir push` and `git -c k=v push`. Keep in step with permissions.deny in
-// .claude/settings.json (policy.test.ts fails on drift). A guard against mistakes, not a sandbox: see README Limits.
+// `git * push*` also catches `git -C dir push` and `git -c k=v push`.
+export const PUSH_BASH = ["Bash(git push*)", "Bash(git * push*)"];
+// scripts/orchestrate.sh passes all of it to headless runs as --disallowedTools (verify.test.ts fails on drift).
+// Everything here except PUSH_BASH is also in permissions.deny in .claude/settings.json (policy.test.ts fails on
+// drift); interactive sessions may push as their permission mode allows. A guard against mistakes, not a sandbox: see
+// README Limits.
 export const UNSAFE_BASH = [
-  "Bash(git push*)", "Bash(git * push*)", "Bash(git remote*)", "Bash(git * remote*)",
+  ...PUSH_BASH, "Bash(git remote*)", "Bash(git * remote*)",
   "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
 ];
 const READ_ONLY = ["Read", "Glob", "Grep"];

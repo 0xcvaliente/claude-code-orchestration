@@ -13,6 +13,6 @@ Two orchestrators for the same job (split a task, build slices in parallel, gate
 
 ## Rules
 - `src/config.ts` is the source of truth for model, effort, maxTurns and the triage thresholds (`TRIAGE`). After editing it, run `npm run sync-agents`.
-- Nothing in either path pushes to a remote. Project settings deny `git push`, `git remote`, `sudo` and `rm -rf`; remove specific paths with `rm -r <path>`.
+- Neither path pushes to a remote: SDK workers deny `git push` (`UNSAFE_BASH`), `scripts/orchestrate.sh` passes the same list to every headless native run as `--disallowedTools`, and the agents are told not to push. Project settings deny `git remote`, `sudo` and `rm -rf` (remove specific paths with `rm -r <path>`), but not `git push`: an interactive session may push as its permission mode allows.
 - Agent-file, hook and settings rules live in `.claude/rules/agents.md` and load when you touch those files.
 - When testing hook scripts in zsh, pass JSON with `printf '%s'`, not `echo` (zsh expands `\n`).

@@ -2,8 +2,6 @@
   "worktree": { "baseRef": "head" },
   "permissions": {
     "deny": [
-      "Bash(git push*)",
-      "Bash(git * push*)",
       "Bash(git remote*)",
       "Bash(git * remote*)",
       "Bash(sudo*)",
