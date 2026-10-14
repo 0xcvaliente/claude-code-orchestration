@@ -112,6 +112,8 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
     encoding: "utf8",
   });
   assert.equal(r.status, 0, r.stderr);
+  // auto.sh keeps the decision beside runs.jsonl, though this repo does not register the hooks.
+  assert.match(readFileSync(join(repo, ".claude", "state", "routes.jsonl"), "utf8"), /"mode":"reviewed"/);
   const calls = readdirSync(log).map((f) => readFileSync(join(log, f), "utf8"));
   const reviewer = calls.find((c) => c.includes("--agent\nreviewer"));
   assert.ok(reviewer, "reviewer call recorded");
