@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -87,14 +87,20 @@ test("review gate: blocks when the last reviewer recorded no status", () => {
   assert.match(readFileSync(join(dir, ".claude", "state", "gates.jsonl"), "utf8"), /last_reviewer_no_status/);
 });
 
-test("session nudge: tells the session to route non-trivial tasks, and is silent when ORCH_NO_NUDGE is set", () => {
+test("session nudge: tells the session to route non-trivial tasks of any kind, not only code, and is silent when ORCH_NO_NUDGE is set", () => {
   const run = (env: Record<string, string>) =>
     spawnSync("node", [hook("nudge.mjs")], { input: "{}", env: { ...process.env, ORCH_NO_NUDGE: "", ...env }, encoding: "utf8" });
   const on = run({});
   assert.equal(on.status, 0);
   const out = JSON.parse(on.stdout);
   assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
-  assert.match(out.hookSpecificOutput.additionalContext, /orchestration:route/);
+  const context: string = out.hookSpecificOutput.additionalContext;
+  assert.match(context, /orchestration:route/);
+  for (const kind of ["code", "research", "writing", "analysis", "operations"]) assert.match(context, new RegExp(`\\b${kind}\\b`), `the nudge covers ${kind}`);
+  assert.match(context, /Only for code in a git repository: parallel slices use isolation: worktree/, "git machinery is for code only");
+  assert.match(context, /Work that changes no code runs in the shared folder, and its slices with disjoint files may run in parallel; code outside a git repository runs one slice at a time/);
+  assert.match(context, /send the draft and its sources to orchestration:reviewer before you reply, and to a second, opus reviewer for a risky one/, "an answer the session writes itself is reviewed too");
+  assert.match(context, /Skip routing for quick questions/);
   const off = run({ ORCH_NO_NUDGE: "1" });
   assert.equal(off.status, 0);
   assert.equal(off.stdout, "");
@@ -210,4 +216,124 @@ test("project hooks write a .gitignore into .claude/state on first write", () =>
   const other = mkdtempSync(join(tmpdir(), "orch-verify-"));
   spawnSync("bash", [hook("verify.sh")], { input: stopEventFor(other, "implementer"), env: { ...process.env, CLAUDE_PROJECT_DIR: other, ORCH_TEST_CMD: "exit 0" }, encoding: "utf8" });
   assert.equal(readFileSync(join(other, ".claude", "state", ".gitignore"), "utf8"), "*\n");
+});
+
+// verify.sh judges "no code changed" from git, so these tests use real repos: a package.json whose test script always
+// fails (a test run shows as a block), README.md as prose and app.js as code, committed. Git variables from the
+// machine running the tests (for example inside a git hook) are dropped, so every git call stays in the temp repo.
+const withoutGitEnv = (): Record<string, string> =>
+  Object.fromEntries(Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined && !e[0].startsWith("GIT_")));
+function gitRepo() {
+  const dir = mkdtempSync(join(tmpdir(), "orch-git-"));
+  const git = (...args: string[]) => {
+    const r = spawnSync("git", ["-c", "user.name=orch", "-c", "user.email=orch@example.com", "-c", "commit.gpgsign=false", ...args], { cwd: dir, env: withoutGitEnv(), encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+  };
+  git("init", "-q");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ scripts: { test: "exit 1" } }));
+  writeFileSync(join(dir, "README.md"), "# project\n");
+  writeFileSync(join(dir, "app.js"), "export {};\n");
+  git("add", "-A");
+  git("commit", "-q", "-m", "init");
+  return { dir, git };
+}
+// verify.sh as the SubagentStop hook runs it, with ORCH_TEST_CMD unset unless `extra` sets it.
+function testGate(dir: string, extra: Record<string, string> = {}, agent_id = "a1") {
+  const env: Record<string, string> = { ...withoutGitEnv(), CLAUDE_PROJECT_DIR: dir, ...extra };
+  if (!("ORCH_TEST_CMD" in extra)) delete env.ORCH_TEST_CMD;
+  return spawnSync("bash", [hook("verify.sh")], { input: JSON.stringify({ agent_type: "orchestration:implementer", agent_id, cwd: dir }), env, encoding: "utf8" });
+}
+const lastGateEntry = (dir: string) => JSON.parse(readFileSync(gateLog(dir), "utf8").trim().split("\n").pop() ?? "{}");
+
+test("test gate: when only prose files changed, judged from git status and not from the agent, the tests are skipped", () => {
+  const { dir, git } = gitRepo();
+  writeFileSync(join(dir, "README.md"), "# project\n\nmore\n");
+  const modified = testGate(dir);
+  assert.equal(modified.status, 0, modified.stderr);
+  assert.deepEqual([lastGateEntry(dir).decision, lastGateEntry(dir).reason], ["allow", "no_code_changes"]);
+
+  // Untracked prose with spaces, an upper-case extension and non-ASCII letters, and a staged rename of a modified file.
+  writeFileSync(join(dir, "notes with spaces.TXT"), "x\n");
+  mkdirSync(join(dir, "docs"));
+  writeFileSync(join(dir, "docs", "ünï.markdown"), "x\n");
+  writeFileSync(join(dir, "docs", "Setup.ADOC"), "x\n");
+  git("mv", "README.md", "docs/GUIDE.rst");
+  const more = testGate(dir, {}, "a2");
+  assert.equal(more.status, 0, more.stderr);
+  assert.equal(lastGateEntry(dir).reason, "no_code_changes");
+});
+
+test("test gate: any changed code, build or dependency path still runs the tests, and the failing test script blocks", () => {
+  const changes: Record<string, (dir: string, git: (...args: string[]) => void) => void> = {
+    "a modified code file": (dir) => writeFileSync(join(dir, "app.js"), "export const x = 1;\n"),
+    "only a requirements.txt": (dir) => writeFileSync(join(dir, "requirements.txt"), "left-pad==1.0\n"),
+    "a requirements file in a folder": (dir) => {
+      mkdirSync(join(dir, "requirements"));
+      writeFileSync(join(dir, "requirements", "base.txt"), "x\n");
+    },
+    "a constraints file in upper case": (dir) => writeFileSync(join(dir, "Constraints-dev.TXT"), "x\n"),
+    "a CMakeLists.txt": (dir) => writeFileSync(join(dir, "CMakeLists.txt"), "project(x)\n"),
+    "an .mdx file, which is JSX": (dir) => writeFileSync(join(dir, "page.mdx"), "<Hero />\n"),
+    "an untracked code file": (dir) => writeFileSync(join(dir, "extra.JS"), "export {};\n"),
+    "a deleted code file": (dir) => unlinkSync(join(dir, "app.js")),
+    "prose and code together": (dir) => {
+      writeFileSync(join(dir, "README.md"), "more\n");
+      writeFileSync(join(dir, "Makefile"), "all:\n");
+    },
+    "code renamed to a prose name": (_dir, git) => git("mv", "app.js", "app.md"),
+  };
+  for (const [name, change] of Object.entries(changes)) {
+    const { dir, git } = gitRepo();
+    change(dir, git);
+    const r = testGate(dir);
+    assert.equal(r.status, 2, `${name}: ${r.stderr}`);
+    assert.match(r.stderr, /Acceptance gate failed: npm test/, name);
+    assert.equal(lastGateEntry(dir).reason, "tests_failed", name);
+  }
+});
+
+test("test gate: prose under a test-data folder is test input and runs the tests; the same file in docs is still prose", () => {
+  const docs = gitRepo().dir;
+  mkdirSync(join(docs, "docs"));
+  writeFileSync(join(docs, "docs", "guide.md"), "x\n");
+  assert.equal(testGate(docs).status, 0);
+  assert.equal(lastGateEntry(docs).reason, "no_code_changes");
+
+  // Folder names are matched whole and in any case: "specification", "latest" and "test-plans" are ordinary folders.
+  const near = gitRepo().dir;
+  for (const name of ["specification", "latest", "test-plans"]) {
+    mkdirSync(join(near, name));
+    writeFileSync(join(near, name, "notes.md"), "x\n");
+  }
+  assert.equal(testGate(near).status, 0);
+  assert.equal(lastGateEntry(near).reason, "no_code_changes");
+
+  const places = ["testdata/expected.txt", ...["test", "Tests", "testdata", "__tests__", "spec", "Fixtures", "__fixtures__", "golden", "snapshots", "__snapshots__"].map((name, i) => `pkg/${name}/${i % 2 ? "expected.txt" : "page.md"}`)];
+  for (const path of places) {
+    const { dir } = gitRepo();
+    mkdirSync(join(dir, path.split("/").slice(0, -1).join("/")), { recursive: true });
+    writeFileSync(join(dir, path), "x\n");
+    const r = testGate(dir);
+    assert.equal(r.status, 2, `${path}: ${r.stderr}`);
+    assert.equal(lastGateEntry(dir).reason, "tests_failed", path);
+  }
+});
+
+test("test gate: a clean tree, a folder outside git and an explicit ORCH_TEST_CMD keep the test run", () => {
+  // Nothing changed since the commit: an isolated slice that already committed looks like this.
+  const clean = gitRepo().dir;
+  assert.equal(testGate(clean).status, 2);
+  assert.equal(lastGateEntry(clean).reason, "tests_failed");
+
+  const outside = mkdtempSync(join(tmpdir(), "orch-nogit-"));
+  writeFileSync(join(outside, "package.json"), JSON.stringify({ scripts: { test: "exit 1" } }));
+  writeFileSync(join(outside, "README.md"), "# not a repository\n");
+  assert.equal(testGate(outside).status, 2);
+
+  const { dir } = gitRepo();
+  writeFileSync(join(dir, "README.md"), "more\n");
+  assert.equal(testGate(dir, { ORCH_TEST_CMD: "exit 1" }).status, 2, "an explicit command runs even when only prose changed");
+  assert.equal(lastGateEntry(dir).reason, "tests_failed");
+  assert.equal(testGate(dir, { ORCH_TEST_CMD: "exit 0" }, "a2").status, 0);
+  assert.equal(lastGateEntry(dir).reason, "tests_passed");
 });

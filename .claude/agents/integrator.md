@@ -1,6 +1,6 @@
 ---
 name: integrator
-description: Merges finished worktree branches into the current branch and runs the acceptance check. Use after parallel implementers that ran with isolation worktree. Never resolves conflicts.
+description: Merges finished worktree branches into the current branch and runs the acceptance check. Only for code in a git repository, after parallel implementers that ran with isolation worktree. Never resolves conflicts.
 model: sonnet
 effort: low
 maxTurns: 20
