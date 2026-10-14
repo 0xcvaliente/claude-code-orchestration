@@ -4,7 +4,7 @@
   "width": 880, "height": 700,
   "nodes": [
     {"id": "task", "label": "Your task", "x": 340, "y": 20, "w": 200, "h": 56, "status": "observed", "sources": ["README.md#how-it-works"]},
-    {"id": "triage", "label": "Triage", "detail": "Sonnet, read-only, about $0.05", "x": 280, "y": 116, "w": 320, "h": 76, "status": "observed", "sources": ["src/config.ts (triager role)", "src/triage.ts"]},
+    {"id": "triage", "label": "Triage", "detail": "Sonnet, read-only, about 20k tokens", "x": 280, "y": 116, "w": 320, "h": 76, "status": "observed", "sources": ["src/config.ts (triager role)", "src/triage.ts"]},
     {"id": "plain", "label": "Plain", "detail": "One agent, this session", "x": 20, "y": 300, "w": 240, "h": 76, "status": "observed", "sources": ["src/solo.ts", "src/auto.ts", "scripts/auto.sh"]},
     {"id": "reviewed", "label": "Reviewed", "detail": "Plain session + fresh reviewer", "x": 290, "y": 300, "w": 300, "h": 76, "status": "observed", "sources": ["src/triage.ts:4", "src/auto.ts", "scripts/auto.sh:68-110"]},
     {"id": "pipeline", "label": "Pipeline", "detail": "Orchestrator + workers", "x": 620, "y": 300, "w": 240, "h": 76, "status": "observed", "sources": ["src/orchestrator.ts", ".claude/agents/orchestrator.md"]},

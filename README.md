@@ -23,13 +23,13 @@ Measured on the same tasks (details in [docs/benchmarks.md](docs/benchmarks.md))
 | | Plain session | Pipeline |
 |---|---|---|
 | Hidden-test correctness | passed | passed (never better) |
-| Cost | 1x | 1.1x to 2x |
+| Tokens (estimated) | 1x | 0.8x to 2.2x |
 | Small task | fastest (20s) | slower (60s+) |
 | Parallel task | slower | faster (250s against 397s on a hard one) |
 | Verification | you, or the agent's own word | test gate, independent reviewer, review gate |
 | Unverified work | may be reported as done | reported as failed |
 
-So the pipeline buys speed on parallel work and hard guarantees on risky work, and costs more everywhere else. The router spends one cheap read-only call (about $0.05) to decide which you need.
+So the pipeline buys speed on parallel work and hard guarantees on risky work, and on small tasks uses about twice the tokens. The router spends one cheap read-only call (about 20k tokens) to decide which you need.
 
 ## Quick start
 
@@ -138,8 +138,8 @@ runs/<id>/
   plan.json          questions and slices
   findings.md        what the explorers found
   journal.json       state after every slice, for --resume
-  telemetry.jsonl    cost, turns and model per worker
-  report.json        slice results, merged and conflicted branches, cost by role
+  telemetry.jsonl    tokens, turns and model per worker
+  report.json        slice results, merged and conflicted branches, tokens by role
   worktrees/         kept only for failed slices, or with --keep-worktrees
 runs/routes.jsonl    one line per triage decision
 ```
@@ -165,7 +165,7 @@ The triager only reports five facts about a task, of any kind: how many files it
 | 2 or more independent slices and (4 or more files, or 1,500 or more lines) | pipeline: parallel slices pay off, and an interface-first plan lets slices run in parallel even across few files (in worktrees for code in a git repository, in your folder for work that changes no code; code outside git runs one slice at a time) |
 | anything else | plain (a large but sequential change stays in one context) |
 
-The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMaxLines` 200 are the line limits). They were tuned on coding benchmarks only; nothing has been measured for research, writing, analysis or operations, so for those tasks they are a starting point. The `/route` skill applies the same rules, so it also works without a checkout of this repo: with no `node_modules` at `$ORCH_HOME` it sizes the task in-session (skim the folder, estimate the five facts, apply the rules) instead of calling the triager. A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Every decision is appended to `routes.jsonl`, so you can tune thresholds against what happened: `runs/routes.jsonl` for the SDK; for native, `.claude/state/routes.jsonl` under `npm run auto` or in a repo that registers the hooks itself, and the plugin's per-user state dir when `/route` runs for a plugin install. In the one benchmark where triage chose the pipeline for a two-file-per-slice task, it cost twice a plain session for the same result, so `minParallelFiles` may deserve a raise once there is more data.
+The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMaxLines` 200 are the line limits). They were tuned on coding benchmarks only; nothing has been measured for research, writing, analysis or operations, so for those tasks they are a starting point. The `/route` skill applies the same rules, so it also works without a checkout of this repo: with no `node_modules` at `$ORCH_HOME` it sizes the task in-session (skim the folder, estimate the five facts, apply the rules) instead of calling the triager. A failed or malformed triage falls back to the pipeline, the pre-triage behaviour. Every decision is appended to `routes.jsonl`, so you can tune thresholds against what happened: `runs/routes.jsonl` for the SDK; for native, `.claude/state/routes.jsonl` under `npm run auto` or in a repo that registers the hooks itself, and the plugin's per-user state dir when `/route` runs for a plugin install. In the one benchmark where triage chose the pipeline for a two-file-per-slice task, it used about twice the tokens of a plain session for the same result, so `minParallelFiles` may deserve a raise once there is more data.
 
 ## Two ways to run it
 
@@ -218,10 +218,10 @@ After changing anything under `.claude/`, run `npm run build-plugin`; `npm run c
 
 ## Resilience: retry, resume, replan
 
-- **Transient errors** (`src/retry.ts`): a rate limit, overload, 5xx or dropped stream is retried up to twice with exponential backoff (2s, 8s) on the same request. It is not counted as a task failure and its cost is added up. A turn cap, our own 15-minute timeout or a refusal is never retried.
-- **Resume**: every pipeline run writes `runs/<id>/journal.json` after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Spend in the report covers the resumed session only.
+- **Transient errors** (`src/retry.ts`): a rate limit, overload, 5xx or dropped stream is retried up to twice with exponential backoff (2s, 8s) on the same request. It is not counted as a task failure and its tokens are added up. A turn cap, our own 15-minute timeout or a refusal is never retried.
+- **Resume**: every pipeline run writes `runs/<id>/journal.json` after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Token counts in the report cover the resumed session only.
 - **Replan**: `--replans N` (0 to 3, default 0). When a pass leaves failed slices, the planner sees what finished and what failed and plans only the missing work; a new slice may depend on a finished one. Replaced slices stay in the report as `replaced` and their branches are never merged. It stops when the planner offers nothing usable.
-- **Dollar caps are opt-in.** There is no default budget. Runs are bounded by turn caps, worker timeouts, and retry and slice limits. Set `--budget USD` (SDK) or `ORCH_BUDGET_USD` (native) to add a cap; spend is always reported either way.
+- **Token caps are opt-in.** There is no default budget. Runs are bounded by turn caps, worker timeouts, and retry and slice limits. Set `--budget TOKENS` (SDK, exact) or `ORCH_BUDGET_TOKENS` (native, approximate) to add a cap; token use is always reported either way.
 
 ## Safety and limits
 
@@ -247,7 +247,7 @@ After changing anything under `.claude/`, run `npm run build-plugin`; `npm run c
 | `--no-escalate` | Do not rerun a failed plain or reviewed run through the pipeline |
 | `--test-cmd CMD` | The acceptance command, run by the harness after each worker |
 | `--setup-cmd CMD` | Runs in each new worktree before its writer, for example `npm ci` (worktrees have no `node_modules`) |
-| `--budget USD` | Optional run cap; unset means no dollar cap |
+| `--budget TOKENS` | Optional run cap in tokens (`500000`, `500k` or `2M`; at least 10k). The pipeline stops starting new work at the cap. Unset means no cap |
 | `--concurrency N`, `--retries N` | Parallel workers (3) and retries per slice (2) |
 | `--replans N` | Replanning rounds after failures, 0 to 3 (default 0) |
 | `--plan-only` | Stop after planning (implies the pipeline) |
@@ -264,7 +264,7 @@ Invalid numbers exit 2; a failed plan exits 1.
 | `ORCH_MODEL_PLANNER`, `_EXPLORER`, `_WRITER`, `_VERIFIER`, `_TRIAGER`, `_SOLO` | SDK | Override a role's model |
 | `ORCH_MODE` | `auto.sh` | `auto`, `plain`, `reviewed` or `orchestrate` |
 | `ORCH_NO_ESCALATE` | `auto.sh` | Turn escalation off |
-| `ORCH_BUDGET_USD` | `orchestrate.sh` | Optional spend cap for a headless run |
+| `ORCH_BUDGET_TOKENS` | `orchestrate.sh` | Optional token cap for a headless run, same forms and minimum as `--budget`. Approximate: converted at 1M tokens per list-price dollar. `ORCH_BUDGET_USD` is rejected |
 | `ORCH_ALLOWED_TOOLS` | `orchestrate.sh` | Replace the tool allowlist, one rule per line |
 | `ORCH_AGENT` | `orchestrate.sh` | Agent to run; `none` is a plain session. A bare name runs the folder's own `.claude/agents/<name>.md` or, without it, the plugin's `orchestration:<name>` when `claude plugin list` shows the plugin enabled in that folder; a namespaced name runs as it is |
 | `ORCH_AGENT_PREFIX` | `orchestrate.sh` | `orchestration:` always runs the plugin's agents, without checking the folder or `claude plugin list` (CI, or a plugin loaded another way) |
@@ -291,9 +291,9 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
 | `npm run compare`, `compare:hard`, `compare:validate`, `compare:mutate` | The A/B benchmark ([docs/benchmarks.md](docs/benchmarks.md)); `compare` takes `--variants` (A to F, including C plain Sonnet and F plain Opus), `--tasks`, `--repeat N`, `--snapshot-every SEC` and `--timeout SEC`. Tasks may carry `setup/` and a `score.mjs` |
 
-### Tuning cost
+### Tuning token use
 
-Models, effort and turn caps are in `src/config.ts`. Check `telemetry.jsonl`, then move each role to the cheapest model that still passes verification.
+Models, effort and turn caps are in `src/config.ts`. Check `telemetry.jsonl`, then move each role to the smallest model that still passes verification.
 
 ## Repository layout
 
