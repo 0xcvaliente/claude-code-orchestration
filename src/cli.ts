@@ -2,11 +2,13 @@ import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { runAgent as baseAgent } from "./agent.js";
 import { withTransientRetry } from "./retry.js";
-import { count, usd } from "./args.js";
+import { count, parseTokens } from "./args.js";
+import { formatTokens } from "./tokens.js";
 import { isDirty } from "./git.js";
 import { auto, MODES, type RequestedMode } from "./auto.js";
 
 const runAgent = withTransientRetry(baseAgent);
+const byRole = (tokens: Record<string, number>) => Object.entries(tokens).map(([role, n]) => `${role} ${formatTokens(n)}`).join(", ");
 
 // The pipeline plans, branches and merges in git worktrees, so it is for code in a git repository only.
 const SCOPE = "The SDK pipeline (npm start) works on code in a git repository.";
@@ -34,16 +36,16 @@ const { values } = parseArgs({
 if (!values.repo || !(values.task || values.resume)) {
   console.error(
     'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
-      "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget USD] [--concurrency N] [--retries N] [--replans N] " +
+      "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget TOKENS] [--concurrency N] [--retries N] [--replans N] " +
       `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]\n${SCOPE} ${OTHER_TASKS}`,
   );
   process.exit(2);
 }
 
-let limits: { runBudgetUsd?: number; concurrency?: number; maxRetries?: number; maxReplans?: number };
+let limits: { runBudgetTokens?: number; concurrency?: number; maxRetries?: number; maxReplans?: number };
 try {
   limits = {
-    runBudgetUsd: values.budget === undefined ? undefined : usd("--budget", Number(values.budget)),
+    runBudgetTokens: values.budget === undefined ? undefined : parseTokens("--budget", values.budget),
     concurrency: values.concurrency === undefined ? undefined : count("--concurrency", Number(values.concurrency), 1),
     maxRetries: values.retries === undefined ? undefined : count("--retries", Number(values.retries), 0),
     maxReplans: values.replans === undefined ? undefined : count("--replans", Number(values.replans), 0),
@@ -86,7 +88,7 @@ const { report, soloReport, escalated } = await auto({
 
 if (soloReport && !escalated) {
   const kind = soloReport.reviewPassed === undefined ? "plain session" : "plain session + reviewer";
-  console.log(`\nrun ${soloReport.runId}  ${kind}  spent $${soloReport.spentUsd.toFixed(2)}  by role: ${JSON.stringify(soloReport.costByRole)}`);
+  console.log(`\nrun ${soloReport.runId}  ${kind}  ${formatTokens(soloReport.spentTokens)} tokens  by role: ${byRole(soloReport.tokensByRole)}`);
   if (soloReport.testsPassed !== undefined) console.log(`  tests ${soloReport.testsPassed ? "pass" : "fail"}`);
   if (soloReport.reviewPassed !== undefined) console.log(`  review ${soloReport.reviewPassed ? "pass" : "fail"} (${soloReport.attempts} session(s))`);
   console.log("  changes are uncommitted in the working tree");
@@ -95,7 +97,7 @@ if (soloReport && !escalated) {
 }
 if (escalated) console.warn("note: the failed plain attempt's edits are still uncommitted in the working tree; the pipeline result is on its own branch.");
 if (!report) process.exit(1);
-console.log(`\nrun ${report.runId}  spent $${report.spentUsd.toFixed(2)}  by role: ${JSON.stringify(report.costByRole)}`);
+console.log(`\nrun ${report.runId}  ${formatTokens(report.spentTokens)} tokens  by role: ${byRole(report.tokensByRole)}`);
 for (const s of report.slices) console.log(`  ${s.status.padEnd(6)} ${s.id} (${s.attempts} attempt(s)) ${s.issues[0] ?? ""}`);
 if (report.replans > 0) console.log(`  replanned ${report.replans} time(s)`);
 if (report.error || report.slices.some((s) => s.status === "failed")) console.log(`  resume with: npm start -- --repo ${repo} --resume ${report.runId}`);

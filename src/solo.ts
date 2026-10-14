@@ -13,8 +13,8 @@ export interface SoloReport {
   reviewPassed?: boolean;
   /** Sessions run: 1 plus one per round of reviewer or test feedback. */
   attempts: number;
-  spentUsd: number;
-  costByRole: Record<string, number>;
+  spentTokens: number;
+  tokensByRole: Record<string, number>;
   error?: string;
 }
 
@@ -38,7 +38,7 @@ export interface SoloOptions {
 export async function solo(opts: SoloOptions): Promise<SoloReport> {
   const log = opts.log ?? (() => undefined);
   const run = new Run(newRunId(), opts.outRoot);
-  const report: SoloReport = { runId: run.id, ok: false, attempts: 0, spentUsd: 0, costByRole: {} };
+  const report: SoloReport = { runId: run.id, ok: false, attempts: 0, spentTokens: 0, tokensByRole: {} };
   const rounds = (opts.review ? (opts.maxRetries ?? LIMITS.maxRetries) : 0) + 1;
   let feedback = "";
 
@@ -93,8 +93,8 @@ export async function solo(opts: SoloOptions): Promise<SoloReport> {
   }
 
   report.ok = !report.error && report.testsPassed !== false && report.reviewPassed !== false;
-  report.spentUsd = run.spentUsd;
-  report.costByRole = run.costByRole();
+  report.spentTokens = run.spentTokens;
+  report.tokensByRole = run.tokensByRole();
   run.save("report.json", report);
   return report;
 }

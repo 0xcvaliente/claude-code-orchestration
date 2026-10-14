@@ -41,7 +41,8 @@ export interface Decision {
   source: "forced" | "triage" | "fallback" | "escalated";
   reason: string;
   facts?: Facts;
-  costUsd: number;
+  /** Tokens the triage call used; 0 when triage was forced or skipped. */
+  tokens: number;
 }
 
 export const TRIAGE_SCHEMA = {
@@ -132,15 +133,15 @@ export function triagePrompt(task: string): string {
  */
 export async function triage(opts: { run: RunAgent; repo: string; task: string }): Promise<Decision> {
   const r = await opts.run({ role: "triager", cwd: opts.repo, schema: TRIAGE_SCHEMA, prompt: triagePrompt(opts.task) });
-  const costUsd = Number.isFinite(r.costUsd) ? r.costUsd : 0;
+  const tokens = Number.isFinite(r.tokens) ? r.tokens : 0;
   const facts = r.ok ? parseFacts(r.structured) : undefined;
   if (!facts) {
     return {
       mode: "orchestrate",
       source: "fallback",
       reason: `triage failed (${r.ok ? "invalid output" : r.subtype}); using the full pipeline`,
-      costUsd,
+      tokens,
     };
   }
-  return { ...decide(facts), source: "triage", facts, costUsd };
+  return { ...decide(facts), source: "triage", facts, tokens };
 }

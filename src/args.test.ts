@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { count, usd } from "./args.js";
+import { count, parseTokens } from "./args.js";
 
-test("usd accepts positive numbers and rejects NaN, zero, negatives and Infinity", () => {
-  assert.equal(usd("--budget", 2.5), 2.5);
-  for (const bad of [Number("abc"), 0, -1, Infinity]) assert.throws(() => usd("--budget", bad), /--budget/);
+test("parseTokens accepts plain, k and M counts", () => {
+  assert.equal(parseTokens("--budget", "250000"), 250_000);
+  assert.equal(parseTokens("--budget", "500k"), 500_000);
+  assert.equal(parseTokens("--budget", "1.5M"), 1_500_000);
+  assert.equal(parseTokens("--budget", "2m"), 2_000_000);
+});
+
+test("parseTokens rejects text, zero, negatives, values below 10k and other notations", () => {
+  for (const bad of ["abc", "0", "-1", "5", "1e6", "Infinity", "2MB", ""]) {
+    assert.throws(() => parseTokens("--budget", bad), /--budget must be a token count of at least 10k/, bad);
+  }
 });
 
 test("count accepts integers at or above the minimum and rejects the rest", () => {

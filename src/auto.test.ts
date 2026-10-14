@@ -17,7 +17,7 @@ async function tempRepo() {
 }
 const outRoot = () => mkdtempSync(join(tmpdir(), "orch-out-"));
 const result = (over: Partial<AgentResult> = {}): AgentResult => ({
-  ok: true, text: "done", costUsd: 0.05, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
+  ok: true, text: "done", tokens: 50, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
 });
 
 /** Triager answers with `facts`; a solo session writes solo.txt; planner and the rest behave as in orchestrator.test.ts. */
@@ -57,11 +57,11 @@ test("auto: a small task runs as a plain session in the repo itself, uncommitted
   assert.deepEqual(calls.map((c) => c.role), ["triager", "solo"]);
   assert.ok(existsSync(join(repo, "solo.txt")), "edits land in the working tree");
   assert.equal((await git(repo, "rev-list", "--count", "HEAD")).trim(), "1", "nothing committed");
-  assert.ok((r.soloReport!.costByRole.triager ?? 0) > 0, "triage cost is reported");
+  assert.equal(r.soloReport!.tokensByRole.triager, 50, "triage tokens are reported");
   assert.equal(readFileSync(join(out, "routes.jsonl"), "utf8").trim().split("\n").length, 1);
 });
 
-test("auto: a parallel task runs the pipeline and reports the triage cost", async () => {
+test("auto: a parallel task runs the pipeline and reports the triage tokens", async () => {
   const repo = await tempRepo();
   const { run, calls } = fake(big);
   const r = await auto({ repo, task: "t", outRoot: outRoot(), run });
@@ -70,7 +70,7 @@ test("auto: a parallel task runs the pipeline and reports the triage cost", asyn
   assert.equal(r.soloReport, undefined);
   assert.ok(calls.some((c) => c.role === "planner") && calls.some((c) => c.role === "writer"));
   assert.ok(!calls.some((c) => c.role === "solo"));
-  assert.equal(r.report!.costByRole.triager, 0.05);
+  assert.equal(r.report!.tokensByRole.triager, 50);
 });
 
 test("auto: a forced mode skips triage entirely", async () => {
@@ -157,7 +157,7 @@ test("escalation: a triaged plain session that fails its tests is rerun through 
   assert.equal(r.decision.source, "escalated");
   assert.equal(r.soloReport!.ok, false);
   assert.ok(calls.some((c) => c.role === "planner"), "the pipeline ran");
-  assert.ok(r.report!.costByRole.triager! > 0 && r.report!.costByRole.solo! > 0, "earlier spend is carried into the report");
+  assert.ok(r.report!.tokensByRole.triager! > 0 && r.report!.tokensByRole.solo! > 0, "earlier spend is carried into the report");
 });
 
 test("escalation: off for a forced mode and with escalate: false", async () => {
@@ -171,4 +171,48 @@ test("escalation: off for a forced mode and with escalate: false", async () => {
   assert.equal(b.escalated, false);
   assert.equal(b.soloReport!.ok, false);
   assert.ok(!optOut.calls.some((c) => c.role === "planner"));
+});
+
+/** `fake()` with a fixed token count per role (default 1000), to exercise the budget arithmetic. */
+const withTokens = (inner: RunAgent, by: Record<string, number>): RunAgent => async (req) => ({ ...(await inner(req)), tokens: by[req.role] ?? 1000 });
+const calledRoles = (calls: AgentRequest[]) => calls.map((c) => c.role);
+
+// The pipeline's planner calls (questions, slices) cost 2 x 1000 before the first slice checks the budget.
+test("budget: triage tokens are subtracted, so the pipeline stops earlier than the full budget allows", async () => {
+  const full = fake(big);
+  const forced = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(full.run, {}), mode: "orchestrate", runBudgetTokens: 4000 });
+  assert.equal(forced.report!.slices[0]!.status, "passed", "4000 is enough when nothing was spent before");
+
+  const { run, calls } = fake(big);
+  const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 2500 }), runBudgetTokens: 4000 });
+  assert.equal(r.decision.source, "triage");
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]); // 4000 - 2500 = 1500 < 2000 spent on planning
+  assert.ok(!calledRoles(calls).includes("writer"));
+  assert.equal(r.report!.spentTokens, 2500 + 2000, "triage tokens are carried into the report");
+});
+
+test("budget: an escalated pipeline run also gets the failed solo session's tokens subtracted", async () => {
+  const { run, calls } = fake(small);
+  const r = await auto({
+    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500 }),
+    testCmd: "test -f a.txt", runBudgetTokens: 3000, // 3000 - 500 triage - 1000 solo = 1500 < 2000 spent on planning
+  });
+  assert.equal(r.escalated, true);
+  assert.equal(r.soloReport!.tokensByRole.solo, 1000);
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
+  assert.ok(!calledRoles(calls).includes("writer"));
+  assert.equal(r.report!.tokensByRole.triager, 500);
+  assert.equal(r.report!.tokensByRole.solo, 1000);
+
+  // Counting only the triage tokens would leave 2500, enough for the slice: the solo tokens are what stop it.
+  const roomy = fake(small);
+  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, { triager: 500 }), testCmd: "test -f a.txt", runBudgetTokens: 4000 });
+  assert.equal(ok.report!.slices[0]!.status, "passed");
+});
+
+test("budget: earlier spend that already meets the budget leaves a floor of 1 token, not a crash", async () => {
+  const { run, calls } = fake(big);
+  const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 5000 }), runBudgetTokens: 3000 });
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
+  assert.ok(!calledRoles(calls).includes("writer"));
 });

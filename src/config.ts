@@ -90,8 +90,9 @@ export const ROLES: Record<Role, RoleConfig> = {
 };
 
 /**
- * When the pipeline pays for itself. Measured in README "Benchmark": it matched a plain session on correctness, cost
- * 1.1x to 2x more, and was faster only when slices ran in parallel. So it is chosen for parallel, large or risky work.
+ * When the pipeline pays for itself. Measured in docs/benchmarks.md: it matched a plain session on correctness, used about
+ * 2x the tokens on small tasks (0.8x to 1.2x on hard ones, estimated from list-price cost) and was faster only when slices
+ * ran in parallel. So it is chosen for parallel, large or risky work.
  */
 export const TRIAGE = {
   /** At least this many independent slices ... */
