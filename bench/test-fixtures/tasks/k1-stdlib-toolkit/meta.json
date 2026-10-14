@@ -1,0 +1,13 @@
+{
+  "id": "k1-stdlib-toolkit",
+  "title": "Fixture k1-stdlib-toolkit",
+  "tier": "large",
+  "shape": "fixture",
+  "lang": "python",
+  "cap_min": 90,
+  "test_cmd": "python3 -m unittest -q",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}

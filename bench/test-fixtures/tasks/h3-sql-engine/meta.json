@@ -1,0 +1,13 @@
+{
+  "id": "h3-sql-engine",
+  "title": "Fixture h3-sql-engine",
+  "tier": "large",
+  "shape": "fixture",
+  "lang": "python",
+  "cap_min": 90,
+  "test_cmd": "python3 -m unittest -q",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}
