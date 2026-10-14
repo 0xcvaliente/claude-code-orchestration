@@ -10,6 +10,7 @@
 #      ORCH_ADVISOR (e.g. opus; passes --advisor to claude, experimental),
 #      ORCH_DRY_RUN=1 (print the claude arguments, one per line, and exit).
 set -uo pipefail
+export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a run that was already routed
 
 task="${1:?usage: orchestrate.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
