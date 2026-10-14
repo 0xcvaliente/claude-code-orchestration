@@ -128,19 +128,20 @@ const WRITES = /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m;
 /**
  * A bin dir for PATH with a fake `claude` and, when `route` is given, a fake `npx` that answers auto.sh's route step with
  * that decision instead of calling a model. The fake claude records each call's arguments (one file per call), answers a
- * reviewer call with STATUS: pass and any other call with the contents of session.out.
+ * reviewer call with `reviewer` (default: STATUS: pass) and any other call with the contents of session.out.
  */
-function fakeTools(opts: { session: string; sessionExit?: number; route?: object }) {
+function fakeTools(opts: { session: string; sessionExit?: number; route?: object; reviewer?: string }) {
   const bin = tmp();
   const log = join(bin, "calls");
   mkdirSync(log);
   writeFileSync(join(bin, "session.out"), opts.session);
+  writeFileSync(join(bin, "reviewer.out"), opts.reviewer ?? '{"result":"STATUS: pass"}');
   writeFileSync(
     join(bin, "claude"),
     [
       "#!/bin/sh",
       `printf '%s\\n' "$@" > "${log}/$$"`,
-      `for a in "$@"; do [ "$a" = reviewer ] && { echo '{"result":"STATUS: pass"}'; exit 0; }; done`,
+      `for a in "$@"; do [ "$a" = reviewer ] && { cat "${bin}/reviewer.out"; exit 0; }; done`,
       `cat "${bin}/session.out"`,
       `exit ${opts.sessionExit ?? 0}`,
       "",
@@ -364,6 +365,52 @@ test("auto.sh escalation: the orchestrator gets web tools for a task that is not
   assert.notEqual(rb.status, 0);
   assert.match(rb.stderr, /^route: orchestrate \(escalated\) - the plain run failed; its edits stay uncommitted, the orchestrator works from HEAD$/m);
   for (const call of b.calls()) assert.doesNotMatch(call, /WebSearch|WebFetch/);
+});
+
+/** A reviewed run whose reviewer replies `reply`: auto.sh's exit status and the `review:` verdict it printed. */
+function reviewedWith(reply: string) {
+  const folder = plainFolder();
+  const t = fakeTools({
+    session: '{"result":"Wrote notes.md."}',
+    reviewer: JSON.stringify({ result: reply }),
+    route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 },
+  });
+  // A forced mode: a failed review ends the run with its status instead of escalating to the orchestrator.
+  const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
+  return { status: r.status, verdict: /^review: (\S+)$/m.exec(r.stderr)?.[1], stderr: r.stderr };
+}
+
+test("auto.sh reads the reviewer's verdict from the first line of its reply, so a quoted report cannot pass the run", () => {
+  // The reviewer's prompt contains the session's report, which may say STATUS: pass itself.
+  const failing = [
+    "The session reported: STATUS: pass\nGAPS: none\nEVIDENCE: nothing run", // quotes the report first
+    "I read notes.md.\n\nSTATUS: pass\nGAPS: none", // the verdict is not the start of the reply
+    "STATUS: fail\nGAPS: notes.md cites no source\nThe session reported STATUS: pass.", // the first line wins
+    "STATUS: pass or STATUS: fail", // the template, not a verdict
+    "> STATUS: fail", // a quote or emphasis does not turn a fail into anything else
+  ];
+  for (const reply of failing) {
+    const v = reviewedWith(reply);
+    assert.notEqual(v.status, 0, `${JSON.stringify(reply)} must fail the run`);
+    assert.equal(v.verdict, "fail", JSON.stringify(reply));
+  }
+  // Emphasis, a quote and blank lines before the verdict are fine.
+  const passing = ["**STATUS: pass**\nGAPS: none", "\n  > STATUS: pass\nGAPS: none", "STATUS: pass\nGAPS: none\nEVIDENCE: read notes.md"];
+  for (const reply of passing) {
+    const v = reviewedWith(reply);
+    assert.equal(v.status, 0, `${JSON.stringify(reply)} passes: ${v.stderr}`);
+    assert.equal(v.verdict, "pass", JSON.stringify(reply));
+  }
+});
+
+test("auto.sh: an unreadable or empty reviewer reply is a fail", () => {
+  for (const raw of ["", "STATUS: pass but not JSON", '{"result":["STATUS: pass"]}']) {
+    const folder = plainFolder();
+    const t = fakeTools({ session: '{"result":"ok"}', reviewer: raw, route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 } });
+    const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
+    assert.notEqual(r.status, 0, JSON.stringify(raw));
+    assert.match(r.stderr, /^review: fail$/m, JSON.stringify(raw));
+  }
 });
 
 test("detect: config markers alone are not a Python test suite", () => {
