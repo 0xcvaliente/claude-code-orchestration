@@ -32,6 +32,54 @@ for (const prefix of ["", "orchestration:"]) {
   });
 }
 
+const telemetry = (dir: string, input: string) =>
+  spawnSync("node", [hook("telemetry.mjs")], { input, env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+const lastRecord = (dir: string) => {
+  const lines = readFileSync(join(dir, ".claude", "state", "telemetry.jsonl"), "utf8").trim().split("\n");
+  return JSON.parse(lines[lines.length - 1] ?? "{}");
+};
+function stopEvent(dir: string, assistantContent: object[], last = "") {
+  const transcript = join(dir, "agent.jsonl");
+  writeFileSync(
+    transcript,
+    [JSON.stringify({ type: "user", message: { content: "Reply in this format: STATUS: pass or fail" } }), JSON.stringify({ type: "assistant", message: { content: assistantContent } })].join("\n") + "\n",
+  );
+  return JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s1", agent_type: "reviewer", last_assistant_message: last, agent_transcript_path: transcript });
+}
+
+test("telemetry: empty last message falls back to the transcript's SubagentHandback or text block", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
+  const handback = [{ type: "tool_use", name: "SubagentHandback", input: { message: "STATUS: fail\nCHANGED: none" } }];
+  assert.equal(telemetry(dir, stopEvent(dir, handback)).status, 0);
+  assert.equal(lastRecord(dir).status, "fail");
+  assert.equal(telemetry(dir, stopEvent(dir, [{ type: "text", text: "STATUS: pass\nEVIDENCE: ok" }])).status, 0);
+  assert.equal(lastRecord(dir).status, "pass");
+  assert.equal(lastRecord(dir).agent_type, "reviewer");
+});
+
+test("telemetry: the format template, a missing transcript and non-empty messages", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
+  telemetry(dir, stopEvent(dir, [{ type: "text", text: "Reply in this format:\nSTATUS: pass or fail" }]));
+  assert.equal(lastRecord(dir).status, undefined);
+  telemetry(dir, JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s1", last_assistant_message: "", agent_transcript_path: join(dir, "missing.jsonl") }));
+  assert.equal(lastRecord(dir).status, undefined);
+  telemetry(dir, stopEvent(dir, [], "Done.\nSTATUS: pass"));
+  assert.equal(lastRecord(dir).status, "pass");
+});
+
+test("telemetry: malformed stdin exits 0", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
+  assert.equal(telemetry(dir, "not json{").status, 0);
+});
+
+test("review gate: blocks when the last reviewer recorded no status", () => {
+  const dir = project([{ agent_type: "implementer" }, { agent_type: "reviewer" }]);
+  const r = gate(dir);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /no STATUS line/);
+  assert.match(readFileSync(join(dir, ".claude", "state", "gates.jsonl"), "utf8"), /last_reviewer_no_status/);
+});
+
 test("session nudge: tells the session to route non-trivial tasks, and is silent when ORCH_NO_NUDGE is set", () => {
   const run = (env: Record<string, string>) =>
     spawnSync("node", [hook("nudge.mjs")], { input: "{}", env: { ...process.env, ORCH_NO_NUDGE: "", ...env }, encoding: "utf8" });

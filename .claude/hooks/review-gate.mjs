@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stop gate: if this session ran an implementer, do not let the final reply go out until a reviewer
-// has finished after the last implementer, and its STATUS (when reported) is not "fail".
+// has finished after the last implementer, and its STATUS is "pass" (a "fail" or a missing status blocks).
 // Reads .claude/state/telemetry.jsonl written by telemetry.mjs. Exit 2 blocks and returns stderr.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -62,5 +62,9 @@ if (reviews.length === 0) {
 if (reviews[reviews.length - 1].status === "fail") {
   console.error("Review gate: the last reviewer reported STATUS: fail. Retry the implementer with the gaps, or report the slice as failed with evidence.");
   capped("last_reviewer_failed", 2);
+}
+if (reviews[reviews.length - 1].status !== "pass") {
+  console.error("Review gate: the last reviewer returned no STATUS line. Rerun the review, or report the slice as failed.");
+  capped("last_reviewer_no_status", 2);
 }
 decide("allow", "reviewer_passed", 0);
