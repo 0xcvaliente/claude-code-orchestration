@@ -13,15 +13,10 @@ orch_detect_test_cmd() {
     echo "npm test --silent"
     return 0
   fi
-  local py=0 f
-  for f in pyproject.toml pytest.ini setup.cfg tox.ini conftest.py; do
-    [ -f "$dir/$f" ] && py=1
-  done
-  if [ "$py" = 0 ] && { compgen -G "$dir/tests/test_*.py" >/dev/null || compgen -G "$dir/test_*.py" >/dev/null; }; then
-    py=1
-  fi
-  if [ "$py" = 1 ]; then
-    if python3 -c 'import pytest' >/dev/null 2>&1; then
+  # Python only when real test files exist: config markers alone (e.g. pyproject.toml for linting) do not count.
+  if [ -n "$(find "$dir" -maxdepth 4 \( -name node_modules -o -name .venv -o -name venv -o -name .git -o -name .claude \) -prune -o \( -name 'test_*.py' -o -name '*_test.py' \) -type f -print -quit 2>/dev/null)" ]; then
+    # Probe from a neutral cwd in isolated mode so a planted pytest.py in the repo is never imported.
+    if (cd / && python3 -I -c 'import pytest') >/dev/null 2>&1; then
       echo "python3 -m pytest -q"
     else
       echo "python3 -m unittest discover -q"
@@ -43,6 +38,14 @@ orch_detect_test_cmd() {
 
 orch_allow_rules() {
   local cmd="${1:-}"
+  case "$cmd" in
+    *$'\n'* | *$'\r'*)
+      echo "orch_allow_rules: ignoring a multi-line test command" >&2
+      return 0
+      ;;
+  esac
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+  cmd="${cmd%"${cmd##*[![:space:]]}"}"
   [ -n "$cmd" ] || return 0
   case "$cmd" in
     "python3 -m pytest"*) echo 'Bash(python3 -m pytest*)'; echo 'Bash(pytest*)' ;;
