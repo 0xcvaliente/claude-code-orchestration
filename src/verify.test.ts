@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -98,8 +98,7 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
 });
 
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
-  const repo = tmp();
-  mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+  const repo = withAgents(tmp());
   mkdirSync(join(repo, "tests"));
   writeFileSync(join(repo, "tests", "test_a.py"), "");
   // A fake claude records its arguments, one call per file, and answers STATUS: pass.
@@ -125,23 +124,36 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
 const autoSh = join(root, "scripts", "auto.sh");
 const WRITES = /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m;
 
+/** The installed plugins as `claude plugin list --json` prints them, with the orchestration plugin enabled. */
+const PLUGIN_ON = JSON.stringify([
+  { id: "orchestration@claude-code-orchestration", version: "0.1.5", scope: "user", enabled: true, projectEnabled: false },
+]);
+
 /**
  * A bin dir for PATH with a fake `claude` and, when `route` is given, a fake `npx` that answers auto.sh's route step with
- * that decision instead of calling a model. The fake claude records each call's arguments (one file per call), answers a
- * reviewer call with `reviewer` (default: STATUS: pass) and any other call with the contents of session.out.
+ * that decision instead of calling a model. The fake claude records each model call's arguments (one file per call),
+ * answers a reviewer call (`reviewer` or a namespaced `<plugin>:reviewer`) with `reviewer` (default: STATUS: pass) and
+ * any other call with the contents of session.out. `claude plugin list --json` prints `plugins` (default `[]`: no
+ * plugins; null: the command fails) and records the folder it ran in, apart from the model calls.
  */
-function fakeTools(opts: { session: string; sessionExit?: number; route?: object; reviewer?: string }) {
+function fakeTools(opts: { session: string; sessionExit?: number; route?: object; reviewer?: string; plugins?: string | null }) {
   const bin = tmp();
   const log = join(bin, "calls");
   mkdirSync(log);
   writeFileSync(join(bin, "session.out"), opts.session);
   writeFileSync(join(bin, "reviewer.out"), opts.reviewer ?? '{"result":"STATUS: pass"}');
+  if (opts.plugins !== null) writeFileSync(join(bin, "plugins.out"), opts.plugins ?? "[]");
   writeFileSync(
     join(bin, "claude"),
     [
       "#!/bin/sh",
+      `if [ "$1" = plugin ]; then`,
+      `  pwd -P >> "${bin}/plugin-list.cwd"`,
+      `  [ "$*" = "plugin list --json" ] && [ -f "${bin}/plugins.out" ] && { cat "${bin}/plugins.out"; exit 0; }`,
+      "  exit 1",
+      "fi",
       `printf '%s\\n' "$@" > "${log}/$$"`,
-      `for a in "$@"; do [ "$a" = reviewer ] && { cat "${bin}/reviewer.out"; exit 0; }; done`,
+      `for a in "$@"; do case "$a" in reviewer|*:reviewer) cat "${bin}/reviewer.out"; exit 0 ;; esac; done`,
       `cat "${bin}/session.out"`,
       `exit ${opts.sessionExit ?? 0}`,
       "",
@@ -152,7 +164,13 @@ function fakeTools(opts: { session: string; sessionExit?: number; route?: object
     writeFileSync(join(bin, "route.json"), JSON.stringify(opts.route));
     writeFileSync(join(bin, "npx"), `#!/bin/sh\ncat "${bin}/route.json"\n`, { mode: 0o755 });
   }
-  return { bin, calls: () => readdirSync(log).map((f) => readFileSync(join(log, f), "utf8")) };
+  const pluginLog = join(bin, "plugin-list.cwd");
+  return {
+    bin,
+    calls: () => readdirSync(log).map((f) => readFileSync(join(log, f), "utf8")),
+    /** The folders `claude plugin list` ran in, one per call. */
+    pluginLists: () => (existsSync(pluginLog) ? readFileSync(pluginLog, "utf8").split("\n").filter(Boolean) : []),
+  };
 }
 /** The agent a recorded call ran ("none" for a plain session) and the rules it was allowed to use. */
 const agentOf = (call: string) => {
@@ -174,15 +192,19 @@ function runAuto(repo: string, bin: string, env: Record<string, string> = {}) {
   const clean: NodeJS.ProcessEnv = { ...process.env };
   for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES"]) delete clean[k];
   return spawnSync("bash", [autoSh, "write the summary", repo], {
-    env: { ...clean, PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "", ORCH_TEST_CMD: "", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_NO_ESCALATE: "", ...env },
+    env: { ...clean, PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "", ORCH_TEST_CMD: "", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_NO_ESCALATE: "", ORCH_AGENT_PREFIX: "", ...env },
     encoding: "utf8",
   });
 }
-/** A folder that is not a git repository and has no test runner, with the agents the reviewer needs. */
-function plainFolder() {
-  const dir = tmp();
+/** Gives `dir` its own orchestrator and reviewer agent files, as when this project's .claude/ is copied in. */
+function withAgents(dir: string) {
   mkdirSync(join(dir, ".claude", "agents"), { recursive: true });
+  for (const name of ["orchestrator", "reviewer"]) writeFileSync(join(dir, ".claude", "agents", `${name}.md`), `---\nname: ${name}\ndescription: stub\n---\n`);
   return dir;
+}
+/** A folder that is not a git repository and has no test runner, with its own orchestrator and reviewer agents. */
+function plainFolder() {
+  return withAgents(tmp());
 }
 /** The same, but a git repository with one commit. */
 function gitFolder() {
@@ -418,6 +440,148 @@ test("auto.sh: an unreadable or empty reviewer reply is a fail", () => {
     assert.notEqual(r.status, 0, JSON.stringify(raw));
     assert.match(r.stderr, /^review: fail$/m, JSON.stringify(raw));
   }
+});
+
+/** orchestrate.sh on `dir` with the fake tools first on PATH. ORCH_DRY_RUN=1 prints the arguments instead of calling claude. */
+function runOrchestrate(dir: string, bin: string, env: Record<string, string> = {}) {
+  return spawnSync("bash", [orchestrateSh, "t", dir], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ORCH_AGENT: "", ORCH_AGENT_PREFIX: "", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_TEST_CMD: "", ORCH_DRY_RUN: "", ...env },
+    encoding: "utf8",
+  });
+}
+
+test("orchestrate.sh: the folder's own agent file wins, and the plugin list is not read", () => {
+  const t = fakeTools({ session: "{}", plugins: PLUGIN_ON });
+  const dir = plainFolder();
+  for (const agent of ["orchestrator", "reviewer"]) {
+    const r = runOrchestrate(dir, t.bin, { ORCH_DRY_RUN: "1", ORCH_AGENT: agent });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(agentOf(r.stdout), agent);
+    assert.doesNotMatch(r.stderr, /^agent:/m);
+  }
+  assert.deepEqual(t.pluginLists(), []);
+});
+
+test("orchestrate.sh: with no agent file of its own, a folder gets the plugin's namespaced agent when the plugin is enabled there", () => {
+  const t = fakeTools({ session: '{"result":"ok"}', plugins: PLUGIN_ON });
+  const empty = tmp(); // no .claude at all
+  const other = tmp(); // agents of its own, but not these
+  mkdirSync(join(other, ".claude", "agents"), { recursive: true });
+  writeFileSync(join(other, ".claude", "agents", "code-reviewer.md"), "---\nname: code-reviewer\ndescription: stub\n---\n");
+  for (const dir of [empty, other]) {
+    for (const agent of ["orchestrator", "reviewer"]) {
+      const r = runOrchestrate(dir, t.bin, { ORCH_DRY_RUN: "1", ORCH_AGENT: agent });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(agentOf(r.stdout), `orchestration:${agent}`);
+      assert.match(r.stderr, new RegExp(`^agent: orchestration:${agent} \\(the orchestration plugin's; no \\.claude/agents/${agent}\\.md in `, "m"));
+    }
+  }
+  assert.equal(t.calls().length, 0, "a dry run calls no model");
+  // The check runs in the target folder, whose own settings can disable the plugin.
+  assert.deepEqual(t.pluginLists(), [empty, empty, other, other].map((d) => realpathSync(d)));
+
+  const r = runOrchestrate(empty, t.bin);
+  assert.equal(r.status, 0, r.stderr);
+  const call = callOf(t.calls(), "orchestration:orchestrator");
+  assert.ok(toolsOf(call).includes("Agent") && toolsOf(call).includes("SendMessage"), "the default allowlist is unchanged");
+});
+
+test("orchestrate.sh: with no agent file and no enabled plugin it exits 1 with the reason, before any model call", () => {
+  const list = (id: string, enabled: boolean) => JSON.stringify([{ id, version: "1", scope: "user", enabled }]);
+  const answers: (string | null)[] = [
+    "[]", // nothing installed
+    list("orchestration@claude-code-orchestration", false), // installed, but disabled here (also by this folder's settings)
+    list("other@market", true),
+    list("orchestration-fork@market", true), // another plugin whose name starts the same
+    "error: unknown option '--json'", // not JSON
+    '{"id":"orchestration@market","enabled":true}', // not a list
+    null, // claude plugin list fails
+  ];
+  for (const plugins of answers) {
+    const t = fakeTools({ session: '{"result":"must not run"}', plugins });
+    const r = runOrchestrate(tmp(), t.bin, { ORCH_AGENT: "reviewer" });
+    assert.equal(r.status, 1, `${plugins}: ${r.stderr}`);
+    assert.match(r.stderr, /^no \.claude\/agents\/reviewer\.md in .*, and the orchestration plugin is not enabled there \(claude plugin list\)\.$/m);
+    assert.match(r.stderr, /ORCH_AGENT_PREFIX=orchestration: skips this check\.$/m);
+    assert.equal(r.stdout, "");
+    assert.equal(t.calls().length, 0, `${plugins}: no model call`);
+    assert.equal(t.pluginLists().length, 1);
+  }
+});
+
+test("orchestrate.sh: ORCH_AGENT_PREFIX and a namespaced ORCH_AGENT skip both checks", () => {
+  const t = fakeTools({ session: "{}" }); // no plugin installed: a check would fail
+  const own = plainFolder();
+  const empty = tmp();
+  const agent = (dir: string, env: Record<string, string>) => {
+    const r = runOrchestrate(dir, t.bin, { ORCH_DRY_RUN: "1", ...env });
+    assert.equal(r.status, 0, r.stderr);
+    return agentOf(r.stdout);
+  };
+  assert.equal(agent(own, { ORCH_AGENT_PREFIX: "orchestration:" }), "orchestration:orchestrator", "the prefix wins over the folder's own agent");
+  assert.equal(agent(empty, { ORCH_AGENT_PREFIX: "orchestration" }), "orchestration:orchestrator", "a missing colon is added");
+  assert.equal(agent(empty, { ORCH_AGENT_PREFIX: "orchestration:", ORCH_AGENT: "reviewer" }), "orchestration:reviewer");
+  assert.equal(agent(empty, { ORCH_AGENT: "orchestration:reviewer" }), "orchestration:reviewer");
+  assert.equal(agent(empty, { ORCH_AGENT_PREFIX: "orchestration:", ORCH_AGENT: "orchestration:reviewer" }), "orchestration:reviewer", "never prefixed twice");
+  assert.equal(agent(empty, { ORCH_AGENT_PREFIX: "orchestration:", ORCH_AGENT: "none" }), "none");
+  assert.deepEqual(t.pluginLists(), []);
+});
+
+test("auto.sh reviewed route in a folder with no agents of its own: the plugin's reviewer, with the same tools, prompt and verdict rule", () => {
+  const forced = { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 };
+  const run = (reply: string) => {
+    const folder = tmp();
+    const t = fakeTools({ session: '{"result":"Wrote notes.md: three findings, each with its source."}', reviewer: JSON.stringify({ result: reply }), plugins: PLUGIN_ON, route: forced });
+    return { r: runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) }), t, folder };
+  };
+  const { r, t, folder } = run("Review complete.\n\nSTATUS: pass");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /^route: reviewed - .*\(code: no\)$/m);
+  assert.match(r.stderr, /^agent: orchestration:reviewer /m);
+  assert.match(r.stderr, /^review: pass$/m);
+  const calls = t.calls();
+  assert.equal(calls.length, 2);
+  const reviewer = callOf(calls, "orchestration:reviewer");
+  assert.ok(hasWeb(callOf(calls, "none")) && hasWeb(reviewer), "a task that is not code: web tools for the session and the reviewer");
+  assert.match(reviewer, /^The session reported:\nWrote notes\.md: three findings, each with its source\.$/m);
+  assert.match(reviewer, /Read the files the session created or changed, as named in the session's report, check every requirement of the task/);
+  assert.match(reviewer, /^Read$/m);
+  assert.match(reviewer, /^Bash\(git diff\*\)$/m);
+  assert.doesNotMatch(reviewer, WRITES);
+  assert.deepEqual(t.pluginLists(), [realpathSync(folder)], "one check, for the reviewer: the plain session runs no agent");
+
+  for (const reply of ["> STATUS: pass", "> STATUS: pass\nSTATUS: fail", "STATUS: pass\nSTATUS: fail", "Looks fine."]) {
+    const v = run(reply).r;
+    assert.notEqual(v.status, 0, JSON.stringify(reply));
+    assert.match(v.stderr, /^review: fail$/m, JSON.stringify(reply));
+  }
+});
+
+test("auto.sh escalation in a folder with no agents of its own: the plugin's orchestrator, with web tools for a task that is not code", () => {
+  const folder = tmp();
+  const t = fakeTools({
+    session: '{"result":"boom","is_error":true}',
+    sessionExit: 1,
+    plugins: PLUGIN_ON,
+    route: { mode: "plain", source: "triage", reason: "stub", costUsd: 0, facts: { code: false, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: false, reason: "stub" } },
+  });
+  const r = runAuto(folder, t.bin, notGit(folder));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /^route: orchestrate \(escalated\) - the plain run failed; its edits stay in place$/m);
+  assert.match(r.stderr, /^agent: orchestration:orchestrator /m);
+  const orchestrator = callOf(t.calls(), "orchestration:orchestrator");
+  assert.ok(hasWeb(orchestrator));
+  assert.ok(toolsOf(orchestrator).includes("Agent") && toolsOf(orchestrator).includes("SendMessage"));
+});
+
+test("auto.sh in a folder with no agents and no enabled plugin: the reviewer step stops with the reason, and the review fails", () => {
+  const folder = tmp();
+  const t = fakeTools({ session: '{"result":"Wrote notes.md."}', route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 } });
+  const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /^no \.claude\/agents\/reviewer\.md in .*, and the orchestration plugin is not enabled there/m);
+  assert.match(r.stderr, /^review: fail$/m);
+  assert.deepEqual(t.calls().map(agentOf), ["none"], "only the plain session reached claude");
 });
 
 test("detect: config markers alone are not a Python test suite", () => {

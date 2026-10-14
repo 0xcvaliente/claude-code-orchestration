@@ -179,7 +179,7 @@ The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMax
 | Review gate | Verifier per slice in code | `review-gate.mjs` hook on `Stop`, for every task |
 | Isolation | One worktree per slice | `isolation: "worktree"` on parallel implementers of code in git (needs `worktree.baseRef: "head"`, see below); other work shares your folder, and code outside git runs one slice at a time |
 | Resume, replan, retry | Yes | Retry only: the orchestrator resumes the same implementer with `SendMessage`, so it keeps its context, and its worktree and branch when isolated |
-| Needs | An API login for the Agent SDK | A logged-in `claude`; a headless run that uses an agent (`npm run native`, or the reviewer and orchestrator of `npm run auto`) needs `.claude/agents` in the target folder (copy this project's `.claude/` in; a plugin install is not enough) |
+| Needs | An API login for the Agent SDK | A logged-in `claude`. A headless run that uses an agent (`npm run native`, or the reviewer and orchestrator of `npm run auto`) runs the folder's own `.claude/agents/<name>.md` or, without it, the plugin's agent when the plugin is enabled there; with neither, that agent step exits 1 with the reason and calls no model |
 
 Natively, the gates are hooks that block an agent from finishing:
 
@@ -207,6 +207,8 @@ The marketplace manifest `.claude-plugin/marketplace.json` points at the committ
 The orchestrator reads those settings before a parallel wave; if `baseRef` is not `"head"` it runs the slices one after another in the shared tree and says so in its report. The scripted workflow takes the same fact as the argument `baseRefHead`, and `code: false` for a task that changes no code (default `true`): its slices then share your folder and run at the same time.
 
 **Logs stay out of your repo.** The plugin's hooks log to `$CLAUDE_PLUGIN_DATA/state/<project path>` (a per-user dir), not to `.claude/state/` in your project, and `/route` appends its decisions to `routes.jsonl` there. `npm run report -- /path/to/your/repo` in a checkout finds that dir and writes `report.html` beside the logs. In a repo that registers its own copy of the hooks, such as this one, the plugin's copies step aside so nothing runs twice. Details in [docs/native-mode.md](docs/native-mode.md#gates).
+
+**Headless runs in any folder.** `npm run native` and `npm run auto` from a checkout run the plugin's agents (`orchestration:orchestrator`, `orchestration:reviewer`) in a folder with no `.claude/agents/<name>.md` of its own, when `claude plugin list --json` shows the plugin enabled there, so a research or writing task needs no copy of `.claude/`. Without the plugin or the files, the agent step (all of `npm run native`; `npm run auto`'s reviewer or orchestrator, after its triage and any plain session) exits 1 with the reason and calls no model. Details in [docs/native-mode.md](docs/native-mode.md#headless-ci-and-unattended).
 
 **No checkout needed for routing.** `/route` and the session nudge work in a plugin-only install: without this repo at `~/claude-code-orchestration` (or `$ORCH_HOME`, with `node_modules`) the skill sizes the task itself with the same thresholds. The router works for any task in any folder: `--repo` is the folder the task is about, a git repository is not required, and the JSON from `npm run route` includes `facts.code` (a forced `--mode` or a failed triage has no facts).
 
@@ -264,7 +266,8 @@ Invalid numbers exit 2; a failed plan exits 1.
 | `ORCH_NO_ESCALATE` | `auto.sh` | Turn escalation off |
 | `ORCH_BUDGET_USD` | `orchestrate.sh` | Optional spend cap for a headless run |
 | `ORCH_ALLOWED_TOOLS` | `orchestrate.sh` | Replace the tool allowlist, one rule per line |
-| `ORCH_AGENT` | `orchestrate.sh` | Agent to run; `none` is a plain session |
+| `ORCH_AGENT` | `orchestrate.sh` | Agent to run; `none` is a plain session. A bare name runs the folder's own `.claude/agents/<name>.md` or, without it, the plugin's `orchestration:<name>` when `claude plugin list` shows the plugin enabled in that folder; a namespaced name runs as it is |
+| `ORCH_AGENT_PREFIX` | `orchestrate.sh` | `orchestration:` always runs the plugin's agents, without checking the folder or `claude plugin list` (CI, or a plugin loaded another way) |
 | `ORCH_ADD_DIR`, `ORCH_ADVISOR`, `ORCH_DRY_RUN` | `orchestrate.sh` | Extra readable dir, experimental advisor model, print arguments and exit |
 | `ORCH_TEST_CMD` | `verify.sh`, `orchestrate.sh` | The test command. Unset, it is detected (see below) and the gate skips a prose-only change in a git work tree; set, it always runs. The headless run adds the permission rules it needs. Benchmark tasks declare theirs in `tasks/<id>/test-cmd.txt` and `compare.mjs` exports it |
 | `ORCH_GATE_ISOLATED` | `verify.sh` | Test gate for agents in `.claude/worktrees/`: `warn` (default: run tests, log, never block), `block` or `skip` |
