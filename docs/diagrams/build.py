@@ -34,7 +34,7 @@ def sequence_svg(theme):
     """Native sequence notation: the scene renderer has no lifelines or alt frames."""
     c = PALETTES[theme]
     p = f"gates-{theme}"
-    W, H = 900, 560
+    W, H = 900, 584
     xs = dict(o=90, i=270, v=450, r=630, g=810)
     out = []
     add = out.append
@@ -42,6 +42,13 @@ def sequence_svg(theme):
     def text(x, y, value, size=13, weight=400, color=None, anchor="middle", mono=False):
         family = ' font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"' if mono else ""
         add(f'<text x="{x}" y="{y}" font-size="{size}" font-weight="{weight}" fill="{color or c["ink"]}" text-anchor="{anchor}"{family}>{escape(value)}</text>')
+
+    def guard(x, y, value):
+        """An operand guard. In a wide font a guard can be longer than the space between two lifelines, so, like a
+        message label, it sits on a paper-coloured chip sized for a wide font (8.6 px a character plus padding): the
+        lifeline it crosses is hidden behind the text, never drawn through it. It stays inside the alt frame."""
+        add(f'<rect x="{x - 4}" y="{y - 13}" width="{8.6 * len(value) + 16:.1f}" height="17" rx="3" fill="{c["paper"]}"/>')
+        text(x, y, value, 12, 600, c["muted"], "start")
 
     def message(a, b, y, value, reply=False):
         x1, x2 = xs[a], xs[b]
@@ -55,7 +62,7 @@ def sequence_svg(theme):
 
     add(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="{p}-title {p}-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">')
     add(f'<title id="{p}-title">Native gates: hooks that block an agent from finishing</title>')
-    add(f'<desc id="{p}-desc">The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests: on failure it blocks the implementer with the test output, on success the report reaches the orchestrator. The orchestrator sends the slice to a reviewer, which returns STATUS pass or fail. When the orchestrator gives its final reply, review-gate.mjs blocks it until a reviewer has passed the last implementer.</desc>')
+    add(f'<desc id="{p}-desc">The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests unless there is no test runner or, in a git work tree, only prose changed: on failure it blocks the implementer with the test output; when they pass or are skipped, the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator\'s final reply until a reviewer has passed the last implementer.</desc>')
     add("<defs>")
     add(f'<marker id="{p}-filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M0 0 L12 6 L0 12 Z" fill="{c["edge"]}"/></marker>')
     add(f'<marker id="{p}-open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1 L11 6 L1 11" fill="none" stroke="{c["edge"]}" stroke-width="1.6"/></marker>')
@@ -63,13 +70,13 @@ def sequence_svg(theme):
     add(f'<rect width="{W}" height="{H}" fill="{c["paper"]}"/>')
 
     # alt frame first, so lifelines and messages draw over it
-    add(f'<rect x="30" y="192" width="480" height="132" rx="4" fill="none" stroke="{c["rule"]}" stroke-width="1.5"/>')
+    add(f'<rect x="30" y="192" width="480" height="156" rx="4" fill="none" stroke="{c["rule"]}" stroke-width="1.5"/>')
     add(f'<path d="M30 192 H78 V212 L70 220 H30 Z" fill="{c["accent_surface"]}" stroke="{c["rule"]}" stroke-width="1.5"/>')
     text(42, 210, "alt", 13, 700, c["accent"], "start")
-    add(f'<line x1="30" y1="262" x2="510" y2="262" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="5 5"/>')
+    add(f'<line x1="30" y1="272" x2="510" y2="272" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="5 5"/>')
 
     for key, x in xs.items():
-        add(f'<line x1="{x}" y1="84" x2="{x}" y2="520" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="4 6"/>')
+        add(f'<line x1="{x}" y1="84" x2="{x}" y2="544" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="4 6"/>')
     people = dict(o=("Orchestrator", None), i=("Implementer", None), v=("verify.sh", "SubagentStop hook"),
                   r=("Reviewer", None), g=("review-gate.mjs", "Stop hook"))
     for key, (name, sub) in people.items():
@@ -83,15 +90,15 @@ def sequence_svg(theme):
 
     message("o", "i", 130, "brief: goal, files, check")
     message("i", "v", 172, "tries to finish")
-    text(102, 210, "[tests fail]", 12, 600, c["muted"], "start")
-    message("v", "i", 244, "blocked + test output", reply=True)
-    text(102, 282, "[tests pass]", 12, 600, c["muted"], "start")
-    message("v", "o", 306, "allowed", reply=True)
-    message("o", "r", 364, "review the slice")
-    message("r", "o", 406, "STATUS: pass or fail", reply=True)
-    message("o", "g", 448, "final reply")
-    message("g", "o", 490, "blocked until a reviewer passes the last implementer", reply=True)
-    text(30, 548, "Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.", 12, 400, c["muted"], "start")
+    guard(102, 210, "[tests fail]")
+    message("v", "i", 250, "blocked + test output", reply=True)
+    guard(102, 292, "[tests pass or skipped]")
+    message("v", "o", 328, "allowed", reply=True)
+    message("o", "r", 388, "review the slice")
+    message("r", "o", 430, "STATUS: pass or fail", reply=True)
+    message("o", "g", 472, "final reply")
+    message("g", "o", 514, "blocked until a reviewer passes the last implementer", reply=True)
+    text(30, 572, "Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.", 12, 400, c["muted"], "start")
     add("</svg>")
     return "\n".join(out) + "\n"
 

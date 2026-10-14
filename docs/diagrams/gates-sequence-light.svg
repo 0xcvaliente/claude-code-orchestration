@@ -1,20 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560" role="img" aria-labelledby="gates-light-title gates-light-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 584" width="900" height="584" role="img" aria-labelledby="gates-light-title gates-light-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="gates-light-title">Native gates: hooks that block an agent from finishing</title>
-<desc id="gates-light-desc">The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests: on failure it blocks the implementer with the test output, on success the report reaches the orchestrator. The orchestrator sends the slice to a reviewer, which returns STATUS pass or fail. When the orchestrator gives its final reply, review-gate.mjs blocks it until a reviewer has passed the last implementer.</desc>
+<desc id="gates-light-desc">The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests unless there is no test runner or, in a git work tree, only prose changed: on failure it blocks the implementer with the test output; when they pass or are skipped, the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator's final reply until a reviewer has passed the last implementer.</desc>
 <defs>
 <marker id="gates-light-filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M0 0 L12 6 L0 12 Z" fill="#59636e"/></marker>
 <marker id="gates-light-open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1 L11 6 L1 11" fill="none" stroke="#59636e" stroke-width="1.6"/></marker>
 </defs>
-<rect width="900" height="560" fill="#ffffff"/>
-<rect x="30" y="192" width="480" height="132" rx="4" fill="none" stroke="#818b98" stroke-width="1.5"/>
+<rect width="900" height="584" fill="#ffffff"/>
+<rect x="30" y="192" width="480" height="156" rx="4" fill="none" stroke="#818b98" stroke-width="1.5"/>
 <path d="M30 192 H78 V212 L70 220 H30 Z" fill="#ddf4ff" stroke="#818b98" stroke-width="1.5"/>
 <text x="42" y="210" font-size="13" font-weight="700" fill="#0969da" text-anchor="start">alt</text>
-<line x1="30" y1="262" x2="510" y2="262" stroke="#818b98" stroke-width="1.5" stroke-dasharray="5 5"/>
-<line x1="90" y1="84" x2="90" y2="520" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="270" y1="84" x2="270" y2="520" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="450" y1="84" x2="450" y2="520" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="630" y1="84" x2="630" y2="520" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="810" y1="84" x2="810" y2="520" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="30" y1="272" x2="510" y2="272" stroke="#818b98" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="90" y1="84" x2="90" y2="544" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="270" y1="84" x2="270" y2="544" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="450" y1="84" x2="450" y2="544" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="630" y1="84" x2="630" y2="544" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="810" y1="84" x2="810" y2="544" stroke="#818b98" stroke-width="1.5" stroke-dasharray="4 6"/>
 <rect x="10" y="20" width="160" height="64" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="90" y="57" font-size="15" font-weight="700" fill="#1f2328" text-anchor="middle">Orchestrator</text>
 <rect x="190" y="20" width="160" height="64" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
@@ -33,25 +33,27 @@
 <line x1="270" y1="172" x2="448" y2="172" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-filled)"/>
 <rect x="294.5" y="147" width="131.0" height="19" rx="3" fill="#ffffff"/>
 <text x="360.0" y="161" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">tries to finish</text>
+<rect x="98" y="197" width="119.2" height="17" rx="3" fill="#ffffff"/>
 <text x="102" y="210" font-size="12" font-weight="600" fill="#59636e" text-anchor="start">[tests fail]</text>
-<line x1="450" y1="244" x2="272" y2="244" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
-<rect x="271.1" y="219" width="177.8" height="19" rx="3" fill="#ffffff"/>
-<text x="360.0" y="233" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">blocked + test output</text>
-<text x="102" y="282" font-size="12" font-weight="600" fill="#59636e" text-anchor="start">[tests pass]</text>
-<line x1="450" y1="306" x2="92" y2="306" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
-<rect x="235.7" y="281" width="68.6" height="19" rx="3" fill="#ffffff"/>
-<text x="270.0" y="295" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">allowed</text>
-<line x1="90" y1="364" x2="628" y2="364" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-filled)"/>
-<rect x="290.6" y="339" width="138.8" height="19" rx="3" fill="#ffffff"/>
-<text x="360.0" y="353" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">review the slice</text>
-<line x1="630" y1="406" x2="92" y2="406" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
-<rect x="275.0" y="381" width="170.0" height="19" rx="3" fill="#ffffff"/>
-<text x="360.0" y="395" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">STATUS: pass or fail</text>
-<line x1="90" y1="448" x2="808" y2="448" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-filled)"/>
-<rect x="400.1" y="423" width="99.8" height="19" rx="3" fill="#ffffff"/>
-<text x="450.0" y="437" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">final reply</text>
-<line x1="810" y1="490" x2="92" y2="490" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
-<rect x="240.2" y="465" width="419.6" height="19" rx="3" fill="#ffffff"/>
-<text x="450.0" y="479" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">blocked until a reviewer passes the last implementer</text>
-<text x="30" y="548" font-size="12" font-weight="400" fill="#59636e" text-anchor="start">Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.</text>
+<line x1="450" y1="250" x2="272" y2="250" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
+<rect x="271.1" y="225" width="177.8" height="19" rx="3" fill="#ffffff"/>
+<text x="360.0" y="239" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">blocked + test output</text>
+<rect x="98" y="279" width="213.8" height="17" rx="3" fill="#ffffff"/>
+<text x="102" y="292" font-size="12" font-weight="600" fill="#59636e" text-anchor="start">[tests pass or skipped]</text>
+<line x1="450" y1="328" x2="92" y2="328" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
+<rect x="235.7" y="303" width="68.6" height="19" rx="3" fill="#ffffff"/>
+<text x="270.0" y="317" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">allowed</text>
+<line x1="90" y1="388" x2="628" y2="388" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-filled)"/>
+<rect x="290.6" y="363" width="138.8" height="19" rx="3" fill="#ffffff"/>
+<text x="360.0" y="377" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">review the slice</text>
+<line x1="630" y1="430" x2="92" y2="430" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
+<rect x="275.0" y="405" width="170.0" height="19" rx="3" fill="#ffffff"/>
+<text x="360.0" y="419" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">STATUS: pass or fail</text>
+<line x1="90" y1="472" x2="808" y2="472" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-filled)"/>
+<rect x="400.1" y="447" width="99.8" height="19" rx="3" fill="#ffffff"/>
+<text x="450.0" y="461" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">final reply</text>
+<line x1="810" y1="514" x2="92" y2="514" stroke="#59636e" stroke-width="2" marker-end="url(#gates-light-open)" stroke-dasharray="7 5"/>
+<rect x="240.2" y="489" width="419.6" height="19" rx="3" fill="#ffffff"/>
+<text x="450.0" y="503" font-size="13" font-weight="400" fill="#1f2328" text-anchor="middle">blocked until a reviewer passes the last implementer</text>
+<text x="30" y="572" font-size="12" font-weight="400" fill="#59636e" text-anchor="start">Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.</text>
 </svg>

@@ -3,8 +3,10 @@
 # and log cost and turns to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
-# code work that uses worktrees. To run an agent (not ORCH_AGENT=none) it needs .claude/agents/ (copy this project's
-# .claude/ into it, or install it at user level).
+# code work that uses worktrees. To run an agent (not ORCH_AGENT=none) the folder itself needs .claude/agents/: copy
+# this project's .claude/ into it. The script checks that folder only and exits 1 without it, so agents installed under
+# ~/.claude or by the plugin are not enough. With the plugin installed you can instead run
+# `claude -p --agent orchestration:orchestrator` in any folder.
 # Env: ORCH_BUDGET_USD (optional spend cap, an estimate at list price; unset = no dollar cap),
 #      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
 #      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list; the default list has

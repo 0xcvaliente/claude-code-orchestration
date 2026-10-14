@@ -12,7 +12,9 @@ export interface Facts {
   /**
    * True when the task creates or changes source code, tests, build or CI configuration in a repository. False for
    * research, writing, analysis, planning or operations whose output is documents, data, answers or commands run.
-   * It does not take part in `decide`: callers use it to decide whether the test and git gates apply.
+   * It does not take part in `decide`, so it never changes the route: callers use it to decide git machinery
+   * (worktrees, CHECKPOINT commits, the integrator) and, in `npm run auto`, whether web tools are allowed. The test
+   * gate never reads it: it judges the changed files itself.
    */
   code: boolean;
   /** Files the task will create or change, of any kind (source, docs, reports, data, config). */
@@ -61,7 +63,7 @@ const isRecord = (x: unknown): x is Record<string, unknown> => typeof x === "obj
 /**
  * Model output is untrusted input: anything that is not a well-formed fact sheet is rejected, numbers are clamped.
  * `code` is the one lenient field: a sheet from an older caller or a logged line has none, and a missing or non-boolean
- * `code` means true, the conservative choice that keeps the test and git gates on.
+ * `code` means true, the conservative choice: git machinery stays on and headless web tools stay off.
  */
 export function parseFacts(x: unknown): Facts | undefined {
   if (!isRecord(x)) return undefined;

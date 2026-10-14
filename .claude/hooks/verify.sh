@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# SubagentStop gate: block an implementer from finishing while the test command fails. The gate is for code:
-# it does not run when the work changed no code (research, writing, analysis, operations, or a prose-only edit).
+# SubagentStop gate: block an implementer from finishing while the test command fails. It runs the tests when a test
+# command exists and judges the changed files only, never the triage fact `code` and never what the agent says. Work
+# that changes no code still runs them outside git, with ORCH_TEST_CMD set, or when any non-prose file changed.
 # Test command: $ORCH_TEST_CMD, else detected by test-cmd.sh (npm, pytest/unittest, cargo, go, swift, make).
-# No code changed (only when ORCH_TEST_CMD is unset; an explicit command always runs): the agent's folder is
+# Prose-only skip (only when ORCH_TEST_CMD is unset; an explicit command always runs): the agent's folder is
 # inside a git work tree and every changed path, staged, unstaged or untracked, is prose (*.md, *.markdown, *.rst,
 # *.adoc and *.txt, any case). Not prose: .mdx (JSX); a .txt that is CMakeLists.txt or whose path names requirements
 # or constraints (build and dependency files); anything under a directory named test, tests, testdata, __tests__,
