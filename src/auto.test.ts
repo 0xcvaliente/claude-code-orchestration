@@ -17,7 +17,7 @@ async function tempRepo() {
 }
 const outRoot = () => mkdtempSync(join(tmpdir(), "orch-out-"));
 const result = (over: Partial<AgentResult> = {}): AgentResult => ({
-  ok: true, text: "done", costUsd: 0.05, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
+  ok: true, text: "done", tokens: 50, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
 });
 
 /** Triager answers with `facts`; a solo session writes solo.txt; planner and the rest behave as in orchestrator.test.ts. */
@@ -57,11 +57,11 @@ test("auto: a small task runs as a plain session in the repo itself, uncommitted
   assert.deepEqual(calls.map((c) => c.role), ["triager", "solo"]);
   assert.ok(existsSync(join(repo, "solo.txt")), "edits land in the working tree");
   assert.equal((await git(repo, "rev-list", "--count", "HEAD")).trim(), "1", "nothing committed");
-  assert.ok((r.soloReport!.costByRole.triager ?? 0) > 0, "triage cost is reported");
+  assert.equal(r.soloReport!.tokensByRole.triager, 50, "triage tokens are reported");
   assert.equal(readFileSync(join(out, "routes.jsonl"), "utf8").trim().split("\n").length, 1);
 });
 
-test("auto: a parallel task runs the pipeline and reports the triage cost", async () => {
+test("auto: a parallel task runs the pipeline and reports the triage tokens", async () => {
   const repo = await tempRepo();
   const { run, calls } = fake(big);
   const r = await auto({ repo, task: "t", outRoot: outRoot(), run });
@@ -70,7 +70,7 @@ test("auto: a parallel task runs the pipeline and reports the triage cost", asyn
   assert.equal(r.soloReport, undefined);
   assert.ok(calls.some((c) => c.role === "planner") && calls.some((c) => c.role === "writer"));
   assert.ok(!calls.some((c) => c.role === "solo"));
-  assert.equal(r.report!.costByRole.triager, 0.05);
+  assert.equal(r.report!.tokensByRole.triager, 50);
 });
 
 test("auto: a forced mode skips triage entirely", async () => {
@@ -157,7 +157,7 @@ test("escalation: a triaged plain session that fails its tests is rerun through 
   assert.equal(r.decision.source, "escalated");
   assert.equal(r.soloReport!.ok, false);
   assert.ok(calls.some((c) => c.role === "planner"), "the pipeline ran");
-  assert.ok(r.report!.costByRole.triager! > 0 && r.report!.costByRole.solo! > 0, "earlier spend is carried into the report");
+  assert.ok(r.report!.tokensByRole.triager! > 0 && r.report!.tokensByRole.solo! > 0, "earlier spend is carried into the report");
 });
 
 test("escalation: off for a forced mode and with escalate: false", async () => {

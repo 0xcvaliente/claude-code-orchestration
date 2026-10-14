@@ -19,7 +19,7 @@ async function tempRepo() {
 const outRoot = () => mkdtempSync(join(tmpdir(), "orch-out-"));
 
 const result = (over: Partial<AgentResult> = {}): AgentResult => ({
-  ok: true, text: "done", costUsd: 0.01, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
+  ok: true, text: "done", tokens: 1000, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
 });
 
 const kind = (req: AgentRequest) => {
@@ -32,33 +32,34 @@ interface Hooks {
   /** Return false to fail verification; `n` counts verifier calls for that worktree. */
   verdict?: (n: number) => boolean;
   write?: (cwd: string, id: string) => void;
-  cost?: number;
+  /** Tokens each fake worker reports. */
+  tokens?: number;
 }
 
 /** A scripted fake model: each slice writes `<id>.txt` unless a hook overrides it. */
 function fake(slices: unknown[], hooks: Hooks = {}): { run: RunAgent; calls: AgentRequest[] } {
   const calls: AgentRequest[] = [];
   const verifierCalls = new Map<string, number>();
-  const cost = hooks.cost ?? 0.01;
+  const tokens = hooks.tokens ?? 1000;
   const write = hooks.write ?? ((cwd, id) => writeFileSync(join(cwd, `${id}.txt`), `${id}\n`));
 
   const run: RunAgent = async (req) => {
     calls.push(req);
     switch (kind(req)) {
       case "questions":
-        return result({ costUsd: cost, structured: { questions: ["where is the entry point?"] } });
+        return result({ tokens, structured: { questions: ["where is the entry point?"] } });
       case "slices":
-        return result({ costUsd: cost, structured: { slices } });
+        return result({ tokens, structured: { slices } });
       case "explorer":
-        return result({ costUsd: cost, text: "entry point is main.ts" });
+        return result({ tokens, text: "entry point is main.ts" });
       case "writer":
         write(req.cwd, sliceOf(req));
-        return result({ costUsd: cost });
+        return result({ tokens });
       default: {
         const n = (verifierCalls.get(req.cwd) ?? 0) + 1;
         verifierCalls.set(req.cwd, n);
         const pass = hooks.verdict ? hooks.verdict(n) : true;
-        return result({ costUsd: cost, structured: { pass, issues: pass ? [] : ["fix the edge case"], summary: "" } });
+        return result({ tokens, structured: { pass, issues: pass ? [] : ["fix the edge case"], summary: "" } });
       }
     }
   };
@@ -69,7 +70,7 @@ const slice = (id: string, dependsOn: string[] = []) => ({
   id, goal: `do ${id}`, files: [`${id}.txt`], acceptance: "file exists", dependsOn,
 });
 
-test("happy path: plans, writes in worktrees, verifies, merges, tracks cost per role", async () => {
+test("happy path: plans, writes in worktrees, verifies, merges, tracks tokens per role", async () => {
   const repo = await tempRepo();
   const { run, calls } = fake([slice("alpha"), slice("beta")]);
   const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run });
@@ -79,7 +80,7 @@ test("happy path: plans, writes in worktrees, verifies, merges, tracks cost per 
   assert.deepEqual(report.conflicted, []);
   const files = (await git(repo, "ls-tree", "--name-only", report.resultBranch!)).split("\n");
   assert.ok(files.includes("alpha.txt") && files.includes("beta.txt"));
-  assert.ok((report.costByRole.writer ?? 0) > 0 && (report.costByRole.planner ?? 0) > 0);
+  assert.ok((report.tokensByRole.writer ?? 0) > 0 && (report.tokensByRole.planner ?? 0) > 0);
   assert.equal(calls.filter((c) => c.role === "explorer").length, 1);
   assert.ok(calls.find((c) => c.role === "writer")!.prompt.includes("entry point is main.ts"), "findings reach writers");
 });
@@ -110,21 +111,21 @@ test("a failing test command skips the verifier and feeds the output back", asyn
 
 test("run budget stops new work", async () => {
   const repo = await tempRepo();
-  const { run } = fake([slice("alpha")], { cost: 1 });
-  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, runBudgetUsd: 3 });
+  const { run } = fake([slice("alpha")], { tokens: 1000 });
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, runBudgetTokens: 3000 });
 
   assert.equal(report.slices[0]!.status, "failed");
   assert.deepEqual(report.slices[0]!.issues, ["run budget exhausted"]);
   assert.equal(report.resultBranch, undefined);
 });
 
-test("without a run budget there is no dollar cap", async () => {
+test("without a run budget there is no token cap", async () => {
   const repo = await tempRepo();
-  const { run } = fake([slice("alpha")], { cost: 100 });
+  const { run } = fake([slice("alpha")], { tokens: 100_000 });
   const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run });
 
   assert.equal(report.slices[0]!.status, "passed");
-  assert.ok(report.spentUsd > 100, "cost is still reported");
+  assert.ok(report.spentTokens > 100_000, "tokens are still reported");
 });
 
 test("model-chosen slice ids cannot escape the worktree directory or collide", async () => {
@@ -224,23 +225,23 @@ test("a crash in one slice fails that slice only and the report is still written
   assert.ok(existsSync(join(out, report.runId, "report.json")));
 });
 
-test("a NaN worker cost cannot disable the run budget", async () => {
+test("a NaN worker token count cannot disable the run budget", async () => {
   const repo = await tempRepo();
-  const { run } = fake([slice("alpha")], { cost: 2 }); // planner x2 = $4 > $3, so the cap must trip
+  const { run } = fake([slice("alpha")], { tokens: 2000 }); // planner x2 = 4000 > 3000, so the cap must trip
   const nanOnce: RunAgent = async (req) => {
     const r = await run(req);
-    return req.role === "explorer" ? { ...r, costUsd: Number.NaN } : r;
+    return req.role === "explorer" ? { ...r, tokens: Number.NaN } : r;
   };
-  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run: nanOnce, runBudgetUsd: 3 });
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run: nanOnce, runBudgetTokens: 3000 });
 
-  assert.ok(Number.isFinite(report.spentUsd));
+  assert.ok(Number.isFinite(report.spentTokens));
   assert.deepEqual(report.slices[0]!.issues, ["run budget exhausted"]);
 });
 
 test("invalid limits are rejected before any model is called", async () => {
   const repo = await tempRepo();
   const { run, calls } = fake([slice("alpha")]);
-  for (const bad of [{ runBudgetUsd: Number.NaN }, { concurrency: 0 }, { maxRetries: -1 }]) {
+  for (const bad of [{ runBudgetTokens: Number.NaN }, { concurrency: 0 }, { maxRetries: -1 }]) {
     await assert.rejects(orchestrate({ repo, task: "t", outRoot: outRoot(), run, ...bad }), RangeError);
   }
   assert.equal(calls.length, 0);

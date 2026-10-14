@@ -4,7 +4,7 @@ import type { AgentResult, RunAgent } from "./agent.js";
 import { isTransient, withTransientRetry } from "./retry.js";
 
 const res = (over: Partial<AgentResult>): AgentResult => ({
-  ok: true, text: "", costUsd: 1, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
+  ok: true, text: "", tokens: 1000, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
 });
 const scripted = (results: AgentResult[]) => {
   let n = 0;
@@ -23,14 +23,21 @@ test("isTransient: service errors yes, task failures and our own limits no", () 
   assert.equal(isTransient(res({ ok: false, subtype: "exception", text: "tests failed" })), false);
 });
 
-test("withTransientRetry: retries a rate limit, then returns the success with summed cost", async () => {
+test("withTransientRetry: retries a rate limit, then returns the success with summed tokens", async () => {
   const { run, calls } = scripted([res({ ok: false, subtype: "exception", text: "429 rate limit" }), res({ text: "done" })]);
   const seen: number[] = [];
   const r = await withTransientRetry(run, { ...noWait, onRetry: (n) => seen.push(n) })({ role: "writer", prompt: "p", cwd: "." });
   assert.equal(r.ok, true);
   assert.equal(calls(), 2);
-  assert.equal(r.costUsd, 2);
+  assert.equal(r.tokens, 2000);
   assert.deepEqual(seen, [1]);
+});
+
+test("withTransientRetry: sums the usage breakdown across attempts", async () => {
+  const usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 };
+  const { run } = scripted([res({ ok: false, subtype: "exception", text: "429 rate limit", usage }), res({ usage })]);
+  const r = await withTransientRetry(run, noWait)({ role: "writer", prompt: "p", cwd: "." });
+  assert.deepEqual(r.usage, { input: 2, output: 4, cacheRead: 6, cacheWrite: 8 });
 });
 
 test("withTransientRetry: gives up after the retry limit and does not retry task failures", async () => {

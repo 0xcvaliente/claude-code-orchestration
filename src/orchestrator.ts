@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
-import { count, usd } from "./args.js";
+import { count } from "./args.js";
 import { LIMITS } from "./config.js";
 import { addWorktree, commitAll, deleteBranch, headRef, mergeAll, mergeInto, removeWorktree, sh } from "./git.js";
 import { newRunId, Run } from "./state.js";
@@ -26,8 +26,8 @@ export interface Report {
   /** How many times the planner was asked to plan the missing work after failures. */
   replans: number;
   resumed: boolean;
-  spentUsd: number;
-  costByRole: Record<string, number>;
+  spentTokens: number;
+  tokensByRole: Record<string, number>;
   /** Set when the run could not do its job (planning or integration failed); the CLI exits non-zero. */
   error?: string;
 }
@@ -46,8 +46,11 @@ export interface OrchestrateOptions {
   resume?: string;
   /** After a pass that leaves failed slices, ask the planner for the missing work this many times (0 to 3, default 0). */
   maxReplans?: number;
-  /** Optional spend cap in USD (an estimate at list price). Unset: no dollar cap; turns, timeouts and retries still bound the run. */
-  runBudgetUsd?: number;
+  /**
+   * Optional cap on total tokens (input + output + cache read + cache write, over every model), summed over every worker.
+   * Unset: no cap; turns, timeouts and retries still bound the run.
+   */
+  runBudgetTokens?: number;
   concurrency?: number;
   maxRetries?: number;
   log?: (line: string) => void;
@@ -179,7 +182,7 @@ const replanPrompt = (task: string, findings: string, done: Slice[], failed: Sli
 
 export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const log = opts.log ?? (() => undefined);
-  const budget = opts.runBudgetUsd === undefined ? undefined : usd("runBudgetUsd", opts.runBudgetUsd);
+  const budget = opts.runBudgetTokens === undefined ? undefined : count("runBudgetTokens", opts.runBudgetTokens, 1);
   const concurrency = count("concurrency", opts.concurrency ?? LIMITS.concurrency, 1);
   const maxRetries = count("maxRetries", opts.maxRetries ?? LIMITS.maxRetries, 0);
   const maxReplans = Math.min(3, count("maxReplans", opts.maxReplans ?? 0, 0));
@@ -189,11 +192,11 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const base = journal?.base ?? (await headRef(opts.repo));
   const report: Report = {
     runId: run.id, base, slices: [], merged: [], conflicted: [], replans: 0, resumed: Boolean(journal),
-    spentUsd: 0, costByRole: {},
+    spentTokens: 0, tokensByRole: {},
   };
   const finish = (): Report => {
-    report.spentUsd = run.spentUsd;
-    report.costByRole = run.costByRole();
+    report.spentTokens = run.spentTokens;
+    report.tokensByRole = run.tokensByRole();
     run.save("report.json", report);
     return report;
   };
