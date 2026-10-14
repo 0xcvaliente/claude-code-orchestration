@@ -30,8 +30,8 @@ export const ROLES: Record<Role, RoleConfig> = {
     tools: READ_ONLY,
     disallowedTools: [],
     system:
-      "You size coding tasks so the orchestrator can choose between a plain session and a multi-agent pipeline. " +
-      "You only read the repository; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
+      "You size tasks (code, research, writing, analysis or operations) so the orchestrator can choose between a plain session and a multi-agent pipeline. " +
+      "You only read the folder; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
   },
   solo: {
     model: env("ORCH_MODEL_SOLO", "claude-sonnet-5-5"),
