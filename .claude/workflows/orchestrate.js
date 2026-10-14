@@ -1,22 +1,27 @@
 export const meta = {
   name: 'orchestrate',
-  description: 'Plan a task, build slices with the implementer agent, review each with a fresh reviewer, merge isolated work',
-  whenToUse: 'A coding task that splits into slices with runnable acceptance checks. The script, not the model, fixes the order.',
+  description: 'Plan a task, build slices with the implementer agent, review each with a fresh reviewer, merge isolated code branches',
+  whenToUse: 'A task (code, research, writing, analysis or operations) that splits into slices, each with an acceptance check: a runnable command for code, a checklist a reviewer can verify otherwise. Pass code: false for anything that is not code in a git repository. The script, not the model, fixes the order.',
   phases: [
     { title: 'Plan', detail: 'questions, then slices' },
     { title: 'Explore', detail: 'researcher agents in parallel' },
     { title: 'Build', detail: 'implementer, then reviewer, with retries' },
-    { title: 'Integrate', detail: 'merge isolated branches' },
+    { title: 'Integrate', detail: 'merge isolated branches (code in git only)' },
   ],
 }
 
-// args: { task: string, maxSlices?: number, maxRetries?: number, baseRefHead?: boolean }
+// args: { task: string, maxSlices?: number, maxRetries?: number, baseRefHead?: boolean, code?: boolean }
+//   code: true (the default) = code in a git repository: parallel waves run in worktrees (when baseRefHead), after a
+//     checkpoint commit, and the integrator merges them. false = research, writing, analysis or operations: no
+//     worktrees, checkpoint or integrator, nobody commits, and the slices of a wave run at the same time in the
+//     shared folder (their files are disjoint and no tests run).
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
 const MAX_SLICES = (args && args.maxSlices) || 6
 const MAX_RETRIES = (args && args.maxRetries) || 2
 // true when settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
 const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
+const CODE = !(args && args.code === false)
 
 const QUESTIONS = {
   type: 'object',
@@ -72,7 +77,9 @@ const VERDICT = {
 
 phase('Plan')
 const q = await agent(
-  `Task:\n${task}\n\nSkim the repository and list up to 4 specific questions a read-only explorer should answer before the work is split up. Return an empty list if you need none.`,
+  CODE
+    ? `Task:\n${task}\n\nSkim the repository and list up to 4 specific questions a read-only explorer should answer before the work is split up. Return an empty list if you need none.`
+    : `Task:\n${task}\n\nSkim the folder and list up to 4 specific questions a read-only researcher (local files and the web) should answer before the work is split up. Return an empty list if you need none.`,
   { label: 'plan:questions', effort: 'high', schema: QUESTIONS },
 )
 
@@ -87,7 +94,9 @@ const findings = ((q && q.questions) || [])
   .join('\n\n')
 
 const plan = await agent(
-  `Task:\n${task}\n\nFindings:\n${findings || '(none)'}\n\nSplit the task into at most ${MAX_SLICES} slices with disjoint files. Each needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, and risky=true for security-sensitive or cross-module work. If it cannot be parallelised safely, return one slice.`,
+  CODE
+    ? `Task:\n${task}\n\nFindings:\n${findings || '(none)'}\n\nSplit the task into at most ${MAX_SLICES} slices with disjoint files. Each needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, and risky=true for security-sensitive or cross-module work. If it cannot be parallelised safely, return one slice.`
+    : `Task:\n${task}\n\nFindings:\n${findings || '(none)'}\n\nSplit the task into at most ${MAX_SLICES} slices with disjoint output files in this folder. Each needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (a runnable command if the slice runs code, otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, and risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team). If it cannot be parallelised safely, return one slice.`,
   { label: 'plan:slices', phase: 'Plan', effort: 'high', schema: SLICES },
 )
 const slices = (plan && plan.slices) || []
@@ -112,10 +121,11 @@ while (left.length) {
 const results = []
 const sharedFiles = []
 for (const wave of waves) {
-  // Isolate only parallel slices. Worktrees see only committed work, and only from the local HEAD when
-  // baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
-  let isolated = wave.length > 1 && BASE_REF_HEAD
-  if (wave.length > 1 && !BASE_REF_HEAD) {
+  // Isolate only parallel slices of code in git. Worktrees see only committed work, and only from the local HEAD
+  // when baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
+  // Without code there are no worktrees, checkpoint or integrator: the wave runs in the shared folder (below).
+  let isolated = CODE && wave.length > 1 && BASE_REF_HEAD
+  if (CODE && wave.length > 1 && !BASE_REF_HEAD) {
     log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head", so worktrees would branch from the remote default branch; running one after another in the shared tree`)
   }
   if (isolated) {
@@ -140,7 +150,11 @@ for (const wave of waves) {
         work = await agent(
           `Slice ${s.id}\nGoal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
             `Overall task: ${task}\nFindings:\n${findings || '(none)'}\n` +
-            (isolated ? 'You are in an isolated worktree: commit all changes on the current branch and report its name.\n' : 'Do not commit.\n') +
+            (isolated
+              ? 'You are in an isolated worktree: commit all changes on the current branch and report its name.\n'
+              : CODE
+                ? 'Do not commit.\n'
+                : 'You work in the shared folder; other slices may be writing their own files at the same time, so touch only yours. Do not commit.\n') +
             (feedback ? `A previous attempt was rejected. Fix:\n${feedback}\n` : ''),
           { label: `build:${s.id}#${attempt}`, phase: 'Build', agentType: 'implementer', isolation: isolated ? 'worktree' : undefined, schema: WORK },
         )
@@ -153,7 +167,9 @@ for (const wave of waves) {
         reviews = await parallel(
           (s.risky ? [undefined, 'opus'] : [undefined]).map((model) => () =>
             agent(
-              `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nReview the working-tree changes (git diff HEAD), run the check, and return a verdict.`,
+              CODE
+                ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nReview the working-tree changes (git diff HEAD), run the check, and return a verdict.`
+                : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.`,
               { label: `review:${s.id}#${attempt}${model ? ':' + model : ''}`, phase: 'Build', agentType: 'reviewer', model, schema: VERDICT },
             ),
           ),
@@ -164,15 +180,18 @@ for (const wave of waves) {
       }
       return { slice: s, status: 'failed', attempts: MAX_RETRIES + 1, branch: (work && work.branch) || '', gaps: feedback ? [feedback] : [] }
   }
+  // Isolated slices run at the same time in their own worktrees. Without code the files of a wave are disjoint and
+  // no tests run, so its slices share the folder and also run at the same time. Code in the shared tree goes one at
+  // a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
   let out
-  if (isolated || wave.length === 1) {
+  if (isolated || wave.length === 1 || !CODE) {
     out = await pipeline(wave, runSlice)
   } else {
     out = []
     for (const s of wave) out.push(await runSlice(s))
   }
   const built = out.filter(Boolean)
-  if (!isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
+  if (CODE && !isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
   results.push(...built)
 
   if (isolated) {
