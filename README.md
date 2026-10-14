@@ -215,7 +215,7 @@ sequenceDiagram
     G-->>O: blocked until a reviewer has passed the last implementer
 ```
 
-The review gate reads the worker's `STATUS` from its last message or, when that is empty, from the `SubagentHandback` message or last text block in its transcript. A reviewer with no status at all blocks too (`last_reviewer_no_status`).
+The review gate reads the worker's `STATUS` from its last message or, when that is empty, from the `SubagentHandback` message or last text block in its transcript. A reviewer with no status at all blocks too (`last_reviewer_no_status`). The loop guard allows 2 blocks after each implementer run (a later implementer resets it); then the reply goes out with a `systemMessage` saying the work is unverified (`max_blocks_reached`), so the gate never gives up silently.
 
 The interactive orchestrator cannot hand over to a plain session, because it has no Edit or Bash by design. So it has a **light path** for small tasks (one slice, at most 3 files and under about 1,500 lines): one implementer and one reviewer, with no exploration, worktrees or integrator. Large work with separable parts gets an interface-first plan: one slice writes the shared interfaces and stubs, a checkpoint commit follows, then the rest run in parallel. Everything native (agents, gates, headless runs, lessons from the first live runs) is in [docs/native-mode.md](docs/native-mode.md).
 
@@ -230,6 +230,8 @@ The marketplace manifest `.claude-plugin/marketplace.json` points at the committ
 ```
 
 The orchestrator reads those settings before a parallel wave; if `baseRef` is not `"head"` it runs the slices one after another in the shared tree and says so in its report. The scripted workflow takes the same fact as the argument `baseRefHead`.
+
+**Logs stay out of your repo.** The plugin's hooks log to `$CLAUDE_PLUGIN_DATA/state/<project path>` (a per-user dir), not to `.claude/state/` in your project. In a repo that registers its own copy of the hooks, such as this one, the plugin's copies step aside so nothing runs twice. Details in [docs/native-mode.md](docs/native-mode.md#gates).
 
 **No checkout needed for routing.** `/route` and the session nudge work in a plugin-only install: without this repo at `~/claude-code-orchestration` (or `$ORCH_HOME`, with `node_modules`) the skill sizes the task itself with the same thresholds.
 
@@ -324,7 +326,7 @@ src/
   git.ts, state.ts, args.ts       worktree and merge helpers, run directory and telemetry, number checks
 .claude/
   agents/                         orchestrator, researcher, implementer, integrator, reviewer
-  hooks/                          verify.sh, test-cmd.sh, review-gate.mjs, telemetry.mjs, nudge.mjs
+  hooks/                          verify.sh, test-cmd.sh, review-gate.mjs, telemetry.mjs, state.mjs, nudge.mjs
   skills/                         route, orchestration-conventions
   workflows/orchestrate.js        the scripted flow
   settings.json, rules/           gates and permission denies, rules for editing the above

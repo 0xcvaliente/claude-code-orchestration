@@ -47,7 +47,7 @@ sequenceDiagram
     R-->>O: STATUS pass or fail, gaps
     O->>G: final reply
     alt no reviewer passed after the last implementer
-        G-->>O: exit 2 (blocked, one forced retry)
+        G-->>O: exit 2 (blocked; after 2 blocks per implementer run, allowed with an unverified warning)
     else reviewer passed
         G-->>O: allowed
     end
@@ -56,15 +56,17 @@ sequenceDiagram
 | Hook | Script | Effect |
 |---|---|---|
 | `SubagentStop` (implementer) | `verify.sh` | Blocks finishing while the test command fails; runs in the agent's cwd. The command is `$ORCH_TEST_CMD` or detected by `test-cmd.sh`. At most 2 blocks per agent, then it lets the agent finish. Agents in `.claude/worktrees/` follow `ORCH_GATE_ISOLATED`. |
-| `Stop` | `review-gate.mjs` | Blocks the final reply if an implementer finished and no reviewer has since, the last reviewer said `STATUS: fail`, or it returned no status (`last_reviewer_no_status`). Allows one forced retry (`stop_hook_active`). |
-| `SubagentStart`, `SubagentStop` | `telemetry.mjs` | Appends events to `.claude/state/telemetry.jsonl` (gitignored). Records the worker's `STATUS` from `last_assistant_message`, or, when that is empty, from the `SubagentHandback` message or last text block in `agent_transcript_path`. |
+| `Stop` | `review-gate.mjs` | Blocks the final reply if an implementer finished and no reviewer has since, the last reviewer said `STATUS: fail`, or it returned no status (`last_reviewer_no_status`). At most 2 blocks after each implementer run (a later implementer resets the count); then it lets the reply out with a `systemMessage` saying the work is unverified (`max_blocks_reached`). |
+| `SubagentStart`, `SubagentStop` | `telemetry.mjs` | Appends events to `telemetry.jsonl` in the state dir (below). Records the worker's `STATUS` from `last_assistant_message`, or, when that is empty, from the `SubagentHandback` message or last text block in `agent_transcript_path`. |
 | `SessionStart` (plugin only) | `nudge.mjs` | Tells the main session to run `orchestration:route` before a non-trivial coding task. Silent when `ORCH_NO_NUDGE` is set. |
 
 **Runner detection** (`.claude/hooks/test-cmd.sh`), first match wins: `ORCH_TEST_CMD`; `npm test` when `package.json` has a test script; `pytest` (or `unittest` if pytest is not installed) only when `test_*.py` or `*_test.py` files exist; `cargo test`; `go test ./...`; `swift test`; `make test` with a `test:` target. None found: the gate allows (`no_test_command`). pytest exit 5 (no tests collected) counts as no tests.
 
 **Isolated worktrees.** Sibling slices may not be merged yet, so a worktree's tests can fail for reasons the slice does not own. `ORCH_GATE_ISOLATED=warn` (default) runs the tests, logs `tests_failed_isolated` and never blocks; `block` gates them like the shared tree; `skip` does not run them. The integrator's acceptance check on the merged result is the real gate.
 
-Every gate decision is appended to `.claude/state/gates.jsonl`, so a run can show whether a gate fired. Hooks exit 2 to block; any other non-zero code only warns, and hooks exit 0 on malformed input.
+Every gate decision is appended to `gates.jsonl` in the state dir, so a run can show whether a gate fired. Hooks exit 2 to block; any other non-zero code only warns, and hooks exit 0 on malformed input.
+
+**State dir and plugin copies** (`.claude/hooks/state.mjs`; `verify.sh` mirrors the rule in bash). The project copy of the hooks (registered in `.claude/settings.json`) logs to `.claude/state/` and writes a `.gitignore` there on first write. The plugin copy (`hooks.json` runs every hook with `--plugin`) logs outside the repo, because the logs hold subagent payloads: `$CLAUDE_PLUGIN_DATA/state/<key>`, or `~/.claude/orchestration/state/<key>` where Claude Code does not set `CLAUDE_PLUGIN_DATA`. The key is the project path with every byte that is not a letter or digit replaced by `-`. With the plugin installed in a repo that registers its own copy (this repo, or one with `.claude/` copied in), both copies would fire on every event, doubling telemetry and letting two review gates count each other's blocks. So the plugin's `telemetry.mjs` and `review-gate.mjs` exit at once when the project's settings register the same script, and the project copy does the work; the plugin's `verify.sh` then logs to the project's `.claude/state/` too, so every gate reads one log. `verify.sh` needs no such check: the project matcher `^implementer$` and the plugin's `orchestration:implementer` never match the same agent. `npm run report` reads `.claude/state/` only.
 
 ## Parallel slices
 

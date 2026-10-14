@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -112,4 +112,102 @@ test("test gate: blocks a namespaced implementer while the test command fails, l
   assert.equal(run("orchestration:implementer", "exit 0").status, 0);
   assert.equal(run("orchestration:reviewer", "exit 1").status, 0, "only implementers are gated");
   assert.match(readFileSync(join(dir, ".claude", "state", "gates.jsonl"), "utf8"), /"decision":"block".*"reason":|"reason":"tests_failed"/);
+});
+
+const at = (ms: number) => new Date(Date.UTC(2026, 0, 1) + ms).toISOString();
+const gateLog = (dir: string) => join(dir, ".claude", "state", "gates.jsonl");
+const writeGateLog = (dir: string, entries: object[]) =>
+  writeFileSync(gateLog(dir), entries.map((e) => JSON.stringify({ gate: "review", decision: "block", session_id: "s1", ...e })).join("\n") + "\n");
+
+test("review gate: counts blocks since the last implementer only, so later work in a long session is still gated", () => {
+  const dir = project([{ agent_type: "implementer", ts: at(0) }, { agent_type: "implementer", ts: at(5000) }]);
+  writeGateLog(dir, [{ ts: at(100) }, { ts: at(200) }, { decision: "allow", reason: "max_blocks_reached", ts: at(300) }, { ts: at(6000), session_id: "other" }]);
+  const r = gate(dir);
+  assert.equal(r.status, 2, "two blocks for the first implementer must not exempt the second");
+  assert.match(r.stderr, /no reviewer has run/);
+});
+
+test("review gate: gives up after 2 blocks since the last implementer, and says the reply is unverified", () => {
+  const dir = project([{ agent_type: "implementer", ts: at(0) }]);
+  writeGateLog(dir, [{ ts: at(100) }]);
+  const last = gate(dir);
+  assert.equal(last.status, 2);
+  assert.match(last.stderr, /last block.*unverified/);
+  const giveUp = gate(dir);
+  assert.equal(giveUp.status, 0);
+  assert.match(JSON.parse(giveUp.stdout).systemMessage, /gave up after 2 blocks \(no_reviewer_after_last_implementer\).*unverified/);
+  assert.match(readFileSync(gateLog(dir), "utf8"), /"decision":"allow","reason":"max_blocks_reached"/);
+});
+
+// The plugin copy of a hook, run as hooks.json runs it (--plugin), with its data dir in a temp dir.
+const pluginHook = (name: string, dir: string, data: string, input: string, env: Record<string, string> = {}) =>
+  spawnSync(name.endsWith(".sh") ? "bash" : "node", [hook(name), "--plugin"], {
+    input,
+    env: { ...process.env, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_DATA: data, ...env },
+    encoding: "utf8",
+  });
+const stopEventFor = (dir: string, agent_type: string) => JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s1", agent_type, agent_id: "a1", cwd: dir });
+
+test("plugin hooks step aside where the project registers its own copy, so nothing runs twice", () => {
+  const dir = project([{ agent_type: "implementer" }]);
+  const data = mkdtempSync(join(tmpdir(), "orch-data-"));
+  mkdirSync(join(dir, ".claude", "hooks"));
+  for (const f of ["telemetry.mjs", "review-gate.mjs"]) writeFileSync(join(dir, ".claude", "hooks", f), "");
+  writeFileSync(join(dir, ".claude", "settings.json"), readFileSync(new URL("../.claude/settings.json", import.meta.url)));
+  const telemetryBefore = readFileSync(join(dir, ".claude", "state", "telemetry.jsonl"), "utf8");
+
+  const stop = pluginHook("review-gate.mjs", dir, data, JSON.stringify({ session_id: "s1" }));
+  assert.deepEqual([stop.status, stop.stdout, stop.stderr], [0, "", ""]);
+  assert.equal(existsSync(gateLog(dir)), false, "the plugin copy logs no decision of its own");
+  assert.equal(gate(dir).status, 2, "the project copy still gates");
+  assert.equal(readFileSync(gateLog(dir), "utf8").trim().split("\n").length, 1);
+
+  assert.equal(pluginHook("telemetry.mjs", dir, data, stopEventFor(dir, "orchestration:reviewer")).status, 0);
+  assert.equal(readFileSync(join(dir, ".claude", "state", "telemetry.jsonl"), "utf8"), telemetryBefore);
+
+  // verify.sh has no project twin for namespaced agents, so it runs, and logs where the project's gates do.
+  assert.equal(pluginHook("verify.sh", dir, data, stopEventFor(dir, "orchestration:implementer"), { ORCH_TEST_CMD: "exit 1" }).status, 2);
+  assert.match(readFileSync(gateLog(dir), "utf8"), /"gate":"test","decision":"block"/);
+  assert.equal(existsSync(join(data, "state")), false);
+});
+
+type HookFile = { hooks: Record<string, { matcher?: string; hooks: { command: string }[] }[]> };
+test("test gate: the project and plugin matchers never fire for the same agent; plugin hooks run with --plugin", () => {
+  const read = (path: string): HookFile => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
+  const project = read("../.claude/settings.json");
+  const plugin = read("../dist/plugin/hooks/hooks.json");
+  const matcher = (h: HookFile) => new RegExp(h.hooks.SubagentStop?.find((e) => e.matcher)?.matcher ?? "^$");
+  assert.ok(matcher(project).test("implementer") && !matcher(project).test("orchestration:implementer"));
+  assert.ok(matcher(plugin).test("orchestration:implementer") && !matcher(plugin).test("implementer"));
+  const commands = Object.values(plugin.hooks).flatMap((list) => list.flatMap((e) => e.hooks.map((h) => h.command)));
+  assert.ok(commands.length > 0 && commands.every((c) => c.endsWith(" --plugin")), commands.join("\n"));
+});
+
+test("plugin hooks keep state in a per-user dir keyed by the project path, never in the repo", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-é-")); // non-ASCII: the JS and bash keys must still agree
+  const data = mkdtempSync(join(tmpdir(), "orch-data-"));
+  assert.equal(pluginHook("telemetry.mjs", dir, data, stopEventFor(dir, "orchestration:implementer")).status, 0);
+  assert.equal(pluginHook("verify.sh", dir, data, stopEventFor(dir, "orchestration:implementer"), { ORCH_TEST_CMD: "exit 1" }).status, 2);
+  const r = pluginHook("review-gate.mjs", dir, data, JSON.stringify({ session_id: "s1" }));
+  assert.equal(r.status, 2, "the gate reads the telemetry the plugin copy wrote");
+  assert.equal(existsSync(join(dir, ".claude")), false, "nothing is written into the project");
+  const keys = readdirSync(join(data, "state"));
+  assert.equal(keys.length, 1, `one dir for all three hooks: ${keys.join(", ")}`);
+  assert.deepEqual(readdirSync(join(data, "state", keys[0] ?? "")).sort(), ["gates.jsonl", "telemetry.jsonl"]);
+  assert.match(readFileSync(join(data, "state", keys[0] ?? "", "gates.jsonl"), "utf8"), /"gate":"test".*\n.*"gate":"review"/);
+
+  // Without CLAUDE_PLUGIN_DATA (older Claude Code) the state goes under ~/.claude/orchestration.
+  const home = mkdtempSync(join(tmpdir(), "orch-home-"));
+  pluginHook("telemetry.mjs", dir, "", stopEventFor(dir, "orchestration:implementer"), { HOME: home });
+  pluginHook("verify.sh", dir, "", stopEventFor(dir, "orchestration:implementer"), { HOME: home, ORCH_TEST_CMD: "exit 0" });
+  assert.deepEqual(readdirSync(join(home, ".claude", "orchestration", "state", keys[0] ?? "")).sort(), ["gates.jsonl", "telemetry.jsonl"]);
+});
+
+test("project hooks write a .gitignore into .claude/state on first write", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
+  assert.equal(telemetry(dir, JSON.stringify({ hook_event_name: "SubagentStart", session_id: "s1" })).status, 0);
+  assert.equal(readFileSync(join(dir, ".claude", "state", ".gitignore"), "utf8"), "*\n");
+  const other = mkdtempSync(join(tmpdir(), "orch-verify-"));
+  spawnSync("bash", [hook("verify.sh")], { input: stopEventFor(other, "implementer"), env: { ...process.env, CLAUDE_PROJECT_DIR: other, ORCH_TEST_CMD: "exit 0" }, encoding: "utf8" });
+  assert.equal(readFileSync(join(other, ".claude", "state", ".gitignore"), "utf8"), "*\n");
 });

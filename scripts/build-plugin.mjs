@@ -33,7 +33,8 @@ writeFileSync(
   }),
 );
 
-const run = (script) => (script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"` : `"\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"`);
+// --plugin: keep state outside the user's repo, and step aside where the project registers its own copy (state.mjs).
+const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"` : `"\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"`} --plugin`;
 const hooks = {
   hooks: {
     SessionStart: [{ hooks: [{ type: "command", command: run("nudge.mjs") }] }],

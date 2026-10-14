@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// SubagentStart / SubagentStop logger: appends one JSON line per event to .claude/state/telemetry.jsonl.
+// SubagentStart / SubagentStop logger: appends one JSON line per event to telemetry.jsonl in the state dir
+// (state.mjs: .claude/state for the project copy, a per-user dir for the plugin copy).
 // Also records the worker's STATUS (pass/fail) from its final report, for review-gate.mjs.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
+if (duplicate("telemetry.mjs")) process.exit(0); // the project's own copy logs this event
 let payload = {};
 try {
   payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -57,7 +60,6 @@ if (payload.hook_event_name === "SubagentStop") {
 const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
 const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
 
-const dir = join(process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".claude", "state");
-mkdirSync(dir, { recursive: true });
-appendFileSync(join(dir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim })}\n`);
+ensureStateDir();
+appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim })}\n`);
 process.exit(0);
