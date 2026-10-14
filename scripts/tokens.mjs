@@ -28,11 +28,17 @@ export const totalTokens = (result) => total(usageOf(result));
 export const tokensByModel = (result) =>
   Object.fromEntries(Object.entries(result?.modelUsage ?? {}).map(([m, u]) => [m.replace(/^claude-/, ""), total(fromModel(u))]));
 
+// Unit and decimals are chosen from the rounded value, so 999,999 prints "1.00M", never "1000k".
 export function formatTokens(count) {
   const x = Math.round(count);
   if (x < 1_000) return String(x);
-  if (x < 1_000_000) return `${x < 10_000 ? (x / 1_000).toFixed(1) : Math.round(x / 1_000)}k`;
-  return `${x < 10_000_000 ? (x / 1_000_000).toFixed(2) : (x / 1_000_000).toFixed(1)}M`;
+  const tenthsK = Math.round(x / 100);
+  if (tenthsK < 100) return `${(tenthsK / 10).toFixed(1)}k`;
+  const k = Math.round(x / 1_000);
+  if (k < 1_000) return `${k}k`;
+  const hundredthsM = Math.round(x / 10_000);
+  if (hundredthsM < 1_000) return `${(hundredthsM / 100).toFixed(2)}M`;
+  return `${(Math.round(x / 100_000) / 10).toFixed(1)}M`;
 }
 
 // "500000", "500k", "2M", "1.5m" -> integer, at least 10k (so an old dollar value such as 5 is refused).
