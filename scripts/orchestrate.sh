@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Headless native orchestration: run the orchestrator agent non-interactively, print its JSON,
-# and log cost and turns to <repo>/.claude/state/runs.jsonl.
+# and log tokens and turns to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
 # code work that uses worktrees. Which agent runs (not ORCH_AGENT=none):
@@ -11,7 +11,8 @@
 #   3. else exit 1 before any model call. Agents under ~/.claude/agents do not count.
 # ORCH_AGENT_PREFIX skips both checks; a name that already has a namespace (ORCH_AGENT=orchestration:reviewer) is
 # used as it is.
-# Env: ORCH_BUDGET_USD (optional spend cap, an estimate at list price; unset = no dollar cap),
+# Env: ORCH_BUDGET_TOKENS (optional token cap, e.g. 500k or 2M, at least 10k; approximate, because claude caps spend only
+#        in dollars: converted at 1M tokens per list-price dollar into --max-budget-usd; unset = no cap),
 #      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
 #      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list; the default list has
 #        no web tools, so add WebSearch and WebFetch for research, scripts/auto.sh does it for a task that is not code),
@@ -29,6 +30,15 @@ export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a ru
 task="${1:?usage: orchestrate.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The old dollar cap must fail, not be ignored: a run that relied on it would go uncapped.
+if [ -n "${ORCH_BUDGET_USD:-}" ]; then
+  echo "ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS (a token count such as 2M)" >&2
+  exit 1
+fi
+budget_usd=""
+if [ -n "${ORCH_BUDGET_TOKENS:-}" ]; then
+  budget_usd="$(node "$here/tokens.mjs" budget-usd "$ORCH_BUDGET_TOKENS")" || exit 1
+fi
 cd "$repo" || exit 1
 
 plugin=orchestration # the plugin name in scripts/build-plugin.mjs
@@ -86,7 +96,7 @@ fi
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
 args+=(--output-format json --permission-mode dontAsk --no-session-persistence)
-[ -n "${ORCH_BUDGET_USD:-}" ] && args+=(--max-budget-usd "$ORCH_BUDGET_USD")
+[ -n "$budget_usd" ] && args+=(--max-budget-usd "$budget_usd")
 # Experimental advisor (second, stronger model consulted at decision points); see the docs' /advisor page.
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
 [ -n "${ORCH_MODEL:-}" ] && args+=(--model "$ORCH_MODEL")
