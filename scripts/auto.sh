@@ -29,7 +29,12 @@ code=$?
 if [ "$code" -eq 0 ] && [ "$mode" = reviewed ]; then
   review_prompt="Review the uncommitted change in this repository against this goal: $task
 Use git diff HEAD, read untracked files from git status --short, and run the tests if you can find them. Start your reply with STATUS: pass or STATUS: fail."
-  out="$(ORCH_AGENT=reviewer ORCH_ALLOWED_TOOLS=$'Read\nGrep\nGlob\nBash(git diff*)\nBash(git status*)\nBash(git log*)\nBash(git show*)\nBash(npm test*)\nBash(node *)\nBash(ls*)' \
+  # Read-only tools plus the allow rules of the repo's detected test runner (pytest, cargo, go ...) and nothing broader.
+  source "$here/../.claude/hooks/test-cmd.sh"
+  reviewer_tools=$'Read\nGrep\nGlob\nBash(git diff*)\nBash(git status*)\nBash(git log*)\nBash(git show*)\nBash(npm test*)\nBash(node *)\nBash(ls*)'
+  runner_rules="$(orch_allow_rules "$(orch_detect_test_cmd "$repo")")"
+  [ -n "$runner_rules" ] && reviewer_tools+=$'\n'"$runner_rules"
+  out="$(ORCH_AGENT=reviewer ORCH_ALLOWED_TOOLS="$reviewer_tools" \
     "$here/orchestrate.sh" "$review_prompt" "$repo")"
   status="$(printf '%s' "$out" | node -p 'const r=JSON.parse(require("fs").readFileSync(0,"utf8")).result||"";(/STATUS:\s*(pass|fail)/i.exec(r)||[,"fail"])[1].toLowerCase()' 2>/dev/null || echo fail)"
   echo "review: $status" >&2

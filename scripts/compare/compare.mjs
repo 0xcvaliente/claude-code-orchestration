@@ -7,7 +7,8 @@
 //           E auto: triage picks plain, reviewed or the orchestrator per task (scripts/auto.sh) | F plain Opus session.
 // Each run gets a fresh repo under ~/orch-compare. Pass = the task's scorer passes after the run:
 //   tasks/<id>/score.mjs (exports score(runDir) -> {pass, passed, failed}) if present, else `node --test hidden.test.js`.
-// A task may also ship setup/ (copied into the run repo before the initial commit) and ref/ (used by --validate).
+// A task may also ship setup/ (copied into the run repo before the initial commit) and ref/ (used by --validate),
+// and test-cmd.txt (the task's own test command, passed to the run as ORCH_TEST_CMD so the allowlist and the verify gate use it).
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -48,10 +49,16 @@ async function scoreDir(id, dir) {
   return { pass: r.status === 0 && num("pass") > 0 && num("fail") === 0, passed: num("pass"), failed: num("fail") };
 }
 
-// Seeds a run directory: package.json (unless setup/ brings its own) then the task's setup/ files.
+// The task's declared test command (tasks/<id>/test-cmd.txt, first line), or "" to let the run detect one.
+function taskTestCmd(id) {
+  const f = join(tasksDir, id, "test-cmd.txt");
+  return existsSync(f) ? readFileSync(f, "utf8").split("\n")[0].trim() : "";
+}
+
+// Seeds a run directory: package.json (unless setup/ brings its own or the task declares a non-npm test command) then the task's setup/ files.
 function seedTask(id, dir) {
   const setupDir = join(tasksDir, id, "setup");
-  if (!existsSync(join(setupDir, "package.json"))) writeFileSync(join(dir, "package.json"), '{"name":"cmp","type":"module","scripts":{"test":"node --test"}}\n');
+  if (!existsSync(join(setupDir, "package.json")) && !taskTestCmd(id)) writeFileSync(join(dir, "package.json"), '{"name":"cmp","type":"module","scripts":{"test":"node --test"}}\n');
   if (existsSync(setupDir)) cpSync(setupDir, dir, { recursive: true });
 }
 
@@ -151,6 +158,8 @@ for (const id of tasks) {
       const t0 = process.hrtime.bigint();
       const env = { ...process.env, ORCH_AGENT: v.agent ? "orchestrator" : "none", ORCH_ADVISOR: v.advisor || "", ORCH_BUDGET_USD: arg("budget", "") };
       if (v.model) env.ORCH_MODEL = v.model;
+      const testCmd = taskTestCmd(id);
+      if (testCmd) env.ORCH_TEST_CMD = testCmd;
       const r = await runAgent("bash", [join(root, "scripts", v.auto ? "auto.sh" : "orchestrate.sh"), task, dir], env, (secs) => {
         const dest = join(snapRoot, `t${secs}`);
         if (snapshot(dir, dest)) snaps.push({ secs, dest });

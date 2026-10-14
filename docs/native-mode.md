@@ -24,7 +24,7 @@ claude --agent orchestrator
 
 ## Light path and full path
 
-The orchestrator sizes the task first. One slice, at most 3 files, nothing security-sensitive: the **light path** (one implementer in the shared tree, then one reviewer; no exploration, worktrees or integrator). Otherwise the **full path**. The numbers mirror `TRIAGE` in `src/config.ts`; for work that small a plain session is cheaper still, which is what `npm run auto` and the `/route` skill decide before the orchestrator starts.
+The orchestrator sizes the task first. One slice, at most 3 files, under about 1,500 changed lines, nothing security-sensitive: the **light path** (one implementer in the shared tree, then one reviewer; no exploration, worktrees or integrator). Otherwise the **full path**. For large work (1,500+ lines) with separable parts it plans interface-first: slice 1 writes the shared interfaces, types and stubs in the shared tree, a checkpoint commit follows, then the remaining slices run in parallel against it. The numbers mirror `TRIAGE` in `src/config.ts` (`bigLines` 1500, `reviewedMaxLines` 200); for work that small a plain session is cheaper still, which is what `npm run auto` and the `/route` skill decide before the orchestrator starts.
 
 ## Gates
 
@@ -55,16 +55,22 @@ sequenceDiagram
 
 | Hook | Script | Effect |
 |---|---|---|
-| `SubagentStop` (implementer) | `verify.sh` | Blocks finishing while `$ORCH_TEST_CMD` (default `npm test`) fails; runs in the agent's cwd. At most 2 blocks per agent, then it lets the agent finish. |
-| `Stop` | `review-gate.mjs` | Blocks the final reply if an implementer finished and no reviewer has since, or the last reviewer said `STATUS: fail`. Allows one forced retry (`stop_hook_active`). |
-| `SubagentStart`, `SubagentStop` | `telemetry.mjs` | Appends events to `.claude/state/telemetry.jsonl` (gitignored). |
+| `SubagentStop` (implementer) | `verify.sh` | Blocks finishing while the test command fails; runs in the agent's cwd. The command is `$ORCH_TEST_CMD` or detected by `test-cmd.sh`. At most 2 blocks per agent, then it lets the agent finish. Agents in `.claude/worktrees/` follow `ORCH_GATE_ISOLATED`. |
+| `Stop` | `review-gate.mjs` | Blocks the final reply if an implementer finished and no reviewer has since, the last reviewer said `STATUS: fail`, or it returned no status (`last_reviewer_no_status`). Allows one forced retry (`stop_hook_active`). |
+| `SubagentStart`, `SubagentStop` | `telemetry.mjs` | Appends events to `.claude/state/telemetry.jsonl` (gitignored). Records the worker's `STATUS` from `last_assistant_message`, or, when that is empty, from the `SubagentHandback` message or last text block in `agent_transcript_path`. |
 | `SessionStart` (plugin only) | `nudge.mjs` | Tells the main session to run `orchestration:route` before a non-trivial coding task. Silent when `ORCH_NO_NUDGE` is set. |
+
+**Runner detection** (`.claude/hooks/test-cmd.sh`), first match wins: `ORCH_TEST_CMD`; `npm test` when `package.json` has a test script; `pytest` (or `unittest` if pytest is not installed) only when `test_*.py` or `*_test.py` files exist; `cargo test`; `go test ./...`; `swift test`; `make test` with a `test:` target. None found: the gate allows (`no_test_command`). pytest exit 5 (no tests collected) counts as no tests.
+
+**Isolated worktrees.** Sibling slices may not be merged yet, so a worktree's tests can fail for reasons the slice does not own. `ORCH_GATE_ISOLATED=warn` (default) runs the tests, logs `tests_failed_isolated` and never blocks; `block` gates them like the shared tree; `skip` does not run them. The integrator's acceptance check on the merged result is the real gate.
 
 Every gate decision is appended to `.claude/state/gates.jsonl`, so a run can show whether a gate fired. Hooks exit 2 to block; any other non-zero code only warns, and hooks exit 0 on malformed input.
 
 ## Parallel slices
 
-For independent slices the orchestrator launches implementers with `isolation: "worktree"`; each commits on its own branch, and the `integrator` merges the branches (`git merge --no-ff`, aborting on conflict) and runs the acceptance check. Conflicted slices are retried one at a time in the shared tree. Dependent slices run sequentially in the shared tree and nothing is committed. Security-sensitive or cross-module slices get a second `reviewer` on `model: "opus"`; the slice passes only if both pass.
+**Check `worktree.baseRef` first.** Claude Code starts a worktree from the remote default branch unless `worktree.baseRef` is `"head"` (set in this repo's `.claude/settings.json`; plugin users must set it in their own settings). Worktrees also only see committed work. Before a parallel wave the orchestrator reads `.claude/settings.json`, `.claude/settings.local.json` and `~/.claude/settings.json`; if `baseRef` is not `"head"` it runs the slices one after another in the shared tree and says so. If earlier slices left uncommitted work, it sends the `integrator` a CHECKPOINT brief naming the files those slices own; in that mode the integrator stages and commits only those paths and reports the hash in a `CHECKPOINT:` field. The orchestrator checks that field before launching the wave: if the commit failed or the field is `none` while those slices left changes, it runs the wave one slice at a time in the shared tree instead (the workflow does the same and logs why). The same `baseRef` and CHECKPOINT rule is in the `/route` skill and the session nudge for a session that acts as orchestrator itself.
+
+For independent slices the orchestrator launches implementers with `isolation: "worktree"`; each commits on its own branch, and the `integrator` merges the branches (`git merge --no-ff`, aborting on conflict) and runs the acceptance check. Conflicted slices are retried one at a time in the shared tree. Dependent slices run sequentially in the shared tree. A rejected slice is retried by resuming the same implementer with `SendMessage` (verified: a resumed isolated implementer kept its worktree and committed on its branch) rather than starting a new one. Security-sensitive or cross-module slices get a second `reviewer` on `model: "opus"`; the slice passes only if both pass.
 
 ## Headless, CI and unattended
 
@@ -73,7 +79,7 @@ npm run native -- "task description" /path/to/repo     # always the orchestrator
 npm run auto   -- "task description" /path/to/repo     # triage first: plain, reviewed or orchestrator
 ```
 
-`native` runs `claude -p --agent orchestrator` with `dontAsk`, an optional budget cap (`ORCH_BUDGET_USD`, off by default) and an explicit tool allowlist (`ORCH_ALLOWED_TOOLS` replaces it; one permission rule per line, for example `ORCH_ALLOWED_TOOLS=$'Read\nBash(npm test*)'`). The target repo needs `.claude/` copied in, and `.claude/state/` and `.claude/worktrees/` in its `.gitignore`. `ORCH_DRY_RUN=1` prints the exact `claude` arguments. Cost, turns and subagent counts per run are logged to `.claude/state/runs.jsonl`; `npm run report` renders them and the agent events as `.claude/state/report.html` (a local file, nothing is published). For a session that keeps going until a condition holds, use `/goal` with your acceptance check.
+`native` runs `claude -p --agent orchestrator` with `dontAsk`, an optional budget cap (`ORCH_BUDGET_USD`, off by default) and an explicit tool allowlist (`ORCH_ALLOWED_TOOLS` replaces it; one permission rule per line, for example `ORCH_ALLOWED_TOOLS=$'Read\nBash(npm test*)'`; `ORCH_EXTRA_ALLOWED_TOOLS` appends rules to the default list instead). The default allowlist includes `Agent` and `SendMessage` (so a headless orchestrator retry can resume the same implementer). The test command's permission rules (pytest, cargo, go, swift, make) are added automatically from `ORCH_TEST_CMD` or the detected runner; in `npm run auto`'s reviewed route the read-only reviewer gets the same detected-runner rules, so it can run the project's tests and nothing broader. Benchmark tasks declare their test command in `test-cmd.txt`, which `compare.mjs` exports as `ORCH_TEST_CMD`. `ORCH_MODEL` passes `--model`, for plain-model baselines. The target repo needs `.claude/` copied in, and `.claude/state/` and `.claude/worktrees/` in its `.gitignore`. `ORCH_DRY_RUN=1` prints the exact `claude` arguments. Cost, turns and subagent counts per run are logged to `.claude/state/runs.jsonl`; `npm run report` renders them and the agent events as `.claude/state/report.html` (a local file, nothing is published). For a session that keeps going until a condition holds, use `/goal` with your acceptance check.
 
 ### What the first headless runs taught
 
@@ -85,7 +91,7 @@ Two live runs ended the same way: both implementers wrote code but could not run
 
 ## Scripted flow (workflow)
 
-`.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt: plan, explore (`researcher`), build (`implementer`, isolated when slices run in parallel), review (`reviewer`, plus an opus reviewer on risky slices), integrate (`integrator`). Ask Claude for it explicitly, for example "run the orchestrate workflow with task ...". Dependent slices run in the shared tree because worktrees branch from the default branch. Order is advisory in the native session (the orchestrator once reviewed a branch before running the integrator, against its prompt); the workflow removes that freedom.
+`.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt: plan, explore (`researcher`), build (`implementer`, isolated when slices run in parallel), review (`reviewer`, plus an opus reviewer on risky slices), integrate (`integrator`). Ask Claude for it explicitly, for example "run the orchestrate workflow with task ...". Dependent slices run in the shared tree because worktrees only see committed work; pass `baseRefHead: true` when `worktree.baseRef` is `"head"` so waves after shared-tree work can still run isolated. Order is advisory in the native session (the orchestrator once reviewed a branch before running the integrator, against its prompt); the workflow removes that freedom.
 
 ## Verified in a live run (2026-10-13)
 
