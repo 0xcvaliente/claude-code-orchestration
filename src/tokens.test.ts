@@ -30,5 +30,6 @@ test("usageFromResult counts NaN and missing fields as 0", () => {
 
 test("formatTokens: plain, kilo and mega", () => {
   const cases: [number, string][] = [[0, "0"], [950, "950"], [4500, "4.5k"], [45600, "46k"], [456000, "456k"], [1234567, "1.23M"], [12345678, "12.3M"]];
+  cases.push([999.6, "1.0k"], [9949, "9.9k"], [9950, "10k"], [999499, "999k"], [999500, "1.00M"], [999999, "1.00M"], [9994999, "9.99M"], [9999999, "10.0M"]);
   for (const [v, s] of cases) assert.equal(formatTokens(v), s);
 });

@@ -172,3 +172,47 @@ test("escalation: off for a forced mode and with escalate: false", async () => {
   assert.equal(b.soloReport!.ok, false);
   assert.ok(!optOut.calls.some((c) => c.role === "planner"));
 });
+
+/** `fake()` with a fixed token count per role (default 1000), to exercise the budget arithmetic. */
+const withTokens = (inner: RunAgent, by: Record<string, number>): RunAgent => async (req) => ({ ...(await inner(req)), tokens: by[req.role] ?? 1000 });
+const calledRoles = (calls: AgentRequest[]) => calls.map((c) => c.role);
+
+// The pipeline's planner calls (questions, slices) cost 2 x 1000 before the first slice checks the budget.
+test("budget: triage tokens are subtracted, so the pipeline stops earlier than the full budget allows", async () => {
+  const full = fake(big);
+  const forced = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(full.run, {}), mode: "orchestrate", runBudgetTokens: 4000 });
+  assert.equal(forced.report!.slices[0]!.status, "passed", "4000 is enough when nothing was spent before");
+
+  const { run, calls } = fake(big);
+  const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 2500 }), runBudgetTokens: 4000 });
+  assert.equal(r.decision.source, "triage");
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]); // 4000 - 2500 = 1500 < 2000 spent on planning
+  assert.ok(!calledRoles(calls).includes("writer"));
+  assert.equal(r.report!.spentTokens, 2500 + 2000, "triage tokens are carried into the report");
+});
+
+test("budget: an escalated pipeline run also gets the failed solo session's tokens subtracted", async () => {
+  const { run, calls } = fake(small);
+  const r = await auto({
+    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500 }),
+    testCmd: "test -f a.txt", runBudgetTokens: 3000, // 3000 - 500 triage - 1000 solo = 1500 < 2000 spent on planning
+  });
+  assert.equal(r.escalated, true);
+  assert.equal(r.soloReport!.tokensByRole.solo, 1000);
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
+  assert.ok(!calledRoles(calls).includes("writer"));
+  assert.equal(r.report!.tokensByRole.triager, 500);
+  assert.equal(r.report!.tokensByRole.solo, 1000);
+
+  // Counting only the triage tokens would leave 2500, enough for the slice: the solo tokens are what stop it.
+  const roomy = fake(small);
+  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, { triager: 500 }), testCmd: "test -f a.txt", runBudgetTokens: 4000 });
+  assert.equal(ok.report!.slices[0]!.status, "passed");
+});
+
+test("budget: earlier spend that already meets the budget leaves a floor of 1 token, not a crash", async () => {
+  const { run, calls } = fake(big);
+  const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 5000 }), runBudgetTokens: 3000 });
+  assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
+  assert.ok(!calledRoles(calls).includes("writer"));
+});

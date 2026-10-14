@@ -44,6 +44,12 @@ export const totalTokens = (u: TokenUsage) => u.input + u.output + u.cacheRead +
 export function formatTokens(count: number): string {
   const v = Math.round(count);
   if (v < 1_000) return String(v);
-  if (v < 1_000_000) return `${(v / 1_000).toFixed(v < 10_000 ? 1 : 0)}k`;
-  return `${(v / 1_000_000).toFixed(v < 10_000_000 ? 2 : 1)}M`;
+  // Unit and decimals come from the rounded value, so 999,999 never prints "1000k" and 9,999,999 never "10.00M".
+  const tenthsOfK = Math.round(v / 100);
+  if (tenthsOfK < 100) return `${(tenthsOfK / 10).toFixed(1)}k`;
+  const k = Math.round(v / 1_000);
+  if (k < 1_000) return `${k}k`;
+  const hundredthsOfM = Math.round(v / 10_000);
+  if (hundredthsOfM < 1_000) return `${(hundredthsOfM / 100).toFixed(2)}M`;
+  return `${(Math.round(v / 100_000) / 10).toFixed(1)}M`;
 }
