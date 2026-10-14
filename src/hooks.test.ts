@@ -57,6 +57,13 @@ test("telemetry: empty last message falls back to the transcript's SubagentHandb
   assert.equal(lastRecord(dir).agent_type, "reviewer");
 });
 
+test("telemetry: a preamble message without a status falls back to the transcript's SubagentHandback", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
+  const content = [{ type: "text", text: "Handing back now." }, { type: "tool_use", name: "SubagentHandback", input: { message: "STATUS: pass\nEVIDENCE: ok" } }];
+  assert.equal(telemetry(dir, stopEvent(dir, content, "Handing back now.")).status, 0);
+  assert.equal(lastRecord(dir).status, "pass");
+});
+
 test("telemetry: the format template, a missing transcript and non-empty messages", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-tel-"));
   telemetry(dir, stopEvent(dir, [{ type: "text", text: "Reply in this format:\nSTATUS: pass or fail" }]));

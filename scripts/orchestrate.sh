@@ -29,7 +29,7 @@ fi
 # dontAsk denies everything not listed, so an unattended run can never prompt or widen its own access.
 # One rule per element: rules contain spaces, so never split them on whitespace.
 tools=(
-  "Read" "Grep" "Glob" "Agent" "Edit" "Write"
+  "Read" "Grep" "Glob" "Agent" "SendMessage" "Edit" "Write"
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git -C *)" "Bash(cd *)"

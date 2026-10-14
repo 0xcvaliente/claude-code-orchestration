@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -89,11 +89,35 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
   assert.equal(base.status, 0);
   assert.match(base.stdout, /Bash\(python3 -m (pytest|unittest)\*\)/);
   assert.doesNotMatch(base.stdout, /--model/);
+  assert.ok(base.stdout.split("\n").includes("SendMessage"), "headless orchestrator retries need SendMessage to resume the implementer");
   const full = run({ ORCH_MODEL: "sonnet", ORCH_EXTRA_ALLOWED_TOOLS: "Bash(ruff*)\n\nBash(mypy*)" });
   const lines = full.stdout.split("\n");
   assert.equal(lines[lines.indexOf("--model") + 1], "sonnet");
   assert.ok(lines.includes("Bash(ruff*)") && lines.includes("Bash(mypy*)"));
   assert.ok(lines.indexOf("--allowedTools") > lines.indexOf("--model"), "--allowedTools stays last");
+});
+
+test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
+  const repo = tmp();
+  mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+  mkdirSync(join(repo, "tests"));
+  writeFileSync(join(repo, "tests", "test_a.py"), "");
+  // A fake claude records its arguments, one call per file, and answers STATUS: pass.
+  const bin = tmp();
+  const log = join(bin, "calls");
+  mkdirSync(log);
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${log}/$$"\necho '{"result":"STATUS: pass"}'\n`, { mode: 0o755 });
+  const r = spawnSync("bash", [join(root, "scripts", "auto.sh"), "t", repo], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "reviewed", ORCH_TEST_CMD: "" },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const calls = readdirSync(log).map((f) => readFileSync(join(log, f), "utf8"));
+  const reviewer = calls.find((c) => c.includes("--agent\nreviewer"));
+  assert.ok(reviewer, "reviewer call recorded");
+  assert.match(reviewer, /^Bash\(python3 -m (pytest|unittest)\*\)$/m);
+  assert.match(reviewer, /^Bash\(git diff\*\)$/m);
+  assert.doesNotMatch(reviewer, /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m);
 });
 
 test("detect: config markers alone are not a Python test suite", () => {

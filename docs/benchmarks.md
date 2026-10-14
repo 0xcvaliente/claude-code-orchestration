@@ -25,7 +25,7 @@ Options:
 - `--timeout <sec>` (default 3600) kills the agent's whole process group after that long.
 - `--snapshot-every <sec>` (default off) copies the run directory (without `.git`, `node_modules`, `.claude`) to `<out>/snapshots/<stamp>/<task>-<variant>-<rep>/t<secs>` at that interval. After the run, every snapshot and the final tree are scored. The row gets `timeline` (`[seconds, tests passed]` pairs) and `first_pass_s` (first passing snapshot, or null).
 
-A task may carry `setup/` (copied into the run repo before the first commit) and `score.mjs` (exports `score(runDir)` and replaces `node --test hidden.test.js`). `--validate` uses the same scorer: the stub-only repo must fail and `ref/` must pass.
+A task may carry `setup/` (copied into the run repo before the first commit) and `score.mjs` (exports `score(runDir)` and replaces `node --test hidden.test.js`). `--validate` uses the same scorer: the stub-only repo must fail and `ref/` must pass. A task may also declare its own test command in `test-cmd.txt` (first line, e.g. `python3 tests/run_public.py` for h3-sql-engine): `compare.mjs` passes it to the run as `ORCH_TEST_CMD`, so the headless allowlist gets the matching rule (otherwise `dontAsk` denies the command the task text tells the agent to run) and the verify gate runs that command instead of the seeded `node --test`. A task with `test-cmd.txt` gets no seeded `package.json`.
 
 Tasks: `t1-parallel`, `t2-single`, `t3-dependent`, `h1-query-engine`, `h2-scheduler` and `h3-sql-engine`. h3 is the 30-minute minisql task: implement an in-memory SQL engine in Python from `SPEC.md`, scored by a hidden differential grader against SQLite (322 tests, about a minute to run). Its `hidden/` grader is never copied into the run repo.
 

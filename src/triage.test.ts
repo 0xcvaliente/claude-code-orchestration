@@ -39,7 +39,8 @@ test("decide: line count matters, not only files", () => {
 test("route skill mentions every TRIAGE threshold (in-model fallback cannot drift)", () => {
   const skill = readFileSync(new URL("../.claude/skills/route/SKILL.md", import.meta.url), "utf8");
   for (const [k, v] of Object.entries(TRIAGE)) {
-    assert.ok(skill.includes(String(v)), `SKILL.md must mention ${k}=${v}`);
+    // Name and number together, as the "Thresholds:" line lists them ("bigLines 1500"); a bare number like 2 or 3 would match anywhere.
+    assert.ok(new RegExp(`\\b${k} ${v}\\b`).test(skill), `SKILL.md must list "${k} ${v}"`);
   }
 });
 

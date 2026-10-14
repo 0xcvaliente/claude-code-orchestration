@@ -55,6 +55,15 @@ const WORK = {
   },
   required: ['status', 'branch', 'evidence', 'open'],
 }
+const CHECKPOINT = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['pass', 'fail'] },
+    commit: { type: 'string' },
+    open: { type: 'string' },
+  },
+  required: ['status', 'commit', 'open'],
+}
 const VERDICT = {
   type: 'object',
   properties: { pass: { type: 'boolean' }, gaps: { type: 'array', items: { type: 'string' } }, evidence: { type: 'string' } },
@@ -105,16 +114,22 @@ const sharedFiles = []
 for (const wave of waves) {
   // Isolate only parallel slices. Worktrees see only committed work, and only from the local HEAD when
   // baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
-  const isolated = wave.length > 1 && BASE_REF_HEAD
+  let isolated = wave.length > 1 && BASE_REF_HEAD
   if (wave.length > 1 && !BASE_REF_HEAD) {
     log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head", so worktrees would branch from the remote default branch; running one after another in the shared tree`)
   }
   if (isolated) {
     // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
-    await agent(
-      `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash.`,
-      { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator' },
+    const cp = await agent(
+      `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash (or "none" if nothing was committed).`,
+      { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator', schema: CHECKPOINT },
     )
+    const hasCommit = !!(cp && cp.status === 'pass' && cp.commit && !/^none$/i.test(cp.commit.trim()))
+    if (sharedFiles.length && !hasCommit) {
+      // Worktrees branch from HEAD, so without the commit they would not contain the earlier slices' work.
+      isolated = false
+      log(`wave ${wave.map((s) => s.id).join(', ')}: checkpoint ${cp ? `failed or committed nothing (${cp.open || cp.status})` : 'returned nothing'} while shared-tree files were pending (${sharedFiles.join(', ')}); running one after another in the shared tree`)
+    }
   }
   phase('Build')
   const runSlice = async (s) => {

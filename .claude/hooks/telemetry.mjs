@@ -48,14 +48,10 @@ function reportFromTranscript(path) {
 
 let status;
 if (payload.hook_event_name === "SubagentStop") {
+  // A reviewer may write a preamble and then call SubagentHandback, so fall back to the transcript whenever the last message has no status.
   const last = payload.last_assistant_message;
-  const report =
-    typeof last === "string" && last.trim()
-      ? last
-      : typeof payload.agent_transcript_path === "string"
-        ? reportFromTranscript(payload.agent_transcript_path)
-        : undefined;
-  status = statusOf(report);
+  status = typeof last === "string" ? statusOf(last) : undefined;
+  if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
 }
 
 const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
