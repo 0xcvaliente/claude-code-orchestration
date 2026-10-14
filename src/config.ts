@@ -102,6 +102,10 @@ export const TRIAGE = {
   bigFiles: 12,
   /** A risky change this small gets a plain session plus one independent reviewer instead of the whole pipeline. */
   reviewedMaxFiles: 3,
+  /** A change this many lines with at least minParallelSlices independent parts is worth splitting even across few files: an interface-first plan lets slices run in parallel. */
+  bigLines: 1500,
+  /** A risky change gets the reviewed route only when it is also this many lines or fewer. */
+  reviewedMaxLines: 200,
 };
 
 export const LIMITS = {

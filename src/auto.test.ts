@@ -42,8 +42,8 @@ function fake(facts: object): { run: RunAgent; calls: AgentRequest[] } {
   return { run, calls };
 }
 
-const small = { filesToTouch: 1, independentSlices: 1, risky: false, reason: "tiny" };
-const big = { filesToTouch: 9, independentSlices: 3, risky: false, reason: "three modules" };
+const small = { filesToTouch: 1, linesToChange: 20, independentSlices: 1, risky: false, reason: "tiny" };
+const big = { filesToTouch: 9, linesToChange: 400, independentSlices: 3, risky: false, reason: "three modules" };
 
 test("auto: a small task runs as a plain session in the repo itself, uncommitted, no pipeline roles", async () => {
   const repo = await tempRepo();
@@ -108,7 +108,7 @@ test("auto: failed triage falls back to the pipeline", async () => {
   assert.ok(r.report);
 });
 
-const risky = { filesToTouch: 2, independentSlices: 1, risky: true, reason: "auth" };
+const risky = { filesToTouch: 2, linesToChange: 50, independentSlices: 1, risky: true, reason: "auth" };
 
 /** Like fake(), but verdicts come from `verdicts` in order (then pass) and the solo session's tests can be made to fail once. */
 function reviewed(facts: object, verdicts: boolean[]) {
