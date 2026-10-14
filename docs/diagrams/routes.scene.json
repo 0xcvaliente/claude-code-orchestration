@@ -1,0 +1,27 @@
+{
+  "title": "Routes: how triage sends a task to one of three routes",
+  "description": "Triage sends a task to a plain session, a plain session plus a fresh reviewer, or the pipeline. Plain and reviewed runs leave uncommitted edits when their checks pass; when checks fail, the task escalates to the pipeline, which leaves git branches.",
+  "width": 880, "height": 700,
+  "nodes": [
+    {"id": "task", "label": "Your task", "x": 340, "y": 20, "w": 200, "h": 56, "status": "observed", "sources": ["README.md#how-it-works"]},
+    {"id": "triage", "label": "Triage", "detail": "Sonnet, read-only, about $0.05", "x": 280, "y": 116, "w": 320, "h": 76, "status": "observed", "sources": ["src/config.ts (triager role)", "src/triage.ts"]},
+    {"id": "plain", "label": "Plain", "detail": "One agent in your repo", "x": 20, "y": 300, "w": 240, "h": 76, "status": "observed", "sources": ["src/solo.ts", "src/auto.ts"]},
+    {"id": "reviewed", "label": "Reviewed", "detail": "Plain session + fresh reviewer", "x": 290, "y": 300, "w": 300, "h": 76, "status": "observed", "sources": ["src/triage.ts:4", "src/auto.ts"]},
+    {"id": "pipeline", "label": "Pipeline", "detail": "Orchestrator + workers", "x": 620, "y": 300, "w": 240, "h": 76, "status": "observed", "sources": ["src/orchestrator.ts"]},
+    {"id": "checks", "label": "Checks pass?", "shape": "decision", "x": 190, "y": 430, "w": 200, "h": 120, "status": "observed", "sources": ["README.md route table: tests, plus the reviewer on the reviewed route"]},
+    {"id": "working", "label": "Uncommitted edits", "detail": "In your working tree", "x": 160, "y": 600, "w": 260, "h": 76, "status": "observed", "sources": ["README.md route table"]},
+    {"id": "branches", "label": "Git branches", "detail": "orch/<id>/result + per slice", "x": 580, "y": 600, "w": 290, "h": 76, "status": "observed", "sources": ["README.md#what-a-run-leaves-behind"]}
+  ],
+  "edges": [
+    {"id": "e-triage", "from": "task", "to": "triage", "points": [[440,76],[440,116]], "status": "observed"},
+    {"id": "e-plain", "from": "triage", "to": "plain", "points": [[380,192],[380,226],[140,226],[140,300]], "label": "small or sequential", "label_at": [50,246], "label_w": 180, "status": "observed", "sources": ["src/triage.ts:80"]},
+    {"id": "e-reviewed", "from": "triage", "to": "reviewed", "points": [[440,192],[440,300]], "label": "small but risky", "label_at": [365,246], "label_w": 150, "status": "observed", "sources": ["src/triage.ts:61"]},
+    {"id": "e-pipeline", "from": "triage", "to": "pipeline", "points": [[500,192],[500,226],[740,226],[740,300]], "label": "parallel, large or risky", "label_at": [635,246], "label_w": 210, "status": "observed", "sources": ["src/triage.ts:64-72"]},
+    {"id": "e-plain-checks", "from": "plain", "to": "checks", "points": [[140,376],[140,490],[190,490]], "status": "observed"},
+    {"id": "e-reviewed-checks", "from": "reviewed", "to": "checks", "points": [[440,376],[440,404],[290,404],[290,430]], "status": "observed"},
+    {"id": "e-yes", "from": "checks", "to": "working", "points": [[290,550],[290,600]], "label": "yes", "label_at": [265,560], "label_w": 50, "status": "observed"},
+    {"id": "e-escalate", "from": "checks", "to": "pipeline", "points": [[390,490],[690,490],[690,376]], "style": "dashed", "label": "no: escalate", "label_at": [478,475], "label_w": 124, "status": "observed", "sources": ["src/auto.ts:64-75"]},
+    {"id": "e-branches", "from": "pipeline", "to": "branches", "points": [[800,376],[800,600]], "status": "observed"}
+  ],
+  "notes": ["Escalation applies to triaged runs only: --no-escalate or a forced --mode turns it off (src/auto.ts:64)."]
+}

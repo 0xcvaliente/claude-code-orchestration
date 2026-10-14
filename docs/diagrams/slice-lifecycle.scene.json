@@ -1,0 +1,27 @@
+{
+  "title": "One slice's life: from planned to merged or replaced",
+  "description": "A planned slice is written, tested and reviewed. Failing tests or review gaps send it back to writing. A slice that passes review is merged into the result branch; one that uses up its retries fails and may be replaced by a replan.",
+  "width": 900, "height": 560,
+  "nodes": [
+    {"id": "planned", "label": "Planned", "x": 30, "y": 20, "w": 180, "h": 56, "status": "observed", "sources": ["src/orchestrator.ts"]},
+    {"id": "writing", "label": "Writing", "x": 30, "y": 176, "w": 180, "h": 64, "status": "observed"},
+    {"id": "testing", "label": "Testing", "x": 360, "y": 176, "w": 180, "h": 64, "status": "observed"},
+    {"id": "reviewing", "label": "Reviewing", "x": 690, "y": 176, "w": 180, "h": 64, "status": "observed"},
+    {"id": "failed", "label": "Failed", "x": 30, "y": 330, "w": 180, "h": 56, "status": "observed"},
+    {"id": "passed", "label": "Passed", "x": 690, "y": 330, "w": 180, "h": 56, "status": "observed"},
+    {"id": "replaced", "label": "Replaced", "x": 30, "y": 474, "w": 180, "h": 56, "status": "observed", "sources": ["README.md#resilience-retry-resume-replan (--replans)"]},
+    {"id": "merged", "label": "Merged", "x": 690, "y": 474, "w": 180, "h": 56, "emphasis": true, "status": "observed"}
+  ],
+  "edges": [
+    {"id": "t-start", "from": "planned", "to": "writing", "points": [[80,76],[80,176]], "label": "worker starts", "label_at": [20,111], "label_w": 120, "status": "observed"},
+    {"id": "t-done", "from": "writing", "to": "testing", "points": [[210,192],[360,192]], "label": "done", "label_at": [250,158], "label_w": 70, "status": "observed"},
+    {"id": "t-fail", "from": "testing", "to": "writing", "points": [[360,226],[210,226]], "style": "dashed", "label": "tests fail", "label_at": [235,234], "label_w": 110, "status": "observed"},
+    {"id": "t-pass", "from": "testing", "to": "reviewing", "points": [[540,208],[690,208]], "label": "tests pass", "label_at": [560,170], "label_w": 110, "status": "observed"},
+    {"id": "t-gaps", "from": "reviewing", "to": "writing", "points": [[780,176],[780,126],[160,126],[160,176]], "style": "dashed", "label": "gaps", "label_at": [420,111], "label_w": 60, "status": "observed"},
+    {"id": "t-retries", "from": "writing", "to": "failed", "points": [[120,240],[120,330]], "label": "retries used up", "label_at": [52,268], "label_w": 136, "status": "observed"},
+    {"id": "t-replan", "from": "failed", "to": "replaced", "points": [[120,386],[120,474]], "label": "replanned", "label_at": [72,415], "label_w": 96, "status": "observed"},
+    {"id": "t-review-pass", "from": "reviewing", "to": "passed", "points": [[780,240],[780,330]], "label": "pass", "label_at": [752,268], "label_w": 56, "status": "observed"},
+    {"id": "t-merge", "from": "passed", "to": "merged", "points": [[780,386],[780,474]], "label": "integrated", "label_at": [730,415], "label_w": 100, "status": "observed"}
+  ],
+  "notes": ["Replanning runs only with --replans N; replaced slices are never merged."]
+}

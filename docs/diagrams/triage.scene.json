@@ -1,0 +1,27 @@
+{
+  "title": "Triage: the four facts decide the route",
+  "description": "A risky task goes to the reviewed route when it is small, otherwise to the pipeline. A task that is not risky goes to the pipeline when it touches 12 or more files or splits into parallel slices, and to a plain session otherwise.",
+  "width": 860, "height": 760,
+  "nodes": [
+    {"id": "facts", "label": "Triage facts", "detail": "files, lines, slices, risky", "x": 290, "y": 20, "w": 280, "h": 76, "status": "observed", "sources": ["src/triage.ts:14-36"]},
+    {"id": "risky", "label": "Risky?", "shape": "decision", "x": 320, "y": 136, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:61-64"]},
+    {"id": "small", "label": "Small?", "shape": "decision", "x": 40, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:61", "src/config.ts:104-108"]},
+    {"id": "big", "label": "12+ files?", "shape": "decision", "x": 600, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:65", "src/config.ts:102"]},
+    {"id": "parallel", "label": "Parallel?", "shape": "decision", "x": 600, "y": 490, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:68", "src/config.ts:98-106"]},
+    {"id": "reviewed", "label": "Reviewed", "x": 50, "y": 680, "w": 200, "h": 60, "status": "observed"},
+    {"id": "pipeline", "label": "Pipeline", "x": 330, "y": 680, "w": 200, "h": 60, "status": "observed"},
+    {"id": "plain", "label": "Plain", "x": 610, "y": 680, "w": 200, "h": 60, "status": "observed"}
+  ],
+  "edges": [
+    {"id": "d-start", "from": "facts", "to": "risky", "points": [[430,96],[430,136]], "status": "observed"},
+    {"id": "d-risky-yes", "from": "risky", "to": "small", "points": [[320,196],[150,196],[150,310]], "label": "yes", "label_at": [210,181], "label_w": 50, "status": "observed"},
+    {"id": "d-risky-no", "from": "risky", "to": "big", "points": [[540,196],[710,196],[710,310]], "label": "no", "label_at": [602,181], "label_w": 46, "status": "observed"},
+    {"id": "d-small-yes", "from": "small", "to": "reviewed", "points": [[150,430],[150,680]], "label": "yes", "label_at": [125,540], "label_w": 50, "status": "observed"},
+    {"id": "d-small-no", "from": "small", "to": "pipeline", "points": [[260,370],[370,370],[370,680]], "label": "no", "label_at": [292,355], "label_w": 46, "status": "observed"},
+    {"id": "d-big-yes", "from": "big", "to": "pipeline", "points": [[600,370],[470,370],[470,680]], "label": "yes", "label_at": [510,355], "label_w": 50, "status": "observed"},
+    {"id": "d-big-no", "from": "big", "to": "parallel", "points": [[710,430],[710,490]], "label": "no", "label_at": [687,445], "label_w": 46, "status": "observed"},
+    {"id": "d-par-yes", "from": "parallel", "to": "pipeline", "points": [[600,550],[560,550],[560,710],[530,710]], "label": "yes", "label_at": [535,610], "label_w": 50, "status": "observed"},
+    {"id": "d-par-no", "from": "parallel", "to": "plain", "points": [[710,610],[710,680]], "label": "no", "label_at": [687,630], "label_w": 46, "status": "observed"}
+  ],
+  "notes": ["Small: at most 3 files, at most 200 lines and one slice. Parallel: 2 or more independent slices and either 4 or more files or 1,500 or more lines (src/config.ts TRIAGE)."]
+}
