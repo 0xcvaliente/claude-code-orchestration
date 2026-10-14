@@ -69,6 +69,8 @@ Interactive `claude --agent orchestrator` cannot hand over to a plain session (i
 
 The marketplace manifest is `.claude-plugin/marketplace.json` and points at the committed `dist/plugin`. After changing anything under `.claude/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. The plugin carries the agents, hooks, the worker contract and the `/route` skill, not the permission denies (add those to your own settings).
 
+A `SessionStart` hook (`.claude/hooks/nudge.mjs`, plugin only) tells every new main session to run `orchestration:route` before a non-trivial coding task and follow it: plain stays in the session, reviewed adds a reviewer, orchestrate makes the main session act as the orchestrator and delegate to the `orchestration:*` agents. Headless runs started by `scripts/orchestrate.sh` set `ORCH_NO_NUDGE=1` and are not nudged. To turn the nudge off for one shell, `export ORCH_NO_NUDGE=1`.
+
 ## Native Claude Code mode
 
 Same roles as the pipeline, run inside an interactive session with no SDK code. Definitions are in `.claude/agents/`.

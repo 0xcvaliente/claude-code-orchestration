@@ -32,6 +32,19 @@ for (const prefix of ["", "orchestration:"]) {
   });
 }
 
+test("session nudge: tells the session to route non-trivial tasks, and is silent when ORCH_NO_NUDGE is set", () => {
+  const run = (env: Record<string, string>) =>
+    spawnSync("node", [hook("nudge.mjs")], { input: "{}", env: { ...process.env, ORCH_NO_NUDGE: "", ...env }, encoding: "utf8" });
+  const on = run({});
+  assert.equal(on.status, 0);
+  const out = JSON.parse(on.stdout);
+  assert.equal(out.hookSpecificOutput.hookEventName, "SessionStart");
+  assert.match(out.hookSpecificOutput.additionalContext, /orchestration:route/);
+  const off = run({ ORCH_NO_NUDGE: "1" });
+  assert.equal(off.status, 0);
+  assert.equal(off.stdout, "");
+});
+
 test("test gate: blocks a namespaced implementer while the test command fails, lets reviewers through", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-verify-"));
   const run = (agent_type: string, cmd: string) =>

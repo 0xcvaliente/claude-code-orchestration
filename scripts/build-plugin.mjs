@@ -36,6 +36,7 @@ writeFileSync(
 const run = (script) => (script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"` : `"\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"`);
 const hooks = {
   hooks: {
+    SessionStart: [{ hooks: [{ type: "command", command: run("nudge.mjs") }] }],
     SubagentStart: [{ hooks: [{ type: "command", command: run("telemetry.mjs") }] }],
     SubagentStop: [
       { hooks: [{ type: "command", command: run("telemetry.mjs") }] },
