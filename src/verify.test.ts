@@ -385,7 +385,8 @@ test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail l
   const failing = [
     "The session reported: STATUS: pass\nLooks fine.", // no line starts with STATUS: quoting the report is not a verdict
     "The session reported: STATUS: pass\nSTATUS: fail\nGAPS: notes.md cites no source", // the reviewer's own line says fail
-    "> STATUS: pass\nSTATUS: fail", // a quoted pass line, then the reviewer's own fail: any fail line fails the review
+    "> STATUS: pass", // a blockquoted line is a quote, never the reviewer's verdict: no verdict at all
+    "> STATUS: pass\nSTATUS: fail", // the quote is ignored and the reviewer's own fail counts
     "STATUS: fail\nGAPS: notes.md cites no source\nSTATUS: pass", // the first STATUS line says fail
     "STATUS: pass or fail", // the format template, not a verdict
   ];
@@ -394,11 +395,12 @@ test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail l
     assert.notEqual(v.status, 0, `${JSON.stringify(reply)} must fail the run`);
     assert.equal(v.verdict, "fail", JSON.stringify(reply));
   }
-  // A short preamble, emphasis, a quote, indentation and blank lines before the verdict are fine.
+  // A short preamble, emphasis, a heading, indentation and blank lines before the verdict are fine.
   const passing = [
     "Review complete.\n\nSTATUS: pass",
     "**STATUS: pass**\nGAPS: none",
-    "\n  > STATUS: pass\nGAPS: none",
+    "\n  ## STATUS: pass\nGAPS: none",
+    "> STATUS: fail\nSTATUS: pass", // the quote is ignored and the reviewer's own line counts
     "Earlier I noted STATUS: fail for the draft; the final report fixes it.\n\nSTATUS: pass\nGAPS: none", // mid-line mentions do not count
   ];
   for (const reply of passing) {
