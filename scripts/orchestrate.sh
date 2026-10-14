@@ -101,6 +101,11 @@ args+=(--output-format json --permission-mode dontAsk --no-session-persistence)
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
 [ -n "${ORCH_MODEL:-}" ] && args+=(--model "$ORCH_MODEL")
 [ -n "${ORCH_ADD_DIR:-}" ] && args+=(--add-dir "$ORCH_ADD_DIR")
+# Never publish or escalate, whatever the folder's settings say (a plugin user's folder has no deny list, and this
+# repo's leaves git push to interactive sessions). A deny beats every allow rule, so `Bash(git -C *)` cannot reach a
+# push. UNSAFE_BASH in src/config.ts; src/verify.test.ts fails on drift. Variadic: keep it before --allowedTools.
+args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
+  "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last
 
 if [ -n "${ORCH_DRY_RUN:-}" ]; then

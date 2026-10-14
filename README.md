@@ -196,7 +196,7 @@ The interactive orchestrator cannot hand over to a plain session, because it has
 
 ### The plugin
 
-The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract and the `/route` skill, but not your permission denies (add `git push`, `sudo` and `rm -rf` denies to your own settings) and not this repo's `worktree` setting.
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract and the `/route` skill, but not permission denies (headless runs deny push, remote, `sudo` and `rm -rf` on the command line; for interactive sessions add the denies you want to your own settings) and not this repo's `worktree` setting.
 
 **Parallel code slices need `baseRef: "head"`.** Only code in a git repository runs slices in worktrees, and Claude Code starts a worktree from the remote default branch unless told otherwise, so a parallel slice would not see your unpushed or feature-branch commits. For parallel slices of unpushed or feature-branch work, add this to your own `.claude/settings.json` (or `~/.claude/settings.json`):
 
@@ -225,7 +225,7 @@ After changing anything under `.claude/`, run `npm run build-plugin`; `npm run c
 
 ## Safety and limits
 
-- Nothing in either path pushes to a remote. Project settings deny `git push`, `git remote`, `sudo` and `rm -rf`, and workers have the same deny list (`UNSAFE_BASH`, kept equal to `permissions.deny` by `policy.test.ts`).
+- Neither path pushes to a remote. SDK workers deny `git push`, `git remote`, `sudo` and `rm -rf` (`UNSAFE_BASH`); `orchestrate.sh` passes the same list to every headless native run as `--disallowedTools`, which beats any allow rule; and the agents are told never to push. Project settings deny the same list except `git push` (`policy.test.ts` keeps them in step), so an interactive session in this repo can push when its permission mode allows: default mode asks you first.
 - Worktrees isolate git state, not the filesystem: a worker with Bash can still write outside its worktree. Run in a container or VM for untrusted repos.
 - The deny lists guard against mistakes, not malice. Native headless mode allows `Bash(npm *)` and `Bash(node *)`, which can run any code, including a push.
 - SDK workers branch from `HEAD`; uncommitted changes are not visible to them. Native isolated workers (code in git only) branch from the remote default branch unless `worktree.baseRef` is `"head"`; either way they only see committed work, so the integrator commits a checkpoint (only the paths the orchestrator names) before a parallel wave.

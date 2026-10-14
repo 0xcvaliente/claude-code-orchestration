@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { UNSAFE_BASH } from "./config.js";
 
 const root = new URL("..", import.meta.url).pathname;
 const testCmdSh = join(root, ".claude", "hooks", "test-cmd.sh");
@@ -95,6 +96,19 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
   assert.equal(lines[lines.indexOf("--model") + 1], "sonnet");
   assert.ok(lines.includes("Bash(ruff*)") && lines.includes("Bash(mypy*)"));
   assert.ok(lines.indexOf("--allowedTools") > lines.indexOf("--model"), "--allowedTools stays last");
+});
+
+test("orchestrate.sh dry run: push, remote, sudo and rm -rf are denied on the command line, whatever the allowlist", () => {
+  const repo = tmp();
+  for (const env of [{}, { ORCH_ALLOWED_TOOLS: "Read\nBash(git -C *)" }]) {
+    const r = spawnSync("bash", [orchestrateSh, "t", repo], {
+      env: { ...process.env, ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ORCH_ALLOWED_TOOLS: "", ...env },
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.split("\n");
+    assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), UNSAFE_BASH);
+  }
 });
 
 test("orchestrate.sh dry run: ORCH_BUDGET_TOKENS becomes --max-budget-usd, a bad count or the old dollar name exits 1", () => {
