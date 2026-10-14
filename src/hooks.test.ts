@@ -99,7 +99,7 @@ test("session nudge: tells the session to route non-trivial tasks of any kind, n
   for (const kind of ["code", "research", "writing", "analysis", "operations"]) assert.match(context, new RegExp(`\\b${kind}\\b`), `the nudge covers ${kind}`);
   assert.match(context, /Only for code in a git repository: parallel slices use isolation: worktree/, "git machinery is for code only");
   assert.match(context, /Work that changes no code runs in the shared folder, and its slices with disjoint files may run in parallel; code outside a git repository runs one slice at a time/);
-  assert.match(context, /send the draft and its sources to orchestration:reviewer before you reply/, "an answer the session writes itself is reviewed too");
+  assert.match(context, /send the draft and its sources to orchestration:reviewer before you reply, and to a second, opus reviewer for a risky one/, "an answer the session writes itself is reviewed too");
   assert.match(context, /Skip routing for quick questions/);
   const off = run({ ORCH_NO_NUDGE: "1" });
   assert.equal(off.status, 0);
@@ -289,6 +289,33 @@ test("test gate: any changed code, build or dependency path still runs the tests
     assert.equal(r.status, 2, `${name}: ${r.stderr}`);
     assert.match(r.stderr, /Acceptance gate failed: npm test/, name);
     assert.equal(lastGateEntry(dir).reason, "tests_failed", name);
+  }
+});
+
+test("test gate: prose under a test-data folder is test input and runs the tests; the same file in docs is still prose", () => {
+  const docs = gitRepo().dir;
+  mkdirSync(join(docs, "docs"));
+  writeFileSync(join(docs, "docs", "guide.md"), "x\n");
+  assert.equal(testGate(docs).status, 0);
+  assert.equal(lastGateEntry(docs).reason, "no_code_changes");
+
+  // Folder names are matched whole and in any case: "specification", "latest" and "test-plans" are ordinary folders.
+  const near = gitRepo().dir;
+  for (const name of ["specification", "latest", "test-plans"]) {
+    mkdirSync(join(near, name));
+    writeFileSync(join(near, name, "notes.md"), "x\n");
+  }
+  assert.equal(testGate(near).status, 0);
+  assert.equal(lastGateEntry(near).reason, "no_code_changes");
+
+  const places = ["testdata/expected.txt", ...["test", "Tests", "testdata", "__tests__", "spec", "Fixtures", "__fixtures__", "golden", "snapshots", "__snapshots__"].map((name, i) => `pkg/${name}/${i % 2 ? "expected.txt" : "page.md"}`)];
+  for (const path of places) {
+    const { dir } = gitRepo();
+    mkdirSync(join(dir, path.split("/").slice(0, -1).join("/")), { recursive: true });
+    writeFileSync(join(dir, path), "x\n");
+    const r = testGate(dir);
+    assert.equal(r.status, 2, `${path}: ${r.stderr}`);
+    assert.equal(lastGateEntry(dir).reason, "tests_failed", path);
   }
 });
 

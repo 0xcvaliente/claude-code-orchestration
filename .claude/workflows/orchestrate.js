@@ -172,7 +172,7 @@ for (const wave of waves) {
           (s.risky ? [undefined, 'opus'] : [undefined]).map((model) => () =>
             agent(
               CODE
-                ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nReview the working-tree changes (git diff HEAD), run the check, and return a verdict.`
+                ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check and return a verdict.`
                 : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.`,
               { label: `review:${s.id}#${attempt}${model ? ':' + model : ''}`, phase: 'Build', agentType: 'reviewer', model, schema: VERDICT },
             ),
