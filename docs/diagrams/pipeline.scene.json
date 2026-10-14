@@ -1,6 +1,6 @@
 {
-  "title": "Pipeline: plan, then build each slice behind two gates",
-  "description": "Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch.",
+  "title": "Pipeline for code in a git repository: plan, then build each slice behind two gates",
+  "description": "For code in a git repository: Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch. Work that changes no code follows the same plan and review steps in your folder.",
   "width": 860, "height": 730,
   "regions": [
     {"id": "r-plan", "label": "Plan", "x": 14, "y": 24, "w": 312, "h": 416},
@@ -27,5 +27,5 @@
     {"id": "e-fail", "from": "test", "to": "write", "points": [[650,246],[710,246],[710,140],[650,140]], "style": "dashed", "label": "fail", "label_at": [684,170], "label_w": 52, "status": "observed", "sources": ["README.md: retries carry the failing output"]},
     {"id": "e-gaps", "from": "verify", "to": "write", "points": [[650,380],[800,380],[800,100],[650,100]], "style": "dashed", "label": "gaps", "label_at": [770,300], "label_w": 60, "status": "observed", "sources": ["README.md: up to 2 retries (--retries)"]}
   ],
-  "notes": ["Retries (dashed) carry the failing output or the reviewer's gaps back to the same slice, up to --retries (default 2)."]
+  "notes": ["Retries (dashed) carry the failing output or the reviewer's gaps back to the same slice, up to --retries (default 2).", "The SDK pipeline (npm start) works on code in a git repository only (src/cli.ts). Natively, work that changes no code follows the same plan and review steps in the shared folder, with no worktrees, no integrator and no commits (.claude/agents/orchestrator.md, steps 2 to 5)."]
 }

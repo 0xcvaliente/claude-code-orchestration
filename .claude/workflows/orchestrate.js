@@ -17,7 +17,7 @@ export const meta = {
 //     Pass baseRefHead only for a git repository whose worktree.baseRef is "head": code outside git runs one at a time.
 //     false = the task changes no code (research, writing, analysis, operations): no worktrees, checkpoint or
 //     integrator, nobody commits, and the slices of a wave run at the same time in the shared folder (their output
-//     files are disjoint and none is code, so one slice's files cannot fail another slice's checks).
+//     files are disjoint and none of them is code, so no slice can break the code another slice's test gate might run).
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
 const MAX_SLICES = (args && args.maxSlices) || 6

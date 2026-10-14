@@ -2,8 +2,8 @@
 
 Two orchestrators for the same job (split a task, build slices in parallel, gate on tests, verify independently):
 
-- SDK pipeline: `src/` (TypeScript on the Agent SDK). Order is fixed in code. Worktree per slice, optional budget cap (off by default), telemetry in `runs/`.
-- Native: `.claude/` (agents, hooks, skill, workflow). Run with `claude --agent orchestrator`. Order is the orchestrator's prompt, plus hook gates.
+- SDK pipeline: `src/` (TypeScript on the Agent SDK). Code in a git repository only. Order is fixed in code. Worktree per slice, optional budget cap (off by default), telemetry in `runs/`.
+- Native: `.claude/` (agents, hooks, skill, workflow). Any task: code, research, writing, analysis or operations. Run with `claude --agent orchestrator`. Order is the orchestrator's prompt, plus hook gates. Git machinery (worktrees, checkpoint commits, the integrator) is for code in git: parallel slices run in worktrees there, code outside git runs one slice at a time, and work that changes no code may run slices with disjoint files in parallel in the shared folder. The test gate runs wherever there is a test command and skips only a prose-only change in a git work tree. The triage fact `code` does not change the route, and the test gate never reads it: it decides whether git machinery is used and, in `npm run auto`, whether web tools are allowed. The review gate covers every task.
 
 ## Commands
 - `npm test` / `npm run typecheck`: must pass before finishing.

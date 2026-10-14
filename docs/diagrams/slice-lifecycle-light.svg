@@ -1,51 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560" role="img" aria-labelledby="dc-6ca31a9ac9-title dc-6ca31a9ac9-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-<title id="dc-6ca31a9ac9-title">One slice&#x27;s life: from planned to merged or replaced</title>
-<desc id="dc-6ca31a9ac9-desc">A planned slice is written, tested and reviewed. Failing tests or review gaps send it back to writing. A slice that passes review is merged into the result branch; one that uses up its retries fails and may be replaced by a replan.</desc>
-<defs><marker id="dc-6ca31a9ac9-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#59636e"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560" role="img" aria-labelledby="dc-390e7b669d-title dc-390e7b669d-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="dc-390e7b669d-title">One slice&#x27;s life: from planned to merged or replaced</title>
+<desc id="dc-390e7b669d-desc">A planned slice is written, then tested unless there are no tests to run (no test command, or only prose changed in a git repository), then reviewed. Failing tests or review gaps send it back to writing. A slice that passes review is merged into the result branch; one that uses up its retries fails and may be replaced by a replan.</desc>
+<defs><marker id="dc-390e7b669d-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#59636e"/></marker></defs>
 <rect width="900" height="560" fill="#ffffff" aria-hidden="true"/>
-<polyline data-edge="t-start" points="80,76 80,176" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-done" points="210,192 360,192" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-fail" points="360,226 210,226" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)" stroke-dasharray="6 5"/>
-<polyline data-edge="t-pass" points="540,208 690,208" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-gaps" points="780,176 780,126 160,126 160,176" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)" stroke-dasharray="6 5"/>
-<polyline data-edge="t-retries" points="120,240 120,330" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-replan" points="120,386 120,474" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-review-pass" points="780,240 780,330" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<polyline data-edge="t-merge" points="780,386 780,474" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-6ca31a9ac9-arrow)"/>
-<g id="dc-6ca31a9ac9-node-planned" data-node="planned" data-x="30" data-y="20" data-w="180" data-h="56">
+<polyline data-edge="t-start" points="80,76 80,176" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-done" points="210,192 360,192" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-fail" points="360,226 210,226" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="t-pass" points="540,208 690,208" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-no-tests" points="200,240 200,290 740,290 740,240" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-gaps" points="780,176 780,126 160,126 160,176" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="t-retries" points="120,240 120,330" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-replan" points="120,386 120,474" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-review-pass" points="780,240 780,330" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<polyline data-edge="t-merge" points="780,386 780,474" fill="none" stroke="#59636e" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-390e7b669d-arrow)"/>
+<g id="dc-390e7b669d-node-planned" data-node="planned" data-x="30" data-y="20" data-w="180" data-h="56">
 <rect x="30" y="20" width="180" height="56" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="48" y="54.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="planned"><tspan x="48" dy="0">Planned</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-writing" data-node="writing" data-x="30" data-y="176" data-w="180" data-h="64">
+<g id="dc-390e7b669d-node-writing" data-node="writing" data-x="30" data-y="176" data-w="180" data-h="64">
 <rect x="30" y="176" width="180" height="64" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="48" y="214.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="writing"><tspan x="48" dy="0">Writing</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-testing" data-node="testing" data-x="360" data-y="176" data-w="180" data-h="64">
+<g id="dc-390e7b669d-node-testing" data-node="testing" data-x="360" data-y="176" data-w="180" data-h="64">
 <rect x="360" y="176" width="180" height="64" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="378" y="214.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="testing"><tspan x="378" dy="0">Testing</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-reviewing" data-node="reviewing" data-x="690" data-y="176" data-w="180" data-h="64">
+<g id="dc-390e7b669d-node-reviewing" data-node="reviewing" data-x="690" data-y="176" data-w="180" data-h="64">
 <rect x="690" y="176" width="180" height="64" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="708" y="214.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="reviewing"><tspan x="708" dy="0">Reviewing</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-failed" data-node="failed" data-x="30" data-y="330" data-w="180" data-h="56">
+<g id="dc-390e7b669d-node-failed" data-node="failed" data-x="30" data-y="330" data-w="180" data-h="56">
 <rect x="30" y="330" width="180" height="56" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="48" y="364.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="failed"><tspan x="48" dy="0">Failed</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-passed" data-node="passed" data-x="690" data-y="330" data-w="180" data-h="56">
+<g id="dc-390e7b669d-node-passed" data-node="passed" data-x="690" data-y="330" data-w="180" data-h="56">
 <rect x="690" y="330" width="180" height="56" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="708" y="364.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="passed"><tspan x="708" dy="0">Passed</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-replaced" data-node="replaced" data-x="30" data-y="474" data-w="180" data-h="56">
+<g id="dc-390e7b669d-node-replaced" data-node="replaced" data-x="30" data-y="474" data-w="180" data-h="56">
 <rect x="30" y="474" width="180" height="56" rx="6" fill="#f6f8fa" stroke="#818b98" stroke-width="1.5"/>
 <text x="48" y="508.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="replaced"><tspan x="48" dy="0">Replaced</tspan></text>
 </g>
-<g id="dc-6ca31a9ac9-node-merged" data-node="merged" data-x="690" data-y="474" data-w="180" data-h="56">
+<g id="dc-390e7b669d-node-merged" data-node="merged" data-x="690" data-y="474" data-w="180" data-h="56">
 <rect x="690" y="474" width="180" height="56" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-width="2"/>
 <text x="708" y="508.5" font-size="18" font-weight="650" fill="#1f2328" text-anchor="start" data-node-text="merged"><tspan x="708" dy="0">Merged</tspan></text>
 </g>
-<g data-label="t-start" data-x="20" data-y="111" data-w="120" data-h="30"><rect x="20" y="111" width="120" height="30" rx="4" fill="#ffffff"/>
-<text x="28" y="130" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="28" dy="0">worker starts</tspan></text>
+<g data-label="t-start" data-x="15" data-y="111" data-w="130" data-h="30"><rect x="15" y="111" width="130" height="30" rx="4" fill="#ffffff"/>
+<text x="23" y="130" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="23" dy="0">worker starts</tspan></text>
 </g>
 <g data-label="t-done" data-x="250" data-y="158" data-w="70" data-h="30"><rect x="250" y="158" width="70" height="30" rx="4" fill="#ffffff"/>
 <text x="258" y="177" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="258" dy="0">done</tspan></text>
@@ -56,11 +57,14 @@
 <g data-label="t-pass" data-x="560" data-y="170" data-w="110" data-h="30"><rect x="560" y="170" width="110" height="30" rx="4" fill="#ffffff"/>
 <text x="568" y="189" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="568" dy="0">tests pass</tspan></text>
 </g>
+<g data-label="t-no-tests" data-x="395" data-y="275" data-w="146" data-h="30"><rect x="395" y="275" width="146" height="30" rx="4" fill="#ffffff"/>
+<text x="403" y="294" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="403" dy="0">no tests to run</tspan></text>
+</g>
 <g data-label="t-gaps" data-x="420" data-y="111" data-w="60" data-h="30"><rect x="420" y="111" width="60" height="30" rx="4" fill="#ffffff"/>
 <text x="428" y="130" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="428" dy="0">gaps</tspan></text>
 </g>
-<g data-label="t-retries" data-x="52" data-y="268" data-w="136" data-h="30"><rect x="52" y="268" width="136" height="30" rx="4" fill="#ffffff"/>
-<text x="60" y="287" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="60" dy="0">retries used up</tspan></text>
+<g data-label="t-retries" data-x="47" data-y="268" data-w="146" data-h="30"><rect x="47" y="268" width="146" height="30" rx="4" fill="#ffffff"/>
+<text x="55" y="287" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="55" dy="0">retries used up</tspan></text>
 </g>
 <g data-label="t-replan" data-x="72" data-y="415" data-w="96" data-h="30"><rect x="72" y="415" width="96" height="30" rx="4" fill="#ffffff"/>
 <text x="80" y="434" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="80" dy="0">replanned</tspan></text>
@@ -68,7 +72,7 @@
 <g data-label="t-review-pass" data-x="752" data-y="268" data-w="56" data-h="30"><rect x="752" y="268" width="56" height="30" rx="4" fill="#ffffff"/>
 <text x="760" y="287" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="760" dy="0">pass</tspan></text>
 </g>
-<g data-label="t-merge" data-x="730" data-y="415" data-w="100" data-h="30"><rect x="730" y="415" width="100" height="30" rx="4" fill="#ffffff"/>
-<text x="738" y="434" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="738" dy="0">integrated</tspan></text>
+<g data-label="t-merge" data-x="728" data-y="415" data-w="104" data-h="30"><rect x="728" y="415" width="104" height="30" rx="4" fill="#ffffff"/>
+<text x="736" y="434" font-size="13" font-weight="400" fill="#1f2328" text-anchor="start"><tspan x="736" dy="0">integrated</tspan></text>
 </g>
 </svg>
