@@ -1,0 +1,8 @@
+{
+  "name": "orchestration",
+  "version": "0.1.0",
+  "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.",
+  "author": {
+    "name": "0xcvaliente"
+  }
+}

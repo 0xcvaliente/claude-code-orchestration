@@ -23,17 +23,15 @@ export interface AgentResult {
 /** Seam for tests: the orchestrator only depends on this signature. */
 export type RunAgent = (req: AgentRequest) => Promise<AgentResult>;
 
-/** One worker = one query() = one fresh context, cwd, tool set, and budget. */
+/** One worker = one query() = one fresh context, cwd, tool set, and turn cap. */
 export const runAgent: RunAgent = async (req) => {
   const cfg = ROLES[req.role];
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), LIMITS.workerTimeoutMs);
   const started = Date.now();
-  let sawMessage = false;
-  // A worker that died after streaming began may have spent money we never see in a result message.
-  // Count the per-worker cap as an upper bound so the run budget cannot be undercounted.
+  // A worker that died mid-stream reports no cost; runs are bounded by turns and timeouts, not dollars.
   const fail = (subtype: string, text: string): AgentResult => ({
-    ok: false, text, costUsd: sawMessage ? cfg.maxBudgetUsd : 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
+    ok: false, text, costUsd: 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
   });
 
   try {
@@ -44,7 +42,6 @@ export const runAgent: RunAgent = async (req) => {
         cwd: req.cwd,
         effort: cfg.effort,
         maxTurns: cfg.maxTurns,
-        maxBudgetUsd: cfg.maxBudgetUsd,
         tools: cfg.tools,
         allowedTools: cfg.tools,
         disallowedTools: cfg.disallowedTools,
@@ -57,7 +54,6 @@ export const runAgent: RunAgent = async (req) => {
     });
 
     for await (const msg of stream) {
-      sawMessage = true;
       if (msg.type !== "result") continue;
       const common = {
         costUsd: msg.total_cost_usd,

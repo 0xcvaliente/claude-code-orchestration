@@ -1,7 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Role } from "./config.js";
 import type { AgentResult } from "./agent.js";
+
+/** Second-resolution timestamp plus a random suffix: two runs in one second must not share branch names. */
+export const newRunId = () => `${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomBytes(2).toString("hex")}`;
 
 /** One run's directory: telemetry log, saved artifacts, and the running cost total. */
 export class Run {

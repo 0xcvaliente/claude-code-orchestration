@@ -3,7 +3,7 @@
 # and log cost and turns to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo defaults to the current directory)
 # The repo needs .claude/agents/ (copy this project's .claude/ into it, or install it at user level).
-# Env: ORCH_BUDGET_USD (default 5; an estimate at list price, a safety cap on a subscription),
+# Env: ORCH_BUDGET_USD (optional spend cap, an estimate at list price; unset = no dollar cap),
 #      ORCH_ALLOWED_TOOLS (one permission rule per line; replaces the default list),
 #      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
 #      ORCH_ADD_DIR (extra directory the agents may read, e.g. a project to analyse),
@@ -40,7 +40,8 @@ fi
 
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
-args+=(--output-format json --permission-mode dontAsk --max-budget-usd "${ORCH_BUDGET_USD:-5}" --no-session-persistence)
+args+=(--output-format json --permission-mode dontAsk --no-session-persistence)
+[ -n "${ORCH_BUDGET_USD:-}" ] && args+=(--max-budget-usd "$ORCH_BUDGET_USD")
 # Experimental advisor (second, stronger model consulted at decision points); see the docs' /advisor page.
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
 [ -n "${ORCH_ADD_DIR:-}" ] && args+=(--add-dir "$ORCH_ADD_DIR")

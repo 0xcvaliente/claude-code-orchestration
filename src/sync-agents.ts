@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { ROLES, type Role } from "./config.js";
 
 type Key = "model" | "effort" | "maxTurns";
-const MAP: Record<Role, { agent: string; keys: Key[] }> = {
+// triager and solo have no agent file: they only exist in the SDK pipeline.
+const MAP: Partial<Record<Role, { agent: string; keys: Key[] }>> = {
   planner: { agent: "orchestrator", keys: ["model", "effort"] }, // main thread: no turn cap
   explorer: { agent: "researcher", keys: ["model", "effort", "maxTurns"] },
   writer: { agent: "implementer", keys: ["model", "effort", "maxTurns"] },
@@ -28,7 +29,7 @@ export function setKey(text: string, key: Key, value: string): string {
 export function syncAgents(agentsDir: string, check: boolean): string[] {
   const drift: string[] = [];
   for (const role of Object.keys(MAP) as Role[]) {
-    const { agent, keys } = MAP[role];
+    const { agent, keys } = MAP[role]!;
     const file = join(agentsDir, `${agent}.md`);
     const before = readFileSync(file, "utf8");
     let after = before;

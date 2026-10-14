@@ -1,9 +1,12 @@
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
-import { runAgent } from "./agent.js";
+import { runAgent as baseAgent } from "./agent.js";
+import { withTransientRetry } from "./retry.js";
 import { count, usd } from "./args.js";
 import { isDirty } from "./git.js";
-import { orchestrate } from "./orchestrator.js";
+import { auto, MODES, type RequestedMode } from "./auto.js";
+
+const runAgent = withTransientRetry(baseAgent);
 
 const { values } = parseArgs({
   options: {
@@ -17,26 +20,37 @@ const { values } = parseArgs({
     concurrency: { type: "string" },
     retries: { type: "string" },
     "plan-only": { type: "boolean", default: false },
+    mode: { type: "string", default: "auto" },
+    resume: { type: "string" },
+    replans: { type: "string" },
+    "no-escalate": { type: "boolean", default: false },
   },
 });
 
-if (!values.repo || !values.task) {
+if (!values.repo || !(values.task || values.resume)) {
   console.error(
     'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
-      "[--budget USD] [--concurrency N] [--retries N] [--plan-only] [--keep-worktrees] [--out DIR]",
+      "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget USD] [--concurrency N] [--retries N] [--replans N] " +
+      "[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]",
   );
   process.exit(2);
 }
 
-let limits: { runBudgetUsd?: number; concurrency?: number; maxRetries?: number };
+let limits: { runBudgetUsd?: number; concurrency?: number; maxRetries?: number; maxReplans?: number };
 try {
   limits = {
     runBudgetUsd: values.budget === undefined ? undefined : usd("--budget", Number(values.budget)),
     concurrency: values.concurrency === undefined ? undefined : count("--concurrency", Number(values.concurrency), 1),
     maxRetries: values.retries === undefined ? undefined : count("--retries", Number(values.retries), 0),
+    maxReplans: values.replans === undefined ? undefined : count("--replans", Number(values.replans), 0),
   };
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));
+  process.exit(2);
+}
+
+if (!MODES.includes(values.mode as RequestedMode)) {
+  console.error(`--mode must be one of ${MODES.join(", ")} (got ${values.mode})`);
   process.exit(2);
 }
 
@@ -50,9 +64,12 @@ try {
   process.exit(2);
 }
 
-const report = await orchestrate({
+const { report, soloReport, escalated } = await auto({
+  mode: values.mode as RequestedMode,
   repo,
-  task: values.task,
+  task: values.task ?? "",
+  resume: values.resume,
+  escalate: !values["no-escalate"],
   outRoot: resolve(values.out),
   run: runAgent,
   testCmd: values["test-cmd"],
@@ -63,8 +80,21 @@ const report = await orchestrate({
   log: (line) => console.log(line),
 });
 
+if (soloReport && !escalated) {
+  const kind = soloReport.reviewPassed === undefined ? "plain session" : "plain session + reviewer";
+  console.log(`\nrun ${soloReport.runId}  ${kind}  spent $${soloReport.spentUsd.toFixed(2)}  by role: ${JSON.stringify(soloReport.costByRole)}`);
+  if (soloReport.testsPassed !== undefined) console.log(`  tests ${soloReport.testsPassed ? "pass" : "fail"}`);
+  if (soloReport.reviewPassed !== undefined) console.log(`  review ${soloReport.reviewPassed ? "pass" : "fail"} (${soloReport.attempts} session(s))`);
+  console.log("  changes are uncommitted in the working tree");
+  if (soloReport.error) console.error(`error: ${soloReport.error}`);
+  process.exit(soloReport.ok ? 0 : 1);
+}
+if (escalated) console.warn("note: the failed plain attempt's edits are still uncommitted in the working tree; the pipeline result is on its own branch.");
+if (!report) process.exit(1);
 console.log(`\nrun ${report.runId}  spent $${report.spentUsd.toFixed(2)}  by role: ${JSON.stringify(report.costByRole)}`);
 for (const s of report.slices) console.log(`  ${s.status.padEnd(6)} ${s.id} (${s.attempts} attempt(s)) ${s.issues[0] ?? ""}`);
+if (report.replans > 0) console.log(`  replanned ${report.replans} time(s)`);
+if (report.error || report.slices.some((s) => s.status === "failed")) console.log(`  resume with: npm start -- --repo ${repo} --resume ${report.runId}`);
 if (report.resultBranch) {
   console.log(`result branch: ${report.resultBranch} (merged ${report.merged.length}, conflicted ${report.conflicted.length})`);
 }
