@@ -216,6 +216,9 @@ test("auto.sh reviewed route, task that is not code: web tools for the session a
   assert.match(reviewer, /^The session reported:\nWrote notes\.md: three findings, each with its source\.$/m);
   assert.match(reviewer, /write the summary/, "the reviewer is given the task to check against");
   assert.match(reviewer, /STATUS: pass or STATUS: fail/);
+  assert.match(reviewer, /Read the files the session created or changed, as named in the session's report/);
+  assert.match(reviewer, /check every requirement of the task, and check each claim against the source it cites/);
+  assert.doesNotMatch(reviewer, /run the tests/, "not code: there is nothing to run");
   // Today's read-only rules stay, and nothing that writes.
   assert.match(reviewer, /^Read$/m);
   assert.match(reviewer, /^Bash\(git diff\*\)$/m);
@@ -233,10 +236,39 @@ test("auto.sh reviewed route, code in a git repository: no web tools, the review
   assert.equal(calls.length, 2);
   for (const call of calls) assert.doesNotMatch(call, /WebSearch|WebFetch/, `no web tools in the ${agentOf(call)} call`);
   const reviewer = callOf(calls, "reviewer");
-  assert.match(reviewer, /git diff HEAD/);
-  assert.match(reviewer, /git status --short/);
-  assert.doesNotMatch(reviewer, /The session reported:/, "the code prompt is unchanged");
+  assert.match(reviewer, /^Review the uncommitted change in this repository against this goal: write the summary$/m);
+  assert.match(
+    reviewer,
+    /Use git diff HEAD, read untracked files from git status --short, and run the tests if you can find them\. Start your reply with STATUS: pass or STATUS: fail\./,
+    "the git and code wording is what it always was",
+  );
+  assert.match(reviewer, /^The session reported:\nEdited README\.md\.$/m, "the report is always included");
+  assert.doesNotMatch(reviewer, /check every requirement/, "code: the tests are the check");
   assert.match(reviewer, /^Bash\(git diff\*\)$/m);
+  assert.doesNotMatch(reviewer, WRITES);
+});
+
+test("auto.sh reviewed route, code outside git: the reviewer gets the report and runs the tests, no git diff, no web tools", () => {
+  const repo = plainFolder();
+  mkdirSync(join(repo, "tests"));
+  writeFileSync(join(repo, "tests", "test_a.py"), ""); // a test runner makes it code
+  const t = fakeTools({ session: '{"result":"Fixed parse() in app.py and added tests/test_a.py."}' });
+  const r = runAuto(repo, t.bin, { ORCH_MODE: "reviewed", ...notGit(repo) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /^route: reviewed - .*\(code: yes\)$/m);
+
+  const calls = t.calls();
+  assert.equal(calls.length, 2);
+  for (const call of calls) assert.doesNotMatch(call, /WebSearch|WebFetch/, `no web tools in the ${agentOf(call)} call`);
+  const reviewer = callOf(calls, "reviewer");
+  assert.match(reviewer, /^The session reported:\nFixed parse\(\) in app\.py and added tests\/test_a\.py\.$/m);
+  assert.match(reviewer, /Read the files the session created or changed, as named in the session's report, and run the tests if you can find them\./);
+  assert.match(reviewer, /write the summary/, "the task is the goal");
+  assert.match(reviewer, /STATUS: pass or STATUS: fail/);
+  assert.doesNotMatch(reviewer, /git diff HEAD/);
+  assert.doesNotMatch(reviewer, /git status --short/);
+  assert.doesNotMatch(reviewer, /check every requirement/);
+  assert.match(reviewer, /^Bash\(python3 -m (pytest|unittest)\*\)$/m, "the runner's rules let it run the tests");
   assert.doesNotMatch(reviewer, WRITES);
 });
 
@@ -245,7 +277,8 @@ test("auto.sh: facts.code from the route wins over what the folder looks like", 
     mode: "reviewed", source: "triage", reason: "stub", costUsd: 0,
     facts: { code, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: true, reason: "stub" },
   });
-  // A git repository where the task is a report, not code: web tools, and the reviewer reads the report and git status.
+  // A git repository where the task is a report, not code: web tools, and the reviewer reads the report and the git
+  // change, then checks requirements and sources instead of running tests.
   const report = gitFolder();
   const a = fakeTools({ session: '{"result":"Report is in docs/report.md."}', route: route(false) });
   const ra = runAuto(report, a.bin);
@@ -254,17 +287,19 @@ test("auto.sh: facts.code from the route wins over what the folder looks like", 
   const reviewerA = callOf(a.calls(), "reviewer");
   assert.ok(hasWeb(callOf(a.calls(), "none")) && hasWeb(reviewerA));
   assert.match(reviewerA, /^The session reported:\nReport is in docs\/report\.md\.$/m);
-  assert.match(reviewerA, /git status --short/, "a git repository: the reviewer may list what changed");
-  assert.doesNotMatch(reviewerA, /git diff HEAD/);
+  assert.match(reviewerA, /Use git diff HEAD, read untracked files from git status --short, check every requirement of the task/);
+  assert.doesNotMatch(reviewerA, /run the tests/, "not code: nothing to run");
 
-  // A folder that is neither git nor tested, where the task is code: today's behaviour.
+  // A folder that is neither git nor tested, where the triager says the task is code: the tests, but no git diff.
   const folder = plainFolder();
   const b = fakeTools({ session: '{"result":"done"}', route: route(true) });
   const rb = runAuto(folder, b.bin, notGit(folder));
   assert.equal(rb.status, 0, rb.stderr);
   assert.match(rb.stderr, /\(code: yes\)/);
   for (const call of b.calls()) assert.doesNotMatch(call, /WebSearch|WebFetch/);
-  assert.match(callOf(b.calls(), "reviewer"), /git diff HEAD/);
+  const reviewerB = callOf(b.calls(), "reviewer");
+  assert.match(reviewerB, /run the tests if you can find them/);
+  assert.doesNotMatch(reviewerB, /git diff HEAD/, "not a git work tree, whatever the triager says");
 });
 
 test("auto.sh: the user's extra allowed tools are kept, and a web rule they already list is not repeated", () => {
