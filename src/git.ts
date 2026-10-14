@@ -20,6 +20,10 @@ export async function removeWorktree(repo: string, dir: string): Promise<void> {
   await git(repo, "worktree", "prune").catch(() => undefined);
 }
 
+/** Delete a branch and its commits if it exists. Used when a resumed run restarts a failed slice. Never throws. */
+export const deleteBranch = (repo: string, branch: string) =>
+  git(repo, "branch", "-D", branch).then(() => undefined, () => undefined);
+
 /** Commit everything in the worktree. Returns false when the worker changed nothing. */
 export async function commitAll(dir: string, message: string): Promise<boolean> {
   await git(dir, "add", "-A");

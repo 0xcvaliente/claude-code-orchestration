@@ -1,5 +1,6 @@
 node_modules/
 runs/
-dist/
+dist/*
+!dist/plugin/
 .claude/state/
 *.log

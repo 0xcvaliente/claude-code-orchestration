@@ -2,7 +2,8 @@
 // A/B benchmark: the same tasks under different setups, scored by hidden tests the agent never sees.
 //   node scripts/compare/compare.mjs --validate                 hidden tests vs reference solutions (no model calls)
 //   node scripts/compare/compare.mjs [--variants A,B,C] [--tasks t1-parallel,...] [--out dir]
-// Variants: A orchestrator on opus | B orchestrator on sonnet + opus advisor | C plain session | D orchestrator on sonnet.
+// Variants: A orchestrator on opus | B orchestrator on sonnet + opus advisor | C plain session | D orchestrator on sonnet
+//           E auto: triage picks plain, reviewed or the orchestrator per task (scripts/auto.sh).
 // Each run gets a fresh git repo under ~/orch-compare. Pass = the hidden test file passes after the run.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -23,6 +24,7 @@ const VARIANTS = {
   B: { label: "Sonnet orchestrator + Opus advisor", agent: true, orchModel: "sonnet", advisor: "opus" },
   C: { label: "Plain session", agent: false },
   D: { label: "Sonnet orchestrator, no advisor", agent: true, orchModel: "sonnet", advisor: "" },
+  E: { label: "Auto (triage routes)", agent: true, orchModel: "opus", advisor: "", auto: true },
 };
 const taskIds = readdirSync(tasksDir).filter((d) => existsSync(join(tasksDir, d, "task.txt"))).sort();
 
@@ -90,15 +92,20 @@ for (const id of tasks) {
     const dir = setup(variant, id);
     const task = readFileSync(join(tasksDir, id, "task.txt"), "utf8").trim();
     const t0 = process.hrtime.bigint();
-    const r = run("bash", [join(root, "scripts", "orchestrate.sh"), task, dir], {
-      env: { ...process.env, ORCH_AGENT: v.agent ? "orchestrator" : "none", ORCH_ADVISOR: v.advisor || "", ORCH_BUDGET_USD: arg("budget", "12") },
+    const r = run("bash", [join(root, "scripts", v.auto ? "auto.sh" : "orchestrate.sh"), task, dir], {
+      env: { ...process.env, ORCH_AGENT: v.agent ? "orchestrator" : "none", ORCH_ADVISOR: v.advisor || "", ORCH_BUDGET_USD: arg("budget", "") },
       timeout: 3_600_000,
     });
     const wall = Number((process.hrtime.bigint() - t0) / 1_000_000n);
+    // auto.sh prints several JSON documents when it escalates; the last one is the run that finished the task.
     const text = `${r.stdout}`;
+    const routes = existsSync(join(dir, ".claude", "state", "routes.jsonl"))
+      ? readFileSync(join(dir, ".claude", "state", "routes.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).mode)
+      : [];
     let j = null;
     try {
-      j = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+      const docs = text.split("\n").filter((l) => l.startsWith("{"));
+      j = JSON.parse(docs.length ? docs[docs.length - 1] : text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
     } catch {
       // unparsed: recorded below
     }
@@ -109,7 +116,7 @@ for (const id of tasks) {
       task: id, variant, label: v.label, pass: s.pass, hidden_passed: s.passed, hidden_failed: s.failed,
       cost_usd: j ? Number(j.total_cost_usd.toFixed(4)) : null, by_model: byModel,
       wall_ms: wall, turns: j?.num_turns ?? null, subagents: j?.subagent_stats?.by_type ?? {},
-      denials: j?.permission_denials?.length ?? null, error: j ? j.is_error : true,
+      denials: j?.permission_denials?.length ?? null, error: j ? j.is_error : true, routes,
     };
     appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
     console.log(`${id} ${variant} pass=${row.pass} (${s.passed}/${s.passed + s.failed}) cost=${row.cost_usd} wall=${(wall / 1000).toFixed(0)}s denials=${row.denials}`);
@@ -120,7 +127,7 @@ const rows = readFileSync(resultsFile, "utf8").split("\n").filter(Boolean).map((
 const md = [
   "| Task | Setup | Hidden tests | List-price cost | Wall time | Turns | Agents | Denials |",
   "|---|---|---|---|---|---|---|---|",
-  ...rows.map((r) => `| ${r.task} | ${r.variant}: ${r.label} | ${r.pass ? "pass" : "FAIL"} (${r.hidden_passed}/${r.hidden_passed + r.hidden_failed}) | $${r.cost_usd ?? "n/a"} | ${(r.wall_ms / 1000).toFixed(0)}s | ${r.turns ?? "n/a"} | ${Object.entries(r.subagents).map(([k, n]) => `${k}:${n}`).join(" ") || "none"} | ${r.denials ?? "n/a"} |`),
+  ...rows.map((r) => `| ${r.task} | ${r.variant}: ${r.label} | ${r.pass ? "pass" : "FAIL"} (${r.hidden_passed}/${r.hidden_passed + r.hidden_failed}) | $${r.cost_usd ?? "n/a"} | ${(r.wall_ms / 1000).toFixed(0)}s | ${r.turns ?? "n/a"} | ${(r.routes ?? []).length ? `route:${r.routes.join(">")} ` : ""}${Object.entries(r.subagents).map(([k, n]) => `${k}:${n}`).join(" ") || "none"} | ${r.denials ?? "n/a"} |`),
 ].join("\n");
 writeFileSync(resultsFile.replace(".jsonl", ".md"), `${md}\n`);
 console.log(`\n${md}`);

@@ -13,3 +13,4 @@ paths:
 - The telemetry and review-gate hooks read `.claude/state/telemetry.jsonl`; keep `session_id`, `agent_type` and `hook_event_name` as the fields they rely on.
 - Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter; keep gates in `settings.json` or `hooks.json`.
 - After changing model, effort or maxTurns, edit `src/config.ts` and run `npm run sync-agents` instead of editing the agent file.
+- The orchestrator's "Size the task first" step mirrors `TRIAGE` in `src/config.ts` (the SDK and `npm run auto` use those numbers). Change both together. `npm run build-plugin` after any change under `.claude/agents`, `skills` or `hooks`: `dist/plugin` is committed and `npm run check-plugin` fails when stale.

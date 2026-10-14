@@ -118,6 +118,15 @@ test("run budget stops new work", async () => {
   assert.equal(report.resultBranch, undefined);
 });
 
+test("without a run budget there is no dollar cap", async () => {
+  const repo = await tempRepo();
+  const { run } = fake([slice("alpha")], { cost: 100 });
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run });
+
+  assert.equal(report.slices[0]!.status, "passed");
+  assert.ok(report.spentUsd > 100, "cost is still reported");
+});
+
 test("model-chosen slice ids cannot escape the worktree directory or collide", async () => {
   const repo = await tempRepo();
   const { run } = fake([slice("../../etc/passwd"), slice("../../etc/passwd")]);
@@ -284,4 +293,84 @@ test("waves: orders by dependency and breaks cycles instead of hanging", () => {
   const mk = (id: string, dependsOn: string[]): Slice => ({ id, goal: "", files: [], acceptance: "", dependsOn });
   assert.deepEqual(waves([mk("c", ["b"]), mk("b", ["a"]), mk("a", [])]).map((w) => w.map((s) => s.id)), [["a"], ["b"], ["c"]]);
   assert.deepEqual(waves([mk("x", ["y"]), mk("y", ["x"])]).map((w) => w.map((s) => s.id)), [["x", "y"]]);
+});
+
+/** The fake, but the planner answers each `slices` request from `plans` in turn and verdicts follow `passes(cwd)`. */
+function scripted(plans: unknown[][], passes: (cwd: string) => boolean) {
+  const inner = fake([]);
+  let n = 0;
+  const run: RunAgent = async (req) => {
+    if (kind(req) === "slices") {
+      inner.calls.push(req);
+      return result({ structured: { slices: plans[Math.min(n++, plans.length - 1)] } });
+    }
+    if (kind(req) === "verdict") {
+      inner.calls.push(req);
+      const pass = passes(req.cwd);
+      return result({ structured: { pass, issues: pass ? [] : ["wrong approach"], summary: "" } });
+    }
+    return inner.run(req);
+  };
+  return { run, calls: inner.calls };
+}
+
+test("replan: failed slices are replaced by new slices for the missing work; the old branch is never merged", async () => {
+  const repo = await tempRepo();
+  const { run, calls } = scripted([[slice("alpha")], [slice("beta")]], (cwd) => cwd.endsWith("beta"));
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, maxRetries: 0, maxReplans: 1 });
+
+  assert.deepEqual(report.slices.map((s) => [s.id, s.status]), [["alpha", "replaced"], ["beta", "passed"]]);
+  assert.equal(report.replans, 1);
+  const files = (await git(repo, "ls-tree", "--name-only", report.resultBranch!)).split("\n");
+  assert.ok(files.includes("beta.txt") && !files.includes("alpha.txt"));
+  const replanPrompt = calls.filter((c) => kind(c) === "slices")[1]!.prompt;
+  assert.ok(replanPrompt.includes("alpha") && replanPrompt.includes("wrong approach"), "the planner sees what failed and why");
+});
+
+test("replan is off by default, and a replan with no usable slices stops cleanly", async () => {
+  const off = await orchestrate({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: scripted([[slice("alpha")]], () => false).run, maxRetries: 0 });
+  assert.deepEqual(off.slices.map((s) => s.status), ["failed"]);
+  assert.equal(off.replans, 0);
+
+  const empty = await orchestrate({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: scripted([[slice("alpha")], []], () => false).run, maxRetries: 0, maxReplans: 2 });
+  assert.deepEqual(empty.slices.map((s) => s.status), ["failed"], "nothing replaced when the planner offers nothing");
+  assert.equal(empty.replans, 0);
+});
+
+test("a new slice may depend on a slice that already passed", async () => {
+  const repo = await tempRepo();
+  const plans = [[slice("alpha"), slice("beta")], [slice("gamma", ["alpha"])]];
+  const { run } = scripted(plans, (cwd) => !cwd.endsWith("beta"));
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, maxRetries: 0, maxReplans: 1 });
+
+  assert.deepEqual(report.slices.map((s) => [s.id, s.status]), [["alpha", "passed"], ["beta", "replaced"], ["gamma", "passed"]]);
+  const files = (await git(repo, "ls-tree", "--name-only", report.resultBranch!)).split("\n");
+  assert.ok(files.includes("alpha.txt") && files.includes("gamma.txt"));
+});
+
+test("resume: skips planning and passed slices, restarts the failed one, and merges everything", async () => {
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = scripted([[slice("alpha"), slice("beta")]], (cwd) => !cwd.endsWith("beta"));
+  const r1 = await orchestrate({ repo, task: "build both", outRoot: out, run: first.run, maxRetries: 0 });
+  assert.deepEqual(r1.slices.map((s) => s.status), ["passed", "failed"]);
+
+  const second = scripted([[]], () => true);
+  const r2 = await orchestrate({ repo, task: "ignored on resume", outRoot: out, run: second.run, resume: r1.runId });
+  assert.equal(r2.resumed, true);
+  assert.equal(r2.runId, r1.runId);
+  assert.deepEqual(r2.slices.map((s) => s.status), ["passed", "passed"]);
+  assert.ok(!second.calls.some((c) => c.role === "planner" || c.role === "explorer"), "no planning on resume");
+  const writers = second.calls.filter((c) => c.role === "writer");
+  assert.equal(writers.length, 1);
+  assert.ok(writers[0]!.prompt.includes("build both") && writers[0]!.prompt.includes("beta"), "the journal's task is used");
+  const files = (await git(repo, "ls-tree", "--name-only", r2.resultBranch!)).split("\n");
+  assert.ok(files.includes("alpha.txt") && files.includes("beta.txt"));
+});
+
+test("resume: an unknown run id is an error, not a fresh run", async () => {
+  const { run, calls } = fake([slice("alpha")]);
+  const report = await orchestrate({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run, resume: "20200101000000-dead" });
+  assert.match(report.error!, /cannot resume/);
+  assert.equal(calls.length, 0);
 });
