@@ -97,6 +97,50 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
   assert.ok(lines.indexOf("--allowedTools") > lines.indexOf("--model"), "--allowedTools stays last");
 });
 
+test("orchestrate.sh dry run: ORCH_BUDGET_TOKENS becomes --max-budget-usd, a bad count or the old dollar name exits 1", () => {
+  const repo = tmp();
+  const run = (env: Record<string, string>) =>
+    spawnSync("bash", [orchestrateSh, "t", repo], {
+      env: { ...process.env, ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "", ...env },
+      encoding: "utf8",
+    });
+  const cap = (env: Record<string, string>) => {
+    const r = run(env);
+    assert.equal(r.status, 0, r.stderr);
+    const lines = r.stdout.split("\n");
+    return lines.includes("--max-budget-usd") ? lines[lines.indexOf("--max-budget-usd") + 1] : undefined;
+  };
+  assert.equal(cap({ ORCH_BUDGET_TOKENS: "2M" }), "2");
+  assert.equal(cap({ ORCH_BUDGET_TOKENS: "500k" }), "0.5");
+  assert.equal(cap({}), undefined);
+  for (const bad of ["5", "abc"]) {
+    const r = run({ ORCH_BUDGET_TOKENS: bad });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, new RegExp(`ORCH_BUDGET_TOKENS must be a token count of at least 10k, such as 500000, 500k or 2M \\(got ${bad}\\)`));
+    assert.equal(r.stdout, "");
+  }
+  const old = run({ ORCH_BUDGET_USD: "5" });
+  assert.equal(old.status, 1);
+  assert.match(old.stderr, /ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS \(a token count such as 2M\)/);
+  assert.equal(old.stdout, "");
+});
+
+test("auto.sh: a set ORCH_BUDGET_USD or a bad ORCH_BUDGET_TOKENS exits 1 before triage or any model call", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({ session: '{"result":"must not run"}', route: { mode: "plain", source: "forced", reason: "stub", tokens: 0 } });
+  for (const [env, message] of [
+    [{ ORCH_BUDGET_USD: "5" }, /ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS \(a token count such as 2M\)/],
+    [{ ORCH_BUDGET_TOKENS: "abc" }, /ORCH_BUDGET_TOKENS must be a token count of at least 10k, such as 500000, 500k or 2M \(got abc\)/],
+  ] as const) {
+    const r = runAuto(repo, t.bin, { ORCH_BUDGET_USD: "", ORCH_BUDGET_TOKENS: "", ...env });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, message);
+    assert.doesNotMatch(r.stderr, /^route:/m, "the fake route tool was not called");
+    assert.equal(r.stdout, "");
+  }
+  assert.equal(t.calls().length, 0, "no model call");
+});
+
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
   const repo = withAgents(tmp());
   mkdirSync(join(repo, "tests"));
@@ -297,7 +341,7 @@ test("auto.sh reviewed route, code outside git: the reviewer gets the report and
 
 test("auto.sh: facts.code from the route wins over what the folder looks like", () => {
   const route = (code: boolean) => ({
-    mode: "reviewed", source: "triage", reason: "stub", costUsd: 0,
+    mode: "reviewed", source: "triage", reason: "stub", tokens: 0,
     facts: { code, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: true, reason: "stub" },
   });
   // A git repository where the task is a report, not code: web tools, and the reviewer reads the report and the git
@@ -327,7 +371,7 @@ test("auto.sh: facts.code from the route wins over what the folder looks like", 
 
 test("auto.sh: the user's extra allowed tools are kept, and a web rule they already list is not repeated", () => {
   const repo = tmp();
-  const t = fakeTools({ session: '{"result":"ok"}', route: { mode: "plain", source: "forced", reason: "--mode plain", costUsd: 0 } });
+  const t = fakeTools({ session: '{"result":"ok"}', route: { mode: "plain", source: "forced", reason: "--mode plain", tokens: 0 } });
   const r = runAuto(repo, t.bin, { ORCH_MODE: "plain", ORCH_EXTRA_ALLOWED_TOOLS: "Bash(ruff*)\nWebSearch", ...notGit(repo) });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /\(code: no\)/, "no facts, no git, no test runner: not code");
@@ -341,7 +385,7 @@ test("auto.sh: the user's extra allowed tools are kept, and a web rule they alre
 test("auto.sh: a test runner makes a folder code even without git, and gives it no web tools", () => {
   const repo = plainFolder();
   writeFileSync(join(repo, "Cargo.toml"), "");
-  const t = fakeTools({ session: '{"result":"ok"}', route: { mode: "plain", source: "forced", reason: "--mode plain", costUsd: 0 } });
+  const t = fakeTools({ session: '{"result":"ok"}', route: { mode: "plain", source: "forced", reason: "--mode plain", tokens: 0 } });
   const r = runAuto(repo, t.bin, { ORCH_MODE: "plain", ...notGit(repo) });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stderr, /\(code: yes\)/);
@@ -368,7 +412,7 @@ test("auto.sh reviewed route, task that is not code: the session's report is cut
 
 test("auto.sh escalation: the orchestrator gets web tools for a task that is not code, and the message says where the edits are", () => {
   const route = (code: boolean) => ({
-    mode: "plain", source: "triage", reason: "stub", costUsd: 0,
+    mode: "plain", source: "triage", reason: "stub", tokens: 0,
     facts: { code, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: false, reason: "stub" },
   });
   const failing = { session: '{"result":"boom","is_error":true}', sessionExit: 1 };
@@ -395,7 +439,7 @@ function reviewedWith(reply: string) {
   const t = fakeTools({
     session: '{"result":"Wrote notes.md."}',
     reviewer: JSON.stringify({ result: reply }),
-    route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 },
+    route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", tokens: 0 },
   });
   // A forced mode: a failed review ends the run with its status instead of escalating to the orchestrator.
   const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
@@ -435,7 +479,7 @@ test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail l
 test("auto.sh: an unreadable or empty reviewer reply is a fail", () => {
   for (const raw of ["", "STATUS: pass but not JSON", '{"result":["STATUS: pass"]}']) {
     const folder = plainFolder();
-    const t = fakeTools({ session: '{"result":"ok"}', reviewer: raw, route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 } });
+    const t = fakeTools({ session: '{"result":"ok"}', reviewer: raw, route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", tokens: 0 } });
     const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
     assert.notEqual(r.status, 0, JSON.stringify(raw));
     assert.match(r.stderr, /^review: fail$/m, JSON.stringify(raw));
@@ -528,7 +572,7 @@ test("orchestrate.sh: ORCH_AGENT_PREFIX and a namespaced ORCH_AGENT skip both ch
 });
 
 test("auto.sh reviewed route in a folder with no agents of its own: the plugin's reviewer, with the same tools, prompt and verdict rule", () => {
-  const forced = { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 };
+  const forced = { mode: "reviewed", source: "forced", reason: "--mode reviewed", tokens: 0 };
   const run = (reply: string) => {
     const folder = tmp();
     const t = fakeTools({ session: '{"result":"Wrote notes.md: three findings, each with its source."}', reviewer: JSON.stringify({ result: reply }), plugins: PLUGIN_ON, route: forced });
@@ -563,7 +607,7 @@ test("auto.sh escalation in a folder with no agents of its own: the plugin's orc
     session: '{"result":"boom","is_error":true}',
     sessionExit: 1,
     plugins: PLUGIN_ON,
-    route: { mode: "plain", source: "triage", reason: "stub", costUsd: 0, facts: { code: false, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: false, reason: "stub" } },
+    route: { mode: "plain", source: "triage", reason: "stub", tokens: 0, facts: { code: false, filesToTouch: 1, linesToChange: 10, independentSlices: 1, risky: false, reason: "stub" } },
   });
   const r = runAuto(folder, t.bin, notGit(folder));
   assert.notEqual(r.status, 0);
@@ -576,7 +620,7 @@ test("auto.sh escalation in a folder with no agents of its own: the plugin's orc
 
 test("auto.sh in a folder with no agents and no enabled plugin: the reviewer step stops with the reason, and the review fails", () => {
   const folder = tmp();
-  const t = fakeTools({ session: '{"result":"Wrote notes.md."}', route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", costUsd: 0 } });
+  const t = fakeTools({ session: '{"result":"Wrote notes.md."}', route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", tokens: 0 } });
   const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /^no \.claude\/agents\/reviewer\.md in .*, and the orchestration plugin is not enabled there/m);

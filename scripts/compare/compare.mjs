@@ -2,7 +2,7 @@
 // A/B benchmark: the same tasks under different setups, scored by hidden tests the agent never sees.
 //   node scripts/compare/compare.mjs --validate                 hidden tests vs reference solutions (no model calls)
 //   node scripts/compare/compare.mjs [--variants A,B,C] [--tasks t1-parallel,...] [--out dir]
-//        [--repeat N] [--snapshot-every SEC] [--timeout SEC] [--budget USD]
+//        [--repeat N] [--snapshot-every SEC] [--timeout SEC] [--budget TOKENS]
 // Variants: A orchestrator on opus | B orchestrator on sonnet + opus advisor | C plain Sonnet session | D orchestrator on sonnet
 //           E auto: triage picks plain, reviewed or the orchestrator per task (scripts/auto.sh) | F plain Opus session.
 // Each run gets a fresh repo under ~/orch-compare. Pass = the task's scorer passes after the run:
@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { formatTokens, tokensByModel, totalTokens } from "../tokens.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..", "..");
@@ -156,7 +157,7 @@ for (const id of tasks) {
       const snaps = [];
       const snapRoot = join(outDir, "snapshots", stamp, `${id}-${variant}-${rep}`);
       const t0 = process.hrtime.bigint();
-      const env = { ...process.env, ORCH_AGENT: v.agent ? "orchestrator" : "none", ORCH_ADVISOR: v.advisor || "", ORCH_BUDGET_USD: arg("budget", "") };
+      const env = { ...process.env, ORCH_AGENT: v.agent ? "orchestrator" : "none", ORCH_ADVISOR: v.advisor || "", ORCH_BUDGET_TOKENS: arg("budget", "") };
       if (v.model) env.ORCH_MODEL = v.model;
       const testCmd = taskTestCmd(id);
       if (testCmd) env.ORCH_TEST_CMD = testCmd;
@@ -185,10 +186,9 @@ for (const id of tasks) {
         timeline.push([sn.secs, ss.passed]);
         if (ss.pass && firstPass === null) firstPass = sn.secs;
       }
-      const byModel = Object.fromEntries(Object.entries(j?.modelUsage ?? {}).map(([m, u]) => [m.replace("claude-", ""), Number(u.costUSD.toFixed(4))]));
       const row = {
         task: id, variant, rep, label: v.label, pass: s.pass, hidden_passed: s.passed, hidden_failed: s.failed,
-        cost_usd: j ? Number(j.total_cost_usd.toFixed(4)) : null, by_model: byModel,
+        tokens: j ? totalTokens(j) : null, by_model: j ? tokensByModel(j) : {},
         wall_ms: wall, turns: j?.num_turns ?? null, subagents: j?.subagent_stats?.by_type ?? {},
         denials: j?.permission_denials?.length ?? null, error: j ? j.is_error : true, routes, timed_out: r.timedOut,
       };
@@ -197,13 +197,12 @@ for (const id of tasks) {
         row.first_pass_s = firstPass;
       }
       appendFileSync(resultsFile, `${JSON.stringify(row)}\n`);
-      console.log(`${id} ${variant}#${rep} pass=${row.pass} (${s.passed}/${s.passed + s.failed}) cost=${row.cost_usd} wall=${(wall / 1000).toFixed(0)}s denials=${row.denials}${row.timed_out ? " TIMEOUT" : ""}`);
+      console.log(`${id} ${variant}#${rep} pass=${row.pass} (${s.passed}/${s.passed + s.failed}) tokens=${row.tokens === null ? "n/a" : formatTokens(row.tokens)} wall=${(wall / 1000).toFixed(0)}s denials=${row.denials}${row.timed_out ? " TIMEOUT" : ""}`);
     }
   }
 }
 
 const rows = readFileSync(resultsFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-const money = (n) => `$${n.toFixed(2)}`;
 const groups = new Map();
 for (const r of rows) {
   const k = `${r.task}\t${r.variant}`;
@@ -211,20 +210,20 @@ for (const r of rows) {
   groups.get(k).push(r);
 }
 const summary = [
-  "| Task | Setup | Pass rate | Mean cost | Cost range | Mean wall time |",
+  "| Task | Setup | Pass rate | Mean tokens | Token range | Mean wall time |",
   "|---|---|---|---|---|---|",
   ...[...groups.values()].map((g) => {
-    const costs = g.map((r) => r.cost_usd).filter((c) => c !== null);
-    const mean = costs.length ? money(costs.reduce((a, b) => a + b, 0) / costs.length) : "n/a";
-    const range = costs.length ? `${money(Math.min(...costs))}-${money(Math.max(...costs))}` : "n/a";
+    const counts = g.map((r) => r.tokens).filter((t) => t !== null);
+    const mean = counts.length ? formatTokens(counts.reduce((a, b) => a + b, 0) / counts.length) : "n/a";
+    const range = counts.length ? `${formatTokens(Math.min(...counts))}-${formatTokens(Math.max(...counts))}` : "n/a";
     const wall = (g.reduce((a, r) => a + r.wall_ms, 0) / g.length / 1000).toFixed(0);
     return `| ${g[0].task} | ${g[0].variant}: ${g[0].label} | ${g.filter((r) => r.pass).length}/${g.length} | ${mean} | ${range} | ${wall}s |`;
   }),
 ].join("\n");
 const perRun = [
-  "| Task | Setup | Rep | Hidden tests | List-price cost | Wall time | Turns | Agents | Denials | First pass |",
+  "| Task | Setup | Rep | Hidden tests | Tokens | Wall time | Turns | Agents | Denials | First pass |",
   "|---|---|---|---|---|---|---|---|---|---|",
-  ...rows.map((r) => `| ${r.task} | ${r.variant}: ${r.label} | ${r.rep ?? 1} | ${r.pass ? "pass" : "FAIL"} (${r.hidden_passed}/${r.hidden_passed + r.hidden_failed}) | $${r.cost_usd ?? "n/a"} | ${(r.wall_ms / 1000).toFixed(0)}s | ${r.turns ?? "n/a"} | ${(r.routes ?? []).length ? `route:${r.routes.join(">")} ` : ""}${Object.entries(r.subagents).map(([k, n]) => `${k}:${n}`).join(" ") || "none"} | ${r.denials ?? "n/a"} | ${r.first_pass_s === undefined ? "off" : r.first_pass_s === null ? "never" : `${r.first_pass_s}s`} |`),
+  ...rows.map((r) => `| ${r.task} | ${r.variant}: ${r.label} | ${r.rep ?? 1} | ${r.pass ? "pass" : "FAIL"} (${r.hidden_passed}/${r.hidden_passed + r.hidden_failed}) | ${r.tokens === null ? "n/a" : formatTokens(r.tokens)} | ${(r.wall_ms / 1000).toFixed(0)}s | ${r.turns ?? "n/a"} | ${(r.routes ?? []).length ? `route:${r.routes.join(">")} ` : ""}${Object.entries(r.subagents).map(([k, n]) => `${k}:${n}`).join(" ") || "none"} | ${r.denials ?? "n/a"} | ${r.first_pass_s === undefined ? "off" : r.first_pass_s === null ? "never" : `${r.first_pass_s}s`} |`),
 ].join("\n");
 const md = `${summary}\n\n${perRun}`;
 writeFileSync(resultsFile.replace(".jsonl", ".md"), `${md}\n`);
