@@ -19,7 +19,7 @@
 <g id="dc-d91ec32249-node-triage" data-node="triage" data-x="280" data-y="116" data-w="320" data-h="76">
 <rect x="280" y="116" width="320" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="298" y="151.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="triage"><tspan x="298" dy="0">Triage</tspan></text>
-<text x="298" y="177.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="triage"><tspan x="298" dy="0">Sonnet, read-only, about $0.05</tspan></text>
+<text x="298" y="177.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="triage"><tspan x="298" dy="0">Sonnet, read-only, about 20k tokens</tspan></text>
 </g>
 <g id="dc-d91ec32249-node-plain" data-node="plain" data-x="20" data-y="300" data-w="240" data-h="76">
 <rect x="20" y="300" width="240" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
