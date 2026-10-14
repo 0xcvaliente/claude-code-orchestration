@@ -135,20 +135,20 @@ test("triagePrompt: sizes any kind of task and defines every fact", () => {
 });
 
 const result = (over: Partial<AgentResult>): AgentResult => ({
-  ok: true, text: "", costUsd: 0.04, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
+  ok: true, text: "", tokens: 40, turns: 1, subtype: "success", durationMs: 1, model: "fake", ...over,
 });
 const runWith = (res: Partial<AgentResult>): { run: RunAgent; calls: AgentRequest[] } => {
   const calls: AgentRequest[] = [];
   return { calls, run: async (req) => (calls.push(req), result(res)) };
 };
 
-test("triage: one read-only triager call, policy applied, cost recorded", async () => {
+test("triage: one read-only triager call, policy applied, tokens recorded", async () => {
   const { run, calls } = runWith({ structured: { filesToTouch: 1, linesToChange: 3, independentSlices: 1, risky: false, reason: "typo" } });
   const d = await triage({ run, repo: "/r", task: "fix the typo in README" });
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.role, "triager");
   assert.ok(calls[0]!.prompt.includes("fix the typo in README"));
-  assert.deepEqual([d.mode, d.source, d.costUsd], ["plain", "triage", 0.04]);
+  assert.deepEqual([d.mode, d.source, d.tokens], ["plain", "triage", 40]);
   assert.equal(d.facts!.reason, "typo");
 });
 
@@ -158,7 +158,8 @@ test("triage: failure or invalid output falls back to the full pipeline", async 
   assert.match(failed.reason, /error_max_turns/);
   const invalid = await triage({ ...runWith({ structured: { nope: 1 } }), repo: "/r", task: "t" });
   assert.deepEqual([invalid.mode, invalid.source], ["orchestrate", "fallback"]);
-  assert.equal(invalid.costUsd, 0.04, "a failed triage still costs money");
+  assert.equal(invalid.tokens, 40, "a failed triage still reports its tokens");
+  assert.equal(failed.tokens, 40, "so does a failed worker");
 });
 
 test("triage: a folder that is not a git repository works, and neither triage nor the route decision calls git", async () => {

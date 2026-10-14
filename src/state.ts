@@ -7,10 +7,10 @@ import type { AgentResult } from "./agent.js";
 /** Second-resolution timestamp plus a random suffix: two runs in one second must not share branch names. */
 export const newRunId = () => `${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomBytes(2).toString("hex")}`;
 
-/** One run's directory: telemetry log, saved artifacts, and the running cost total. */
+/** One run's directory: telemetry log, saved artifacts, and the running token total. */
 export class Run {
   readonly dir: string;
-  spentUsd = 0;
+  spentTokens = 0;
   private byRole: Partial<Record<Role, number>> = {};
 
   constructor(readonly id: string, outRoot: string) {
@@ -18,12 +18,12 @@ export class Run {
     mkdirSync(this.dir, { recursive: true });
   }
 
-  /** Record a worker's cost and append a telemetry line. */
+  /** Record a worker's tokens and append a telemetry line. */
   charge(role: Role, label: string, res: AgentResult) {
-    // A missing or NaN cost must not poison the total: NaN would make every budget check pass.
-    const cost = Number.isFinite(res.costUsd) ? res.costUsd : 0;
-    this.spentUsd += cost;
-    this.byRole[role] = (this.byRole[role] ?? 0) + cost;
+    // A missing or NaN count must not poison the total: NaN would make every budget check pass.
+    const tokens = Number.isFinite(res.tokens) ? res.tokens : 0;
+    this.spentTokens += tokens;
+    this.byRole[role] = (this.byRole[role] ?? 0) + tokens;
     const { text, structured, ...meta } = res;
     appendFileSync(
       join(this.dir, "telemetry.jsonl"),
@@ -31,11 +31,11 @@ export class Run {
     );
   }
 
-  overBudget(limitUsd: number) {
-    return this.spentUsd >= limitUsd;
+  overBudget(limitTokens: number) {
+    return this.spentTokens >= limitTokens;
   }
 
-  costByRole() {
+  tokensByRole() {
     return { ...this.byRole };
   }
 

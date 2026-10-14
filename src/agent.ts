@@ -1,5 +1,6 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { LIMITS, ROLES, type Role } from "./config.js";
+import { totalTokens, usageFromResult, type TokenUsage } from "./tokens.js";
 
 export interface AgentRequest {
   role: Role;
@@ -13,7 +14,9 @@ export interface AgentResult {
   ok: boolean;
   text: string;
   structured?: unknown;
-  costUsd: number;
+  /** Total tokens of the worker: input + output + cache read + cache write, over every model it used. */
+  tokens: number;
+  usage?: TokenUsage;
   turns: number;
   subtype: string;
   durationMs: number;
@@ -29,9 +32,9 @@ export const runAgent: RunAgent = async (req) => {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), LIMITS.workerTimeoutMs);
   const started = Date.now();
-  // A worker that died mid-stream reports no cost; runs are bounded by turns and timeouts, not dollars.
+  // A worker that died mid-stream reports no tokens; runs are bounded by turns and timeouts unless a token budget is set.
   const fail = (subtype: string, text: string): AgentResult => ({
-    ok: false, text, costUsd: 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
+    ok: false, text, tokens: 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
   });
 
   try {
@@ -55,8 +58,10 @@ export const runAgent: RunAgent = async (req) => {
 
     for await (const msg of stream) {
       if (msg.type !== "result") continue;
+      const usage = usageFromResult(msg);
       const common = {
-        costUsd: msg.total_cost_usd,
+        tokens: totalTokens(usage),
+        usage,
         turns: msg.num_turns,
         subtype: msg.subtype,
         durationMs: Date.now() - started,
