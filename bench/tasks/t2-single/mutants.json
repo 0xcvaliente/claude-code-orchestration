@@ -1,0 +1,6 @@
+[
+  {"name": "no start anchor", "file": "duration.js", "from": "/^(?:(\\d+)d)?", "to": "/(?:(\\d+)d)?"},
+  {"name": "empty string accepted", "file": "duration.js", "from": " || str === \"\"", "to": ""},
+  {"name": "hour factor wrong", "file": "duration.js", "from": "h * 3600", "to": "h * 3660"},
+  {"name": "hours may repeat", "file": "duration.js", "from": "(?:(\\d+)h)?", "to": "(?:(\\d+)h)*"}
+]

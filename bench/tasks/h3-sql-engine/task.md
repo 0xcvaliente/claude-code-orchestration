@@ -1,0 +1,3 @@
+Implement the `minisql` package described in SPEC.md: an in-memory SQL engine in pure Python (standard library only) that matches SQLite's results for the specified SQL subset. The stub is in minisql/__init__.py; write the implementation under minisql/.
+
+- Public example tests: `python3 tests/run_public.py` (they compare against SQLite via tests/oracle.py). A hidden suite of about 320 different tests determines your score. It uses the same mechanism with different data and queries, and covers every section of SPEC.md, including window functions, DML and constraints, error cases, randomized expression fuzzing, and the performance requirements.

@@ -1,0 +1,6 @@
+[
+  {"name": "slugify does not collapse runs", "file": "slugify.js", "from": "replace(/[^a-z0-9]+/g, \"-\")", "to": "replace(/[^a-z0-9]/g, \"-\")"},
+  {"name": "slugify keeps trailing dash", "file": "slugify.js", "from": "replace(/^-+|-+$/g, \"\")", "to": "replace(/^-+/g, \"\")"},
+  {"name": "slugify does not strip accents", "file": "slugify.js", "from": "str.normalize(\"NFD\")", "to": "str"},
+  {"name": "capitalize lowercases the rest", "file": "capitalize.js", "from": "str.slice(1)", "to": "str.slice(1).toLowerCase()"}
+]

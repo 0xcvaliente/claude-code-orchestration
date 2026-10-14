@@ -1,0 +1,2 @@
+{"run_id":"run-a","task":"t2-single","arm":"plain","cell":"c1","rep":1,"cap_min":10,"wall_ms":95000,"end_reason":"done","dir":"/nonexistent/a"}
+{"run_id":"run-b","task":"t2-single","arm":"orch","cell":"c2","rep":1,"cap_min":10,"wall_ms":60400,"end_reason":"done","dir":"/nonexistent/b"}
