@@ -23,7 +23,7 @@ Options:
 
 - `--repeat N` (default 1) runs each task and variant N times. Rows carry `rep`.
 - `--timeout <sec>` (default 3600) kills the agent's whole process group after that long.
-- `--snapshot-every <sec>` (default off) copies the run directory (without `.git`, `node_modules`, `.claude`) to `<out>/snapshots/<stamp>/<task>-<variant>-<rep>/t<secs>` at that interval. After the run, every snapshot and the final tree are scored. The row gets `timeline` (`[secs, passed]` pairs) and `first_pass_s` (first passing snapshot, or null).
+- `--snapshot-every <sec>` (default off) copies the run directory (without `.git`, `node_modules`, `.claude`) to `<out>/snapshots/<stamp>/<task>-<variant>-<rep>/t<secs>` at that interval. After the run, every snapshot and the final tree are scored. The row gets `timeline` (`[seconds, tests passed]` pairs) and `first_pass_s` (first passing snapshot, or null).
 
 A task may carry `setup/` (copied into the run repo before the first commit) and `score.mjs` (exports `score(runDir)` and replaces `node --test hidden.test.js`). `--validate` uses the same scorer: the stub-only repo must fail and `ref/` must pass.
 
@@ -77,7 +77,7 @@ An Opus orchestrator (plugin 0.1.1) against a plain Opus session on the minisql 
 
 - Both arms reached 322/322 at the first scored snapshot (6:01), so the task saturated in about 6 minutes and the rest of the time measured polish, not correctness.
 - The orchestrator took the light path: one Sonnet implementer and 5 implement-review rounds. Most of its cost was the Sonnet implementer.
-- The review gate recorded no status for 10 of 13 subagent stops. That is fixed in this change.
+- The review gate recorded no status for 10 of 13 subagent stops. The fix lives in plugin 0.1.2: its telemetry hook reads the status from the subagent's SubagentHandback message in its transcript. It ships in the same release as this benchmark change.
 - With one run per arm, the cost gap ($2.87 against $4.80) and the time gap are not evidence of a difference. Use `--repeat` and `--snapshot-every` to measure it.
 
 ## Live checks of the router (2026-10-14)
