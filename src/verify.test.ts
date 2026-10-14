@@ -125,6 +125,22 @@ test("orchestrate.sh dry run: ORCH_BUDGET_TOKENS becomes --max-budget-usd, a bad
   assert.equal(old.stdout, "");
 });
 
+test("auto.sh: a set ORCH_BUDGET_USD or a bad ORCH_BUDGET_TOKENS exits 1 before triage or any model call", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({ session: '{"result":"must not run"}', route: { mode: "plain", source: "forced", reason: "stub", tokens: 0 } });
+  for (const [env, message] of [
+    [{ ORCH_BUDGET_USD: "5" }, /ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS \(a token count such as 2M\)/],
+    [{ ORCH_BUDGET_TOKENS: "abc" }, /ORCH_BUDGET_TOKENS must be a token count of at least 10k, such as 500000, 500k or 2M \(got abc\)/],
+  ] as const) {
+    const r = runAuto(repo, t.bin, { ORCH_BUDGET_USD: "", ORCH_BUDGET_TOKENS: "", ...env });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, message);
+    assert.doesNotMatch(r.stderr, /^route:/m, "the fake route tool was not called");
+    assert.equal(r.stdout, "");
+  }
+  assert.equal(t.calls().length, 0, "no model call");
+});
+
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
   const repo = withAgents(tmp());
   mkdirSync(join(repo, "tests"));
