@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 730" width="860" height="730" role="img" aria-labelledby="dc-8821694e01-title dc-8821694e01-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="dc-8821694e01-title">Pipeline: plan, then build each slice behind two gates</title>
+<desc id="dc-8821694e01-desc">Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch.</desc>
+<defs><marker id="dc-8821694e01-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
+<rect width="860" height="730" fill="#0d1117" aria-hidden="true"/>
+<rect x="14" y="24" width="312" height="416" rx="8" fill="none" stroke="#656c76" stroke-dasharray="4 4"/>
+<text x="30" y="48" font-size="13" font-weight="600" fill="#9198a1" text-anchor="start"><tspan x="30" dy="0">Plan</tspan></text>
+<rect x="354" y="24" width="312" height="416" rx="8" fill="none" stroke="#656c76" stroke-dasharray="4 4"/>
+<text x="370" y="48" font-size="13" font-weight="600" fill="#9198a1" text-anchor="start"><tspan x="370" dy="0">Each slice, in parallel</tspan></text>
+<polyline data-edge="e-explore" points="170,154 170,204" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-plan" points="170,288 170,338" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-write" points="310,380 340,380 340,112 370,112" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-test" points="510,154 510,204" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-pass-test" points="510,288 510,338" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-pass-verify" points="510,422 510,480" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-result" points="510,564 510,614" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)"/>
+<polyline data-edge="e-fail" points="650,246 710,246 710,140 650,140" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="e-gaps" points="650,380 800,380 800,100 650,100" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8821694e01-arrow)" stroke-dasharray="6 5"/>
+<g id="dc-8821694e01-node-questions" data-node="questions" data-x="30" data-y="70" data-w="280" data-h="84">
+<rect x="30" y="70" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="48" y="109.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="questions"><tspan x="48" dy="0">Plan questions</tspan></text>
+<text x="48" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="questions"><tspan x="48" dy="0">Opus, read-only</tspan></text>
+</g>
+<g id="dc-8821694e01-node-explore" data-node="explore" data-x="30" data-y="204" data-w="280" data-h="84">
+<rect x="30" y="204" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="48" y="243.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="explore"><tspan x="48" dy="0">Explore</tspan></text>
+<text x="48" y="269.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="explore"><tspan x="48" dy="0">Haiku, parallel, read-only</tspan></text>
+</g>
+<g id="dc-8821694e01-node-plan" data-node="plan" data-x="30" data-y="338" data-w="280" data-h="84">
+<rect x="30" y="338" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="48" y="368.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="plan"><tspan x="48" dy="0">Plan slices</tspan></text>
+<text x="48" y="394.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="plan"><tspan x="48" dy="0">Up to 6, disjoint files, one</tspan><tspan x="48" dy="18">acceptance check each</tspan></text>
+</g>
+<g id="dc-8821694e01-node-write" data-node="write" data-x="370" data-y="70" data-w="280" data-h="84">
+<rect x="370" y="70" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="388" y="109.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="write"><tspan x="388" dy="0">Write in parallel</tspan></text>
+<text x="388" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="write"><tspan x="388" dy="0">Sonnet, a worktree each</tspan></text>
+</g>
+<g id="dc-8821694e01-node-test" data-node="test" data-x="370" data-y="204" data-w="280" data-h="84">
+<rect x="370" y="204" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="388" y="243.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="test"><tspan x="388" dy="0">Test gate</tspan></text>
+<text x="388" y="269.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="test"><tspan x="388" dy="0">Runs your command; no model</tspan></text>
+</g>
+<g id="dc-8821694e01-node-verify" data-node="verify" data-x="370" data-y="338" data-w="280" data-h="84">
+<rect x="370" y="338" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="388" y="377.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="verify"><tspan x="388" dy="0">Verify</tspan></text>
+<text x="388" y="403.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="verify"><tspan x="388" dy="0">Fresh-context reviewer</tspan></text>
+</g>
+<g id="dc-8821694e01-node-integrate" data-node="integrate" data-x="370" data-y="480" data-w="280" data-h="84">
+<rect x="370" y="480" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="388" y="519.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="integrate"><tspan x="388" dy="0">Integrate</tspan></text>
+<text x="388" y="545.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="integrate"><tspan x="388" dy="0">Merge passing branches</tspan></text>
+</g>
+<g id="dc-8821694e01-node-result" data-node="result" data-x="370" data-y="614" data-w="280" data-h="84">
+<rect x="370" y="614" width="280" height="84" rx="6" fill="#0f2a4a" stroke="#4493f8" stroke-width="2"/>
+<text x="388" y="653.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="result"><tspan x="388" dy="0">Result branch</tspan></text>
+<text x="388" y="679.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="result"><tspan x="388" dy="0">orch/&lt;id&gt;/result</tspan></text>
+</g>
+<g data-label="e-pass-test" data-x="482" data-y="298" data-w="56" data-h="30"><rect x="482" y="298" width="56" height="30" rx="4" fill="#0d1117"/>
+<text x="490" y="317" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="start"><tspan x="490" dy="0">pass</tspan></text>
+</g>
+<g data-label="e-pass-verify" data-x="482" data-y="436" data-w="56" data-h="30"><rect x="482" y="436" width="56" height="30" rx="4" fill="#0d1117"/>
+<text x="490" y="455" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="start"><tspan x="490" dy="0">pass</tspan></text>
+</g>
+<g data-label="e-fail" data-x="684" data-y="170" data-w="52" data-h="30"><rect x="684" y="170" width="52" height="30" rx="4" fill="#0d1117"/>
+<text x="692" y="189" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="start"><tspan x="692" dy="0">fail</tspan></text>
+</g>
+<g data-label="e-gaps" data-x="770" data-y="300" data-w="60" data-h="30"><rect x="770" y="300" width="60" height="30" rx="4" fill="#0d1117"/>
+<text x="778" y="319" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="start"><tspan x="778" dy="0">gaps</tspan></text>
+</g>
+</svg>

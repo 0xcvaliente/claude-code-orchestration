@@ -1,0 +1,31 @@
+{
+  "title": "Pipeline: plan, then build each slice behind two gates",
+  "description": "Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch.",
+  "width": 860, "height": 730,
+  "regions": [
+    {"id": "r-plan", "label": "Plan", "x": 14, "y": 24, "w": 312, "h": 416},
+    {"id": "r-slice", "label": "Each slice, in parallel", "x": 354, "y": 24, "w": 312, "h": 416}
+  ],
+  "nodes": [
+    {"id": "questions", "label": "Plan questions", "detail": "Opus, read-only", "x": 30, "y": 70, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (planner)"]},
+    {"id": "explore", "label": "Explore", "detail": "Haiku, parallel, read-only", "x": 30, "y": 204, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (explorer)"]},
+    {"id": "plan", "label": "Plan slices", "detail": "Up to 6, disjoint files, one acceptance check each", "x": 30, "y": 338, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts:114 maxSlices"]},
+    {"id": "write", "label": "Write in parallel", "detail": "Sonnet, a worktree each", "x": 370, "y": 70, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (writer)"]},
+    {"id": "test", "label": "Test gate", "detail": "Runs your command; no model", "x": 370, "y": 204, "w": 280, "h": 84, "status": "observed", "sources": ["src/orchestrator.ts", "README.md#the-pipeline"]},
+    {"id": "verify", "label": "Verify", "detail": "Fresh-context reviewer", "x": 370, "y": 338, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (verifier)"]},
+    {"id": "integrate", "label": "Integrate", "detail": "Merge passing branches", "x": 370, "y": 480, "w": 280, "h": 84, "status": "observed", "sources": ["src/git.ts", "README.md#the-pipeline"]},
+    {"id": "result", "label": "Result branch", "detail": "orch/<id>/result", "x": 370, "y": 614, "w": 280, "h": 84, "emphasis": true, "status": "observed", "sources": ["README.md#what-a-run-leaves-behind"]}
+  ],
+  "edges": [
+    {"id": "e-explore", "from": "questions", "to": "explore", "points": [[170,154],[170,204]], "status": "observed"},
+    {"id": "e-plan", "from": "explore", "to": "plan", "points": [[170,288],[170,338]], "status": "observed"},
+    {"id": "e-write", "from": "plan", "to": "write", "points": [[310,380],[340,380],[340,112],[370,112]], "status": "observed"},
+    {"id": "e-test", "from": "write", "to": "test", "points": [[510,154],[510,204]], "status": "observed"},
+    {"id": "e-pass-test", "from": "test", "to": "verify", "points": [[510,288],[510,338]], "label": "pass", "label_at": [482,298], "label_w": 56, "status": "observed"},
+    {"id": "e-pass-verify", "from": "verify", "to": "integrate", "points": [[510,422],[510,480]], "label": "pass", "label_at": [482,436], "label_w": 56, "status": "observed"},
+    {"id": "e-result", "from": "integrate", "to": "result", "points": [[510,564],[510,614]], "status": "observed"},
+    {"id": "e-fail", "from": "test", "to": "write", "points": [[650,246],[710,246],[710,140],[650,140]], "style": "dashed", "label": "fail", "label_at": [684,170], "label_w": 52, "status": "observed", "sources": ["README.md: retries carry the failing output"]},
+    {"id": "e-gaps", "from": "verify", "to": "write", "points": [[650,380],[800,380],[800,100],[650,100]], "style": "dashed", "label": "gaps", "label_at": [770,300], "label_w": 60, "status": "observed", "sources": ["README.md: up to 2 retries (--retries)"]}
+  ],
+  "notes": ["Retries (dashed) carry the failing output or the reviewer's gaps back to the same slice, up to --retries (default 2)."]
+}

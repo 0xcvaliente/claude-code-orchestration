@@ -73,18 +73,10 @@ claude --agent orchestrator
 
 Every task goes through triage. The three routes differ in how much machinery they use.
 
-```mermaid
-flowchart TD
-    T([Your task]) --> TR{{"Triage<br/>Sonnet, read-only<br/>about $0.05"}}
-    TR -->|"small or sequential"| P["Plain session<br/>one agent"]
-    TR -->|"small but risky"| R["Plain session<br/>+ fresh reviewer"]
-    TR -->|"parallel, large or risky"| O["Pipeline<br/>orchestrator + workers"]
-    P --> C{"Checks<br/>pass?"}
-    R --> C
-    C -->|yes| W(["Uncommitted edits<br/>in your working tree"])
-    C -.->|"no: escalate"| O
-    O --> B(["Branches orch/id/*"])
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/routes-dark.svg">
+  <img alt="Triage sends a task to a plain session, a plain session plus a fresh reviewer, or the pipeline. Plain and reviewed runs leave uncommitted edits when their checks pass; when checks fail, the task escalates to the pipeline, which leaves git branches." src="docs/diagrams/routes-light.svg">
+</picture>
 
 | Route | What runs | Result lands in | Verified by |
 |---|---|---|---|
@@ -92,22 +84,14 @@ flowchart TD
 | Reviewed | The same, then one fresh-context reviewer; its issues go back to the session (up to `--retries` times). In the headless `npm run auto` the reviewer is read-only but may run the repo's detected test command (pytest, cargo, go ...) | Uncommitted working tree | Tests plus the reviewer |
 | Pipeline | Planner, researchers, implementers in worktrees, verifiers, integrator | Git branches; your checkout is untouched | Tests, a verifier per slice, merge check |
 
-The dotted arrow is **escalation**: if a triaged plain or reviewed run fails its checks (tests, plus the review on the reviewed route), the task reruns through the pipeline. The failed attempt's edits stay uncommitted in your working tree and are never reverted, because they may sit beside your own changes; the pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off, and a forced `--mode` never escalates.
+The dashed arrow is **escalation**: if a triaged plain or reviewed run fails its checks (tests, plus the review on the reviewed route), the task reruns through the pipeline. The failed attempt's edits stay uncommitted in your working tree and are never reverted, because they may sit beside your own changes; the pipeline works from `HEAD` in worktrees. `--no-escalate` (native: `ORCH_NO_ESCALATE=1`) turns it off, and a forced `--mode` never escalates.
 
 ## The pipeline
 
-```mermaid
-flowchart TD
-    A["Plan questions<br/>Opus, read-only"] --> B["Explore in parallel<br/>Haiku, read-only"]
-    B --> C["Plan up to 6 slices<br/>disjoint files<br/>one acceptance check each"]
-    C --> D["Write in parallel<br/>Sonnet, one worktree each"]
-    D --> E{{"Test gate<br/>your command, no model"}}
-    E -->|pass| F{{"Verify<br/>fresh-context reviewer"}}
-    F -->|pass| G["Integrate<br/>merge passing branches<br/>never pushes"]
-    G --> H(["Result branch<br/>orch/id/result"])
-    E -.->|fail| D
-    F -.->|gaps| D
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/pipeline-dark.svg">
+  <img alt="Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch." src="docs/diagrams/pipeline-light.svg">
+</picture>
 
 Why each step is shaped this way:
 
@@ -115,25 +99,15 @@ Why each step is shaped this way:
 - **Fresh contexts.** Workers start with no history. They get a brief and return a short report, so the orchestrator's context stays small.
 - **A gate that does not trust the agent.** The test command runs in the harness, not inside the model, and a failing run costs no verifier call.
 - **A verifier that did not write the code.** It sees the diff and the goal, not the implementer's reasoning.
-- **Retries carry feedback.** A rejected slice (the dotted arrows) goes back to a writer with the failing output or the reviewer's gaps, up to 2 times (`--retries`).
+- **Retries carry feedback.** A rejected slice (the dashed arrows) goes back to a writer with the failing output or the reviewer's gaps, up to 2 times (`--retries`).
 - **Disjoint files per slice.** Parallel slices never edit the same file, so merges are clean. A slice that needs another's output lists it in `dependsOn` and starts from a worktree that already contains it.
 
 One slice's life:
 
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> Writing
-    Writing --> Testing: done
-    Testing --> Writing: tests fail
-    Testing --> Reviewing: tests pass
-    Reviewing --> Writing: gaps
-    Reviewing --> Passed: pass
-    Passed --> Merged: integrated
-    Merged --> [*]
-    Writing --> Failed: retries used up
-    Failed --> Replaced: replanned
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/slice-lifecycle-dark.svg">
+  <img alt="A planned slice is written, tested and reviewed. Failing tests or review gaps send it back to writing. A slice that passes review is merged into the result branch; one that uses up its retries fails and may be replaced by a replan." src="docs/diagrams/slice-lifecycle-light.svg">
+</picture>
 
 ### The roles
 
@@ -168,18 +142,10 @@ Branches `orch/<id>/<slice>` hold each slice and `orch/<id>/result` holds the me
 
 The triager only reports four facts about a task: how many files it will touch, how many lines it will change, how many parts could be built independently, and whether it is risky. The decision is then plain code, so it is testable and tunable without a model.
 
-```mermaid
-flowchart TD
-    S([Facts from the triager]) --> Q1{"Risky?"}
-    Q1 -->|yes| Q2{"Small?"}
-    Q1 -->|no| Q3{"12+ files?"}
-    Q2 -->|yes| REV["Reviewed"]
-    Q2 -->|no| ORC["Pipeline"]
-    Q3 -->|yes| ORC
-    Q3 -->|no| Q4{"Parallel?"}
-    Q4 -->|yes| ORC
-    Q4 -->|no| PLA["Plain"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/triage-dark.svg">
+  <img alt="A risky task goes to the reviewed route when it is small, otherwise to the pipeline. A task that is not risky goes to the pipeline when it touches 12 or more files or splits into parallel slices, and to a plain session otherwise." src="docs/diagrams/triage-light.svg">
+</picture>
 
 *Small* is at most 3 files, at most 200 lines and one slice. *Parallel* is 2 or more independent slices and either 4 or more files or 1,500 or more lines. In full:
 
@@ -208,25 +174,10 @@ The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMax
 
 Natively, the gates are hooks that block an agent from finishing:
 
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant I as Implementer
-    participant V as verify.sh<br/>SubagentStop
-    participant R as Reviewer
-    participant G as review-gate.mjs<br/>Stop
-    O->>I: brief: goal, files, check
-    I-->>V: tries to finish
-    alt tests fail
-        V-->>I: blocked, with test output
-    else tests pass
-        V-->>O: allowed
-    end
-    O->>R: review the slice
-    R-->>O: STATUS: pass or fail
-    O->>G: final reply
-    G-->>O: blocked until a reviewer passes<br/>the last implementer
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/gates-sequence-dark.svg">
+  <img alt="The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests: on failure it blocks the implementer with the test output, on success the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator's final reply until a reviewer has passed the last implementer." src="docs/diagrams/gates-sequence-light.svg">
+</picture>
 
 The review gate reads the worker's `STATUS` from its last message or, when that is empty, from the `SubagentHandback` message or last text block in its transcript. A reviewer with no status at all blocks too (`last_reviewer_no_status`). The loop guard allows 2 blocks after each implementer run (a later implementer resets it); then the reply goes out with a `systemMessage` saying the work is unverified (`max_blocks_reached`), so the gate never gives up silently.
 
@@ -352,7 +303,7 @@ src/
 dist/plugin/                      the built plugin (committed)
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
                                   report.mjs, compare/ (the benchmark)
-docs/                             benchmarks.md, native-mode.md
+docs/                             benchmarks.md, native-mode.md, diagrams/
 orchestration/                    the original architecture diagram
 ```
 
@@ -365,5 +316,7 @@ npm run typecheck
 npm run check-agents   # agents in sync with src/config.ts
 npm run check-plugin   # committed plugin build is current
 ```
+
+The README diagrams are SVGs in `docs/diagrams/`, in a light and a dark version. To change one, edit its `*.scene.json` (or the sequence in `build.py`) and run `python3 docs/diagrams/build.py`; it uses the diagram-craft skill's renderer.
 
 Rules for contributors are in `CLAUDE.md` and `.claude/rules/agents.md`. In short: change models, effort and triage thresholds in `src/config.ts` and run `npm run sync-agents`; rebuild the plugin after touching agents, skills or hooks; the native orchestrator's "size the task first" step mirrors `TRIAGE`, so change both together.
