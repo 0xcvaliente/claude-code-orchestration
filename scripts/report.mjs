@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-// Renders a repo's state dir (runs, agent events, triage and gate decisions) as a local HTML report.html in that dir.
+// Renders a repo's logs (runs, agent events, triage and gate decisions) as a local HTML report.html.
 // Usage: node scripts/report.mjs [repo]   (repo defaults to the current directory). Nothing is published.
-// Reads <repo>/.claude/state when it has telemetry, else the per-user dir the plugin hooks log to for that repo
-// (.claude/hooks/state.mjs), so a plugin install's report stays out of the repo too. With no logs anywhere it
-// writes an empty report where this repo's writers would log.
+// Each log is read from the first dir that has it: <repo>/.claude/state, then the per-user dirs the plugin hooks log
+// to for that repo (.claude/hooks/state.mjs). A headless run with the plugin's agents splits them: runs.jsonl and
+// auto.sh's routes.jsonl in the repo, telemetry.jsonl and gates.jsonl in the per-user dir. report.html goes in the
+// first dir with telemetry or runs, else routes or gates, so a plugin install's report stays out of the repo too; the
+// page holds no hook payloads. With no logs anywhere it writes an empty report where this repo's writers would log.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
@@ -16,19 +18,22 @@ const dir =
   candidates.find(has(["routes.jsonl", "gates.jsonl"])) ??
   stateDirFor(repo).dir;
 
-const read = (name) =>
-  existsSync(join(dir, name))
-    ? readFileSync(join(dir, name), "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .flatMap((l) => {
-          try {
-            return [JSON.parse(l)];
-          } catch {
-            return [];
-          }
-        })
-    : [];
+const sources = new Map(); // dir -> the logs read from it
+const read = (name) => {
+  const from = candidates.find(has([name]));
+  if (!from) return [];
+  (sources.get(from) ?? sources.set(from, []).get(from)).push(name);
+  return readFileSync(join(from, name), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+};
 
 const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const runs = read("runs.jsonl");
@@ -57,9 +62,12 @@ const sessions = [...bySession.entries()]
   })
   .join("");
 
+// Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".
+const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</code> (${names.join(", ")})`).join("; ") : `<code>${esc(dir)}</code>`;
+
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orchestration report</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #8884;padding:.4rem .6rem;text-align:left;font-size:13px}th{font-weight:600}</style></head>
-<body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: <code>${esc(dir)}</code></p>
+<body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Cost USD</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}
@@ -68,3 +76,4 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 mkdirSync(dir, { recursive: true });
 writeFileSync(join(dir, "report.html"), html);
 console.log(`wrote ${join(dir, "report.html")} (${runs.length} runs, ${events.length} events, ${routes.length} routes, ${gates.length} gates)`);
+for (const [d, names] of sources) if (d !== dir) console.log(`also read ${names.join(", ")} from ${d}`);
