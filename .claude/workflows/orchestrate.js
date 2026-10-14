@@ -1,7 +1,7 @@
 export const meta = {
   name: 'orchestrate',
   description: 'Plan a task, build slices with the implementer agent, review each with a fresh reviewer, merge isolated code branches',
-  whenToUse: 'A task (code, research, writing, analysis or operations) that splits into slices, each with an acceptance check: a runnable command for code, a checklist a reviewer can verify otherwise. Pass code: false for anything that is not code in a git repository. The script, not the model, fixes the order.',
+  whenToUse: 'A task (code, research, writing, analysis or operations) that splits into slices, each with an acceptance check: a runnable command for code, a checklist a reviewer can verify otherwise. Pass code: false when the task changes no code (research, writing, analysis, operations): its slices then share the folder and run in parallel. The script, not the model, fixes the order.',
   phases: [
     { title: 'Plan', detail: 'questions, then slices' },
     { title: 'Explore', detail: 'researcher agents in parallel' },
@@ -11,15 +11,18 @@ export const meta = {
 }
 
 // args: { task: string, maxSlices?: number, maxRetries?: number, baseRefHead?: boolean, code?: boolean }
-//   code: true (the default) = code in a git repository: parallel waves run in worktrees (when baseRefHead), after a
-//     checkpoint commit, and the integrator merges them. false = research, writing, analysis or operations: no
-//     worktrees, checkpoint or integrator, nobody commits, and the slices of a wave run at the same time in the
-//     shared folder (their files are disjoint and no tests run).
+//   code: true (the default) = the task changes code: a parallel wave runs in worktrees, after a checkpoint commit and
+//     merged by the integrator, only when baseRefHead is true; otherwise its slices run one at a time in the shared
+//     folder, because each implementer's test gate runs the whole suite and parallel siblings would fail each other's.
+//     Pass baseRefHead only for a git repository whose worktree.baseRef is "head": code outside git runs one at a time.
+//     false = the task changes no code (research, writing, analysis, operations): no worktrees, checkpoint or
+//     integrator, nobody commits, and the slices of a wave run at the same time in the shared folder (their output
+//     files are disjoint and none is code, so one slice's files cannot fail another slice's checks).
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
 const MAX_SLICES = (args && args.maxSlices) || 6
 const MAX_RETRIES = (args && args.maxRetries) || 2
-// true when settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
+// true only for a git repository whose settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
 const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
 const CODE = !(args && args.code === false)
 
@@ -121,12 +124,13 @@ while (left.length) {
 const results = []
 const sharedFiles = []
 for (const wave of waves) {
-  // Isolate only parallel slices of code in git. Worktrees see only committed work, and only from the local HEAD
-  // when baseRefHead is true. Without it, a wave after shared-tree work runs in the shared tree, one slice at a time.
-  // Without code there are no worktrees, checkpoint or integrator: the wave runs in the shared folder (below).
+  // Isolate only parallel slices of code, and only with baseRefHead (callers pass it for a git repository whose
+  // worktree.baseRef is "head"): worktrees see only committed work, and only from the local HEAD then. Otherwise a code
+  // wave runs in the shared tree, one slice at a time. A task that changes no code has no worktrees, checkpoint or
+  // integrator: its wave runs in the shared folder (below).
   let isolated = CODE && wave.length > 1 && BASE_REF_HEAD
   if (CODE && wave.length > 1 && !BASE_REF_HEAD) {
-    log(`wave ${wave.map((s) => s.id).join(', ')}: worktree.baseRef is not "head", so worktrees would branch from the remote default branch; running one after another in the shared tree`)
+    log(`wave ${wave.map((s) => s.id).join(', ')}: baseRefHead is not set (worktree.baseRef is not "head", so worktrees would branch from the remote default branch, or this is not a git repository); running one after another in the shared tree`)
   }
   if (isolated) {
     // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
@@ -180,9 +184,9 @@ for (const wave of waves) {
       }
       return { slice: s, status: 'failed', attempts: MAX_RETRIES + 1, branch: (work && work.branch) || '', gaps: feedback ? [feedback] : [] }
   }
-  // Isolated slices run at the same time in their own worktrees. Without code the files of a wave are disjoint and
-  // no tests run, so its slices share the folder and also run at the same time. Code in the shared tree goes one at
-  // a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
+  // Isolated slices run at the same time in their own worktrees. Without code the output files of a wave are disjoint
+  // and none is code, so its slices share the folder and also run at the same time. Code in the shared tree goes one
+  // at a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
   let out
   if (isolated || wave.length === 1 || !CODE) {
     out = await pipeline(wave, runSlice)
