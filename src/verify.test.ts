@@ -380,22 +380,26 @@ function reviewedWith(reply: string) {
   return { status: r.status, verdict: /^review: (\S+)$/m.exec(r.stderr)?.[1], stderr: r.stderr };
 }
 
-test("auto.sh reads the reviewer's verdict from the first line of its reply, so a quoted report cannot pass the run", () => {
+test("auto.sh takes the reviewer's verdict from its first STATUS line: a preamble is fine, a quoted report is not a verdict", () => {
   // The reviewer's prompt contains the session's report, which may say STATUS: pass itself.
   const failing = [
-    "The session reported: STATUS: pass\nGAPS: none\nEVIDENCE: nothing run", // quotes the report first
-    "I read notes.md.\n\nSTATUS: pass\nGAPS: none", // the verdict is not the start of the reply
-    "STATUS: fail\nGAPS: notes.md cites no source\nThe session reported STATUS: pass.", // the first line wins
-    "STATUS: pass or STATUS: fail", // the template, not a verdict
-    "> STATUS: fail", // a quote or emphasis does not turn a fail into anything else
+    "The session reported: STATUS: pass\nLooks fine.", // no line starts with STATUS: quoting the report is not a verdict
+    "The session reported: STATUS: pass\nSTATUS: fail\nGAPS: notes.md cites no source", // the reviewer's own line says fail
+    "STATUS: fail\nGAPS: notes.md cites no source\nSTATUS: pass", // the first STATUS line wins, not the last
+    "STATUS: pass or fail", // the format template, not a verdict
   ];
   for (const reply of failing) {
     const v = reviewedWith(reply);
     assert.notEqual(v.status, 0, `${JSON.stringify(reply)} must fail the run`);
     assert.equal(v.verdict, "fail", JSON.stringify(reply));
   }
-  // Emphasis, a quote and blank lines before the verdict are fine.
-  const passing = ["**STATUS: pass**\nGAPS: none", "\n  > STATUS: pass\nGAPS: none", "STATUS: pass\nGAPS: none\nEVIDENCE: read notes.md"];
+  // A short preamble, emphasis, a quote, indentation and blank lines before the verdict are fine.
+  const passing = [
+    "Review complete.\n\nSTATUS: pass",
+    "**STATUS: pass**\nGAPS: none",
+    "\n  > STATUS: pass\nGAPS: none",
+    "Earlier I noted STATUS: fail for the draft; the final report fixes it.\n\nSTATUS: pass\nGAPS: none", // mid-line mentions do not count
+  ];
   for (const reply of passing) {
     const v = reviewedWith(reply);
     assert.equal(v.status, 0, `${JSON.stringify(reply)} passes: ${v.stderr}`);
