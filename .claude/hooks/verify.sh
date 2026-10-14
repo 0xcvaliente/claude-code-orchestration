@@ -5,7 +5,9 @@
 # may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
 # block (gate as usual), skip (do not run tests).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
-# Every decision is appended to .claude/state/gates.jsonl so a run can show whether the gate fired.
+# Every decision is appended to gates.jsonl in the state dir (the same rule as state.mjs) so a run can show
+# whether the gate fired. Unlike the other hooks this one needs no duplicate check: the project matcher
+# (^implementer$) and the plugin's (orchestration:implementer) never fire for the same agent.
 set -u
 
 # shellcheck source=test-cmd.sh
@@ -14,12 +16,25 @@ source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
 
+# State dir: <project>/.claude/state, or for the plugin copy (--plugin) a per-user dir keyed by the project
+# path, unless the project registers its own telemetry hook (then every copy shares the project's log).
+state="$project/.claude/state"
+in_project=1
+if [ "${1:-}" = --plugin ] && ! { [ -f "$project/.claude/hooks/telemetry.mjs" ] &&
+  grep -qsF .claude/hooks/telemetry.mjs "$project/.claude/settings.json" "$project/.claude/settings.local.json"; }; then
+  in_project=0
+  key="$(printf '%s' "$project" | LC_ALL=C tr -c 'A-Za-z0-9' '-')"
+  [ "${#key}" -gt 200 ] && key="${key: -200}"
+  state="${CLAUDE_PLUGIN_DATA:-${HOME:-}/.claude/orchestration}/state/$key"
+fi
+
 MAX_BLOCKS=2 # per agent; the cap is the loop guard, so a still-failing agent is rechecked, not waved through
 
 log_gate() { # decision reason
-  mkdir -p "$project/.claude/state" 2>/dev/null || return 0
+  mkdir -p "$state" 2>/dev/null || return 0
+  [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" >> "$project/.claude/state/gates.jsonl" 2>/dev/null || true
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" >> "$state/gates.jsonl" 2>/dev/null || true
 }
 
 agent_type="$(printf '%s' "$input" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
@@ -75,8 +90,8 @@ if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
 fi
 
 blocks=0
-if [ -n "$agent_id" ] && [ -f "$project/.claude/state/gates.jsonl" ]; then
-  blocks="$(grep -c "\"decision\":\"block\".*\"agent_id\":\"$agent_id\"" "$project/.claude/state/gates.jsonl" 2>/dev/null || true)"
+if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
+  blocks="$(grep -c "\"decision\":\"block\".*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   log_gate allow max_blocks_reached
