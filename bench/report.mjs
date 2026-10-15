@@ -108,7 +108,7 @@ function processRows(s) {
           arm,
           String(median(rs.map((r) => r.subagent_count)) ?? 0),
           countStr(types),
-          String(Math.max(0, ...rs.map((r) => r.max_concurrent_subagents ?? 0))),
+          rs.some((r) => typeof r.max_concurrent_subagents === "number") ? String(Math.max(0, ...rs.map((r) => r.max_concurrent_subagents ?? 0))) : "n/a",
           String(median(rs.map((r) => r.worktrees)) ?? 0),
           String(median(rs.map((r) => r.reviewer_rounds)) ?? 0),
           countStr(gates),
@@ -120,19 +120,35 @@ function processRows(s) {
   }
   return rows;
 }
+// Per task: how many plain runs delegated to built-in subagents (from the result docs' subagent_stats).
+function delegationNotes(s) {
+  const inc = s.runs.filter((r) => !r.excluded && String(r.arm).startsWith("P-"));
+  return tasksIn(inc).map((task) => {
+    const rs = inc.filter((r) => r.task === task);
+    return `${task}: ${rs.filter((r) => r.self_delegated).length} of ${rs.length} plain runs delegated to built-in subagents.`;
+  });
+}
 const PROCESS_HEADS = ["Task", "Cell", "Setup", "Median subagents", "Subagents by type (all runs)", "Max concurrency", "Median worktrees", "Median reviewer rounds", "Gate decisions (all runs)", "AUTO routes", "Permission denials"];
 
 function honestyRows(s) {
   const inc = s.runs.filter((r) => !r.excluded);
+  const audited = inc.some((r) => r.claim_source === "audit");
   return armsIn(inc).map((arm) => {
     const rs = inc.filter((r) => r.arm === arm);
-    const by = (claim) => {
-      const xs = rs.filter((r) => r.claim === claim);
+    const by = (claim, field = "claim") => {
+      const xs = rs.filter((r) => r[field] === claim);
       return xs.length ? `${xs.length} (${xs.filter((r) => r.pass).length} passed)` : "0";
     };
     const outside = rs.filter((r) => Array.isArray(r.outside_graded) && r.outside_graded.length).length;
-    return [arm, String(rs.length), by("success"), by("partial"), by("failure"), by("unclear"), by("none"), String(rs.filter((r) => r.false_success).length), String(outside)];
+    const autoFalse = rs.filter((r) => r.claim_auto === "success" && r.pass === false).length;
+    const fs = rs.filter((r) => r.false_success).length;
+    if (!audited) return [arm, String(rs.length), by("success"), by("partial"), by("failure"), by("unclear"), by("none"), String(fs), String(outside)];
+    const both = (c) => `${by(c, "claim_auto")} auto / ${by(c)} audited`;
+    return [arm, String(rs.length), both("success"), both("partial"), both("failure"), both("unclear"), both("none"), `${autoFalse} auto / ${fs} audited`, String(outside)];
   });
+}
+function auditNotes(s) {
+  return s.runs.filter((r) => r.claim_source === "audit" && r.claim !== r.claim_auto).map((r) => `${r.run_id}: auto ${r.claim_auto}, audited ${r.claim}${r.claim_note ? `. ${r.claim_note}` : ""}`);
 }
 const HONESTY_HEADS = ["Setup", "Runs", "Claimed success", "Claimed partial", "Claimed failure", "Unclear claim", "No result text", "False successes", "Runs touching files outside graded paths"];
 
@@ -454,8 +470,8 @@ ${["opus", "sonnet", "haiku", "triage", "other"].map((m) => `.legend .m-${m}{bac
 <h3>Time-limit sweep</h3><div class="charts">${charts(sweepChart, big)}</div>
 <h3>Token caps</h3><div class="charts">${charts(budgetChart, big)}</div>
 
-<h2>Process</h2>${htmlTable(PROCESS_HEADS, processRows(s))}
-<h2>Claims vs results</h2>${htmlTable(HONESTY_HEADS, honestyRows(s))}
+<h2>Process</h2>${htmlTable(PROCESS_HEADS, processRows(s))}<ul>${delegationNotes(s).map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+<h2>Claims vs results</h2>${htmlTable(HONESTY_HEADS, honestyRows(s))}${auditNotes(s).length ? `<h3>Audit notes</h3><ul>${auditNotes(s).map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
 <h2>Failures and exclusions</h2>${htmlTable(FAILURE_HEADS, failureRows(s))}
 <h3>Retries</h3><p>${esc(retryNote(s))}</p>${retryRows(s).length ? htmlTable(RETRY_HEADS, retryRows(s)) : ""}
 <h2>Caveats</h2><ul>${caveats(s).map((c) => `<li>${esc(c)}</li>`).join("")}</ul>
@@ -478,7 +494,7 @@ export function renderMarkdown(s, { sources, htmlPath } = {}) {
     for (const cell of cellsIn(s.cells.filter((c) => c.task === t))) md += `**${cell}** (${CELL_TEXT[cell] ?? cell})\n\n${mdTable(resultHeads(s, t), resultsRows(s, t, cell))}\n`;
   }
   md += `### Comparisons with the baselines\n\n${mdTable(COMPARISON_HEADS, comparisonRows(s))}\n`;
-  md += `## Process\n\n${mdTable(PROCESS_HEADS, processRows(s))}\n## Claims vs results\n\n${mdTable(HONESTY_HEADS, honestyRows(s))}\n## Failures and exclusions\n\n${mdTable(FAILURE_HEADS, failureRows(s))}\n### Retries\n\n${retryNote(s)}\n\n${retryRows(s).length ? `${mdTable(RETRY_HEADS, retryRows(s))}\n` : ""}`;
+  md += `## Process\n\n${mdTable(PROCESS_HEADS, processRows(s))}\n${delegationNotes(s).map((n) => `- ${n}`).join("\n")}\n\n## Claims vs results\n\n${mdTable(HONESTY_HEADS, honestyRows(s))}\n${auditNotes(s).length ? `### Audit notes\n\n${auditNotes(s).map((n) => `- ${n}`).join("\n")}\n\n` : ""}## Failures and exclusions\n\n${mdTable(FAILURE_HEADS, failureRows(s))}\n### Retries\n\n${retryNote(s)}\n\n${retryRows(s).length ? `${mdTable(RETRY_HEADS, retryRows(s))}\n` : ""}`;
   md += `## Caveats\n\n${caveats(s).map((c) => `- ${c}`).join("\n")}\n`;
   return md;
 }
