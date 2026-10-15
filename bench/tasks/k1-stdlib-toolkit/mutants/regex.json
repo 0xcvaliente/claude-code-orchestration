@@ -1,0 +1,30 @@
+[
+  {
+    "id": "regex-m1-ignorecase-set-upper",
+    "file": "toolkit/regex.py",
+    "find": "return inset(ch) or inset(ch.lower()) or inset(ch.upper())",
+    "replace": "return inset(ch) or inset(ch.lower())",
+    "description": "IGNORECASE character sets stop matching a lowercase subject against an uppercase range"
+  },
+  {
+    "id": "regex-m2-no-lastindex",
+    "file": "toolkit/regex.py",
+    "find": "    lst[0] = g\n",
+    "replace": "",
+    "description": "closing a group no longer updates lastindex/lastgroup"
+  },
+  {
+    "id": "regex-m3-dollar-before-final-newline",
+    "file": "toolkit/regex.py",
+    "find": "return lambda s, i: i == len(s) or (i + 1 == len(s) and s[i] == \"\\n\")",
+    "replace": "return lambda s, i: i == len(s)",
+    "description": "$ without MULTILINE no longer matches before a trailing newline"
+  },
+  {
+    "id": "regex-m4-backref-case",
+    "file": "toolkit/regex.py",
+    "find": "            if ignore:\n                if s[i:i + n].lower() != s[a:b].lower():",
+    "replace": "            if False:\n                if s[i:i + n].lower() != s[a:b].lower():",
+    "description": "backreferences ignore IGNORECASE"
+  }
+]

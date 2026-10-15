@@ -1,0 +1,30 @@
+[
+  {
+    "id": "csv-m1-doublequote-read",
+    "file": "toolkit/csvx.py",
+    "find": "            if d.quoting != QUOTE_NONE and c == d.quotechar:\n                self._add(c)\n",
+    "replace": "            if d.quoting != QUOTE_NONE and c == d.quotechar:\n                pass\n",
+    "description": "reader drops the quote of a doubled quotechar inside a quoted field"
+  },
+  {
+    "id": "csv-m2-lineterminator-quoting",
+    "file": "toolkit/csvx.py",
+    "find": "c == \"\\n\" or c == \"\\r\" or c in d.lineterminator):",
+    "replace": "c == \"\\n\" or c == \"\\r\"):",
+    "description": "writer no longer quotes fields containing lineterminator characters"
+  },
+  {
+    "id": "csv-m3-nonnumeric-float",
+    "file": "toolkit/csvx.py",
+    "find": "            value = float(text)\n",
+    "replace": "            value = text\n",
+    "description": "QUOTE_NONNUMERIC/QUOTE_STRINGS reading keeps unquoted fields as strings"
+  },
+  {
+    "id": "csv-m4-delim-quote-check",
+    "file": "toolkit/csvx.py",
+    "find": "        _check_pair(\"delimiter\", \"quotechar\", delimiter, quotechar)\n",
+    "replace": "",
+    "description": "dialect validation accepts delimiter == quotechar"
+  }
+]
