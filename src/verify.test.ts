@@ -156,7 +156,7 @@ test("auto.sh: a set ORCH_BUDGET_USD or a bad ORCH_BUDGET_TOKENS exits 1 before 
 });
 
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
-  const repo = withAgents(tmp());
+  const repo = withAgents(join(tmp(), "a repo")); // a space in the path must still give one rule per line
   mkdirSync(join(repo, "tests"));
   writeFileSync(join(repo, "tests", "test_a.py"), "");
   // A fake claude records its arguments, one call per file, and answers STATUS: pass.
@@ -176,9 +176,11 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
   assert.ok(reviewer, "reviewer call recorded");
   assert.match(reviewer, /^Bash\(python3 \*\)$/m);
   assert.match(reviewer, /^Bash\(git diff\*\)$/m);
-  // git -C only in its read-only forms: reviewer.md tells reviewers to use git -C <path> diff with literal paths.
-  for (const sub of ["diff", "status", "log", "show"]) assert.ok(reviewer.split("\n").includes(`Bash(git -C * ${sub}*)`), sub);
-  assert.doesNotMatch(reviewer, /^Bash\(git -C \*\)$/m);
+  // git -C only in its read-only forms, pinned to this repo's absolute path: a wildcard before the subcommand would also
+  // match `git -C . commit -am diff`. reviewer.md tells reviewers to use git -C <path> diff with literal paths.
+  const repoAbs = realpathSync(repo);
+  for (const sub of ["diff", "status", "log", "show"]) assert.ok(reviewer.split("\n").includes(`Bash(git -C ${repoAbs} ${sub}*)`), sub);
+  assert.doesNotMatch(reviewer, /^Bash\(git -C \*/m);
   assert.doesNotMatch(reviewer, /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m);
 });
 
