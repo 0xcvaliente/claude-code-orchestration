@@ -1,0 +1,1 @@
+{"id":"t1-parallel","title":"Two independent modules","tier":"small","shape":"parallel","lang":"node","cap_min":10,"total":4,"test_cmd":null,"graded_paths":["."],"snapshot_every_s":30}

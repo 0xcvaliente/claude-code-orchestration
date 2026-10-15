@@ -1,0 +1,1 @@
+{"id":"h2-scheduler","title":"Job scheduler simulator","tier":"medium","shape":"splittable","lang":"node","cap_min":30,"total":13,"test_cmd":null,"graded_paths":["."],"snapshot_every_s":60}
