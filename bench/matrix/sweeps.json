@@ -1,0 +1,35 @@
+{
+  "name": "sweeps",
+  "seed": 1,
+  "groups": [
+    {
+      "tasks": [
+        "k1-stdlib-toolkit",
+        "h3-sql-engine"
+      ],
+      "arms": [
+        "P-O",
+        "O-mix"
+      ],
+      "cells": [
+        {
+          "id": "cap10",
+          "cap_min": 10
+        },
+        {
+          "id": "cap60",
+          "cap_min": 60
+        },
+        {
+          "id": "budget1M",
+          "budget_tokens": 1000000
+        },
+        {
+          "id": "budget3M",
+          "budget_tokens": 3000000
+        }
+      ],
+      "reps": 2
+    }
+  ]
+}
