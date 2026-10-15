@@ -18,20 +18,22 @@ It runs two ways with the same roles: as a TypeScript pipeline on the Claude Age
 
 ## Why a router
 
-Measured on seven coding tasks, five setups (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell (1 on k2) the results show direction only.
+Measured on seven coding tasks, five setups (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell the results show direction only. Ranges are per run; token ratios are per-task medians.
 
 | | Plain session (Sonnet or Opus) | Pipeline (shipped or all-Opus orchestrator) |
 |---|---|---|
 | Small and medium tasks (t1, t2, h1, h2): correctness | 100% on every run | 100% on every run (never better) |
-| Small and medium tasks: tokens | 126k to 457k | 166k to 812k: 1.2x to 2.1x a plain session of the same model family |
-| Small and medium tasks: wall time | 16s to 3 min | 36s to 5 min |
-| Large tasks (k1, h3, k2): correctness per run | k1 and h3: Opus 100%, Sonnet 98.6% to 99.9%. k2 (strict): Opus 100%, Sonnet 74.5% | k1 and h3: 99.0% to 100%. k2 (strict): 74.9% and 75.1% |
-| Large tasks: tokens | 1.6M to 13.4M | 3.2M to 8.4M: 0.7x to 2.0x on k1 and h3, 0.4x to 0.8x on k2 |
-| Large tasks: time to full score | plain Opus 4 to 8 min | 7 to 12 min, when reached |
+| Small and medium tasks: tokens | 126k to 490k | 166k to 1.09M: 1.2x to 2.1x a plain session of the same model family |
+| Small and medium tasks: wall time | 15s to 3.5 min | 34s to 6.1 min |
+| Large tasks (k1, h3, k2): correctness per run | k1 and h3: Opus 100%, Sonnet 98.6% to 99.9%. k2 (strict): Opus 100%, Sonnet 74.5% and 83.5% | k1 and h3: 99.0% to 100%. k2 (strict): 74.9% to 99.9%, never 100% |
+| Large tasks: tokens | 1.3M to 13.4M | 2.7M to 12.9M: 0.7x to 2.0x on k1 and h3, 0.7x to 0.9x on k2 |
+| Large tasks: time to full score | plain Opus 4 to 8 min | 6 to 12 min on k1 and h3, never on k2 |
 | Self-delegation | on k1 and k2 every plain run spawned Claude Code's built-in subagents (3 on k1, 12 to 21 on k2) | its own researcher, implementers, reviewers, integrator |
-| Verification | the agent's own word: 1 false success in 26 runs | test gate, independent reviewer, review gate: 0 false successes in 26 runs |
+| Verification | the agent's own word: 1 audited false success in 28 runs | test gate, independent reviewer, review gate: 0 in 28 runs |
 
-So on these tasks the pipeline did not raise correctness: small and medium tasks were solved by every setup, and on the large splittable ones a plain session orchestrated itself with built-in subagents and reached full score sooner. On k2, 4 of 5 setups scored about 75% strict (only plain Opus 100%): those runs, including plain Sonnet and every orchestrated one, imported `re` outside the regex module, which the spec forbids; lenient grading that allows it gives 99.3% to 100% for every run, and in the shipped orchestrator the reviewers saw it and disagreed, and nobody removed it. What the pipeline adds is the gates, at 1.2x to 2.1x the tokens on small and medium work; the router spends one cheap read-only call to decide whether a task needs them. The k2 second repetition and the time-limit and token-cap sweeps are still pending.
+So on these tasks the pipeline did not raise correctness: small and medium tasks were solved by every setup, and on the large splittable ones a plain session orchestrated itself with built-in subagents and plain Opus reached full score sooner. On k2 only plain Opus scored 100% strict; 6 of the other 8 runs imported `re` outside the regex module, which the spec forbids, and scored 74.5% to 84.0% strict, while lenient grading that allows it gives 99.3% to 100% for every main k2 run (in the first shipped-orchestrator run the reviewers flagged it and nobody removed it). The false-success gap (1 plain, 0 orchestrated) is one run and shows nothing. All runs were headless, and 41 of the 70 main runs had at least one tool call denied by permissions. What the pipeline adds is the gates, at 1.2x to 2.1x the tokens on small and medium work; the router spends one cheap read-only call to decide whether a task needs them.
+
+Sweeps on k2 (plain Opus vs the shipped orchestrator, 2 runs each): at a 10-minute limit both got almost everything (lenient medians 99.7% and 99.4%); at 60 minutes both used far more tokens (plain Opus median 14.5M vs 12.4M at 30 minutes) for no gain; under a 3M-token cap neither finished and plain Opus scored higher (lenient medians 75.3% vs 59.8%); under 8M both got almost everything (lenient medians 99.6% and 99.3%). Pre-registered hypotheses: H1, H2, H5, H6 and H7 not supported, H4 supported only by that one-run difference ([bench/HYPOTHESES.md](bench/HYPOTHESES.md), [docs/benchmarks.md](docs/benchmarks.md)).
 
 ## Quick start
 
