@@ -11,14 +11,35 @@ It runs two ways with the same roles: as a TypeScript pipeline on the Claude Age
 
 ## Contents
 
-- [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
+- [Benchmark: orchestrator vs plain sessions](#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked) · [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
 - [The pipeline](#the-pipeline) · [Choosing a route](#choosing-a-route-triage) · [Two ways to run it](#two-ways-to-run-it)
 - [Resilience](#resilience-retry-resume-replan) · [Safety and limits](#safety-and-limits)
 - [Reference](#reference) · [Repository layout](#repository-layout) · [Development](#development)
 
+## Benchmark: orchestrator vs plain sessions, built-in subagents blocked
+
+Claude Code's six built-in subagents (`general-purpose`, `claude`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) are blocked in this repository, so a plain session cannot delegate and the orchestrator is the only way to fan work out. Benchmarked on the hardest splittable task (`k2-stdlib-toolkit-xl`: twelve Python standard-library modules, 1,762 hidden tests) under a 10-minute cap, 2 runs per setup (direction only), all headless, tokens counted over every model:
+
+| Setup | Strict score (median) | Tokens | Wall time | Subagents per run |
+|---|---|---|---|---|
+| Plain Sonnet (P-S) | 74.2% | 2.20M | 8.2 min | 0 |
+| Plain Opus (P-O) | 51.3% | 2.94M | 7.5 min | 0 |
+| Orchestrator, shipped models (O-mix) | 92.4% (lenient 99.0%) | 5.66M | 5.8 min | 21 to 22 |
+| Orchestrator, all Opus (O-O) | 99.8% | 6.34M | 6.1 min | 16 to 25 |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/bench-k2-cap10-timeline-dark.svg">
+  <img alt="Mean hidden-test score at 2, 4, 6, 8 and 10 minutes. The orchestrators reach 72 to 83% at 4 minutes; plain Sonnet and Opus reach 35% and 20%." src="docs/diagrams/bench-k2-cap10-timeline-light.svg">
+</picture>
+
+- Delegating through the orchestrator scored 18 points higher than plain Sonnet and 48.5 higher than plain Opus, at 2.2x to 2.6x the tokens and 1.4 to 2.4 minutes less wall time. Plain sessions stopped early with unfinished modules.
+- Both O-mix runs lost the same module (`tomlparse` imports `re`, which the spec forbids) and claimed success: two false successes by the automatic classification. O-mix's reviewers missed it, while an O-O reviewer caught the same rule in four modules.
+- With the built-ins allowed (an earlier campaign, different plugin version), plain Opus scored 99.7% on this task by delegating to `general-purpose` itself, so this benchmark does not show the orchestrator beating built-in delegation on raw score. What the orchestrator adds is role limits, test and review gates, and independent review; the full discussion, per-run tables and every chart are in [docs/benchmark-builtins-blocked.md](docs/benchmark-builtins-blocked.md).
+- One task, coding only, two runs per setup. Nothing here covers tasks that do not split.
+
 ## Why a router
 
-Measured on seven coding tasks, five setups (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell the results show direction only. Ranges are per run; token ratios are per-task medians.
+Measured on seven coding tasks, five setups, **with Claude Code's built-in subagents allowed** (they are blocked now; see the benchmark above) (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell the results show direction only. Ranges are per run; token ratios are per-task medians.
 
 | | Plain session (Sonnet or Opus) | Pipeline (shipped or all-Opus orchestrator) |
 |---|---|---|

@@ -1,0 +1,12 @@
+{
+  "name": "k2-cap10",
+  "seed": 7,
+  "groups": [
+    {
+      "tasks": ["k2-stdlib-toolkit-xl"],
+      "arms": ["P-S", "P-O", "O-mix", "O-O"],
+      "cells": [{ "id": "cap10", "cap_min": 10 }],
+      "reps": 2
+    }
+  ]
+}

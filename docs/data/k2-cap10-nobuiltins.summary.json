@@ -1,0 +1,1125 @@
+{
+ "generated_at": "2026-10-15T20:58:53.307Z",
+ "campaigns": [
+  {
+   "dir": "./runs/bench/k2-cap10-nobuiltins",
+   "manifest": {
+    "campaign": "k2-cap10-nobuiltins",
+    "matrix": {
+     "name": "k2-cap10",
+     "seed": 7,
+     "groups": [
+      {
+       "tasks": [
+        "k2-stdlib-toolkit-xl"
+       ],
+       "arms": [
+        "P-S",
+        "P-O",
+        "O-mix",
+        "O-O"
+       ],
+       "cells": [
+        {
+         "id": "cap10",
+         "cap_min": 10
+        }
+       ],
+       "reps": 2
+      }
+     ]
+    },
+    "seed": 7,
+    "repo_sha": "6f5bbcc275ccaab98cea141f9492931ab1f6cb61",
+    "claude_version": "2.1.299 (Claude Code)",
+    "plugin_version": "0.1.6",
+    "node_version": "v24.21.0",
+    "python3_version": "Python 3.13.16",
+    "sqlite3_version": "3.54.0 2026-04-09 12:25:13 8fa8248e303219400c646a885e36dfc52eae33d83f4412e3f369b2be5373aapl (64-bit)",
+    "started_at": "2026-10-15T20:42:18.052Z",
+    "disabled_plugins": [
+     "orchestration@claude-code-orchestration",
+     "text-to-cad@earthtojake"
+    ],
+    "tasks_dir": "./bench/tasks",
+    "repos_dir": "~/orch-bench/k2-cap10-nobuiltins"
+   },
+   "rows": 8,
+   "runs": 8,
+   "grades": 32
+  }
+ ],
+ "counts": {
+  "runs": 8,
+  "included": 8,
+  "excluded": 0,
+  "rate_limited": 0,
+  "error": 0,
+  "retries": 0,
+  "retries_by_reason": {}
+ },
+ "retries": [],
+ "runs": [
+  {
+   "run_id": "k2-stdlib-toolkit-xl__O-mix__cap10__r2",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "O-mix",
+   "cell": "cap10",
+   "rep": 2,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 285.048,
+   "num_turns": 2,
+   "result_docs": 1,
+   "tokens": {
+    "total": 4966124,
+    "by_model": {
+     "sonnet-5-5": {
+      "input": 224,
+      "output": 207401,
+      "cache_read": 3441838,
+      "cache_write": 567865,
+      "total": 4217328
+     },
+     "opus-5-5": {
+      "input": 66,
+      "output": 9320,
+      "cache_read": 697117,
+      "cache_write": 42293,
+      "total": 748796
+     }
+    },
+    "output_total": 216721
+   },
+   "score_pct": 92.51,
+   "pass": false,
+   "score_pct_lenient": 99.32,
+   "pass_lenient": false,
+   "passed": 1630,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     63.79
+    ],
+    [
+     240,
+     80.87
+    ],
+    [
+     285,
+     92.51
+    ]
+   ],
+   "t90_s": 285,
+   "t100_s": null,
+   "auc": 67.39,
+   "subagents": {
+    "implementer": 12,
+    "reviewer": 9
+   },
+   "subagent_count": 21,
+   "max_concurrent_subagents": 12,
+   "worktrees": 0,
+   "reviewer_rounds": 9,
+   "subagents_source": "telemetry",
+   "self_delegated": false,
+   "gates": {
+    "review:allow": 5,
+    "test:block": 14,
+    "test:allow": 7,
+    "review:block": 9
+   },
+   "routes": [],
+   "permission_denials": 0,
+   "claim": "success",
+   "claim_auto": "success",
+   "claim_source": "auto",
+   "false_success": true,
+   "files_touched": 12,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__O-O__cap10__r2",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "O-O",
+   "cell": "cap10",
+   "rep": 2,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 289.051,
+   "num_turns": 7,
+   "result_docs": 1,
+   "tokens": {
+    "total": 6278289,
+    "by_model": {
+     "opus-5-5": {
+      "input": 370,
+      "output": 176635,
+      "cache_read": 5492904,
+      "cache_write": 608380,
+      "total": 6278289
+     }
+    },
+    "output_total": 176635
+   },
+   "score_pct": 99.6,
+   "pass": false,
+   "score_pct_lenient": 99.6,
+   "pass_lenient": false,
+   "passed": 1755,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     56.98
+    ],
+    [
+     240,
+     91.03
+    ],
+    [
+     289,
+     99.6
+    ]
+   ],
+   "t90_s": 240,
+   "t100_s": null,
+   "auc": 70.46,
+   "subagents": {
+    "implementer": 16,
+    "reviewer": 9
+   },
+   "subagent_count": 25,
+   "max_concurrent_subagents": 12,
+   "worktrees": 0,
+   "reviewer_rounds": 9,
+   "subagents_source": "telemetry",
+   "self_delegated": false,
+   "gates": {
+    "review:allow": 3,
+    "test:block": 8,
+    "test:allow": 7,
+    "review:block": 11
+   },
+   "routes": [],
+   "permission_denials": 0,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 12,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__P-O__cap10__r2",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "P-O",
+   "cell": "cap10",
+   "rep": 2,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 461.212,
+   "num_turns": 45,
+   "result_docs": 1,
+   "tokens": {
+    "total": 2753264,
+    "by_model": {
+     "opus-5-5": {
+      "input": 66,
+      "output": 54237,
+      "cache_read": 2579963,
+      "cache_write": 118998,
+      "total": 2753264
+     }
+    },
+    "output_total": 54237
+   },
+   "score_pct": 38.14,
+   "pass": false,
+   "score_pct_lenient": 64.98,
+   "pass_lenient": false,
+   "passed": 672,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     12.71
+    ],
+    [
+     240,
+     12.71
+    ],
+    [
+     360,
+     30.36
+    ],
+    [
+     461,
+     38.14
+    ]
+   ],
+   "t90_s": null,
+   "t100_s": null,
+   "auc": 19.03,
+   "subagents": {},
+   "subagent_count": 0,
+   "max_concurrent_subagents": null,
+   "worktrees": 0,
+   "reviewer_rounds": 0,
+   "subagents_source": "subagent_stats",
+   "self_delegated": false,
+   "gates": {},
+   "routes": [],
+   "permission_denials": 1,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 8,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__P-S__cap10__r2",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "P-S",
+   "cell": "cap10",
+   "rep": 2,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 480.854,
+   "num_turns": 28,
+   "result_docs": 1,
+   "tokens": {
+    "total": 1658446,
+    "by_model": {
+     "sonnet-5-5": {
+      "input": 36,
+      "output": 71062,
+      "cache_read": 1436738,
+      "cache_write": 150610,
+      "total": 1658446
+     }
+    },
+    "output_total": 71062
+   },
+   "score_pct": 70.49,
+   "pass": false,
+   "score_pct_lenient": 70.49,
+   "pass_lenient": false,
+   "passed": 1242,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     21.91
+    ],
+    [
+     240,
+     39.67
+    ],
+    [
+     360,
+     54.77
+    ],
+    [
+     480,
+     70.49
+    ],
+    [
+     481,
+     70.49
+    ]
+   ],
+   "t90_s": null,
+   "t100_s": null,
+   "auc": 37.37,
+   "subagents": {},
+   "subagent_count": 0,
+   "max_concurrent_subagents": null,
+   "worktrees": 0,
+   "reviewer_rounds": 0,
+   "subagents_source": "subagent_stats",
+   "self_delegated": false,
+   "gates": {},
+   "routes": [],
+   "permission_denials": 1,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 9,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__O-mix__cap10__r1",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "O-mix",
+   "cell": "cap10",
+   "rep": 1,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 416.769,
+   "num_turns": 1,
+   "result_docs": 1,
+   "tokens": {
+    "total": 6358549,
+    "by_model": {
+     "sonnet-5-5": {
+      "input": 268,
+      "output": 211738,
+      "cache_read": 4208016,
+      "cache_write": 588714,
+      "total": 5008736
+     },
+     "opus-5-5": {
+      "input": 96,
+      "output": 10843,
+      "cache_read": 1296893,
+      "cache_write": 41981,
+      "total": 1349813
+     }
+    },
+    "output_total": 222581
+   },
+   "score_pct": 92.34,
+   "pass": false,
+   "score_pct_lenient": 98.69,
+   "pass_lenient": false,
+   "passed": 1627,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     3.86
+    ],
+    [
+     240,
+     63.79
+    ],
+    [
+     360,
+     80.7
+    ],
+    [
+     417,
+     92.34
+    ]
+   ],
+   "t90_s": 417,
+   "t100_s": null,
+   "auc": 49.36,
+   "subagents": {
+    "implementer": 12,
+    "reviewer": 10
+   },
+   "subagent_count": 22,
+   "max_concurrent_subagents": 12,
+   "worktrees": 0,
+   "reviewer_rounds": 10,
+   "subagents_source": "telemetry",
+   "self_delegated": false,
+   "gates": {
+    "review:allow": 15,
+    "test:block": 14,
+    "test:allow": 7,
+    "review:block": 11
+   },
+   "routes": [],
+   "permission_denials": 0,
+   "claim": "success",
+   "claim_auto": "success",
+   "claim_source": "auto",
+   "false_success": true,
+   "files_touched": 12,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__P-O__cap10__r1",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "P-O",
+   "cell": "cap10",
+   "rep": 1,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 442.122,
+   "num_turns": 47,
+   "result_docs": 1,
+   "tokens": {
+    "total": 3121136,
+    "by_model": {
+     "opus-5-5": {
+      "input": 80,
+      "output": 44529,
+      "cache_read": 2994404,
+      "cache_write": 82123,
+      "total": 3121136
+     }
+    },
+    "output_total": 44529
+   },
+   "score_pct": 64.42,
+   "pass": false,
+   "score_pct_lenient": 64.42,
+   "pass_lenient": false,
+   "passed": 1135,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     3.86
+    ],
+    [
+     240,
+     27.24
+    ],
+    [
+     360,
+     52.95
+    ],
+    [
+     442,
+     64.42
+    ]
+   ],
+   "t90_s": null,
+   "t100_s": null,
+   "auc": 30.42,
+   "subagents": {},
+   "subagent_count": 0,
+   "max_concurrent_subagents": null,
+   "worktrees": 0,
+   "reviewer_rounds": 0,
+   "subagents_source": "subagent_stats",
+   "self_delegated": false,
+   "gates": {},
+   "routes": [],
+   "permission_denials": 2,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 9,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__O-O__cap10__r1",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "O-O",
+   "cell": "cap10",
+   "rep": 1,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 442.229,
+   "num_turns": 6,
+   "result_docs": 1,
+   "tokens": {
+    "total": 6405750,
+    "by_model": {
+     "opus-5-5": {
+      "input": 366,
+      "output": 163515,
+      "cache_read": 5709570,
+      "cache_write": 532299,
+      "total": 6405750
+     }
+    },
+    "output_total": 163515
+   },
+   "score_pct": 100,
+   "pass": true,
+   "score_pct_lenient": 100,
+   "pass_lenient": true,
+   "passed": 1762,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     3.86
+    ],
+    [
+     240,
+     75.26
+    ],
+    [
+     360,
+     100
+    ],
+    [
+     442,
+     100
+    ]
+   ],
+   "t90_s": 360,
+   "t100_s": 360,
+   "auc": 55.82,
+   "subagents": {
+    "implementer": 12,
+    "reviewer": 4
+   },
+   "subagent_count": 16,
+   "max_concurrent_subagents": 13,
+   "worktrees": 0,
+   "reviewer_rounds": 3,
+   "subagents_source": "telemetry",
+   "self_delegated": false,
+   "gates": {
+    "review:allow": 3,
+    "test:block": 22,
+    "test:allow": 12,
+    "review:block": 2
+   },
+   "routes": [],
+   "permission_denials": 0,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 12,
+   "outside_graded": []
+  },
+  {
+   "run_id": "k2-stdlib-toolkit-xl__P-S__cap10__r1",
+   "campaign": "k2-cap10-nobuiltins",
+   "task": "k2-stdlib-toolkit-xl",
+   "tier": "large",
+   "arm": "P-S",
+   "cell": "cap10",
+   "rep": 1,
+   "cap_min": 10,
+   "budget_tokens": null,
+   "end_reason": "exited",
+   "excluded": false,
+   "exit_code": 0,
+   "error": null,
+   "wall_s": 504.375,
+   "num_turns": 40,
+   "result_docs": 1,
+   "tokens": {
+    "total": 2747328,
+    "by_model": {
+     "sonnet-5-5": {
+      "input": 52,
+      "output": 69615,
+      "cache_read": 2544800,
+      "cache_write": 132861,
+      "total": 2747328
+     }
+    },
+    "output_total": 69615
+   },
+   "score_pct": 77.98,
+   "pass": false,
+   "score_pct_lenient": 77.98,
+   "pass_lenient": false,
+   "passed": 1374,
+   "total": 1762,
+   "timeline": [
+    [
+     120,
+     12.83
+    ],
+    [
+     240,
+     30.76
+    ],
+    [
+     360,
+     54.77
+    ],
+    [
+     480,
+     71.23
+    ],
+    [
+     504,
+     77.98
+    ]
+   ],
+   "t90_s": null,
+   "t100_s": null,
+   "auc": 35,
+   "subagents": {},
+   "subagent_count": 0,
+   "max_concurrent_subagents": null,
+   "worktrees": 0,
+   "reviewer_rounds": 0,
+   "subagents_source": "subagent_stats",
+   "self_delegated": false,
+   "gates": {},
+   "routes": [],
+   "permission_denials": 1,
+   "claim": "partial",
+   "claim_auto": "partial",
+   "claim_source": "auto",
+   "false_success": false,
+   "files_touched": 10,
+   "outside_graded": []
+  }
+ ],
+ "excluded": [],
+ "cells": [
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "arm": "P-S",
+   "cell": "cap10",
+   "n": 2,
+   "direction_only": true,
+   "graded": 2,
+   "pass_rate": 0,
+   "score_median_lenient": 74.24,
+   "score_median": 74.24,
+   "score_mean": 74.24,
+   "score_iqr": [
+    72.36,
+    76.11
+   ],
+   "score_min": 70.49,
+   "score_max": 77.98,
+   "tokens_median": 2202887,
+   "tokens_iqr": [
+    1930666.5,
+    2475107.5
+   ],
+   "output_tokens_median": 70338.5,
+   "wall_median_s": 492.61,
+   "t100_median_s": null,
+   "reached_100": 0,
+   "auc_median": 36.19,
+   "false_success": 0,
+   "deadline": 0,
+   "errors": 0,
+   "rate_limited": 0,
+   "retries": 0
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "arm": "P-O",
+   "cell": "cap10",
+   "n": 2,
+   "direction_only": true,
+   "graded": 2,
+   "pass_rate": 0,
+   "score_median_lenient": 64.7,
+   "score_median": 51.28,
+   "score_mean": 51.28,
+   "score_iqr": [
+    44.71,
+    57.85
+   ],
+   "score_min": 38.14,
+   "score_max": 64.42,
+   "tokens_median": 2937200,
+   "tokens_iqr": [
+    2845232,
+    3029168
+   ],
+   "output_tokens_median": 49383,
+   "wall_median_s": 451.67,
+   "t100_median_s": null,
+   "reached_100": 0,
+   "auc_median": 24.73,
+   "false_success": 0,
+   "deadline": 0,
+   "errors": 0,
+   "rate_limited": 0,
+   "retries": 0
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "arm": "O-mix",
+   "cell": "cap10",
+   "n": 2,
+   "direction_only": true,
+   "graded": 2,
+   "pass_rate": 0,
+   "score_median_lenient": 99.01,
+   "score_median": 92.43,
+   "score_mean": 92.43,
+   "score_iqr": [
+    92.38,
+    92.47
+   ],
+   "score_min": 92.34,
+   "score_max": 92.51,
+   "tokens_median": 5662336.5,
+   "tokens_iqr": [
+    5314230.25,
+    6010442.75
+   ],
+   "output_tokens_median": 219651,
+   "wall_median_s": 350.91,
+   "t100_median_s": null,
+   "reached_100": 0,
+   "auc_median": 58.38,
+   "false_success": 2,
+   "deadline": 0,
+   "errors": 0,
+   "rate_limited": 0,
+   "retries": 0
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "arm": "O-O",
+   "cell": "cap10",
+   "n": 2,
+   "direction_only": true,
+   "graded": 2,
+   "pass_rate": 0.5,
+   "score_median_lenient": 99.8,
+   "score_median": 99.8,
+   "score_mean": 99.8,
+   "score_iqr": [
+    99.7,
+    99.9
+   ],
+   "score_min": 99.6,
+   "score_max": 100,
+   "tokens_median": 6342019.5,
+   "tokens_iqr": [
+    6310154.25,
+    6373884.75
+   ],
+   "output_tokens_median": 170075,
+   "wall_median_s": 365.64,
+   "t100_median_s": 360,
+   "reached_100": 1,
+   "auc_median": 63.14,
+   "false_success": 0,
+   "deadline": 0,
+   "errors": 0,
+   "rate_limited": 0,
+   "retries": 0
+  }
+ ],
+ "comparisons": [
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "cell": "cap10",
+   "arm": "P-S",
+   "baseline": "P-O",
+   "paired": true,
+   "n_a": 2,
+   "n_b": 2,
+   "direction_only": true,
+   "score_diff_pts": {
+    "estimate": 22.96,
+    "ci": [
+     13.56,
+     32.35
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "tokens_ratio": {
+    "estimate": 0.75,
+    "ci": [
+     0.6,
+     0.88
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "wall_diff_s": {
+    "estimate": 40.95,
+    "ci": [
+     19.64,
+     62.25
+    ],
+    "n_a": 2,
+    "n_b": 2
+   }
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "cell": "cap10",
+   "arm": "O-mix",
+   "baseline": "P-O",
+   "paired": true,
+   "n_a": 2,
+   "n_b": 2,
+   "direction_only": true,
+   "score_diff_pts": {
+    "estimate": 41.15,
+    "ci": [
+     27.92,
+     54.37
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "tokens_ratio": {
+    "estimate": 1.93,
+    "ci": [
+     1.8,
+     2.04
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "wall_diff_s": {
+    "estimate": -100.76,
+    "ci": [
+     -176.16,
+     -25.35
+    ],
+    "n_a": 2,
+    "n_b": 2
+   }
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "cell": "cap10",
+   "arm": "O-mix",
+   "baseline": "P-S",
+   "paired": true,
+   "n_a": 2,
+   "n_b": 2,
+   "direction_only": true,
+   "score_diff_pts": {
+    "estimate": 18.19,
+    "ci": [
+     14.36,
+     22.02
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "tokens_ratio": {
+    "estimate": 2.57,
+    "ci": [
+     2.31,
+     2.99
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "wall_diff_s": {
+    "estimate": -141.71,
+    "ci": [
+     -195.81,
+     -87.61
+    ],
+    "n_a": 2,
+    "n_b": 2
+   }
+  },
+  {
+   "task": "k2-stdlib-toolkit-xl",
+   "cell": "cap10",
+   "arm": "O-O",
+   "baseline": "P-O",
+   "paired": true,
+   "n_a": 2,
+   "n_b": 2,
+   "direction_only": true,
+   "score_diff_pts": {
+    "estimate": 48.52,
+    "ci": [
+     35.58,
+     61.46
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "tokens_ratio": {
+    "estimate": 2.16,
+    "ci": [
+     2.05,
+     2.28
+    ],
+    "n_a": 2,
+    "n_b": 2
+   },
+   "wall_diff_s": {
+    "estimate": -86.03,
+    "ci": [
+     -172.16,
+     0.11
+    ],
+    "n_a": 2,
+    "n_b": 2
+   }
+  }
+ ],
+ "hypotheses": [
+  {
+   "id": "H1",
+   "statement": "On k2-stdlib-toolkit-xl (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "P_O": null,
+    "O_mix": null,
+    "O_O": null
+   },
+   "note": "missing cells or n < 2"
+  },
+  {
+   "id": "H2",
+   "statement": "On small tasks (t1, t2), O-mix uses at least 1.5x the median tokens of P-S and O-O at least 1.5x P-O, with no pass-rate gain.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "t1-parallel O-mix/P-S": {
+     "n_a": 0,
+     "n_b": 0
+    },
+    "t1-parallel O-O/P-O": {
+     "n_a": 0,
+     "n_b": 0
+    },
+    "t2-single O-mix/P-S": {
+     "n_a": 0,
+     "n_b": 0
+    },
+    "t2-single O-O/P-O": {
+     "n_a": 0,
+     "n_b": 0
+    }
+   },
+   "note": "missing cells or n < 2"
+  },
+  {
+   "id": "H4",
+   "statement": "Pooled over main-cell runs, the false-success rate of O-mix+O-O is lower than that of P-S+P-O.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "orchestrated": {
+     "false_success": 0,
+     "n": 0,
+     "rate": null
+    },
+    "plain": {
+     "false_success": 0,
+     "n": 0,
+     "rate": null
+    }
+   },
+   "note": "n < 2 in a group"
+  },
+  {
+   "id": "H5",
+   "statement": "Efficiency (mean score pct per million median tokens): AUTO is within 10% of the best arm on at least two-thirds of the tasks with data.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "t1-parallel": {
+     "evaluable": false
+    },
+    "t2-single": {
+     "evaluable": false
+    },
+    "h1-query-engine": {
+     "evaluable": false
+    },
+    "h2-scheduler": {
+     "evaluable": false
+    },
+    "k1-stdlib-toolkit": {
+     "evaluable": false
+    },
+    "h3-sql-engine": {
+     "evaluable": false
+    },
+    "k2-stdlib-toolkit-xl": {
+     "evaluable": false
+    },
+    "tasks_within": 0,
+    "tasks_evaluable": 0,
+    "tasks_needed": 0
+   },
+   "note": "no task with AUTO and another arm at n >= 2"
+  },
+  {
+   "id": "H6",
+   "statement": "O-O vs P-O (orchestration alone): O-O scores at least as high as P-O on every large task.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "t1-parallel": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "t2-single": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "h1-query-engine": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "h2-scheduler": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "k1-stdlib-toolkit": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "h3-sql-engine": {
+     "n_oo": 0,
+     "n_po": 0
+    },
+    "k2-stdlib-toolkit-xl": {
+     "n_oo": 0,
+     "n_po": 0
+    }
+   },
+   "note": "a large task lacks O-O or P-O at n >= 2"
+  },
+  {
+   "id": "H7",
+   "statement": "On k2-stdlib-toolkit-xl, the O-mix minus P-O score difference grows from cap10 to main to cap60; at the two budget cells P-O scores at least as high as O-mix.",
+   "verdict": "inconclusive",
+   "evidence": {
+    "k2-stdlib-toolkit-xl": {
+     "o_mix_minus_p_o": {
+      "cap10": 41.15
+     },
+     "grows": false,
+     "budgets": {}
+    }
+   },
+   "note": "missing sweep cells or n < 2"
+  }
+ ]
+}
