@@ -55,9 +55,16 @@ test("decide: the code fact is not part of the policy; any kind of task is sized
   for (const s of sheets) {
     assert.deepEqual(decide(facts({ ...s, code: false })), decide(facts({ ...s, code: true })), JSON.stringify(s));
   }
-  // A report and a research fan-out are sized like code: one long document stays in one session, several documents split.
+  // A report and a research fan-out are sized like code: one long document stays in one session, and a fan-out splits
+  // from 10 documents (minParallelFiles, raised from 4 after a 2-rep, coding-only benchmark; untested for non-code work).
   assert.equal(decide(facts({ code: false, filesToTouch: 1, linesToChange: 2000 })).mode, "plain");
   assert.equal(decide(facts({ code: false, filesToTouch: 10, linesToChange: 800, independentSlices: 4 })).mode, "orchestrate");
+});
+
+test("decide: a non-code fan-out of 4 to 9 documents under bigLines now stays plain", () => {
+  // Intended but unverified effect of raising minParallelFiles from 4 to 10 on non-code tasks: the benchmark behind it was
+  // coding-only, and this sheet routed to the pipeline before the change.
+  assert.equal(decide(facts({ code: false, filesToTouch: 4, linesToChange: 800, independentSlices: 4 })).mode, "plain");
 });
 
 test("decide: reasons do not talk about git, so they fit any kind of task", () => {
