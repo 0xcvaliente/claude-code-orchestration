@@ -3,11 +3,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   blockKeyOf, buildPrompt, diffFiles, enabledPluginIds, expandMatrix, filterResume, finishedRunIds, footer, groupBlocks,
-  hms, isRateLimited, mergeSettings, parseResults, runIdOf, shuffle, snapName,
+  hms, isRateLimited, mergeSettings, parseResults, resolveSeed, runIdOf, shuffle, snapName,
 } from "./lib/run-core.mjs";
 import { ARMS, envAdditions, prepareClaudeDir, runEnv } from "./arms.mjs";
 import { executeRun, loadTask } from "./lib/run-exec.mjs";
@@ -206,6 +207,64 @@ test("executeRun: outputs, results, snapshots, deadline", { timeout: 60_000 }, a
     const dl = await executeRun({ ...run, run_id: "fx__O-mix__main__r1", arm: "O-mix" }, ctx);
     assert.equal(dl.end_reason, "deadline");
     assert.deepEqual(dl.results, []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("resume keeps the manifest seed; --seed on resume is an error", () => {
+  assert.deepEqual(resolveSeed({ resumeManifest: { seed: 7 }, cliSeed: null, matrixSeed: 1 }), { seed: 7, save: false });
+  assert.deepEqual(resolveSeed({ resumeManifest: { campaign: "old" }, cliSeed: null, matrixSeed: 3 }), { seed: 3, save: true });
+  assert.throws(() => resolveSeed({ resumeManifest: { seed: 7 }, cliSeed: "9", matrixSeed: 1 }), /--seed cannot be used with --resume/);
+  assert.deepEqual(resolveSeed({ resumeManifest: null, cliSeed: "9", matrixSeed: 1 }), { seed: 9, save: false });
+  assert.deepEqual(resolveSeed({ resumeManifest: null, cliSeed: null, matrixSeed: 4 }), { seed: 4, save: false });
+  assert.deepEqual(resolveSeed({ resumeManifest: null, cliSeed: null, matrixSeed: undefined }), { seed: 1, save: false });
+  // same seed, same block order: a resumed campaign replays the original order
+  const blocks = groupBlocks(expandMatrix(matrixOf("lite"), metaOf)).map((b) => b.key);
+  assert.deepEqual(shuffle(blocks, resolveSeed({ resumeManifest: { seed: 5 }, cliSeed: null }).seed), shuffle(blocks, 5));
+});
+
+// A runner that gets SIGTERM stops its detached runs: the fake agent ignores TERM, so the KILL after the grace period is needed.
+test("interrupt: SIGTERM to the runner kills the run's process group and appends no row", { timeout: 60_000 }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-int-"));
+  try {
+    const taskDir = join(tmp, "tasks", "fx");
+    mkdirSync(join(taskDir, "setup"), { recursive: true });
+    writeFileSync(join(taskDir, "setup", "a.txt"), "a\n");
+    writeFileSync(join(taskDir, "task.md"), "Fake task.\n");
+    writeFileSync(join(taskDir, "meta.json"), JSON.stringify({ id: "fx", cap_min: 5, test_cmd: null, graded_paths: ["."], snapshot_every_s: 0 }));
+    const pidFile = join(tmp, "agent.pid");
+    const rowsFile = join(tmp, "runs.jsonl");
+    const runner = join(tmp, "runner.mjs");
+    const execUrl = pathToFileURL(join(here, "lib", "run-exec.mjs")).href;
+    writeFileSync(runner, `
+import { appendFileSync } from "node:fs";
+import { executeRun, installInterruptHandlers, interrupted, loadTask } from ${JSON.stringify(execUrl)};
+installInterruptHandlers({ graceMs: 500 });
+const task = loadTask(${JSON.stringify(join(tmp, "tasks"))}, "fx");
+const ctx = { root: ${JSON.stringify(root)}, campaignDir: ${JSON.stringify(join(tmp, "campaign"))}, reposDir: ${JSON.stringify(join(tmp, "repos"))},
+  tasks: { fx: task }, disabledIds: [], skipIsolation: true,
+  commandFor: () => ({ cmd: "bash", args: ["-c", ${JSON.stringify(`trap '' TERM; echo $$ > "${pidFile}"; sleep 60; true`)}], cwd: ${JSON.stringify(tmp)} }) };
+const row = await executeRun({ run_id: "fx__P-S__main__r1", task: "fx", arm: "P-S", cell: "main", rep: 1, cap_min: 5, budget_tokens: null }, ctx);
+if (!interrupted()) appendFileSync(${JSON.stringify(rowsFile)}, JSON.stringify(row) + "\\n");
+`);
+    const child = spawn(process.execPath, [runner], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    const t0 = Date.now();
+    while (!existsSync(pidFile) || !readFileSync(pidFile, "utf8").trim()) {
+      assert.ok(Date.now() - t0 < 20_000, `agent never started: ${out}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const pgid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.doesNotThrow(() => process.kill(-pgid, 0), "agent group alive before the interrupt");
+    child.kill("SIGTERM");
+    const code = await new Promise((r) => child.on("close", (c) => r(c)));
+    assert.notEqual(code, 0);
+    assert.match(out, /RUNNER INTERRUPTED/);
+    assert.throws(() => process.kill(-pgid, 0), /ESRCH/, "agent group gone after the interrupt");
+    assert.equal(existsSync(rowsFile), false, "no row for the interrupted run");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
