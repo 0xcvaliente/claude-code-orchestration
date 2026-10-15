@@ -24,6 +24,13 @@ export const UNSAFE_BASH = [
   ...PUSH_BASH, "Bash(git remote*)", "Bash(git * remote*)",
   "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
 ];
+// Claude Code's six built-in subagents. This repo ships its own researcher, implementer, reviewer and integrator, so the
+// built-ins are blocked: they are in permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and
+// scripts/orchestrate.sh sets CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS for headless runs. SDK workers have no Agent tool.
+export const DENIED_AGENTS = [
+  "Agent(general-purpose)", "Agent(claude)", "Agent(Explore)", "Agent(Plan)",
+  "Agent(claude-code-guide)", "Agent(statusline-setup)",
+];
 const READ_ONLY = ["Read", "Glob", "Grep"];
 
 export const ROLES: Record<Role, RoleConfig> = {

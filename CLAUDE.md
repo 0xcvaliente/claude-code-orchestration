@@ -15,5 +15,6 @@ Two orchestrators for the same job (split a task, build slices in parallel, gate
 ## Rules
 - `src/config.ts` is the source of truth for model, effort, maxTurns and the triage thresholds (`TRIAGE`). After editing it, run `npm run sync-agents`.
 - Neither path pushes to a remote: SDK workers deny `git push` (`UNSAFE_BASH`), `scripts/orchestrate.sh` passes the same list to every headless native run as `--disallowedTools`, and the agents are told not to push. Project settings deny `git remote`, `sudo` and `rm -rf` (remove specific paths with `rm -r <path>`), but not `git push`: an interactive session may push as its permission mode allows.
+- Claude Code's six built-in subagents (`general-purpose`, `claude`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) are blocked: `DENIED_AGENTS` in `src/config.ts` is in `permissions.deny` (`policy.test.ts` keeps them in step) and `scripts/orchestrate.sh` exports `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` for headless runs. Only this repo's researcher, implementer, reviewer and integrator remain. The benchmark's plain runs in README "Why a router" predate this and self-delegated to `general-purpose`.
 - Agent-file, hook and settings rules live in `.claude/rules/agents.md` and load when you touch those files.
 - When testing hook scripts in zsh, pass JSON with `printf '%s'`, not `echo` (zsh expands `\n`).
