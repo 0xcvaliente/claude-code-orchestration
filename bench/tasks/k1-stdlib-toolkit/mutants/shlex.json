@@ -1,0 +1,6 @@
+[
+  {"name": "nonposix-comment-ends-word", "file": "toolkit/shellsplit.py", "from": "                    self.readline()\n                    if posix:", "to": "                    self.readline()\n                    if True:"},
+  {"name": "quote-treats-percent-as-unsafe", "file": "toolkit/shellsplit.py", "from": "_@%+=:,./-\")", "to": "_@+=:,./-\")"},
+  {"name": "dq-escape-always-drops-backslash", "file": "toolkit/shellsplit.py", "from": "if escapedstate in QUOTES and nextchar != state and nextchar != escapedstate:", "to": "if False:"},
+  {"name": "posix-drops-empty-quoted-token", "file": "toolkit/shellsplit.py", "from": "if posix and not quoted and token == \"\":", "to": "if posix and token == \"\":"}
+]
