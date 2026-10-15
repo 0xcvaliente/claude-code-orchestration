@@ -10,6 +10,7 @@ Two orchestrators for the same job (split a task, build slices in parallel, gate
 - `npm run check-agents`: fails if `.claude/agents/*.md` drift from `src/config.ts`; `npm run sync-agents` fixes it.
 - `npm run native -- "task" [repo]`: headless native run (needs a logged-in `claude`). `npm run auto -- "task" [repo]`: same, but triage picks plain, reviewed or the orchestrator first.
 - `npm run report`: HTML timeline from `.claude/state/` (or the plugin's per-user state dir). `npm run build-plugin`: `dist/plugin` (committed; `npm run check-plugin` fails when stale).
+- `npm run bench -- --matrix bench/matrix/<name>.json` runs the benchmark (see bench/README.md); `npm run bench:validate` checks every task's graders with no model calls.
 
 ## Rules
 - `src/config.ts` is the source of truth for model, effort, maxTurns and the triage thresholds (`TRIAGE`). After editing it, run `npm run sync-agents`.

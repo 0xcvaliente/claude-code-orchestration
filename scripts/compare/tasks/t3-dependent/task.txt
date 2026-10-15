@@ -1,4 +1,0 @@
-Add two ES modules (named exports) with node:test files; the second builds on the first.
-1. stack.js exports class Stack with push(x), pop(), peek() and a size getter. pop() and peek() on an empty stack throw RangeError. Tests in stack.test.js.
-2. rpn.js exports evalRPN(tokens), where tokens is an array of strings, using your Stack class. Integers are optionally negative decimal digits; operators are + - * /. Division truncates toward zero. Division by zero throws RangeError. An unknown token, too few operands, or an expression that does not end with exactly one value on the stack throws Error. Tests in rpn.test.js.
-Acceptance check: npm test

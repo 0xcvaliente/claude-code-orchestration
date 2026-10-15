@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Token counts from a `claude -p --output-format json` result, shared by log-run.mjs, report.mjs and compare.mjs.
+// Token counts from a `claude -p --output-format json` result, shared by log-run.mjs, report.mjs and the bench scripts.
 // "Tokens" = input + output + cache-read + cache-write, summed over every model in modelUsage (main loop and subagents);
 // usage (main loop only) is the fallback when modelUsage is missing or empty.
 // CLI: node scripts/tokens.mjs budget-usd <count>   prints the dollar cap for a token count such as 500k or 2M, or the error and exit 1.
