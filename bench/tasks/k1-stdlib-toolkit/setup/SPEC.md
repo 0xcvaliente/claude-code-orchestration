@@ -20,13 +20,15 @@ The modules do not depend on each other, so they can be written in any order.
 3. The toolkit modules may import each other (for example `from toolkit import regex` inside `csvx.py`), but a module that imports a broken sibling breaks with it.
 4. Keep `toolkit/__init__.py` free of imports of the submodules: the grader imports each module (`toolkit.tomlparse`, ...) separately, and the package `__init__` runs for every one of them.
 5. Do not rename the modules or change the public names in the specs. Extra private helpers and extra files inside `toolkit/` are fine.
-6. Do not try to reach the forbidden modules indirectly (`__import__`, `importlib`, `sys.modules`, `eval`/`exec`, `builtins`). The grader flags these for review.
+6. Using the stdlib module you reimplement in any way scores that module 0. This covers direct imports and indirect routes alike (`pkgutil`, `pydoc`, another module's attribute such as `json.decoder.re`, `sys.modules`, `__import__`, ...). The grader cannot load `tomllib`, `shlex` or `csv` at all while your code runs, so even a stdlib helper that imports one of them fails, and it watches the real `re` engine while `regex` tests run: if your code reaches it, `regex` scores 0. The grader also flags `__import__`, `importlib`, `sys.modules`, `eval`/`exec` and `builtins` in your sources for review.
 
 ## Grading
 
 - Differential: each hidden test feeds one input to your function and to the Python 3.13 standard library function it mirrors. It passes when the normalized results are equal, or when both raise the error the spec names (only the error kind is compared, never the message).
 - About 400 hidden tests, scored per module. The hidden inputs differ from the public examples and cover everything the specs put in scope.
 - Each test has a 2 second limit. A test that runs longer fails on its own; the other tests still run.
+- Timeout budget: after 5 tests of a module time out, that module's remaining tests fail without running. The same goes after 5 crashes of the test process, or after 10 minutes of grading time for one module.
+- Importing a module may take at most 10 seconds; past that, all of that module's tests fail.
 - A module that fails to import, or crashes the test process, fails only its own tests.
 - Inputs for `regex` and `shlex` are ASCII only. `toml` and `csv` inputs may contain non-ASCII text.
 
