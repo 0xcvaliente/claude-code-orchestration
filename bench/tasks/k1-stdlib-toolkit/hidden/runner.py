@@ -198,6 +198,82 @@ def install_watch():
             wrap_attr(sre, "compile", "re", watch_always=False)
 
 
+# ---- audit hook: the oracle modules' source files may not be read, compiled or run by solution code ----
+STDLIB_DIR = os.path.dirname(os.path.realpath(os.__file__))
+_SEP = os.sep
+ORACLE_PATHS = [  # (prefix of a realpath, oracle module)
+    (os.path.join(STDLIB_DIR, "tomllib") + _SEP, "tomllib"),
+    (os.path.join(STDLIB_DIR, "shlex.py"), "shlex"),
+    (os.path.join(STDLIB_DIR, "__pycache__", "shlex."), "shlex"),
+    (os.path.join(STDLIB_DIR, "csv.py"), "csv"),
+    (os.path.join(STDLIB_DIR, "__pycache__", "csv."), "csv"),
+    (os.path.join(STDLIB_DIR, "re") + _SEP, "re"),
+]
+AUDIT_EVENTS = {"open", "compile", "exec", "import"}
+_audit_busy = [False]
+
+
+def _oracle_of(path):
+    if path is None or isinstance(path, int):
+        return None
+    try:
+        p = os.fspath(path)
+        if isinstance(p, bytes):
+            p = os.fsdecode(p)
+        if not p or p.startswith("<"):
+            return None
+        rp = os.path.realpath(p)
+    except Exception:  # noqa: BLE001
+        return None
+    for prefix, modname in ORACLE_PATHS:
+        if rp.startswith(prefix) or rp == prefix:
+            return modname
+    return None
+
+
+def _importing_re_by_name():
+    """True when the import machinery is loading the real `re` package under its own name."""
+    frame = sys._getframe(2)
+    while frame is not None:
+        if frame.f_code.co_name in ("_find_and_load", "_load_unlocked", "_find_and_load_unlocked"):
+            name = frame.f_locals.get("name")
+            if name is None:
+                spec_ = frame.f_locals.get("spec")
+                name = getattr(spec_, "name", None)
+            if isinstance(name, str):
+                return name == "re" or name.startswith("re.")
+        frame = frame.f_back
+    return False
+
+
+def audit(event, args):
+    if event not in AUDIT_EVENTS or _audit_busy[0]:
+        return
+    _audit_busy[0] = True
+    try:
+        if event == "open":
+            target = args[0] if args else None
+        elif event == "compile":
+            target = args[1] if len(args) > 1 else None
+        elif event == "exec":
+            target = getattr(args[0], "co_filename", None) if args else None
+        else:  # import: (module, filename, sys.path, sys.meta_path, sys.path_hooks)
+            target = args[1] if len(args) > 1 else None
+        modname = _oracle_of(target)
+        if modname is None:
+            return
+        if modname == "re" and (cat not in RE_WATCH_CATS or _importing_re_by_name()):
+            return  # the stdlib loading `re` normally; regex solutions are also watched via _sre
+        if not toolkit_on_stack(depth=2):
+            return
+        flag_oracle(modname)
+        raise PermissionError(f"solution code may not use the {modname} sources")
+    finally:
+        _audit_busy[0] = False
+
+
+sys.addaudithook(audit)
+
 # sys.path: the standard library first (so a solution cannot shadow it), then the solution root.
 sys.path[:] = [p for p in sys.path if "site-packages" not in p and "dist-packages" not in p] + [sol]
 purge_strict()
