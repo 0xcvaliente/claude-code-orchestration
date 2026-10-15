@@ -269,7 +269,7 @@ Invalid numbers exit 2; a failed plan exits 1.
 | `ORCH_AGENT` | `orchestrate.sh` | Agent to run; `none` is a plain session. A bare name runs the folder's own `.claude/agents/<name>.md` or, without it, the plugin's `orchestration:<name>` when `claude plugin list` shows the plugin enabled in that folder; a namespaced name runs as it is |
 | `ORCH_AGENT_PREFIX` | `orchestrate.sh` | `orchestration:` always runs the plugin's agents, without checking the folder or `claude plugin list` (CI, or a plugin loaded another way) |
 | `ORCH_ADD_DIR`, `ORCH_ADVISOR`, `ORCH_DRY_RUN` | `orchestrate.sh` | Extra readable dir, experimental advisor model, print arguments and exit |
-| `ORCH_TEST_CMD` | `verify.sh`, `orchestrate.sh` | The test command. Unset, it is detected (see below) and the gate skips a prose-only change in a git work tree; set, it always runs. The headless run adds the permission rules it needs. Benchmark tasks declare theirs in `tasks/<id>/test-cmd.txt` and `compare.mjs` exports it |
+| `ORCH_TEST_CMD` | `verify.sh`, `orchestrate.sh` | The test command. Unset, it is detected (see below) and the gate skips a prose-only change in a git work tree; set, it always runs. The headless run adds the permission rules it needs. Benchmark tasks declare theirs in `bench/tasks/<id>/meta.json` (`test_cmd`) and `bench/run.mjs` exports it |
 | `ORCH_GATE_ISOLATED` | `verify.sh` | Test gate for agents in `.claude/worktrees/`: `warn` (default: run tests, log, never block), `block` or `skip` |
 | `ORCH_MODEL` | `orchestrate.sh` | Passes `--model` (for example `sonnet` or `opus`), used for plain-model baselines |
 | `ORCH_EXTRA_ALLOWED_TOOLS` | `orchestrate.sh`, `auto.sh` | Extra permission rules, one per line, appended to the default allowlist (`ORCH_ALLOWED_TOOLS` replaces it). `auto.sh` adds `WebSearch` and `WebFetch` when the task changes no code (the triage fact `code`; with no facts, when the folder is neither a git work tree nor has a test runner) |
@@ -289,7 +289,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin`, or fail when the committed build is stale |
 | `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
-| `npm run compare`, `compare:hard`, `compare:validate`, `compare:mutate` | The A/B benchmark ([docs/benchmarks.md](docs/benchmarks.md)); `compare` takes `--variants` (A to F, including C plain Sonnet and F plain Opus), `--tasks`, `--repeat N`, `--snapshot-every SEC` and `--timeout SEC`. Tasks may carry `setup/` and a `score.mjs` |
+| `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md), results in [docs/benchmarks.md](docs/benchmarks.md)): `bench -- --matrix bench/matrix/<name>.json` runs a campaign (flags `--campaign`, `--resume`, `--dry-run`, `--only`, `--parallel-blocks`, `--seed`); `bench:validate` checks every task's graders with no model calls; `bench:grade`, `bench:analyze` and `bench:report` grade snapshots, summarise and render. Cost is reported in tokens |
 
 ### Tuning token use
 
@@ -319,7 +319,8 @@ src/
 .claude-plugin/marketplace.json   makes the repo installable
 dist/plugin/                      the built plugin (committed)
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
-                                  report.mjs, compare/ (the benchmark)
+                                  report.mjs
+bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
 docs/                             benchmarks.md, native-mode.md, diagrams/
 orchestration/                    the original architecture diagram
 ```
