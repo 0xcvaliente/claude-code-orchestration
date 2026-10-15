@@ -414,11 +414,11 @@ test("auto.sh: a test runner makes a folder code even without git, and gives it 
 });
 
 test("auto.sh reviewed route, task that is not code: the session's report is cut to 4000 characters, an unparsable one is empty", () => {
-  const long = fakeTools({ session: JSON.stringify({ result: "Q".repeat(6000) }) });
+  const long = fakeTools({ session: JSON.stringify({ result: "§".repeat(6000) }) });
   const folder = plainFolder();
   const rl = runAuto(folder, long.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
   assert.equal(rl.status, 0, rl.stderr);
-  assert.equal((callOf(long.calls(), "reviewer").match(/Q/g) ?? []).length, 4000);
+  assert.equal((callOf(long.calls(), "reviewer").match(/§/g) ?? []).length, 4000); // not a letter: temp-folder paths in the call can contain any letter
 
   const garbled = fakeTools({ session: "plain text, not JSON" });
   const folder2 = plainFolder();
