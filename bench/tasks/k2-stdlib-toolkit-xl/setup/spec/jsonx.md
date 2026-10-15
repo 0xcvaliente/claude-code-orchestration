@@ -146,7 +146,7 @@ Errors: `loads` raises `JSONDecodeError` with these positions (`pos` is a
 | `\u` not followed by four hex digits (fewer characters left, or a non-hex one), including the second `\u` after a high surrogate | index of the `u` |
 
 Checks happen left to right, so the first problem in the text decides the
-error. For example `"ሴ` (four hex digits, then end of input) is an
+error. For example `"\u1234` (four hex digits, then end of input) is an
 unterminated string at 0, while `"\u123` is an invalid `\u` escape at 2.
 A hook that raises a `ValueError` gives that `ValueError`, not a
 `JSONDecodeError`.
