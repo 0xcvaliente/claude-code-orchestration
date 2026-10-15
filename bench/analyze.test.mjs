@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { aucOf, analyze, evaluateHypotheses, outsideGraded, processOf, tokensOf } from "./analyze.mjs";
+import { aucOf, analyze, evaluateHypotheses, latestRows, outsideGraded, processOf, tokensOf } from "./analyze.mjs";
 import { renderHtml, renderMarkdown } from "./report.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, median, medianDiff, mulberry32, quantile, ratioCI } from "./lib/stats.mjs";
@@ -138,6 +138,35 @@ test("fixture: counts and exclusions", () => {
   assert.equal(cell("k1-stdlib-toolkit", "O-mix").n, 2);
   assert.equal(cell("k1-stdlib-toolkit", "O-mix").rate_limited, 1);
   assert.equal(summary.cells.length, 8);
+});
+
+test("fixture: last row per run_id wins; superseded rows count as retries", () => {
+  // t1 O-mix r1: a rate_limited row, then the exited retry. It counts once in n and adds one retry.
+  const ids = summary.runs.map((r) => r.run_id);
+  assert.equal(ids.filter((id) => id === "t1-parallel__O-mix__main__r1").length, 1);
+  assert.equal(run("t1-parallel__O-mix__main__r1").end_reason, "exited");
+  assert.equal(run("t1-parallel__O-mix__main__r1").pass, true);
+  assert.equal(cell("t1-parallel", "O-mix").n, 2);
+  assert.equal(cell("t1-parallel", "O-mix").retries, 1);
+  assert.equal(cell("t1-parallel", "O-mix").rate_limited, 0);
+  // t1 AUTO r2 appears twice, identically: it counts once.
+  assert.equal(ids.filter((id) => id === "t1-parallel__AUTO__main__r2").length, 1);
+  assert.equal(cell("t1-parallel", "AUTO").n, 2);
+  assert.equal(cell("t1-parallel", "AUTO").retries, 1);
+  assert.equal(summary.counts.retries, 2);
+  assert.deepEqual(summary.counts.retries_by_reason, { rate_limited: 1, exited: 1 });
+  assert.deepEqual(summary.retries.map((r) => [r.run_id, r.end_reason]), [["t1-parallel__O-mix__main__r1", "rate_limited"], ["t1-parallel__AUTO__main__r2", "exited"]]);
+  // A rate-limited run never retried stays excluded.
+  assert.equal(summary.counts.rate_limited, 1);
+  assert.equal(summary.campaigns[0].rows, 19);
+  assert.equal(summary.campaigns[0].runs, 17);
+});
+
+test("latestRows keeps the last row per run_id in file order", () => {
+  const rows = [{ run_id: "a", v: 1 }, { run_id: "b", v: 1 }, { run_id: "a", v: 2 }, { run_id: "a", v: 3 }];
+  const { latest, superseded } = latestRows(rows);
+  assert.deepEqual(latest, [{ run_id: "b", v: 1 }, { run_id: "a", v: 3 }]);
+  assert.deepEqual(superseded.map((r) => r.v), [1, 2]);
 });
 
 test("fixture: tokens across several result docs plus triage", () => {
@@ -281,4 +310,7 @@ test("report renders HTML and Markdown with no dollar figures", () => {
   assert.doesNotMatch(html, /<script|https?:\/\//);
   for (const text of [html, md]) assert.doesNotMatch(text, /usd|\$[0-9]|cost/i);
   assert.match(md, /\| t1-parallel \| main \| O-mix vs P-O \|/);
+  assert.match(md, /### Retries\n\n2 superseded attempt\(s\) \(retries\): 1 rate_limited, 1 exited\./);
+  assert.match(md, /\| t1-parallel__O-mix__main__r1 \| t1-parallel \/ O-mix \/ main \| rate_limited \|/);
+  assert.match(html, /<h3>Retries<\/h3>/);
 });

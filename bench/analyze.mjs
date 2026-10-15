@@ -310,7 +310,7 @@ function seedOf(text) {
 }
 
 export function compare(runsA, runsB, label, { iterations = BOOT_ITERATIONS } = {}) {
-  const byRep = (rs) => new Map(rs.map((r) => [r.rep, r]));
+  const byRep = (rs) => new Map(rs.map((r) => [`${r.campaign ?? ""}|${r.rep}`, r]));
   const ma = byRep(runsA);
   const mb = byRep(runsB);
   const common = [...ma.keys()].filter((k) => mb.has(k));
@@ -510,18 +510,59 @@ export function evaluateHypotheses(runs) {
 
 // ---------- top level ----------
 
+// Keeps the LAST row per run_id of one campaign's runs.jsonl (file order); earlier rows are returned as superseded.
+export function latestRows(rows) {
+  const last = new Map();
+  rows.forEach((r, i) => last.set(r.run_id, i));
+  return { latest: rows.filter((r, i) => last.get(r.run_id) === i), superseded: rows.filter((r, i) => last.get(r.run_id) !== i) };
+}
+
 export function analyze(dirs, opts = {}) {
   const campaigns = dirs.map(loadCampaign);
-  const all = campaigns.flatMap((c) => c.runs.map((row) => analyzeRun(row, c.grades, c)));
+  // Runs are keyed by (campaign, run_id): latestRows runs once per campaign.
+  const latest = [];
+  const superseded = [];
+  for (const c of campaigns) {
+    const d = latestRows(c.runs);
+    latest.push(...d.latest.map((row) => [row, c]));
+    superseded.push(...d.superseded.map((row) => [row, c]));
+  }
+  const all = latest.map(([row, c]) => analyzeRun(row, c.grades, c));
+  // A requeued run (after a rate limit) appends a new row under the same run_id: every superseded row is a retry.
+  // A rate-limited row that was never superseded stays the run's row and counts as excluded rate_limited.
+  const retries = superseded.map(([row, c]) => ({
+    run_id: row.run_id,
+    campaign: c.manifest.campaign ?? c.dir,
+    task: row.task,
+    arm: row.arm,
+    cell: row.cell ?? "main",
+    rep: row.rep,
+    end_reason: row.end_reason ?? null,
+    started_at: row.started_at ?? null,
+    error: row.error ?? null,
+  }));
+  const retriesByReason = {};
+  for (const r of retries) retriesByReason[r.end_reason ?? "unknown"] = (retriesByReason[r.end_reason ?? "unknown"] ?? 0) + 1;
   const included = all.filter((r) => !r.excluded);
   const excluded = all.filter((r) => r.excluded).map(({ run_id, task, arm, cell, rep, end_reason, error, campaign }) => ({ run_id, campaign, task, arm, cell, rep, end_reason, error }));
+  const cells = buildCells(included, all);
+  for (const cell of cells) cell.retries = retries.filter((r) => r.task === cell.task && r.arm === cell.arm && r.cell === cell.cell).length;
   return {
     generated_at: opts.now ?? new Date().toISOString(),
-    campaigns: campaigns.map((c) => ({ dir: c.dir, manifest: c.manifest, runs: c.runs.length, grades: c.grades.length })),
-    counts: { runs: all.length, included: included.length, excluded: excluded.length, rate_limited: excluded.filter((e) => e.end_reason === "rate_limited").length, error: excluded.filter((e) => e.end_reason === "error").length },
+    campaigns: campaigns.map((c) => ({ dir: c.dir, manifest: c.manifest, rows: c.runs.length, runs: c.runs.length - superseded.filter(([, x]) => x === c).length, grades: c.grades.length })),
+    counts: {
+      runs: all.length,
+      included: included.length,
+      excluded: excluded.length,
+      rate_limited: excluded.filter((e) => e.end_reason === "rate_limited").length,
+      error: excluded.filter((e) => e.end_reason === "error").length,
+      retries: retries.length,
+      retries_by_reason: retriesByReason,
+    },
+    retries,
     runs: all,
     excluded,
-    cells: buildCells(included, all),
+    cells,
     comparisons: buildComparisons(included, opts),
     hypotheses: evaluateHypotheses(included),
   };
