@@ -1,0 +1,26 @@
+[
+  {
+    "name": "diff-m1-popular-threshold",
+    "file": "toolkit/diff.py",
+    "from": "if self.autojunk and nb >= 200:",
+    "to": "if self.autojunk and nb > 200:"
+  },
+  {
+    "name": "diff-m2-longest-match-tie-break",
+    "file": "toolkit/diff.py",
+    "from": "                if k > size:",
+    "to": "                if k >= size:"
+  },
+  {
+    "name": "diff-m3-no-junk-extension",
+    "file": "toolkit/diff.py",
+    "from": "for want_junk in (False, True):",
+    "to": "for want_junk in (False,):"
+  },
+  {
+    "name": "diff-m4-close-matches-tie-order",
+    "file": "toolkit/diff.py",
+    "from": "scored.sort(reverse=True)",
+    "to": "scored.sort(key=lambda t: t[0], reverse=True)"
+  }
+]
