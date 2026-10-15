@@ -1,0 +1,74 @@
+[
+  {
+    "name": "nulls last in ASC",
+    "file": "index.js",
+    "from": "a === null ? -1 : b === null ? 1 : a < b",
+    "to": "a === null ? 1 : b === null ? -1 : a < b"
+  },
+  {
+    "name": "LIKE case-sensitive",
+    "file": "index.js",
+    "from": "\"is\")",
+    "to": "\"s\")"
+  },
+  {
+    "name": "NOT IN ignores NULL in list",
+    "file": "index.js",
+    "from": "const r = hit ? true : unknown ? null : false;",
+    "to": "const r = hit ? true : false;"
+  },
+  {
+    "name": "OR binds tighter than AND",
+    "file": "index.js",
+    "from": "let e = andExpr(); while (acceptKw(\"OR\")) e = { k: \"or\", a: e, b: andExpr() }; return e;",
+    "to": "let e = andExpr(); while (acceptKw(\"OR\")) e = { k: \"and\", a: e, b: andExpr() }; return e;"
+  },
+  {
+    "name": "AVG divides by row count",
+    "file": "index.js",
+    "from": "s / vs.length",
+    "to": "s / grp.length"
+  },
+  {
+    "name": "JOIN matches NULL = NULL",
+    "file": "index.js",
+    "from": "if (x !== null && y !== null && x === y)",
+    "to": "if (x === y)"
+  },
+  {
+    "name": "OFFSET ignored",
+    "file": "index.js",
+    "from": "rows.slice(q.offset, end)",
+    "to": "rows.slice(0, end)"
+  },
+  {
+    "name": "unstable sort tiebreak",
+    "file": "index.js",
+    "from": "return x.i - y.i;",
+    "to": "return y.i - x.i;"
+  },
+  {
+    "name": "empty aggregate returns no row",
+    "file": "index.js",
+    "from": "groups.set(\"all\", combos)",
+    "to": "if (combos.length) groups.set(\"all\", combos)"
+  },
+  {
+    "name": "rows share storage with table",
+    "file": "index.js",
+    "from": "t.rows.push(out);",
+    "to": "t.rows.push(row);"
+  },
+  {
+    "name": "string compare numeric coercion",
+    "file": "index.js",
+    "from": "if (typeof a !== typeof b) throw new Error(\"type mismatch\");",
+    "to": ""
+  },
+  {
+    "name": "trailing tokens accepted",
+    "file": "index.js",
+    "from": "if (p < toks.length) fail(\"unexpected trailing tokens\");",
+    "to": ""
+  }
+]

@@ -1,0 +1,1 @@
+{"id":"t2-single","title":"Duration parser","tier":"small","shape":"single","lang":"node","cap_min":10,"total":3,"test_cmd":null,"graded_paths":["."],"snapshot_every_s":30}

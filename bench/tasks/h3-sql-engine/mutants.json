@@ -1,0 +1,8 @@
+[
+  {"name": "NULL sorts last in ORDER BY ASC", "file": "minisql/__init__.py", "from": "        return (0, 0)", "to": "        return (3, 0)"},
+  {"name": "LIKE is case-sensitive", "file": "minisql/__init__.py", "from": "re.S | re.I | re.A", "to": "re.S | re.A"},
+  {"name": "integer division floors", "file": "minisql/__init__.py", "from": "            q = abs(a) // abs(b)\n            return q if (a >= 0) == (b >= 0) else -q", "to": "            return a // b"},
+  {"name": "OFFSET ignored with LIMIT", "file": "minisql/__init__.py", "from": "rows[off:off + lim]", "to": "rows[:lim]"},
+  {"name": "GROUP BY drops NULL keys", "file": "minisql/__init__.py", "from": "                    lst = groups.get(k)", "to": "                    if any(v[1] is None for v in k):\n                        continue\n                    lst = groups.get(k)"},
+  {"name": "NULL = NULL is true", "file": "minisql/__init__.py", "from": "                        if x is None:\n                            return None\n                        y = b(e)", "to": "                        if x is None:\n                            return 1 if b(e) is None else None\n                        y = b(e)"}
+]
