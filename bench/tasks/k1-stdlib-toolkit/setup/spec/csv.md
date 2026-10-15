@@ -58,11 +58,33 @@ quoted fields spanning several strings, `\r`, `\n` and `\r\n` endings, an
 empty string or a line of only a line ending giving `[]`, `escapechar` in
 and out of quotes (including an escaped line ending), `skipinitialspace`,
 `doublequote=False`, `QUOTE_NONE` (quotechar is an ordinary character),
-characters after a closing quote (kept when not `strict`), and the errors
-`csv` raises: a non-string from the iterable, a character after a closing
-quote in `strict` mode, end of data inside a quoted field in `strict`
-mode, a line ending inside an unquoted field followed by more data on the
-same string. Records read before an error must still be produced.
+characters after a closing quote (kept when not `strict`).
+
+An escaped line ending (escapechar followed by `\r` or `\n`, outside
+quotes) adds that character to the field and continues the field on the
+next string: the end of that string does not end the record, and neither
+does the end of following strings while the field continues with plain
+characters; the record ends at the next unescaped `\r` or `\n` (or at
+the end of a later string after another escaped character or a
+delimiter). This is `csv`'s behaviour; match it exactly.
+
+Reading errors (all raise `csvx.Error` unless noted):
+
+- the iterable yields an item that is not a `str` (for example an `int`):
+  `csvx.Error`, raised when that item is reached;
+- `strict` is true and a character other than the delimiter, the
+  quotechar or a line ending follows a closing quote;
+- the input ends while a field is in progress (inside an open quoted
+  field, or with characters collected for the current field but no line
+  ending after them) and `strict` is true; when `strict` is false the
+  partial record is returned as the last record instead;
+- an unescaped `\r` or `\n` outside a quoted field is followed, on the
+  same string, by a character other than `\r` or `\n` (for example the
+  string `"a\rb\n"`);
+- `ValueError` (not `Error`) for a field that `float()` cannot convert
+  under `QUOTE_NONNUMERIC` or `QUOTE_STRINGS`.
+
+Records read before an error must still be produced.
 
 Quoting modes when reading: with `QUOTE_NONNUMERIC` and `QUOTE_STRINGS`
 every non-empty unquoted field is converted with `float()` (a field that
@@ -78,14 +100,37 @@ character. Rules to match include: when a field is quoted for each
 `quoting` mode (`QUOTE_MINIMAL` quotes a field containing the delimiter,
 the quotechar, `\r`, `\n` or any character of `lineterminator`;
 `QUOTE_NONNUMERIC` quotes everything that is not a number, `None`
-included; `QUOTE_STRINGS` quotes strings only; `QUOTE_NOTNULL` quotes
+included, while `int`, `float` and `bool` (a number) stay unquoted; `QUOTE_STRINGS` quotes strings only; `QUOTE_NOTNULL` quotes
 everything but `None`); doubling the quotechar, or escaping it with
 `escapechar` when `doublequote` is false; escaping the escapechar itself;
-`QUOTE_NONE` escaping instead of quoting (and raising `Error` when an
-escape is needed but no escapechar is set); a record made of one empty
-field being written as `""` (or raising `Error` where `csv` does); empty
-fields when the delimiter is a space and `skipinitialspace` is true. A row
-that raises writes nothing; earlier rows stay written.
+`QUOTE_NONE` escaping instead of quoting (the delimiter, the quotechar,
+the escapechar, `\r`, `\n` and lineterminator characters are each
+preceded by the escapechar); a record made of exactly one field whose
+text is empty and unquoted being written as `""`; an empty field (`""`
+or `None`) being written quoted, as `""`, when the delimiter is a space
+and `skipinitialspace` is true.
+
+Writing errors (all raise `csvx.Error`):
+
+- the row is not iterable (for example `7`);
+- a character must be escaped (`QUOTE_NONE` and one of the characters
+  above, or `doublequote=False` and the quotechar) and no escapechar is
+  set; `quotechar=None` without an explicit `quoting` means `QUOTE_NONE`,
+  so `["a,b"]` then raises;
+- the row has exactly one field, its text is empty, and either `quoting`
+  is `QUOTE_NONE` (`[""]` or `[None]`) or the field is `None` and
+  `quoting` is `QUOTE_STRINGS` or `QUOTE_NOTNULL` (`[None]`);
+- the delimiter is a space, `skipinitialspace` is true, a field's text is
+  empty, and either `quoting` is `QUOTE_NONE` or the field is `None` and
+  `quoting` is `QUOTE_STRINGS` or `QUOTE_NOTNULL` (this check runs per
+  field, before the one-field rule).
+
+A row that raises writes nothing; earlier rows stay written, and
+`writerows` stops at the first row that raises.
+
+Some tests write rows to a `io.StringIO` and read the text back with the
+same dialect and parameters, splitting it with `str.splitlines(keepends=True)`
+into the strings given to `reader`.
 
 Only the exception type is compared (`Error`, `TypeError`, `ValueError`),
 never the message.

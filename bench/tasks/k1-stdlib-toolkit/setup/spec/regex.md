@@ -104,9 +104,23 @@ Module level (signatures as in `re`; the tests pass `count`, `maxsplit` and
 - Groups: `(...)`, `(?:...)`, `(?P<name>...)`; backreferences `\N` and
   `(?P=name)`.
 - Alternation `|`; quantifiers `* + ? {m} {m,} {m,n} {,n}` and their lazy
-  forms with `?`. A `{` that does not form a valid quantifier is a literal.
+  forms with `?`. `{,}` means `{0,}` (the same as `*`). Any other `{` that
+  does not form a quantifier (`a{`, `a{x}`, `a{1`, `a{}`) is a literal `{`.
+  A quantifier with nothing before it, or directly after an anchor
+  (`^ $ \A \Z \b \B`), is an error; a quantifier after a lookaround
+  group such as `(?=a)*` is allowed (the lookaround is repeated).
 - Lookahead `(?=...)`, `(?!...)`; lookbehind `(?<=...)`, `(?<!...)` whose
-  body has a fixed width.
+  body has a fixed width: every alternative and every quantifier inside it
+  must give one fixed length (`(?<=ab|cd)` and `(?<=a{2})` are fine,
+  `(?<=a|bc)`, `(?<=a+)` and `(?<=a{1,2})` are errors). A group reference
+  (`\N` or `(?P=name)`) inside a lookbehind is allowed when it refers to a
+  group defined and closed before the lookbehind and that group has a
+  fixed width (it then counts as that width); a reference to a group with
+  a variable width makes the lookbehind not fixed width, which is an error,
+  as in `re`.
+- Groups that capture inside a positive lookahead or lookbehind keep their
+  values after the assertion succeeds (and update `lastindex`); groups in
+  a negative assertion never keep values.
 - Inline flags `(?i)`, `(?m)`, `(?s)` and combinations at the start of the
   pattern; scoped flags `(?i:...)`.
 - `(?#comment)`.
@@ -115,6 +129,7 @@ Module level (signatures as in `re`; the tests pass `count`, `maxsplit` and
 
 Raise `toolkit.regex.error` wherever `re` raises `re.error` for a pattern
 or template in scope, for example: unbalanced parenthesis, missing `)`,
+unexpected end of pattern (`(?`, `(?P`),
 unterminated character set, nothing to repeat (including a quantifier
 after an anchor), multiple repeat (`a**`, `a{2}{3}`), bad escape (an
 unknown ASCII-letter escape such as `\q`, in or out of a class),
@@ -123,7 +138,15 @@ incomplete `\x` escape, octal value above `\377`, bad character range
 reference to an open group, unknown or badly formed group name,
 redefinition of a group name, min greater than max in `{m,n}`, look-behind
 that is not fixed width, global flags not at the start, unknown extension
-or flag, missing `<` or group name in a `\g` template reference.
+or flag.
+
+Template errors (in `sub`, `subn` and `Match.expand`) that raise
+`toolkit.regex.error`: a group number above the pattern's group count
+(`\2` or `\g<2>` with one group); `\g` not followed by `<`; `\g<>`; a
+`\g<...` with no closing `>`; a `\g<...>` whose content is neither a
+decimal number nor a valid identifier (`\g<1x>`, `\g<-1>`); a backslash
+followed by an ASCII letter that is not one of the template escapes
+listed above (`\q`); an octal escape above `\377`.
 
 A template `\g<name>` naming a group that does not exist raises
 `IndexError`, as in `re`. Only the exception type is compared, never the
