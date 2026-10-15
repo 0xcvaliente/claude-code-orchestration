@@ -7,14 +7,15 @@
 // live in ~/orch-bench/<campaign>/<run_id>. Cost is measured in tokens only. Arms: bench/arms.mjs.
 // Isolation: every user-enabled plugin is disabled in each run repo's .claude/settings.json; a run whose repo still shows an
 // enabled plugin is not launched (end_reason "error", error "isolation").
-// Touch <campaign dir>/PAUSE to hold before the next block; a rate-limited run creates it and is requeued.
+// Touch <campaign dir>/PAUSE to hold before the next block; a rate-limited or auth-failed run creates it and is requeued.
+// Before each block `claude auth status` must show loggedIn true, else PAUSE is written and the runner waits.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARMS, command, envAdditions } from "./arms.mjs";
 import { expandMatrix, filterResume, finishedRunIds, groupBlocks, hms, shuffle, stamp, enabledPluginIds, resolveSeed } from "./lib/run-core.mjs";
-import { checkIsolation, createRunRepo, executeRun, installInterruptHandlers, interrupted, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
+import { checkIsolation, pauseAndRequeue, waitUntilClear, createRunRepo, executeRun, installInterruptHandlers, interrupted, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
 import { formatTokens } from "../scripts/tokens.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -160,11 +161,7 @@ if (!existsSync(manifestFile)) {
 const rowsFile = join(campaignDir, "runs.jsonl");
 const pauseFile = join(campaignDir, "PAUSE");
 
-async function waitWhilePaused() {
-  if (!existsSync(pauseFile)) return;
-  log(`[${hms()}] paused`);
-  while (existsSync(pauseFile)) await sleep(POLL_MS);
-}
+const waitWhilePaused = () => waitUntilClear({ pauseFile, pollMs: POLL_MS, log: (m) => log(`[${hms()}] ${m}`) });
 
 const ctx = { root, campaignDir, reposDir, tasks, disabledIds, log };
 const queue = [...blocks];
@@ -181,10 +178,7 @@ async function runOne(run) {
   appendFileSync(rowsFile, `${JSON.stringify(row)}\n`);
   if (row.error) log(`RUN ERROR ${run.run_id}: ${row.error}`);
   log(`[${hms()}] done ${run.run_id} ${row.end_reason} ${Math.round(row.wall_ms / 1000)}s tokens=${formatTokens(tokensOf(row))}`);
-  if (row.end_reason === "rate_limited") {
-    writeFileSync(pauseFile, `rate limited: ${run.run_id} at ${new Date().toISOString()}\nRemove this file to resume.\n`);
-    queue.push({ key: `${run.block} (requeued ${run.run_id})`, runs: [run] });
-  }
+  pauseAndRequeue(row, run, pauseFile, queue);
 }
 
 async function worker() {
