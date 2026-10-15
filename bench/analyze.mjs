@@ -59,8 +59,15 @@ export function loadCampaign(dir) {
     dir: abs,
     manifest: readJson(join(abs, "manifest.json")) ?? {},
     runs: readJsonl(join(abs, "runs.jsonl")),
-    grades: readJsonl(join(abs, "grades.jsonl")),
+    grades: latestGrades(readJsonl(join(abs, "grades.jsonl"))),
   };
+}
+
+// grade.mjs appends a fresh row when it retries a crashed grade: keep the LAST row per (run_id, snap), in file order.
+export function latestGrades(rows) {
+  const last = new Map();
+  rows.forEach((g, i) => last.set(`${g.run_id}\u0000${g.snap}`, i));
+  return rows.filter((g, i) => last.get(`${g.run_id}\u0000${g.snap}`) === i);
 }
 
 // Task meta: the campaign's own copy first (tasks/<task>/meta.json), then the run dir, then bench/tasks.
@@ -106,8 +113,10 @@ export function tokensOf(results, routes) {
 const pctOf = (g) => (g && typeof g.passed === "number" && g.total > 0 ? (100 * g.passed) / g.total : null);
 
 // Grade rows of one run -> timeline [[secs, pct]] sorted by time, final grade, t90/t100.
-export function timelineOf(gradeRows, wallS) {
-  const final = gradeRows.find((g) => g.snap === "final") ?? null;
+// gradeRows are one run's rows; duplicates of a snap (grader retries) are reduced to the last one in file order.
+export function timelineOf(rows, wallS) {
+  const gradeRows = latestGrades(rows);
+  const final = gradeRows.findLast((g) => g.snap === "final") ?? null;
   const points = gradeRows
     .filter((g) => pctOf(g) !== null)
     .map((g) => [typeof g.secs === "number" ? g.secs : g.snap === "final" ? wallS : Number(String(g.snap).replace(/\D/g, "")), pctOf(g), g.snap === "final"])
