@@ -43,7 +43,9 @@ CRASH_BUDGET = 5
 MODULE_WALL_S = 600.0
 BASE_STATIC_PATTERNS = ["__import__", "importlib", "sys.modules", "eval(", "exec(", "builtins",
                         "runpy", "shutil.copy", "copytree", "copyfile", "sysconfig", "get_path", ".__file__"]
-ORACLE_FLAG = "stdlib-oracle-used:"
+ORACLE_FLAG = "stdlib-oracle-used:"      # an oracle was reached: zeroes this module and the oracle's
+REFUSED_FLAG = "stdlib-oracle-refused:"  # an oracle import was refused: zeroes this module only
+ZERO_FLAGS = (ORACLE_FLAG, REFUSED_FLAG)
 
 
 def expected_modules(hidden_dir=HERE):
@@ -229,7 +231,7 @@ def run_module(sol, ad, oracles_by_cat, wrap_by_cat):
 
 def compare(ad, expected, got, flags):
     same = getattr(ad["mod"], "same", None) or (lambda a, b: a == b)
-    oracle_used = sorted(f for f in flags if f.startswith(ORACLE_FLAG))
+    oracle_used = sorted(f for f in flags if f.startswith(ZERO_FLAGS))
     per_case, passed = {}, 0
     for idx, c in enumerate(ad["cases"]):
         exp = expected[idx]
@@ -337,7 +339,7 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
             passed, per_case = compare(ad, expected, got, mflags)
             failed_import = [r for r in got.values() if r.get("status") == "import_failed"]
             status = failed_import[0]["msg"] if failed_import else "ok"
-            oracle = sorted(f for f in mflags if f.startswith(ORACLE_FLAG))
+            oracle = sorted(f for f in mflags if f.startswith(ZERO_FLAGS))
             if oracle:
                 status = "scored 0: " + ", ".join(oracle)
             with lock:
@@ -352,10 +354,13 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
     write()
     with ThreadPoolExecutor(max_workers=max(1, len(adapters))) as ex:
         list(ex.map(work, adapters.values()))
-    # An oracle flag raised while grading one module also zeroes the module that oracle serves.
+    # An oracle use raised while grading one module also zeroes the module that oracle serves.
+    # A refused import reached nothing, so it zeroes only the module that tried it.
     with lock:
         for name, c in list(cats.items()):
             for f in c.get("flags", ()):
+                if not f.startswith(ORACLE_FLAG):
+                    continue
                 target = oracle_cat.get(f[len(ORACLE_FLAG):])
                 if target in cats and target != name and cats[target]["passed"]:
                     t = cats[target]

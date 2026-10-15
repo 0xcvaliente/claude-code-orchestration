@@ -55,7 +55,7 @@ def check(label, edits, only, expect_zero=None, expect_flag=None, expect_full=()
         p, t = out["by_cat"][cat]
         if p != t or t == 0:
             problems.append(f"{cat} scored {p}/{t}, expected full marks")
-    if not expect_flag and any(grade.ORACLE_FLAG in f for f in out["flags"]):
+    if not expect_flag and any(z in f for z in grade.ZERO_FLAGS for f in out["flags"]):
         problems.append(f"unexpected oracle flag: {out['flags']}")
     if max_s is not None and secs > max_s:
         problems.append(f"took {secs:.0f}s, limit {max_s}s")
@@ -172,27 +172,106 @@ def data_driven_checks():
               honest, ["shlex", "colors", "jx"], expect_full=["shlex", "colors", "jx"], hidden_dir=hd)
         check("colors: import colorsys",
               {**honest, "colors.py": ("import colorsys\n", HONEST_COLORS)}, both,
-              expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
+              expect_zero="colors", expect_flag="stdlib-oracle-refused:colorsys", expect_full=["shlex"], hidden_dir=hd)
         check("colors: pkgutil.resolve_name('colorsys') at call time",
               {**honest, "colors.py": ("import pkgutil\n", "\ndef rgb_to_yiq(r, g, b):\n"
                                        "    return pkgutil.resolve_name('colorsys').rgb_to_yiq(r, g, b)\n")},
-              both, expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
+              both, expect_zero="colors", expect_flag="stdlib-oracle-refused:colorsys", expect_full=["shlex"], hidden_dir=hd)
         check("colors: runpy.run_path(<stdlib>/colorsys.py)",
               {**honest, "colors.py": ("import os as _o, runpy as _r\n",
                                        "\ndef rgb_to_yiq(r, g, b):\n"
                                        "    ns = _r.run_path(_o.path.join(_o.path.dirname(_o.__file__), 'colorsys.py'))\n"
                                        "    return ns['rgb_to_yiq'](r, g, b)\n")},
               both, expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
-        check("shellsplit imports colorsys (another category's oracle: zeroes both)",
+        check("shellsplit imports colorsys (another category's oracle: refused, zeroes the importer only)",
               {**honest, "shellsplit.py": ("import colorsys\n", "")}, both,
-              expect_zero=["shlex", "colors"], expect_flag="stdlib-oracle-used:colorsys", hidden_dir=hd)
+              expect_zero="shlex", expect_flag="stdlib-oracle-refused:colorsys", expect_full=["colors"], hidden_dir=hd)
     finally:
         shutil.rmtree(hd, ignore_errors=True)
 
 
+HONEST_TW = """def dedent(s):
+    lines = s.split("\\n")
+    leads = [l[:len(l) - len(l.lstrip(" \\t"))] for l in lines if l.strip(" \\t")]
+    p = leads[0] if leads else ""
+    for x in leads[1:]:
+        while not x.startswith(p):
+            p = p[:-1]
+    return "\\n".join(l[len(p):] if l.strip(" \\t") else "" for l in lines)
+"""
+FAKE_DFK = '''"""Fake adapter for the selftest: toolkit.dfk reimplements difflib.IS_CHARACTER_JUNK."""
+NAME = "dfk"
+MODULE = "toolkit.dfk"
+ORACLES = ["difflib"]
+WRAP = ["difflib.IS_CHARACTER_JUNK"]
+
+
+def cases():
+    return [{"id": "dfk-%d" % i, "ch": ch} for i, ch in enumerate(" \\tax#\\n")]
+
+
+def run_impl(mod, case):
+    return bool(mod.IS_CHARACTER_JUNK(case["ch"]))
+
+
+def run_oracle(case):
+    import difflib
+    return bool(difflib.IS_CHARACTER_JUNK(case["ch"]))
+'''
+HONEST_DFK = "def IS_CHARACTER_JUNK(ch, ws=\" \\t\"):\n    return ch in ws\n"
+
+
+def refusal_fairness_checks():
+    # pydoc imports textwrap: importing pydoc is refused and zeroes the importer, not tw.
+    hd = fake_hidden({"tw": FAKE_TW, "dfk": FAKE_DFK}, '{"shlex": 68, "tw": null, "dfk": null}')
+    honest = {"tw.py": ("", HONEST_TW), "dfk.py": ("", HONEST_DFK)}
+    try:
+        check("honest tw and dfk (fake adapters)", honest, ["tw", "dfk"], expect_full=["tw", "dfk"], hidden_dir=hd)
+        check("pydoc.locate inside dfk.py (pydoc imports textwrap): zeroes dfk only, not tw",
+              {**honest, "dfk.py": ("import pydoc\n", HONEST_DFK + "\n_d = pydoc.locate('difflib')\n")},
+              ["tw", "dfk"], expect_zero="dfk", expect_flag="stdlib-oracle-refused:textwrap", expect_full=["tw"],
+              hidden_dir=hd)
+    finally:
+        shutil.rmtree(hd, ignore_errors=True)
+    # Solution code runs the adapter's run_oracle in a new thread. With the thread's target being
+    # run_oracle itself, no toolkit frame is on that stack: the import is refused silently.
+    finder = (
+        "\nimport sys as _ts, threading as _tt\n_s2 = split\n_seen = {}\n"
+        "def _adapter_run_oracle():\n"
+        "    f = _ts._getframe(1)\n"
+        "    while f is not None:\n"
+        "        a = f.f_globals.get('adapter')\n"
+        "        if hasattr(a, 'run_oracle'):\n            return a.run_oracle\n"
+        "        f = f.f_back\n"
+        "_CASE = {'fn': 'split', 's': 'a b', 'comments': False, 'posix': True}\n")
+    direct = finder + (
+        "def split(s, comments=False, posix=True):\n"
+        "    if not _seen:\n"
+        "        ro = _adapter_run_oracle()\n"
+        "        if ro is None:\n            return ['probe found no adapter']\n"
+        "        t = _tt.Thread(target=ro, args=(_CASE,))\n        t.start()\n        t.join()\n"
+        "        _seen['done'] = True\n"
+        "    if 'shlex' in _ts.modules:\n        return ['oracle loaded from a thread']\n"
+        "    return _s2(s, comments, posix)\n")
+    check("adapter run_oracle as a solution thread's target: the oracle import is refused",
+          {"shellsplit.py": ("", direct)}, ["shlex"], expect_full=["shlex"])
+    # Through a toolkit function in the thread, the attempt is also flagged as refused.
+    wrapped = finder + (
+        "def _steal(ro):\n"
+        "    try:\n        _seen['r'] = ro(_CASE)\n"
+        "    except BaseException as e:\n        _seen['e'] = type(e).__name__\n"
+        "def split(s, comments=False, posix=True):\n"
+        "    if not _seen:\n"
+        "        t = _tt.Thread(target=_steal, args=(_adapter_run_oracle(),))\n        t.start()\n        t.join()\n"
+        "    if 'r' in _seen:\n        return ['oracle reached from a thread']\n"
+        "    return _s2(s, comments, posix)\n")
+    check("adapter run_oracle via a toolkit function in a thread: refused and flagged",
+          {"shellsplit.py": ("", wrapped)}, ["shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex")
+
+
 def laundering_checks():
-    # Both the laundered module and the one whose code reached the oracle score 0 (the oracle
-    # flag zeroes the module being graded, and the module that oracle serves).
+    # The import that would reach the oracle is refused: the module that tried it scores 0 (flagged
+    # as refused), and the laundered module gets no answers, so it scores 0 as well.
     # csvx, in the csv child, gets shlex through webbrowser and hands shellsplit its answers.
     launder_shlex = (
         "import glob as _lg, marshal as _lm2, os as _lo2, tempfile as _lt\n"
@@ -221,10 +300,12 @@ def laundering_checks():
         "\n\ndef split(s, comments=False, posix=True):\n"
         "    r = _answers().get((s, bool(comments), bool(posix)))\n"
         "    if r == 'ValueError':\n        raise ValueError('laundered')\n"
-        "    return r if r is not None else ['no laundered answer']\n")
+        "    return r if r is not None else ['no laundered answer']\n"
+        "\n\ndef quote(s):\n    return 'no laundered answer'\n"
+        "\n\ndef join(split_command):\n    return 'no laundered answer'\n")
     check("laundering: csvx computes shellsplit's answers with webbrowser.shlex",
           {"csvx.py": (launder_shlex, ""), "shellsplit.py": ("", read_shlex)}, ["csv", "shlex"],
-          expect_zero=["shlex", "csv"], expect_flag="stdlib-oracle-used:shlex")
+          expect_zero=["shlex", "csv"], expect_flag="stdlib-oracle-refused:shlex")
     # shellsplit, in the shlex child, gets textwrap through logging (-> traceback) for the fake tw module.
     hd = fake_hidden({"tw": FAKE_TW}, '{"shlex": 68, "tw": null}')
     launder_tw = (
@@ -243,7 +324,7 @@ def laundering_checks():
     try:
         check("laundering: shellsplit computes tw's answers with logging.traceback.textwrap",
               {"shellsplit.py": (launder_tw, ""), "tw.py": ("", read_tw)}, ["shlex", "tw"],
-              expect_zero=["tw", "shlex"], expect_flag="stdlib-oracle-used:textwrap", hidden_dir=hd)
+              expect_zero=["tw", "shlex"], expect_flag="stdlib-oracle-refused:textwrap", hidden_dir=hd)
     finally:
         shutil.rmtree(hd, ignore_errors=True)
 
@@ -278,16 +359,16 @@ def main():
           ["toml", "shlex"], expect_full=["toml", "shlex"])
     check("pkgutil.resolve_name('tomllib')",
           {"tomlparse.py": ("import pkgutil\n", "\ndef loads(s, /):\n    return pkgutil.resolve_name('tomllib').loads(s)\n")},
-          ["toml", "shlex"], expect_zero="toml", expect_flag="stdlib-oracle-used:tomllib", expect_full=["shlex"])
+          ["toml", "shlex"], expect_zero="toml", expect_flag="stdlib-oracle-refused:tomllib", expect_full=["shlex"])
     check("pydoc.locate('shlex')",
           {"shellsplit.py": ("import pydoc\n", "\ndef split(s, comments=False, posix=True):\n    return pydoc.locate('shlex').split(s, comments, posix)\n")},
-          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-used:shlex", expect_full=["toml"])
+          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex", expect_full=["toml"])
     check("webbrowser.shlex (lazy)",
           {"shellsplit.py": ("", "\ndef split(s, comments=False, posix=True):\n    import webbrowser\n    return webbrowser.shlex.split(s, comments, posix)\n")},
-          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-used:shlex", expect_full=["toml"])
+          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex", expect_full=["toml"])
     check("webbrowser.shlex (module level)",
           {"shellsplit.py": ("import webbrowser\n", "\ndef split(s, comments=False, posix=True):\n    return webbrowser.shlex.split(s, comments, posix)\n")},
-          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-used:shlex", expect_full=["toml"])
+          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex", expect_full=["toml"])
     check("runpy.run_path(<stdlib>/shlex.py)",
           {"shellsplit.py": ("import os as _o, runpy as _r\n",
                              "\ndef split(s, comments=False, posix=True):\n"
@@ -320,6 +401,7 @@ def main():
     data_driven_checks()
     refused_os_checks()
     laundering_checks()
+    refusal_fairness_checks()
     if not quick:
         allcats = [c for c in grade.expected_modules() if os.path.exists(os.path.join(HERE, f"mod_{c}.py"))]
         others = [c for c in allcats if c != "shlex"]
