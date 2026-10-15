@@ -1,0 +1,26 @@
+[
+  {
+    "name": "regex-m1-ignorecase-set-upper",
+    "file": "toolkit/regex.py",
+    "from": "return inset(ch) or inset(ch.lower()) or inset(ch.upper())",
+    "to": "return inset(ch) or inset(ch.lower())"
+  },
+  {
+    "name": "regex-m2-no-lastindex",
+    "file": "toolkit/regex.py",
+    "from": "    lst[0] = g\n",
+    "to": ""
+  },
+  {
+    "name": "regex-m3-dollar-before-final-newline",
+    "file": "toolkit/regex.py",
+    "from": "return lambda s, i: i == len(s) or (i + 1 == len(s) and s[i] == \"\\n\")",
+    "to": "return lambda s, i: i == len(s)"
+  },
+  {
+    "name": "regex-m4-backref-case",
+    "file": "toolkit/regex.py",
+    "from": "            if ignore:\n                if s[i:i + n].lower() != s[a:b].lower():",
+    "to": "            if False:\n                if s[i:i + n].lower() != s[a:b].lower():"
+  }
+]
