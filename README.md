@@ -25,13 +25,13 @@ Measured on seven coding tasks, five setups (plain Sonnet, plain Opus, the orche
 | Small and medium tasks (t1, t2, h1, h2): correctness | 100% on every run | 100% on every run (never better) |
 | Small and medium tasks: tokens | 126k to 457k | 166k to 812k: 1.2x to 2.1x a plain session of the same model family |
 | Small and medium tasks: wall time | 16s to 3 min | 36s to 5 min |
-| Large tasks (k1, h3, k2): correctness | plain Opus 100% on k1, h3 and k2; plain Sonnet 98.8% to 99.6% | 99.5% to 100% on k1 and h3; about 75% on k2 (rule violation, below) |
+| Large tasks (k1, h3, k2): correctness per run | k1 and h3: Opus 100%, Sonnet 98.6% to 99.9%. k2 (strict): Opus 100%, Sonnet 74.5% | k1 and h3: 99.0% to 100%. k2 (strict): 74.9% and 75.1% |
 | Large tasks: tokens | 1.6M to 13.4M | 3.2M to 8.4M: 0.7x to 2.0x on k1 and h3, 0.4x to 0.8x on k2 |
 | Large tasks: time to full score | plain Opus 4 to 8 min | 7 to 12 min, when reached |
 | Self-delegation | on k1 and k2 every plain run spawned Claude Code's built-in subagents (3 on k1, 12 to 21 on k2) | its own researcher, implementers, reviewers, integrator |
 | Verification | the agent's own word: 1 false success in 26 runs | test gate, independent reviewer, review gate: 0 false successes in 26 runs |
 
-So on these tasks the pipeline did not raise correctness: small and medium tasks were solved by every setup, and on the large splittable ones a plain session orchestrated itself with built-in subagents and reached full score sooner. On k2, four of five runs (including every orchestrated one) imported `re` outside the regex module, which the spec forbids; lenient grading that allows it gives 99.3% to 100% for every run, and in the shipped orchestrator the reviewers saw it and disagreed, and nobody removed it. What the pipeline adds is the gates, at 1.2x to 2x the tokens on small work; the router spends one cheap read-only call to decide whether a task needs them. The k2 second repetition and the time-limit and token-cap sweeps are still pending.
+So on these tasks the pipeline did not raise correctness: small and medium tasks were solved by every setup, and on the large splittable ones a plain session orchestrated itself with built-in subagents and reached full score sooner. On k2, 4 of 5 setups scored about 75% strict (only plain Opus 100%): those runs, including plain Sonnet and every orchestrated one, imported `re` outside the regex module, which the spec forbids; lenient grading that allows it gives 99.3% to 100% for every run, and in the shipped orchestrator the reviewers saw it and disagreed, and nobody removed it. What the pipeline adds is the gates, at 1.2x to 2.1x the tokens on small and medium work; the router spends one cheap read-only call to decide whether a task needs them. The k2 second repetition and the time-limit and token-cap sweeps are still pending.
 
 ## Quick start
 
