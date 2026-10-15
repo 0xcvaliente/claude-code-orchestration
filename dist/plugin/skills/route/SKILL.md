@@ -24,10 +24,10 @@ Size the task before doing it.
      1. risky, fewer than 2 independent slices, at most 3 files and at most 200 lines: `reviewed`.
      2. risky otherwise: `orchestrate`.
      3. 12 or more files: `orchestrate`.
-     4. 2 or more independent slices and (4 or more files, or 1500 or more lines): `orchestrate`. An interface-first plan lets those slices run in parallel, where step 2 allows it, even across few files.
+     4. 2 or more independent slices and (10 or more files, or 1500 or more lines): `orchestrate`. An interface-first plan lets those slices run in parallel, where step 2 allows it, even across few files.
      5. Otherwise `plain`. A large but sequential change stays plain: one session keeps a coupled design in one context.
 
-     Thresholds: minParallelSlices 2, minParallelFiles 4, bigFiles 12, reviewedMaxFiles 3, bigLines 1500, reviewedMaxLines 200.
+     Thresholds: minParallelSlices 2, minParallelFiles 10, bigFiles 12, reviewedMaxFiles 3, bigLines 1500, reviewedMaxLines 200.
 
 2. Tell the user the mode and the reason in one or two sentences, then act on it. Only code in a git repository uses git machinery (worktrees, the integrator, checkpoint commits, branch reports, `git diff` reviews). The test gate runs the tests whenever a test command exists (detected, or `ORCH_TEST_CMD`) and skips them only for a prose-only change in a git work tree; it judges the changed files, never `code`. The review gate applies to every task.
    - `plain`: do the task in this session. If it changed code, run the project's tests before saying it is done; otherwise check the result against the request (every requested item is there, and each claim is backed by a source you read).

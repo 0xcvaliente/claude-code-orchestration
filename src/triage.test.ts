@@ -14,10 +14,14 @@ test("decide: small or sequential work goes to a plain session", () => {
   assert.equal(decide(facts()).mode, "plain");
   assert.equal(decide(facts({ filesToTouch: 8, independentSlices: 1 })).mode, "plain", "sequential, however many files");
   assert.equal(decide(facts({ filesToTouch: 3, independentSlices: 3 })).mode, "plain", "too little work to parallelise");
+  // Fact sheets the triager wrote in the benchmark (docs/benchmarks.md), where a plain session matched the pipeline's score for fewer tokens.
+  assert.equal(decide(facts({ filesToTouch: 4, linesToChange: 70, independentSlices: 2 })).mode, "plain", "t1: two tiny modules");
+  assert.equal(decide(facts({ filesToTouch: 9, linesToChange: 600, independentSlices: 2 })).mode, "plain", "h2: a medium greenfield library");
+  assert.equal(decide(facts({ filesToTouch: 9, linesToChange: 1300, independentSlices: 3 })).mode, "plain", "h1: a medium engine under bigLines");
 });
 
 test("decide: parallel, large or risky work goes to the pipeline", () => {
-  assert.equal(decide(facts({ filesToTouch: 5, independentSlices: 2 })).mode, "orchestrate");
+  assert.equal(decide(facts({ filesToTouch: 10, independentSlices: 2 })).mode, "orchestrate");
   assert.equal(decide(facts({ filesToTouch: 12, independentSlices: 1 })).mode, "orchestrate");
   assert.equal(decide(facts({ filesToTouch: 6, risky: true })).mode, "orchestrate", "risky and spread over files");
   assert.equal(decide(facts({ filesToTouch: 2, independentSlices: 2, risky: true })).mode, "orchestrate", "risky and parallel");
@@ -42,7 +46,7 @@ test("decide: line count matters, not only files", () => {
 test("decide: the code fact is not part of the policy; any kind of task is sized by the same thresholds", () => {
   const sheets: Partial<Facts>[] = [
     {},
-    { filesToTouch: 5, independentSlices: 2 },
+    { filesToTouch: 10, independentSlices: 2 },
     { filesToTouch: 12 },
     { filesToTouch: 3, linesToChange: 2000, independentSlices: 1 },
     { filesToTouch: 1, risky: true },
@@ -53,13 +57,13 @@ test("decide: the code fact is not part of the policy; any kind of task is sized
   }
   // A report and a research fan-out are sized like code: one long document stays in one session, several documents split.
   assert.equal(decide(facts({ code: false, filesToTouch: 1, linesToChange: 2000 })).mode, "plain");
-  assert.equal(decide(facts({ code: false, filesToTouch: 4, linesToChange: 800, independentSlices: 4 })).mode, "orchestrate");
+  assert.equal(decide(facts({ code: false, filesToTouch: 10, linesToChange: 800, independentSlices: 4 })).mode, "orchestrate");
 });
 
 test("decide: reasons do not talk about git, so they fit any kind of task", () => {
   const sheets: Partial<Facts>[] = [
     {},
-    { filesToTouch: 5, independentSlices: 2 },
+    { filesToTouch: 10, independentSlices: 2 },
     { filesToTouch: 12 },
     { filesToTouch: 3, linesToChange: 2000 },
     { filesToTouch: 1, risky: true },
@@ -68,7 +72,7 @@ test("decide: reasons do not talk about git, so they fit any kind of task", () =
   const reasons = sheets.map((s) => decide(facts(s)).reason);
   assert.equal(new Set(reasons).size, reasons.length, "each rule says something different");
   for (const reason of reasons) assert.doesNotMatch(reason, /worktree|\bgit\b|\bcommit|\bbranch/i, reason);
-  assert.match(decide(facts({ filesToTouch: 5, independentSlices: 2 })).reason, /parallel slices pay off/);
+  assert.match(decide(facts({ filesToTouch: 10, independentSlices: 2 })).reason, /parallel slices pay off/);
 });
 
 test("route skill mentions every TRIAGE threshold (in-model fallback cannot drift)", () => {
