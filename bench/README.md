@@ -26,10 +26,10 @@ In `bench/tasks/<id>/`. The cap is the task's own wall-clock limit (`cap_min`); 
 | `t2-single` | small | single (duration parser) | 10 min | node |
 | `h1-query-engine` | medium | splittable | 30 min | node |
 | `h2-scheduler` | medium | splittable | 30 min | node |
-| `k1-stdlib-toolkit` | large | splittable | 30 min | node |
+| `k1-stdlib-toolkit` | large | splittable (4 modules: toml 124, shlex 68, regex 205, csv 106 hidden cases; 503 total) | 30 min | python |
 | `h3-sql-engine` | large | monolithic (minisql, matched against SQLite) | 30 min | python |
 
-`k1-stdlib-toolkit` may arrive from another branch; `node bench/validate.mjs` lists what is present.
+`k1-stdlib-toolkit` (test command `python3 tests/run_public.py`, graded path `toolkit`) is graded in a sandbox: the stdlib oracle modules are blocked, and using them in any way scores that module 0. It may arrive from another branch; `node bench/validate.mjs` lists what is present.
 
 ## Commands, in order
 
