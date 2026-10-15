@@ -157,6 +157,21 @@ const RATE_LIMIT = /usage limit|rate limit|429|overloaded|quota/i;
 export const isRateLimited = (results) =>
   (results ?? []).some((r) => r?.is_error === true && RATE_LIMIT.test(typeof r.result === "string" ? r.result : JSON.stringify(r.result ?? "")));
 
+const AUTH_ERROR = /Failed to authenticate|OAuth|not logged in|invalid api key|authentication/i;
+export const isAuthError = (results) =>
+  (results ?? []).some((r) => r?.is_error === true && AUTH_ERROR.test(typeof r.result === "string" ? r.result : JSON.stringify(r.result ?? "")));
+
+export const AUTH_PAUSE_REASON = "claude CLI not logged in; run `claude auth login`";
+
+// `claude auth status` stdout -> true only for JSON with loggedIn === true.
+export function parseAuthStatus(text) {
+  try {
+    return JSON.parse(String(text ?? "")).loggedIn === true;
+  } catch {
+    return false;
+  }
+}
+
 // run_ids that a resume skips: rows that ended "exited" or "deadline".
 export function finishedRunIds(rowsText) {
   const done = new Set();
