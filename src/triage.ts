@@ -12,9 +12,10 @@ export interface Facts {
   /**
    * True when the task creates or changes source code, tests, build or CI configuration in a repository. False for
    * research, writing, analysis, planning or operations whose output is documents, data, answers or commands run.
-   * It does not take part in `decide`, so it never changes the route: callers use it to decide git machinery
-   * (worktrees, CHECKPOINT commits, the integrator) and, in `npm run auto`, whether web tools are allowed. The test
-   * gate never reads it: it judges the changed files itself.
+   * In `decide` it changes one thing, the parallel-files threshold (TRIAGE.minParallelFilesCode or
+   * minParallelFilesNonCode). Callers also use it to decide git machinery (worktrees, CHECKPOINT commits, the
+   * integrator) and, in `npm run auto`, whether web tools are allowed. The test gate never reads it: it judges the
+   * changed files itself.
    */
   code: boolean;
   /** Files the task will create or change, of any kind (source, docs, reports, data, config). */
@@ -83,7 +84,18 @@ export function parseFacts(x: unknown): Facts | undefined {
   };
 }
 
-/** Deterministic policy: thresholds live in config.ts (`TRIAGE`), so they can be tuned and tested without a model. */
+/**
+ * The parallel-files threshold for a fact sheet: the code value unless `code` is exactly false, so a sheet with a missing
+ * or odd `code` is sized like code, matching parseFacts' default of true.
+ */
+export function minParallelFiles(f: Pick<Facts, "code">): number {
+  return f.code === false ? TRIAGE.minParallelFilesNonCode : TRIAGE.minParallelFilesCode;
+}
+
+/**
+ * Deterministic policy: thresholds live in config.ts (`TRIAGE`), so they can be tuned and tested without a model. The
+ * `code` fact only picks the parallel-files threshold; every other rule is the same for any kind of task.
+ */
 export function decide(f: Facts): { mode: Mode; reason: string } {
   if (f.risky && f.independentSlices < TRIAGE.minParallelSlices && f.filesToTouch <= TRIAGE.reviewedMaxFiles && f.linesToChange <= TRIAGE.reviewedMaxLines) {
     return { mode: "reviewed", reason: `small risky change (${f.filesToTouch} file(s), ~${f.linesToChange} lines): a plain session plus an independent reviewer` };
@@ -92,7 +104,7 @@ export function decide(f: Facts): { mode: Mode; reason: string } {
   if (f.filesToTouch >= TRIAGE.bigFiles) {
     return { mode: "orchestrate", reason: `large change (${f.filesToTouch} files): split it across fresh contexts` };
   }
-  if (f.independentSlices >= TRIAGE.minParallelSlices && (f.filesToTouch >= TRIAGE.minParallelFiles || f.linesToChange >= TRIAGE.bigLines)) {
+  if (f.independentSlices >= TRIAGE.minParallelSlices && (f.filesToTouch >= minParallelFiles(f) || f.linesToChange >= TRIAGE.bigLines)) {
     return {
       mode: "orchestrate",
       reason: `${f.independentSlices} independent slices over ${f.filesToTouch} files, ~${f.linesToChange} lines: parallel slices pay off`,
