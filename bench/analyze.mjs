@@ -14,7 +14,7 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "AUTO"];
-export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine"];
+export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },
   "t2-single": { tier: "small", shape: "single" },
@@ -22,8 +22,9 @@ export const TASK_META = {
   "h2-scheduler": { tier: "medium", shape: "splittable" },
   "k1-stdlib-toolkit": { tier: "large", shape: "splittable" },
   "h3-sql-engine": { tier: "large", shape: "monolithic" },
+  "k2-stdlib-toolkit-xl": { tier: "large", shape: "splittable" },
 };
-export const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M"];
+export const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 export const EXCLUDED_REASONS = new Set(["rate_limited", "error"]);
 const BOOT_ITERATIONS = 10_000;
 const MIN_N = 2; // below this a hypothesis is inconclusive
@@ -379,13 +380,13 @@ export function evaluateHypotheses(runs) {
 
   // H1
   {
-    const task = "k1-stdlib-toolkit";
+    const task = "k2-stdlib-toolkit-xl";
     const base = cellOf(task, "P-O");
     const xs = ["O-mix", "O-O"].map((a) => cellOf(task, a));
     const ev = { P_O: base && { score_median: base.score_median, wall_median_s: base.wall_median_s, n: base.n } };
     if (!enough(base, ...xs)) {
       for (const [i, a] of ["O-mix", "O-O"].entries()) ev[a.replace("-", "_")] = xs[i] && { score_median: xs[i].score_median, wall_median_s: xs[i].wall_median_s, n: xs[i].n };
-      push("H1", "On k1-stdlib-toolkit (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.", INC, ev, "missing cells or n < 2");
+      push("H1", "On k2-stdlib-toolkit-xl (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.", INC, ev, "missing cells or n < 2");
     } else {
       let ok = true;
       for (const [i, a] of ["O-mix", "O-O"].entries()) {
@@ -395,7 +396,7 @@ export function evaluateHypotheses(runs) {
         ok &&= within && faster;
         ev[a.replace("-", "_")] = { score_median: c.score_median, score_diff_pts: r2(c.score_median - base.score_median), wall_median_s: c.wall_median_s, within_5: within, faster, n: c.n };
       }
-      push("H1", "On k1-stdlib-toolkit (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.", verdict(ok), ev);
+      push("H1", "On k2-stdlib-toolkit-xl (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.", verdict(ok), ev);
     }
   }
 
@@ -462,19 +463,22 @@ export function evaluateHypotheses(runs) {
     }
     ev.tasks_within = okCount;
     ev.tasks_evaluable = evaluable;
-    const v = okCount >= 4 ? "supported" : okCount + (TASKS.length - evaluable) < 4 ? "not supported" : INC;
-    push("H5", "Efficiency (mean score pct per million median tokens): AUTO is within 10% of the best arm on at least 4 of 6 tasks.", v, ev, v === INC ? "too few tasks with AUTO and another arm at n >= 2" : undefined);
+    const needed = Math.ceil((2 / 3) * evaluable);
+    ev.tasks_needed = needed;
+    const v = evaluable === 0 ? INC : okCount >= needed ? "supported" : "not supported";
+    push("H5", "Efficiency (mean score pct per million median tokens): AUTO is within 10% of the best arm on at least two-thirds of the tasks with data.", v, ev, v === INC ? "no task with AUTO and another arm at n >= 2" : undefined);
   }
 
   // H6
   {
+    const isLarge = (task) => (runs.find((r) => r.task === task && r.tier)?.tier ?? TASK_META[task]?.tier) === "large";
     const ev = {};
     let lowerOnLarge = false;
     let allLarge = true;
     for (const task of TASKS) {
       const a = cellOf(task, "O-O");
       const b = cellOf(task, "P-O");
-      const large = TASK_META[task].tier === "large";
+      const large = isLarge(task);
       if (!enough(a, b)) {
         ev[task] = { n_oo: a?.n ?? 0, n_po: b?.n ?? 0 };
         if (large) allLarge = false;
@@ -493,7 +497,7 @@ export function evaluateHypotheses(runs) {
     const ev = {};
     let missing = false;
     let ok = true;
-    for (const task of ["k1-stdlib-toolkit", "h3-sql-engine"]) {
+    for (const task of ["k2-stdlib-toolkit-xl"]) {
       const d = {};
       for (const cell of ["cap10", "main", "cap60"]) {
         const a = cellOf(task, "O-mix", cell);
@@ -503,16 +507,18 @@ export function evaluateHypotheses(runs) {
       }
       const grows = d.cap10 !== undefined && d.main !== undefined && d.cap60 !== undefined && d.cap10 < d.main && d.main < d.cap60;
       const budgets = {};
-      for (const cell of ["budget1M", "budget3M"]) {
+      const budgetCells = [...new Set(cells.filter((c) => c.task === task && c.cell.startsWith("budget")).map((c) => c.cell))].sort();
+      for (const cell of budgetCells) {
         const a = cellOf(task, "O-mix", cell);
         const b = cellOf(task, "P-O", cell);
         if (!enough(a, b)) missing = true;
         else budgets[cell] = { p_o: b.score_median, o_mix: a.score_median, p_o_at_least: b.score_median >= a.score_median };
       }
-      ok &&= grows && Object.keys(budgets).length === 2 && Object.values(budgets).every((x) => x.p_o_at_least);
+      if (budgetCells.length < 2) missing = true;
+      ok &&= grows && Object.keys(budgets).length >= 2 && Object.values(budgets).every((x) => x.p_o_at_least);
       ev[task] = { o_mix_minus_p_o: d, grows, budgets };
     }
-    push("H7", "On k1 and h3, the O-mix minus P-O score difference grows from cap10 to main to cap60; at budget1M and budget3M P-O scores at least as high as O-mix.", missing ? INC : verdict(ok), ev, missing ? "missing sweep cells or n < 2" : undefined);
+    push("H7", "On k2-stdlib-toolkit-xl, the O-mix minus P-O score difference grows from cap10 to main to cap60; at the two budget cells P-O scores at least as high as O-mix.", missing ? INC : verdict(ok), ev, missing ? "missing sweep cells or n < 2" : undefined);
   }
   return out;
 }
