@@ -20,6 +20,7 @@ const META_TYPES = {
   shape: (v) => ["parallel", "single", "dependent", "monolithic", "splittable"].includes(v),
   lang: (v) => ["node", "python"].includes(v),
   cap_min: (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
+  total: (v) => v === undefined || (Number.isInteger(v) && v > 0),
   test_cmd: (v) => v === null || typeof v === "string",
   graded_paths: (v) => Array.isArray(v) && v.length > 0 && v.every((p) => typeof p === "string"),
   snapshot_every_s: (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
@@ -86,6 +87,7 @@ async function validateTask(id, tasksDir, jobs) {
   const ref = await withDir(task, true, (d) => scoreDir(id, d, tasksDir));
   if (!ref.pass) fail(`reference does not pass (${ref.passed}/${ref.total}) ${JSON.stringify(ref.flags ?? [])}`);
   else console.log(`ok   ${id}: reference passes (${ref.passed}/${ref.total})`);
+  if (ref.pass && "total" in task.meta && task.meta.total !== ref.total) fail(`meta.total ${task.meta.total} != reference total ${ref.total}`);
 
   const mutants = loadMutants(task);
   const results = await pool(mutants, jobs, (m) => withDir(task, true, async (d) => {

@@ -11,7 +11,7 @@ import { cpus } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_TASKS_DIR, scoreDir } from "./lib/score.mjs";
+import { DEFAULT_TASKS_DIR, metaTotal, scoreDir } from "./lib/score.mjs";
 
 const self = fileURLToPath(import.meta.url);
 const HASH_SKIP = new Set([".git", "node_modules", "__pycache__", ".claude"]);
@@ -53,7 +53,7 @@ function scoreInChild(taskId, dir, tasksDir) {
     const child = spawn(process.execPath, [self, "--score-one", taskId, dir, "--tasks-dir", tasksDir], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
-    const fallback = { pass: false, passed: 0, total: 0, flags: ["grader-crash"], crashed: true };
+    const fallback = { pass: false, passed: 0, total: metaTotal(taskId, tasksDir) ?? 0, flags: ["grader-crash"], crashed: true };
     child.on("error", () => res(fallback));
     child.on("close", () => {
       const i = out.lastIndexOf("@@RESULT@@");

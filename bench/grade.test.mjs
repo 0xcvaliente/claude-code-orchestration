@@ -68,6 +68,25 @@ test("grade.mjs grades snapshots, reuses identical hashes, and is idempotent", (
   }
 });
 
+test("a crashing score() records the meta total with grader-crash and is never cached", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "grade-test-"));
+  try {
+    const campaign = join(tmp, "campaign");
+    cpSync(join(here, "test-fixtures", "grade-crash", "campaign"), campaign, { recursive: true });
+    const tasks = join(here, "test-fixtures", "grade-crash", "tasks");
+    grade(campaign, "--tasks-dir", tasks);
+    const rows = lines(join(campaign, "grades.jsonl"));
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0].pass, rows[0].passed, rows[0].total], [false, 0, 7]);
+    assert.deepEqual(rows[0].flags, ["grader-crash"]);
+    let cache = {};
+    try { cache = JSON.parse(readFileSync(join(campaign, "grades-cache.json"), "utf8")); } catch { /* none written */ }
+    assert.deepEqual(cache, {});
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("grade.mjs --final-only and --only filter the work", () => {
   const tmp = mkdtempSync(join(tmpdir(), "grade-test-"));
   try {

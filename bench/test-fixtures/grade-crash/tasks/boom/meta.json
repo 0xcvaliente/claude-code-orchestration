@@ -1,0 +1,1 @@
+{"id":"boom","title":"Crashing grader","tier":"small","shape":"single","lang":"node","cap_min":1,"total":7,"test_cmd":null,"graded_paths":["."],"snapshot_every_s":30}
