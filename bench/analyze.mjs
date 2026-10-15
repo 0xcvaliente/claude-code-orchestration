@@ -61,6 +61,8 @@ export function loadCampaign(dir) {
     manifest: readJson(join(abs, "manifest.json")) ?? {},
     runs: readJsonl(join(abs, "runs.jsonl")),
     grades: latestGrades(readJsonl(join(abs, "grades.jsonl"))),
+    // Secondary (lenient) grades of final/ only; null when the campaign has no grades-lenient.jsonl.
+    lenient: existsSync(join(abs, "grades-lenient.jsonl")) ? latestGrades(readJsonl(join(abs, "grades-lenient.jsonl"))) : null,
   };
 }
 
@@ -216,6 +218,13 @@ export function analyzeRun(row, grades, campaign) {
   const g = timelineOf(grades.filter((x) => x.run_id === row.run_id), wallS);
   const score = pctOf(g.final);
   const pass = g.final ? Boolean(g.final.pass) : null;
+  // Lenient variant (bench/grade.mjs --variant lenient): only when grades-lenient.jsonl exists. A run
+  // with no lenient row (task without the variant, or not graded yet) gets null.
+  const lenRow = campaign.lenient ? campaign.lenient.find((x) => x.run_id === row.run_id && x.snap === "final") : null;
+  const lenScore = pctOf(lenRow);
+  const lenient = campaign.lenient
+    ? { score_pct_lenient: lenScore === null ? null : Math.round(lenScore * 100) / 100, pass_lenient: lenRow ? Boolean(lenRow.pass) : null }
+    : {};
   const finalDoc = results.at(-1);
   const claim = classifyClaim(finalDoc?.result);
   const diffFiles = existsSync(join(runDir, "diff-files.txt"))
@@ -242,6 +251,7 @@ export function analyzeRun(row, grades, campaign) {
     tokens: tokensOf(results, routes),
     score_pct: score === null ? null : Math.round(score * 100) / 100,
     pass,
+    ...lenient,
     passed: g.final?.passed ?? null,
     total: g.final?.total ?? null,
     timeline: g.timeline,
@@ -287,6 +297,7 @@ export function buildCells(runs, allRuns = runs) {
       direction_only: rs.length < DIRECTION_ONLY_N,
       graded: graded.length,
       pass_rate: graded.length ? r2(graded.filter((r) => r.pass).length / graded.length) : null,
+      ...(rs.some((r) => "score_pct_lenient" in r) ? { score_median_lenient: r2(median(rs.map((r) => r.score_pct_lenient ?? null))) } : {}),
       score_median: r2(median(scores)),
       score_mean: r2(mean(scores)),
       score_iqr: si && [r2(si.q1), r2(si.q3)],

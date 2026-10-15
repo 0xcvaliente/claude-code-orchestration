@@ -5,13 +5,16 @@
 // score.mjs, in parallel child processes. Identical (task, content hash) pairs are graded once, via
 // <campaign>/grades-cache.json. Rows are appended to <campaign>/grades.jsonl; (run_id, snap) pairs
 // already there are skipped, so the command is idempotent and resumable.
+// --variant lenient: grades final/ only, with the task's secondary variant (only tasks whose score.mjs
+// exports it, k2 for now; others are skipped with a note), into <campaign>/grades-lenient.jsonl. The
+// cache keys carry the variant, so strict and lenient grades never mix.
 import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { cpus } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_TASKS_DIR, metaTotal, scoreDir } from "./lib/score.mjs";
+import { DEFAULT_TASKS_DIR, metaTotal, scoreDir, supportsVariant } from "./lib/score.mjs";
 
 const self = fileURLToPath(import.meta.url);
 const HASH_SKIP = new Set([".git", "node_modules", "__pycache__", ".claude"]);
@@ -43,14 +46,14 @@ function listSnapshots(runDir) {
 }
 
 // Child process: print the score of one dir as JSON on stdout.
-async function scoreOne(taskId, dir, tasksDir) {
-  const r = await scoreDir(taskId, dir, tasksDir);
+async function scoreOne(taskId, dir, tasksDir, variant) {
+  const r = await scoreDir(taskId, dir, tasksDir, variant || null);
   process.stdout.write(`\n@@RESULT@@${JSON.stringify(r)}\n`);
 }
 
-function scoreInChild(taskId, dir, tasksDir) {
+function scoreInChild(taskId, dir, tasksDir, variant) {
   return new Promise((res) => {
-    const child = spawn(process.execPath, [self, "--score-one", taskId, dir, "--tasks-dir", tasksDir], { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(process.execPath, [self, "--score-one", taskId, dir, "--tasks-dir", tasksDir, ...(variant ? ["--variant", variant] : [])], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     child.stdout.on("data", (d) => { out += d; });
     const fallback = { pass: false, passed: 0, total: metaTotal(taskId, tasksDir) ?? 0, flags: ["grader-crash"], crashed: true };
@@ -66,18 +69,20 @@ async function main() {
   const args = process.argv.slice(2);
   const opt = (name, fb) => { const i = args.indexOf(`--${name}`); return i === -1 ? fb : args[i + 1]; };
   const tasksDir = resolve(opt("tasks-dir", DEFAULT_TASKS_DIR));
-  if (args[0] === "--score-one") return scoreOne(args[1], args[2], tasksDir);
+  const variant = opt("variant", null);
+  if (args[0] === "--score-one") return scoreOne(args[1], args[2], tasksDir, variant);
+  if (variant && variant !== "lenient") { console.error(`unknown --variant ${variant} (only: lenient)`); process.exit(2); }
 
-  const flagWithValue = new Set(["--jobs", "--only", "--tasks-dir"]);
+  const flagWithValue = new Set(["--jobs", "--only", "--tasks-dir", "--variant"]);
   const positional = args.filter((a, i) => !a.startsWith("--") && !flagWithValue.has(args[i - 1]));
-  if (!positional[0]) { console.error("usage: node bench/grade.mjs <campaign dir> [--jobs N] [--only <substring>] [--final-only]"); process.exit(2); }
+  if (!positional[0]) { console.error("usage: node bench/grade.mjs <campaign dir> [--jobs N] [--only <substring>] [--final-only] [--variant lenient]"); process.exit(2); }
   const campaign = resolve(positional[0]);
   const jobs = Math.max(1, Number(opt("jobs", 0)) || Math.max(1, Math.floor(cpus().length / 2)));
   const only = opt("only", null);
-  const finalOnly = args.includes("--final-only");
+  const finalOnly = args.includes("--final-only") || !!variant;
 
   const runs = readJsonl(join(campaign, "runs.jsonl")).filter((r) => !only || r.run_id.includes(only));
-  const gradesFile = join(campaign, "grades.jsonl");
+  const gradesFile = join(campaign, variant ? `grades-${variant}.jsonl` : "grades.jsonl");
   const cacheFile = join(campaign, "grades-cache.json");
   const done = new Set(readJsonl(gradesFile).filter((g) => !g.crashed && !(g.flags ?? []).some((f) => f.startsWith("grader-crash"))).map((g) => `${g.run_id}\0${g.snap}`));
   let cache = {};
@@ -90,13 +95,13 @@ async function main() {
   const release = () => { const n = waiting.shift(); if (n) n(); else running--; };
   const inflight = new Map();
   const resultFor = (task, hash, dir) => {
-    const key = `${task}:${hash}`;
+    const key = variant ? `${variant}:${task}:${hash}` : `${task}:${hash}`;
     if (cache[key]) return Promise.resolve(cache[key]);
     if (!inflight.has(key)) {
       inflight.set(key, (async () => {
         await slot();
         try {
-          const r = await scoreInChild(task, dir, tasksDir);
+          const r = await scoreInChild(task, dir, tasksDir, variant);
           if (!r.crashed) { cache[key] = r; saveCache(); }
           return r;
         } finally { release(); }
@@ -106,7 +111,13 @@ async function main() {
   };
 
   let graded = 0;
+  const supported = new Map();
+  const skippedTasks = new Set();
   await Promise.all(runs.map(async (run) => {
+    if (variant) {
+      if (!supported.has(run.task)) supported.set(run.task, await supportsVariant(run.task, variant, tasksDir));
+      if (!supported.get(run.task)) { skippedTasks.add(run.task); return; }
+    }
     const runDir = join(campaign, run.run_id);
     const items = [];
     if (!finalOnly) items.push(...listSnapshots(runDir));
@@ -127,6 +138,7 @@ async function main() {
     const last = results[results.length - 1];
     console.log(`graded ${run.run_id} (${run.task}): ${todo.length} dir(s), last ${last.passed ?? 0}/${last.total ?? 0}`);
   }));
+  if (skippedTasks.size) console.log(`note: variant ${variant} not supported by task(s) ${[...skippedTasks].sort().join(", ")}: skipped`);
   console.log(`done: ${graded} run(s) graded, ${runs.length - graded} up to date or empty`);
 }
 

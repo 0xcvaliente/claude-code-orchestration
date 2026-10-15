@@ -384,3 +384,33 @@ test("report renders HTML and Markdown with no dollar figures", () => {
   assert.match(md, /\| t1-parallel__O-mix__main__r1 \| t1-parallel \/ O-mix \/ main \| rate_limited \|/);
   assert.match(html, /<h3>Retries<\/h3>/);
 });
+
+test("lenient grades add score_pct_lenient, pass_lenient and score_median_lenient; strict stays untouched", async () => {
+  const { cpSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tmp = mkdtempSync(join(tmpdir(), "an-lenient-"));
+  try {
+    const strictOnly = analyze([FIXTURE], { now: "x" });
+    assert.ok(strictOnly.runs.every((r) => !("score_pct_lenient" in r)), "no lenient file, no lenient fields");
+    assert.ok(strictOnly.cells.every((c) => !("score_median_lenient" in c)));
+    const dir = join(tmp, "c");
+    cpSync(FIXTURE, dir, { recursive: true });
+    writeFileSync(join(dir, "grades-lenient.jsonl"), [
+      { run_id: "t1-parallel__P-O__main__r1", snap: "final", pass: false, passed: 9, total: 10 },
+      { run_id: "t1-parallel__P-O__main__r2", snap: "final", pass: true, passed: 10, total: 10 },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const s = analyze([dir], { now: "x" });
+    const r1 = s.runs.find((r) => r.run_id === "t1-parallel__P-O__main__r1");
+    assert.equal(r1.score_pct_lenient, 90);
+    assert.equal(r1.pass_lenient, false);
+    assert.equal(s.runs.find((r) => r.run_id === "k1-stdlib-toolkit__P-O__main__r1").score_pct_lenient, null);
+    const c = s.cells.find((x) => x.task === "t1-parallel" && x.arm === "P-O" && x.cell === "main");
+    assert.equal(c.score_median_lenient, 95);
+    assert.equal(c.score_median, strictOnly.cells.find((x) => x.task === "t1-parallel" && x.arm === "P-O" && x.cell === "main").score_median);
+    assert.deepEqual(s.hypotheses, strictOnly.hypotheses, "hypotheses keep the strict score");
+    assert.match(renderHtml(s), /Median score, lenient/);
+    assert.match(renderMarkdown(s), /Median score, lenient/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
