@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decideRoute } from "./auto.js";
 import { TRIAGE } from "./config.js";
-import { decide, parseFacts, triage, triagePrompt, TRIAGE_SCHEMA, type Facts } from "./triage.js";
+import { decide, minParallelFiles, parseFacts, triage, triagePrompt, TRIAGE_SCHEMA, type Facts } from "./triage.js";
 
 const facts = (over: Partial<Facts> = {}): Facts => ({ code: true, filesToTouch: 2, linesToChange: 50, independentSlices: 1, risky: false, reason: "", ...over });
 
@@ -43,28 +43,48 @@ test("decide: line count matters, not only files", () => {
   assert.equal(decide(facts({ filesToTouch: 2, linesToChange: 201, risky: true })).mode, "orchestrate", "risky and too large to review alone");
 });
 
-test("decide: the code fact is not part of the policy; any kind of task is sized by the same thresholds", () => {
+test("decide: the code fact picks the parallel-files threshold, 10 for code and 4 for non-code work", () => {
+  assert.equal(TRIAGE.minParallelFilesCode, 10);
+  assert.equal(TRIAGE.minParallelFilesNonCode, 4);
+  // The same sheet: parallel slices over 6 files pay off for non-code work, not for code.
+  const sheet = { filesToTouch: 6, linesToChange: 800, independentSlices: 3 };
+  assert.equal(decide(facts({ ...sheet, code: true })).mode, "plain", "code: under 10 files");
+  assert.equal(decide(facts({ ...sheet, code: false })).mode, "orchestrate", "non-code: 4 or more files");
+  // Each threshold at its edge.
+  assert.equal(decide(facts({ code: false, filesToTouch: 3, linesToChange: 800, independentSlices: 2 })).mode, "plain");
+  assert.equal(decide(facts({ code: false, filesToTouch: 4, linesToChange: 800, independentSlices: 2 })).mode, "orchestrate");
+  assert.equal(decide(facts({ code: true, filesToTouch: 9, linesToChange: 800, independentSlices: 2 })).mode, "plain");
+  assert.equal(decide(facts({ code: true, filesToTouch: 10, linesToChange: 800, independentSlices: 2 })).mode, "orchestrate");
+  // A research fan-out: 4 documents written by 4 parallel workers goes to the pipeline.
+  assert.equal(decide(facts({ code: false, filesToTouch: 4, linesToChange: 800, independentSlices: 4 })).mode, "orchestrate");
+  // One long report stays in one session: slices, not size, decide the parallel rule.
+  assert.equal(decide(facts({ code: false, filesToTouch: 1, linesToChange: 2000 })).mode, "plain");
+});
+
+test("decide: the code fact changes nothing but the parallel-files threshold", () => {
   const sheets: Partial<Facts>[] = [
     {},
     { filesToTouch: 10, independentSlices: 2 },
     { filesToTouch: 12 },
+    { filesToTouch: 8, independentSlices: 1 },
     { filesToTouch: 3, linesToChange: 2000, independentSlices: 1 },
+    { filesToTouch: 3, linesToChange: 2000, independentSlices: 3 },
     { filesToTouch: 1, risky: true },
     { filesToTouch: 6, risky: true },
+    { filesToTouch: 6, linesToChange: 800, independentSlices: 3, risky: true },
   ];
   for (const s of sheets) {
     assert.deepEqual(decide(facts({ ...s, code: false })), decide(facts({ ...s, code: true })), JSON.stringify(s));
   }
-  // A report and a research fan-out are sized like code: one long document stays in one session, and a fan-out splits
-  // from 10 documents (minParallelFiles, raised from 4 after a 2-rep, coding-only benchmark; untested for non-code work).
-  assert.equal(decide(facts({ code: false, filesToTouch: 1, linesToChange: 2000 })).mode, "plain");
-  assert.equal(decide(facts({ code: false, filesToTouch: 10, linesToChange: 800, independentSlices: 4 })).mode, "orchestrate");
 });
 
-test("decide: a non-code fan-out of 4 to 9 documents under bigLines now stays plain", () => {
-  // Intended but unverified effect of raising minParallelFiles from 4 to 10 on non-code tasks: the benchmark behind it was
-  // coding-only, and this sheet routed to the pipeline before the change.
-  assert.equal(decide(facts({ code: false, filesToTouch: 4, linesToChange: 800, independentSlices: 4 })).mode, "plain");
+test("decide: a missing or non-boolean code is sized like code, as parseFacts defaults it to true", () => {
+  const sheet = { filesToTouch: 6, linesToChange: 800, independentSlices: 3, risky: false, reason: "" };
+  assert.equal(decide(parseFacts(sheet)!).mode, "plain", "parsed sheet without code");
+  assert.equal(minParallelFiles({ code: undefined as unknown as boolean }), TRIAGE.minParallelFilesCode);
+  assert.equal(decide({ ...sheet, code: undefined as unknown as boolean }).mode, "plain", "unparsed sheet without code");
+  assert.equal(decide({ ...sheet, code: "false" as unknown as boolean }).mode, "plain", "a string is not false");
+  assert.equal(minParallelFiles({ code: false }), TRIAGE.minParallelFilesNonCode);
 });
 
 test("decide: reasons do not talk about git, so they fit any kind of task", () => {

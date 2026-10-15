@@ -101,21 +101,27 @@ export const ROLES: Record<Role, RoleConfig> = {
  * and on large tasks orchestration used 0.7x to 2.0x the tokens (median per task). False
  * successes: 1 in 28 plain runs, 0 in 28 orchestrated. The gates are what it adds.
  *
- * Tuning from that benchmark (2 reps, coding tasks only, so a direction, not a measurement): minParallelFiles went from 4
- * to 10. Triage had sent t1 (4 files, ~70 lines, 2 slices), h1 (9 files, ~1300 lines, 3 slices) and h2 (9 files, ~600
- * lines, 2 slices) to the pipeline, which used 1.1x to 2.8x the tokens of a plain Sonnet session (what `npm run auto`
- * runs for plain) at the same 100% score. Replayed through decide(), those 5 of 14 AUTO decisions now go plain and the
- * other 9 are unchanged. bigLines stays 1500: raising it to 2000 would send k1 (4 files, ~1800 lines, 4 slices) plain,
- * where plain Sonnet scored 98.8% against the shipped orchestrator's 99.9%. bigFiles stays 12: on k2 (12 files) plain
- * Sonnet scored no better than the orchestrator. 10 is the lowest value that reroutes the 9-file, 2-3-slice runs and
- * changes nothing else in the data (h1 r1 reported 10 files but 1 slice, so it was plain either way); it is not a
- * measured optimum.
+ * Tuning from that benchmark (2 reps, coding tasks only, so a direction, not a measurement): the parallel-files threshold
+ * for code tasks (minParallelFilesCode) went from 4 to 10. Triage had sent t1 (4 files, ~70 lines, 2 slices), h1 (9
+ * files, ~1300 lines, 3 slices) and h2 (9 files, ~600 lines, 2 slices) to the pipeline, which used 1.1x to 2.8x the tokens
+ * of a plain Sonnet session (what `npm run auto` runs for plain) at the same 100% score. Replayed through decide(), those
+ * 5 of 14 AUTO decisions now go plain and the other 9 are unchanged. bigLines stays 1500: raising it to 2000 would send
+ * k1 (4 files, ~1800 lines, 4 slices) plain, where plain Sonnet scored 98.8% against the shipped orchestrator's 99.9%.
+ * bigFiles stays 12: on k2 (12 files) plain Sonnet scored no better than the orchestrator. 10 is the lowest value that
+ * reroutes the 9-file, 2-3-slice runs and changes nothing else in the data (h1 r1 reported 10 files but 1 slice, so it
+ * was plain either way); it is not a measured optimum.
+ *
+ * Non-code tasks (research, writing, analysis, operations: the triage fact `code` is false) keep the earlier default of 4
+ * (minParallelFilesNonCode), because nothing measured non-code work. This is the one place the `code` fact changes the
+ * route; a missing `code` counts as code (parseFacts defaults it to true).
  */
 export const TRIAGE = {
   /** At least this many independent slices ... */
   minParallelSlices: 2,
-  /** ... and at least this many files in total make parallel worktrees worth their overhead. */
-  minParallelFiles: 10,
+  /** ... and at least this many files in total make parallel slices worth their overhead, for a code task ... */
+  minParallelFilesCode: 10,
+  /** ... or this many for a task that changes no code (research, writing, analysis, operations). */
+  minParallelFilesNonCode: 4,
   /** This many files no longer fit one session's context comfortably. */
   bigFiles: 12,
   /** A risky change this small gets a plain session plus one independent reviewer instead of the whole pipeline. */
