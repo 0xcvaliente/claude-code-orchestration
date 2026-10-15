@@ -1,0 +1,6 @@
+[
+  {"name": "literal-ml-keeps-first-newline", "file": "toolkit/tomlparse.py", "from": "    if src.startswith(\"\\n\", pos):\n        pos += 1\n    if literal:", "to": "    if not literal and src.startswith(\"\\n\", pos):\n        pos += 1\n    if literal:"},
+  {"name": "U-escape-reads-4-digits", "file": "toolkit/tomlparse.py", "from": "return parse_hex_char(src, pos, 8)", "to": "return parse_hex_char(src, pos, 4)"},
+  {"name": "inline-table-not-recursively-frozen", "file": "toolkit/tomlparse.py", "from": "flags.set(header + key, Flags.FROZEN, recursive=True)", "to": "flags.set(header + key, Flags.FROZEN, recursive=False)"},
+  {"name": "offset-sign-inverted", "file": "toolkit/tomlparse.py", "from": "k = 1 if sign == \"+\" else -1", "to": "k = 1 if sign == \"-\" else -1"}
+]
