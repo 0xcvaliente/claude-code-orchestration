@@ -94,9 +94,11 @@ export const ROLES: Record<Role, RoleConfig> = {
 };
 
 /**
- * When the pipeline pays for itself. Measured in docs/benchmarks.md: it matched a plain session on correctness, used about
- * 2x the tokens on small tasks (0.8x to 1.2x on hard ones, estimated from list-price cost) and was faster only when slices
- * ran in parallel. So it is chosen for parallel, large or risky work.
+ * When the pipeline pays for itself. The benchmark in docs/benchmarks.md (2 runs per cell, direction only) found no
+ * correctness gain: every setup solved the small and medium tasks, where orchestration used 1.2x to 2.1x the tokens of a
+ * plain session of the same model family and took longer; on large tasks plain sessions spawned built-in subagents,
+ * plain Opus reached full score sooner, and orchestration used 0.4x to 2.0x the tokens. The gates are what it adds.
+ * These thresholds have not been retuned to those results yet.
  */
 export const TRIAGE = {
   /** At least this many independent slices ... */
