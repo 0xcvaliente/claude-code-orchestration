@@ -1,0 +1,55 @@
+{
+  "name": "pilot",
+  "seed": 1,
+  "groups": [
+    {
+      "tasks": [
+        "t2-single"
+      ],
+      "arms": [
+        "P-S",
+        "P-O",
+        "O-mix",
+        "O-O",
+        "AUTO"
+      ],
+      "cells": [
+        {
+          "id": "main"
+        }
+      ],
+      "reps": 1
+    },
+    {
+      "tasks": [
+        "k1-stdlib-toolkit"
+      ],
+      "arms": [
+        "P-O",
+        "O-mix"
+      ],
+      "cells": [
+        {
+          "id": "cap10",
+          "cap_min": 10
+        }
+      ],
+      "reps": 1
+    },
+    {
+      "tasks": [
+        "h3-sql-engine"
+      ],
+      "arms": [
+        "O-mix"
+      ],
+      "cells": [
+        {
+          "id": "cap10",
+          "cap_min": 10
+        }
+      ],
+      "reps": 1
+    }
+  ]
+}

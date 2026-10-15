@@ -1,0 +1,13 @@
+{
+  "id": "h2-scheduler",
+  "title": "Fixture h2-scheduler",
+  "tier": "medium",
+  "shape": "fixture",
+  "lang": "node",
+  "cap_min": 45,
+  "test_cmd": "npm test",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}
