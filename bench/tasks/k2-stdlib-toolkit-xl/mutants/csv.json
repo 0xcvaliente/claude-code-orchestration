@@ -1,0 +1,26 @@
+[
+  {
+    "name": "csv-m1-doublequote-read",
+    "file": "toolkit/csvx.py",
+    "from": "            if d.quoting != QUOTE_NONE and c == d.quotechar:\n                self._add(c)\n",
+    "to": "            if d.quoting != QUOTE_NONE and c == d.quotechar:\n                pass\n"
+  },
+  {
+    "name": "csv-m2-lineterminator-quoting",
+    "file": "toolkit/csvx.py",
+    "from": "c == \"\\n\" or c == \"\\r\" or c in d.lineterminator):",
+    "to": "c == \"\\n\" or c == \"\\r\"):"
+  },
+  {
+    "name": "csv-m3-nonnumeric-float",
+    "file": "toolkit/csvx.py",
+    "from": "            value = float(text)\n",
+    "to": "            value = text\n"
+  },
+  {
+    "name": "csv-m4-delim-quote-check",
+    "file": "toolkit/csvx.py",
+    "from": "        _check_pair(\"delimiter\", \"quotechar\", delimiter, quotechar)\n",
+    "to": ""
+  }
+]
