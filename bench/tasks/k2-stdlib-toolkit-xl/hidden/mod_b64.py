@@ -10,7 +10,6 @@ come from a fixed seed.  Values in cases are JSON: {"$b": [ints]} is bytes,
 strings are str arguments.
 """
 
-import json
 import random
 import sys
 import time
@@ -318,6 +317,7 @@ def cases():
 # ---------------------------------------------------------------- self-test
 
 def _main(argv):
+    import json  # only here: json is a blocked oracle module in the sandbox
     if len(argv) != 2:
         print("usage: mod_b64.py <package_root>")
         return 2

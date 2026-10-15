@@ -9,7 +9,6 @@ seed.  Values in cases are JSON: {"$b": [ints]} is bytes, {"$ba": [ints]}
 bytearray, {"$t": [...]} a tuple, {"$d": [[k, v], ...]} a dict.
 """
 
-import json
 import random
 import sys
 import time
@@ -411,6 +410,7 @@ def cases():
 # ---------------------------------------------------------------- self-test
 
 def _main(argv):
+    import json  # only here: json is a blocked oracle module in the sandbox
     if len(argv) != 2:
         print("usage: mod_urls.py <package_root>")
         return 2
