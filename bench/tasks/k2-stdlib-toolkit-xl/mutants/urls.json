@@ -1,0 +1,26 @@
+[
+  {
+    "name": "urls-m1-hostname-not-lowered",
+    "file": "toolkit/urls.py",
+    "from": "return hostname.lower() + percent + zone",
+    "to": "return hostname + percent + zone"
+  },
+  {
+    "name": "urls-m2-join-no-trailing-slash-after-dots",
+    "file": "toolkit/urls.py",
+    "from": "    if segments[-1] in ('.', '..'):\n        resolved.append('')\n",
+    "to": ""
+  },
+  {
+    "name": "urls-m3-quote-plus-space-as-pct20",
+    "file": "toolkit/urls.py",
+    "from": "return quote(string, safe + space, encoding, errors).replace(' ', '+')",
+    "to": "return quote(string, safe, encoding, errors)"
+  },
+  {
+    "name": "urls-m4-max-num-fields-off-by-one",
+    "file": "toolkit/urls.py",
+    "from": "if max_num_fields < 1 + qs.count(separator):",
+    "to": "if max_num_fields < qs.count(separator):"
+  }
+]
