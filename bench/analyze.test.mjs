@@ -70,6 +70,14 @@ test("claims classifier on labelled examples", () => {
     ["Public tests: 30/36. Finished the rest.", "partial"],
     ["12 passed, 0 failed.", "success"],
     ["The feature is implemented, but 3 tests fail. TODO: handle unicode.", "partial"],
+    ["Not all tests pass", "failure"],
+    ["Unable to make tests pass", "failure"],
+    ["Could not verify; implemented anyway", "partial"],
+    ["I could not finish csv; toml, shlex and regex pass their public tests", "partial"],
+    ["Fixed the failing test; all tests pass now", "success"],
+    ["All tests pass; handles errors gracefully", "success"],
+    ["Success!", "success"],
+    ["All done", "success"],
     ["Not implemented; the parser is still a stub.", "failure"],
     ["All 42 tests pass. Implementation complete.", "success"],
     ["Done. 120 passed, 0 failed.", "success"],
@@ -89,6 +97,14 @@ test("claims classifier on labelled examples", () => {
     ["322/322 tests pass.", "success"],
   ];
   for (const [text, want] of cases) assert.equal(classifyClaim(text), want, JSON.stringify(text));
+});
+
+test("claims classifier is linear on pathological text", () => {
+  for (const t of ["\n".repeat(200000) + "STATUS", "added " + "x ".repeat(100000), "added ".repeat(40000), " ".repeat(200000) + "STATUS"]) {
+    const t0 = performance.now();
+    classifyClaim(t);
+    assert.ok(performance.now() - t0 < 200, "too slow");
+  }
 });
 
 // ---------- pieces ----------
