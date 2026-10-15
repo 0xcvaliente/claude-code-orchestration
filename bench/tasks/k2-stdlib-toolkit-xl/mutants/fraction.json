@@ -1,0 +1,26 @@
+[
+  {
+    "name": "fraction-m1-round-half-odd",
+    "file": "toolkit/fraction.py",
+    "from": "            elif floor % 2 == 0:",
+    "to": "            elif floor % 2 == 1:"
+  },
+  {
+    "name": "fraction-m2-no-underscores",
+    "file": "toolkit/fraction.py",
+    "from": "    while i + 1 < n and s[i] == '_' and s[i + 1].isdecimal():",
+    "to": "    while False:"
+  },
+  {
+    "name": "fraction-m3-grouped-zero-pad",
+    "file": "toolkit/fraction.py",
+    "from": "3 * min_leading // 4 + 1 if thousands_sep else min_leading",
+    "to": "min_leading"
+  },
+  {
+    "name": "fraction-m4-mod-sign",
+    "file": "toolkit/fraction.py",
+    "from": "return Fraction((a.numerator * db) % (b.numerator * da), da * db)",
+    "to": "return Fraction(abs(a.numerator * db) % abs(b.numerator * da), da * db)"
+  }
+]

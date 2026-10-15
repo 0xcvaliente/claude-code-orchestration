@@ -1,0 +1,26 @@
+[
+  {
+    "name": "ipaddr-m1-allow-leading-zero",
+    "file": "toolkit/ipaddr.py",
+    "from": "        if octet_str != '0' and octet_str[0] == '0':",
+    "to": "        if False:"
+  },
+  {
+    "name": "ipaddr-m2-compress-single-zero",
+    "file": "toolkit/ipaddr.py",
+    "from": "        if best_doublecolon_len > 1:",
+    "to": "        if best_doublecolon_len > 0:"
+  },
+  {
+    "name": "ipaddr-m3-v6-hosts-drop-last",
+    "file": "toolkit/ipaddr.py",
+    "from": "for x in range(network + 1, broadcast + 1):",
+    "to": "for x in range(network + 1, broadcast):"
+  },
+  {
+    "name": "ipaddr-m4-shared-space-global",
+    "file": "toolkit/ipaddr.py",
+    "from": "return self not in self._constants._public_network and not self.is_private",
+    "to": "return not self.is_private"
+  }
+]
