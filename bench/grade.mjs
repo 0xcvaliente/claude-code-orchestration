@@ -79,7 +79,7 @@ async function main() {
   const runs = readJsonl(join(campaign, "runs.jsonl")).filter((r) => !only || r.run_id.includes(only));
   const gradesFile = join(campaign, "grades.jsonl");
   const cacheFile = join(campaign, "grades-cache.json");
-  const done = new Set(readJsonl(gradesFile).map((g) => `${g.run_id}\0${g.snap}`));
+  const done = new Set(readJsonl(gradesFile).filter((g) => !g.crashed && !(g.flags ?? []).some((f) => f.startsWith("grader-crash"))).map((g) => `${g.run_id}\0${g.snap}`));
   let cache = {};
   try { cache = JSON.parse(readFileSync(cacheFile, "utf8")); } catch { /* none yet */ }
 

@@ -82,6 +82,18 @@ test("a crashing score() records the meta total with grader-crash and is never c
     let cache = {};
     try { cache = JSON.parse(readFileSync(join(campaign, "grades-cache.json"), "utf8")); } catch { /* none written */ }
     assert.deepEqual(cache, {});
+
+    // A rerun retries the crashed pair: the grader now succeeds, a new row is appended and cached.
+    process.env.BOOM_OK = "1";
+    try { grade(campaign, "--tasks-dir", tasks); } finally { delete process.env.BOOM_OK; }
+    const rows2 = lines(join(campaign, "grades.jsonl"));
+    assert.equal(rows2.length, 2);
+    assert.deepEqual([rows2[1].pass, rows2[1].passed, rows2[1].total, rows2[1].flags], [true, 7, 7, []]);
+    assert.equal(Object.keys(JSON.parse(readFileSync(join(campaign, "grades-cache.json"), "utf8"))).length, 1);
+
+    // Now it is done: a third run appends nothing.
+    grade(campaign, "--tasks-dir", tasks);
+    assert.equal(lines(join(campaign, "grades.jsonl")).length, 2);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
