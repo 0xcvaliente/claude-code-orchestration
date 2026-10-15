@@ -240,7 +240,9 @@ Always-safe bytes: ASCII letters, digits and `_.-~`.
 2. For a `str` query a `bytes` separator is decoded as ASCII. For a
    `bytes` query a `str` separator is encoded as ASCII, and an empty
    query returns `[]`.
-3. An empty query returns `[]` (before any other check).
+3. An empty query returns `[]`. This happens after the separator check
+   of step 1 (so `parse_qsl('', separator='')` still raises
+   `ValueError`) but before steps 4-6.
 4. If `max_num_fields` is not `None` and `1 + qs.count(separator)` is
    greater than it, raise `ValueError`.
 5. Split on `separator`. Skip empty fields unless `strict_parsing`. Split
