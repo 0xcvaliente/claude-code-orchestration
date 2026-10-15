@@ -1,0 +1,26 @@
+[
+  {
+    "name": "jsonx-m1-trailing-comma-pos",
+    "file": "toolkit/jsonx.py",
+    "from": "\"Illegal trailing comma before end of array\", s, comma)",
+    "to": "\"Illegal trailing comma before end of array\", s, i)"
+  },
+  {
+    "name": "jsonx-m2-indent-item-separator",
+    "file": "toolkit/jsonx.py",
+    "from": "        item_sep, key_sep = \",\", \": \"",
+    "to": "        item_sep, key_sep = \", \", \": \""
+  },
+  {
+    "name": "jsonx-m3-ascii-del-unescaped",
+    "file": "toolkit/jsonx.py",
+    "from": "elif \" \" <= ch <= \"~\":",
+    "to": "elif \" \" <= ch <= \"\\x7f\":"
+  },
+  {
+    "name": "jsonx-m4-surrogate-pair-unchecked",
+    "file": "toolkit/jsonx.py",
+    "from": "if 0xDC00 <= uni2 <= 0xDFFF:",
+    "to": "if True:"
+  }
+]

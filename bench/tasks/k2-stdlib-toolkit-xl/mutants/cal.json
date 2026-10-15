@@ -1,0 +1,26 @@
+[
+  {
+    "name": "cal-m1-firstweekday-not-modulo",
+    "file": "toolkit/cal.py",
+    "from": "return self._firstweekday % 7",
+    "to": "return self._firstweekday"
+  },
+  {
+    "name": "cal-m2-weekheader-full-name-threshold",
+    "file": "toolkit/cal.py",
+    "from": "names = day_name if width >= 9 else day_abbr",
+    "to": "names = day_name if width > 9 else day_abbr"
+  },
+  {
+    "name": "cal-m3-leapdays-no-400-rule",
+    "file": "toolkit/cal.py",
+    "from": " + (y2 // 400 - y1 // 400)",
+    "to": ""
+  },
+  {
+    "name": "cal-m4-formatyear-min-spacing",
+    "file": "toolkit/cal.py",
+    "from": "        c = max(2, c)",
+    "to": "        c = max(1, c)"
+  }
+]
