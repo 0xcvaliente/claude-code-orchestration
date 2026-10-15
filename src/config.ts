@@ -107,8 +107,9 @@ export const ROLES: Record<Role, RoleConfig> = {
  * runs for plain) at the same 100% score. Replayed through decide(), those 5 of 14 AUTO decisions now go plain and the
  * other 9 are unchanged. bigLines stays 1500: raising it to 2000 would send k1 (4 files, ~1800 lines, 4 slices) plain,
  * where plain Sonnet scored 98.8% against the shipped orchestrator's 99.9%. bigFiles stays 12: on k2 (12 files) plain
- * Sonnet scored no better than the orchestrator. No task had 10 or 11 files, so 10 is the lowest value the data allows,
- * not a measured optimum.
+ * Sonnet scored no better than the orchestrator. 10 is the lowest value that reroutes the 9-file, 2-3-slice runs and
+ * changes nothing else in the data (h1 r1 reported 10 files but 1 slice, so it was plain either way); it is not a
+ * measured optimum.
  */
 export const TRIAGE = {
   /** At least this many independent slices ... */
