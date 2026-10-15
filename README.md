@@ -18,18 +18,20 @@ It runs two ways with the same roles: as a TypeScript pipeline on the Claude Age
 
 ## Why a router
 
-Measured on the same tasks (details in [docs/benchmarks.md](docs/benchmarks.md)). Every benchmark so far is a coding task, so nothing here has been measured for research, writing, analysis or operations:
+Measured on seven coding tasks, five setups (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell (1 on k2) the results show direction only.
 
-| | Plain session | Pipeline |
+| | Plain session (Sonnet or Opus) | Pipeline (shipped or all-Opus orchestrator) |
 |---|---|---|
-| Hidden-test correctness | passed | passed (never better) |
-| Tokens (estimated) | 1x | 0.8x to 2.2x |
-| Small task | fastest (20s) | slower (60s+) |
-| Parallel task | slower | faster (250s against 397s on a hard one) |
-| Verification | you, or the agent's own word | test gate, independent reviewer, review gate |
-| Unverified work | may be reported as done | reported as failed |
+| Small and medium tasks (t1, t2, h1, h2): correctness | 100% on every run | 100% on every run (never better) |
+| Small and medium tasks: tokens | 126k to 457k | 166k to 812k: 1.2x to 2.1x a plain session of the same model family |
+| Small and medium tasks: wall time | 16s to 3 min | 36s to 5 min |
+| Large tasks (k1, h3, k2): correctness | plain Opus 100% on k1, h3 and k2; plain Sonnet 98.8% to 99.6% | 99.5% to 100% on k1 and h3; about 75% on k2 (rule violation, below) |
+| Large tasks: tokens | 1.6M to 13.4M | 3.2M to 8.4M: 0.7x to 2.0x on k1 and h3, 0.4x to 0.8x on k2 |
+| Large tasks: time to full score | plain Opus 4 to 8 min | 7 to 12 min, when reached |
+| Self-delegation | on k1 and k2 every plain run spawned Claude Code's built-in subagents (3 on k1, 12 to 21 on k2) | its own researcher, implementers, reviewers, integrator |
+| Verification | the agent's own word: 1 false success in 26 runs | test gate, independent reviewer, review gate: 0 false successes in 26 runs |
 
-So the pipeline buys speed on parallel work and hard guarantees on risky work, and on small tasks uses about twice the tokens. The router spends one cheap read-only call (about 20k tokens) to decide which you need.
+So on these tasks the pipeline did not raise correctness: small and medium tasks were solved by every setup, and on the large splittable ones a plain session orchestrated itself with built-in subagents and reached full score sooner. On k2, four of five runs (including every orchestrated one) imported `re` outside the regex module, which the spec forbids; lenient grading that allows it gives 99.3% to 100% for every run, and in the shipped orchestrator the reviewers saw it and disagreed, and nobody removed it. What the pipeline adds is the gates, at 1.2x to 2x the tokens on small work; the router spends one cheap read-only call to decide whether a task needs them. The k2 second repetition and the time-limit and token-cap sweeps are still pending.
 
 ## Quick start
 
