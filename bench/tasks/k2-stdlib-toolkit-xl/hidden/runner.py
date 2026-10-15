@@ -4,8 +4,9 @@ Usage: python3 -I -S -B runner.py SOL_ROOT ADAPTER_PATH - START MODULE NAME
 
 The job arrives on stdin (marshal, read in full before anything else runs; no
 file on disk): {"cases": [...], "oracles": {category: [module, ...]},
-"wrap": {category: ["<module>.<name>", ...]}}: every loaded adapter's ORACLES
-(the stdlib modules it reimplements) and WRAP (oracle entry points to watch).
+"wrap": {category: ["<module>.<name>", ...]}, "watch_only": [module, ...]}: every
+loaded adapter's ORACLES (the stdlib modules it reimplements) and WRAP (oracle entry
+points to watch), plus the oracles of adapters that declare WATCH_ONLY = True.
 Everything the sandbox refuses or watches is derived from those lists plus a
 fixed base list, so a new module plugs in by declaring ORACLES and WRAP.
 
@@ -21,12 +22,14 @@ compute answers for another category's module, e.g. through webbrowser.shlex):
     also zeroes the category the oracle belongs to.
   - Spawning processes and hard links (os.system, os.posix_spawn, os.exec*,
     os.fork, os.spawn*, os.link) are refused while toolkit code is on the stack.
-WATCH_ONLY modules (re and the sre_* shims) are imported all over the standard
-library, so they stay importable; they are watched only while the cases of the
-category that owns them (regex) run, as in k1.
-Known limit, the same as k1: `re` laundering between children is not detected:
-code in another category's child may compute regex answers with the real `re`
-(outside regex cases) and hand them over.
+WATCH_ONLY modules (re and the sre_* shims, always; plus the oracles of any adapter
+declaring WATCH_ONLY = True, i.e. calendar for cal) are imported by other standard
+library modules, so they stay importable; they are watched only while the cases of
+the category that owns them run, as in k1.
+Known limit, the same as k1: laundering of a WATCH_ONLY oracle (`re`, `calendar`)
+between children is not detected: code in another category's child may compute
+regex or cal answers with the real module (outside that category's cases) and hand
+them over.
 
 Startup order matters: nothing that imports `re` is loaded before the solution
 module (no json, no importlib.abc, no site, no adapter).
@@ -56,7 +59,14 @@ IMPORT_LIMIT_S = 10
 BASE_BLOCK = ["subprocess", "ctypes", "sqlite3", "socket", "multiprocessing", "importlib"]
 # Imported by much of the standard library (json, dataclasses, inspect, ...): these oracles stay
 # importable and are watched (wrappers, audit) during their own category's cases instead.
-WATCH_ONLY = {"re", "sre_compile", "sre_parse", "sre_constants", "_sre"}
+# Adapters add to this set by declaring WATCH_ONLY = True (all their ORACLES); see below.
+# Probe (Python 3.13.16, python3 -I -S -B) of which stdlib helpers an honest solution may want pull
+# in an oracle: dataclasses and string load re/_sre (watch-only); datetime.strptime and
+# time.strptime load re, _sre and calendar through _strptime, so calendar must be watch-only too
+# (mod_cal declares WATCH_ONLY = True). datetime, time, math, decimal, collections, itertools,
+# functools, enum, typing, struct, operator, copy, bisect, heapq, unicodedata, io, os, sys and
+# date.fromisoformat load no oracle, and no oracle is loaded at interpreter startup.
+BASE_WATCH_ONLY = {"re", "sre_compile", "sre_parse", "sre_constants", "_sre"}
 # Audit events refused while toolkit code is on the stack (event name, or prefix ending in ".").
 REFUSED_EVENTS = {"os.system", "os.posix_spawn", "os.exec", "os.fork", "os.forkpty", "os.spawn",
                   "os.link", "subprocess.Popen", "pty.spawn"}
@@ -97,6 +107,7 @@ job = _read_job()
 cases = job["cases"]
 ORACLES_BY_CAT = {str(k): [str(m) for m in v] for k, v in job["oracles"].items()}
 WRAP_BY_CAT = {str(k): [str(w) for w in v] for k, v in job.get("wrap", {}).items()}
+WATCH_ONLY = BASE_WATCH_ONLY | {str(m) for m in job.get("watch_only", [])}
 del job
 ALL_ORACLES = sorted({m for mods in ORACLES_BY_CAT.values() for m in mods})
 OWN = set(ORACLES_BY_CAT.get(cat, []))

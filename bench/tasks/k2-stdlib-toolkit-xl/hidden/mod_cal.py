@@ -29,6 +29,9 @@ import time
 NAME = "cal"
 MODULE = "toolkit.cal"
 ORACLES = ["calendar"]
+# _strptime (datetime.strptime, time.strptime) imports calendar: it stays importable, and its
+# WRAP entry points are watched only during cal cases (runner.py, WATCH_ONLY).
+WATCH_ONLY = True
 WRAP = ["calendar.Calendar", "calendar.TextCalendar", "calendar.monthrange",
         "calendar.weekday", "calendar.isleap", "calendar.leapdays",
         "calendar.monthcalendar", "calendar.month", "calendar.calendar",
