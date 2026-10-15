@@ -15,7 +15,12 @@ import time
 NAME = "regex"
 MODULE = "toolkit.regex"
 # The stdlib imports re everywhere, so the sandbox watches it during regex cases instead of
-# refusing it; re._compiler.compile and _sre.compile catch references captured at import time.
+# refusing it. A reference to a wrapped function captured at import time is still caught (it
+# is the wrapper, and re._compiler.compile and _sre.compile are wrapped too). Residual limit:
+# re can be cloned at import time, outside cases, by rebuilding its functions from their code
+# objects (types.FunctionType over a copied globals dict); such clones bypass the wrapped entry
+# points. A reviewer's clone scored 168/205 with no flag; the static scan flags __code__,
+# FunctionType and vars( for the post-run audit.
 ORACLES = ["re", "sre_compile", "sre_parse", "sre_constants", "_sre"]
 WRAP = ["re.compile", "re.search", "re.match", "re.fullmatch", "re.split", "re.findall", "re.finditer",
         "re.sub", "re.subn", "re.escape", "re._compile", "re._compiler.compile", "_sre.compile"]
