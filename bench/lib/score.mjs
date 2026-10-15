@@ -21,6 +21,14 @@ export function loadTask(id, tasksDir = DEFAULT_TASKS_DIR) {
 
 const lastTotal = new Map(); // task id -> total seen on a successful score, for the crash fallback
 
+// The task's declared total (meta.json "total"), or null.
+export function metaTotal(id, tasksDir = DEFAULT_TASKS_DIR) {
+  try {
+    const t = JSON.parse(readFileSync(join(tasksDir, id, "meta.json"), "utf8")).total;
+    return Number.isFinite(t) ? t : null;
+  } catch { return null; }
+}
+
 export async function scoreDir(id, dir, tasksDir = DEFAULT_TASKS_DIR) {
   const mod = await import(pathToFileURL(join(tasksDir, id, "score.mjs")).href);
   try {
@@ -28,7 +36,7 @@ export async function scoreDir(id, dir, tasksDir = DEFAULT_TASKS_DIR) {
     if (r && Number.isFinite(r.total)) lastTotal.set(id, r.total);
     return r;
   } catch {
-    return { pass: false, passed: 0, total: lastTotal.get(id) ?? 0, flags: ["grader-crash"] };
+    return { pass: false, passed: 0, total: metaTotal(id, tasksDir) ?? lastTotal.get(id) ?? 0, flags: ["grader-crash"], crashed: true };
   }
 }
 

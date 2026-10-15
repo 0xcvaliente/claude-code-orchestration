@@ -1,1 +1,1 @@
-{"id":"h3-sql-engine","title":"In-memory SQL engine (minisql) matching SQLite","tier":"large","shape":"monolithic","lang":"python","cap_min":30,"test_cmd":"python3 tests/run_public.py","graded_paths":["minisql"],"snapshot_every_s":120}
+{"id":"h3-sql-engine","title":"In-memory SQL engine (minisql) matching SQLite","tier":"large","shape":"monolithic","lang":"python","cap_min":30,"total":1384,"test_cmd":"python3 tests/run_public.py","graded_paths":["minisql"],"snapshot_every_s":120}
