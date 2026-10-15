@@ -22,7 +22,9 @@ const TIMEOUT_MS = MODULE_COUNT * 620_000;
 
 function run(cmd, args, timeoutMs) {
   return new Promise((resolveRun) => {
-    const child = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+    const env = { ...process.env, PYTHONDONTWRITEBYTECODE: "1" };
+    delete env.K2_LENIENT_RE; // the variant is chosen only by the explicit --lenient argument
+    const child = spawn(cmd, args, { stdio: ["ignore", "ignore", "pipe"], env });
     let stderr = "";
     let timedOut = false;
     child.stderr.on("data", (d) => { if (stderr.length < 4000) stderr += d; });
@@ -45,12 +47,17 @@ function expectedTotal() {
   return Object.values(listedModules()).reduce((a, b) => a + (Number.isInteger(b) ? b : 0), 0);
 }
 
-export async function score(dir) {
+// opts.variant === "lenient": secondary grade where `re` may be imported outside toolkit/regex.py
+// (flags then carry a "lenient:" prefix). Any other value is the official strict grade.
+export const VARIANTS = ["lenient"];
+
+export async function score(dir, opts = {}) {
+  const lenient = opts.variant === "lenient";
   // No predictable name: solution code runs while this dir exists (it holds only per-module totals).
   const tmp = mkdtempSync(join(tmpdir(), randomBytes(8).toString("hex")));
   const out = join(tmp, "grade.json");
   try {
-    const { code, stderr, timedOut } = await run("python3", [join(here, "hidden", "grade.py"), resolve(dir), "--out", out], TIMEOUT_MS);
+    const { code, stderr, timedOut } = await run("python3", [join(here, "hidden", "grade.py"), resolve(dir), "--out", out, ...(lenient ? ["--lenient"] : [])], TIMEOUT_MS);
     let j;
     try {
       j = JSON.parse(readFileSync(existsSync(out) ? out : `${out}.tmp`, "utf8"));
@@ -59,7 +66,7 @@ export async function score(dir) {
     }
     const flags = [...(j.flags ?? [])];
     if (timedOut || !j.complete) flags.push("grader did not finish: unfinished modules score 0");
-    const graderError = flags.some((f) => f.startsWith("grader error"));
+    const graderError = flags.some((f) => f.replace(/^lenient: /, "").startsWith("grader error"));
     const byCat = j.by_cat ?? {};
     const notFull = Object.keys(listedModules()).filter((m) => {
       const pt = byCat[m];
