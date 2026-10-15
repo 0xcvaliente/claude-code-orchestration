@@ -393,7 +393,9 @@ test("campaigns table renders an object matrix readably and shows no absolute pa
   const md = renderMarkdown(s, { htmlPath: "benchmark-report.html" });
   const html = renderHtml(s, { mdPath: "benchmarks.md" });
   assert.match(md, /lite: 2 tasks × 3 arms × main × 2 reps/);
-  assert.match(md, /`benchmark-report\.html`/);
+  assert.match(md, /\[benchmark-report\.html\]\(benchmark-report\.html\)/);
+  const shaMd = renderMarkdown({ ...s, campaigns: s.campaigns.map((c) => ({ ...c, manifest: { ...c.manifest, repo_sha: "c9f6578d132250be4fff48c43546c82e80701a48" } })) }, { htmlPath: "x.html" });
+  assert.match(shaMd, /\| c9f6578 \|/);
   for (const t of [md, html]) assert.doesNotMatch(t, /\[object Object\]|\/Users\//);
 });
 
