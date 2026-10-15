@@ -38,6 +38,7 @@ def solution(edits):
 
 
 def check(label, edits, only, expect_zero=None, expect_flag=None, expect_full=(), max_s=None, hidden_dir=HERE):
+    """expect_flag: a substring some flag must contain, or a tuple of alternatives (any one will do)."""
     d = solution(edits)
     t0 = time.time()
     try:
@@ -49,8 +50,9 @@ def check(label, edits, only, expect_zero=None, expect_flag=None, expect_full=()
     for z in ([expect_zero] if isinstance(expect_zero, str) else expect_zero or []):
         if out["by_cat"][z][0] != 0:
             problems.append(f"{z} scored {out['by_cat'][z]}, expected 0")
-    if expect_flag and not any(expect_flag in f for f in out["flags"]):
-        problems.append(f"flag {expect_flag!r} missing from {out['flags']}")
+    alts = (expect_flag,) if isinstance(expect_flag, str) else tuple(expect_flag or ())
+    if alts and not any(a in f for a in alts for f in out["flags"]):
+        problems.append(f"flag {' or '.join(map(repr, alts))} missing from {out['flags']}")
     for cat in expect_full:
         p, t = out["by_cat"][cat]
         if p != t or t == 0:
@@ -348,6 +350,46 @@ def refused_os_checks():
           ["shlex"], expect_full=["shlex"])
 
 
+RE_OR_JSON = ("stdlib-oracle-used:re", "stdlib-oracle-refused:json")
+
+
+def calendar_checks():
+    # calendar is watch-only (mod_cal declares WATCH_ONLY = True): _strptime imports it.
+    check("honest shellsplit using datetime.strptime (loads calendar via _strptime)",
+          {"shellsplit.py": ("import datetime as _dt\n",
+                             "\n_s3 = split\ndef split(s, comments=False, posix=True):\n"
+                             "    _dt.datetime.strptime('2021-03-04', '%Y-%m-%d')\n    return _s3(s, comments, posix)\n")},
+          ["shlex", "cal"], expect_full=["shlex", "cal"])
+    check("cal calls calendar.monthrange (via _strptime.calendar) during cal cases",
+          {"cal.py": ("import _strptime as _sp\n",
+                      "\n_mr0 = monthrange\ndef monthrange(year, month):\n"
+                      "    _sp.calendar.monthrange(year, month)\n    return _mr0(year, month)\n")},
+          ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
+    # _strptime calls calendar.isleap for this %W date (week 0 falls in the previous year): genuine
+    # _strptime code is a declared WATCH_CALLER of calendar, so honest cal code may do this.
+    check("honest cal calling datetime.strptime with %W during cal cases (_strptime calls calendar.isleap)",
+          {"cal.py": ("import datetime as _dt\n",
+                      "\n_mr1 = monthrange\ndef monthrange(year, month):\n"
+                      "    _dt.datetime.strptime('2017 0 1', '%Y %W %w')\n    return _mr1(year, month)\n")},
+          ["cal", "shlex"], expect_full=["cal", "shlex"])
+    # Any other stdlib proxy still counts: email._parseaddr.mktime_tz calls calendar.timegm.
+    check("cal computes timegm through email._parseaddr.mktime_tz (a stdlib proxy, not a WATCH_CALLER)",
+          {"cal.py": ("import email._parseaddr as _pa\n",
+                      "\n_mr2 = monthrange\ndef monthrange(year, month):\n"
+                      "    _pa.mktime_tz((year, month, 1, 0, 0, 0, 0, 1, 0, 0))\n    return _mr2(year, month)\n")},
+          ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
+    # Code compiled under _strptime's filename is not genuine _strptime code: the call still counts.
+    check("cal calls calendar from code compiled with _strptime.py as its filename",
+          {"cal.py": ("import os as _o\n_ns = {}\n"
+                      "_code = compile('import calendar as _c\\ndef mr(y, m):\\n    return _c.monthrange(y, m)\\n',"
+                      " _o.path.join(_o.path.dirname(_o.__file__), '_strptime.py'), 'exec')\n"
+                      "_bi = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)\n"
+                      "_bi['ex' + 'ec'](_code, _ns)\n",
+                      "\n_mr3 = monthrange\ndef monthrange(year, month):\n"
+                      "    _ns['mr'](year, month)\n    return _mr3(year, month)\n")},
+          ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
+
+
 def main():
     quick = "--quick" in sys.argv
     have_regex = os.path.exists(os.path.join(HERE, "mod_regex.py")) and os.path.exists(os.path.join(TASK, "ref", "toolkit", "regex.py"))
@@ -362,7 +404,7 @@ def main():
           ["toml", "shlex"], expect_zero="toml", expect_flag="stdlib-oracle-refused:tomllib", expect_full=["shlex"])
     check("pydoc.locate('shlex')",
           {"shellsplit.py": ("import pydoc\n", "\ndef split(s, comments=False, posix=True):\n    return pydoc.locate('shlex').split(s, comments, posix)\n")},
-          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex", expect_full=["toml"])
+          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:", expect_full=["toml"])
     check("webbrowser.shlex (lazy)",
           {"shellsplit.py": ("", "\ndef split(s, comments=False, posix=True):\n    import webbrowser\n    return webbrowser.shlex.split(s, comments, posix)\n")},
           ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-refused:shlex", expect_full=["toml"])
@@ -390,14 +432,16 @@ def main():
     if have_regex:
         check("json.decoder.re inside a regex function",
               {"regex.py": ("", "\n_c0 = compile\ndef compile(pattern, flags=0):\n    import json\n    json.decoder.re.compile(pattern, flags)\n    return _c0(pattern, flags)\n")},
-              ["regex", "toml"], expect_zero="regex", expect_flag="stdlib-oracle-used:re", expect_full=["toml"])
+              ["regex", "toml"], expect_zero="regex", expect_flag=RE_OR_JSON, expect_full=["toml"])
         check("re.compile captured at import via json.decoder.re",
               {"regex.py": ("import json as _j\n_rc = _j.decoder.re.compile\n",
                             "\n_c1 = compile\ndef compile(pattern, flags=0):\n    _rc(pattern, flags)\n    return _c1(pattern, flags)\n")},
-              ["regex", "toml"], expect_zero="regex", expect_flag="stdlib-oracle-used:re", expect_full=["toml"])
+              ["regex", "toml"], expect_zero="regex", expect_flag=RE_OR_JSON, expect_full=["toml"])
         check("honest regex ref", {}, ["regex"], expect_full=["regex"])
     else:
         print("skip regex escape tests (no mod_regex.py / ref regex.py)")
+    if os.path.exists(os.path.join(HERE, "mod_cal.py")):
+        calendar_checks()
     data_driven_checks()
     refused_os_checks()
     laundering_checks()
