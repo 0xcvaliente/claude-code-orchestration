@@ -1,0 +1,7 @@
+{
+  "tier": "small",
+  "graded_paths": [
+    "src/"
+  ],
+  "cap_min": 10
+}

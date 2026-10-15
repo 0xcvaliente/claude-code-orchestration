@@ -1,0 +1,6 @@
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:10.000Z","agent_type":"implementer","agent_id":"a1","cwd":"/tmp/r/.claude/worktrees/a1"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:01:40.000Z","agent_type":"implementer","agent_id":"a1","cwd":"/tmp/r/.claude/worktrees/a1","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:11.000Z","agent_type":"implementer","agent_id":"a2","cwd":"/tmp/r/.claude/worktrees/a2"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:01:50.000Z","agent_type":"implementer","agent_id":"a2","cwd":"/tmp/r/.claude/worktrees/a2","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:02:00.000Z","agent_type":"orchestration:reviewer","agent_id":"r1","cwd":"/tmp/r"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:02:30.000Z","agent_type":"orchestration:reviewer","agent_id":"r1","cwd":"/tmp/r","status":"pass"}

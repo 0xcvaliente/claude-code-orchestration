@@ -1,0 +1,12 @@
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:05.000Z","agent_type":"researcher","agent_id":"q1","cwd":"/tmp/r"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:00:30.000Z","agent_type":"researcher","agent_id":"q1","cwd":"/tmp/r"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:40.000Z","agent_type":"implementer","agent_id":"c1","cwd":"/tmp/r/.claude/worktrees/c1"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:15:00.000Z","agent_type":"implementer","agent_id":"c1","cwd":"/tmp/r/.claude/worktrees/c1","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:41.000Z","agent_type":"implementer","agent_id":"c2","cwd":"/tmp/r/.claude/worktrees/c2"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:16:40.000Z","agent_type":"implementer","agent_id":"c2","cwd":"/tmp/r/.claude/worktrees/c2","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:00:42.000Z","agent_type":"implementer","agent_id":"c3","cwd":"/tmp/r/.claude/worktrees/c3"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:15:50.000Z","agent_type":"implementer","agent_id":"c3","cwd":"/tmp/r/.claude/worktrees/c3","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:16:50.000Z","agent_type":"orchestration:reviewer","agent_id":"r3","cwd":"/tmp/r"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:18:20.000Z","agent_type":"orchestration:reviewer","agent_id":"r3","cwd":"/tmp/r","status":"pass"}
+{"hook_event_name":"SubagentStart","ts":"2026-10-14T08:18:30.000Z","agent_type":"orchestration:reviewer","agent_id":"r4","cwd":"/tmp/r"}
+{"hook_event_name":"SubagentStop","ts":"2026-10-14T08:20:00.000Z","agent_type":"orchestration:reviewer","agent_id":"r4","cwd":"/tmp/r","status":"pass"}

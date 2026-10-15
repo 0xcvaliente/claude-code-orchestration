@@ -1,0 +1,11 @@
+{
+  "campaign": "fixture",
+  "matrix": "fixture",
+  "git_sha": "0000000",
+  "claude_version": "9.9.9 (fixture)",
+  "plugin_version": "0.1.5",
+  "node_version": "v24.0.0",
+  "python_version": "3.13.0",
+  "sqlite_version": "3.50.0",
+  "started_at": "2026-10-14T08:00:00.000Z"
+}
