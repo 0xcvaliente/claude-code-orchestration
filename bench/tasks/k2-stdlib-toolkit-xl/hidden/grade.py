@@ -112,16 +112,15 @@ def static_patterns(adapters):
     return list(dict.fromkeys(pats))
 
 
-def run_module(sol, ad, oracles_by_cat):
+def run_module(sol, ad, oracles_by_cat, wrap_by_cat):
     """Run every case of one adapter in sandboxed children; return ({index: record}, flags)."""
     cases = ad["cases"]
     n = len(cases)
     results, flags = {}, set()
     timeouts = crashes = 0
     t_module = time.time()
-    fd, cases_path = tempfile.mkstemp(suffix=".marshal", prefix="k2-job-")
-    with os.fdopen(fd, "wb") as f:
-        marshal.dump({"cases": cases, "oracles": oracles_by_cat, "wrap": ad["wrap"]}, f)
+    # The job goes to each child over its stdin pipe: no job file a solution could find on disk.
+    job = marshal.dumps({"cases": cases, "oracles": oracles_by_cat, "wrap": wrap_by_cat})
 
     def fail_rest(frm, why):
         for j in range(frm, n):
@@ -135,11 +134,20 @@ def run_module(sol, ad, oracles_by_cat):
                 break
             start_i = i
             p = subprocess.Popen(
-                [sys.executable, "-I", "-S", "-B", RUNNER, sol, ad["path"], cases_path, str(i),
+                [sys.executable, "-I", "-S", "-B", RUNNER, sol, ad["path"], "-", str(i),
                  ad["mod"].MODULE, ad["name"]],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.PIPE,
                 cwd=tempfile.gettempdir(), bufsize=0,
             )
+            try:  # the child reads all of stdin before it runs any solution code
+                p.stdin.write(job)
+            except OSError:
+                pass
+            finally:
+                try:
+                    p.stdin.close()
+                except OSError:
+                    pass
             out_fd = p.stdout.fileno()
             buf = b""
             current, started, spawned, ready = None, time.time(), time.time(), False
@@ -215,7 +223,7 @@ def run_module(sol, ad, oracles_by_cat):
                 fail_rest(i, f"crash budget ({CRASH_BUDGET}) exhausted")
                 break
     finally:
-        os.unlink(cases_path)
+        job = None  # drop the job bytes
     return results, flags
 
 
@@ -268,6 +276,7 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
     expected_counts = expected_modules(hidden_dir)
     adapters, flags = load_adapters(hidden_dir)
     oracles_by_cat = {name: ad["oracles"] for name, ad in adapters.items()}
+    wrap_by_cat = {name: ad["wrap"] for name, ad in adapters.items()}
     oracle_cat = oracle_category(adapters)
     cats = {}  # name -> {"passed", "total", "cases", "status", "done"}
     for name, count in expected_counts.items():
@@ -313,15 +322,18 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
     def write():
         if out_path:
             tmp = out_path + ".tmp"
+            # Per-case details (which quote expected results) stay out of the file: other modules'
+            # solution code is still running while it exists.
+            summary = {k: v for k, v in build().items() if k != "cases"}
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(build(), f, indent=1)
+                json.dump(summary, f, indent=1)
             os.replace(tmp, out_path)
 
     def work(ad):
         name = ad["name"]
         try:
             expected = oracle_results(ad)
-            got, mflags = run_module(sol, ad, oracles_by_cat)
+            got, mflags = run_module(sol, ad, oracles_by_cat, wrap_by_cat)
             passed, per_case = compare(ad, expected, got, mflags)
             failed_import = [r for r in got.values() if r.get("status") == "import_failed"]
             status = failed_import[0]["msg"] if failed_import else "ok"

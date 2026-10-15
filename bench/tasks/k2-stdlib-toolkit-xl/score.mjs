@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -45,7 +46,8 @@ function expectedTotal() {
 }
 
 export async function score(dir) {
-  const tmp = mkdtempSync(join(tmpdir(), "k2-score-"));
+  // No predictable name: solution code runs while this dir exists (it holds only per-module totals).
+  const tmp = mkdtempSync(join(tmpdir(), randomBytes(8).toString("hex")));
   const out = join(tmp, "grade.json");
   try {
     const { code, stderr, timedOut } = await run("python3", [join(here, "hidden", "grade.py"), resolve(dir), "--out", out], TIMEOUT_MS);

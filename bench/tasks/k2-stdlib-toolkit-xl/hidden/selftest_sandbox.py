@@ -46,8 +46,9 @@ def check(label, edits, only, expect_zero=None, expect_flag=None, expect_full=()
         shutil.rmtree(d, ignore_errors=True)
     secs = time.time() - t0
     problems = []
-    if expect_zero and out["by_cat"][expect_zero][0] != 0:
-        problems.append(f"{expect_zero} scored {out['by_cat'][expect_zero]}, expected 0")
+    for z in ([expect_zero] if isinstance(expect_zero, str) else expect_zero or []):
+        if out["by_cat"][z][0] != 0:
+            problems.append(f"{z} scored {out['by_cat'][z]}, expected 0")
     if expect_flag and not any(expect_flag in f for f in out["flags"]):
         problems.append(f"flag {expect_flag!r} missing from {out['flags']}")
     for cat in expect_full:
@@ -64,7 +65,9 @@ def check(label, edits, only, expect_zero=None, expect_flag=None, expect_full=()
         FAILS.append(label)
 
 
-FAKE_ADAPTER = '''"""Fake adapter for the selftest: toolkit.colors reimplements colorsys.rgb_to_yiq."""
+FAKE_COLORS = '''"""Fake adapter for the selftest: toolkit.colors reimplements colorsys.rgb_to_yiq."""
+import json  # bookkeeping import at top level; json is the fake jx module's oracle
+
 NAME = "colors"
 MODULE = "toolkit.colors"
 ORACLES = ["colorsys"]
@@ -77,54 +80,170 @@ def cases():
 
 
 def run_impl(mod, case):
-    return list(mod.rgb_to_yiq(*case["rgb"]))
+    return json.loads(json.dumps(list(mod.rgb_to_yiq(*case["rgb"]))))
 
 
 def run_oracle(case):
     import colorsys
     return list(colorsys.rgb_to_yiq(*case["rgb"]))
 '''
+FAKE_JX = '''"""Fake adapter for the selftest: toolkit.jx reimplements json.dumps for ints."""
+NAME = "jx"
+MODULE = "toolkit.jx"
+ORACLES = ["json", "_json"]
+WRAP = ["json.dumps", "json.loads"]
+
+
+def cases():
+    return [{"id": "jx-%d" % n, "n": n} for n in (0, 7, -3, 10 ** 20)]
+
+
+def run_impl(mod, case):
+    return mod.dumps(case["n"])
+
+
+def run_oracle(case):
+    import json
+    return json.dumps(case["n"])
+'''
+TW_TEXTS = ["  a\n  b\n", "\tx\n\ty\n", "    one\n      two\n", "no indent\n"]
+FAKE_TW = '''"""Fake adapter for the selftest: toolkit.tw reimplements textwrap.dedent."""
+NAME = "tw"
+MODULE = "toolkit.tw"
+ORACLES = ["textwrap"]
+WRAP = ["textwrap.dedent", "textwrap.TextWrapper"]
+TEXTS = %s
+
+
+def cases():
+    return [{"id": "tw-%%d" %% i, "s": s} for i, s in enumerate(TEXTS)]
+
+
+def run_impl(mod, case):
+    return mod.dedent(case["s"])
+
+
+def run_oracle(case):
+    import textwrap
+    return textwrap.dedent(case["s"])
+''' % TW_TEXTS
 HONEST_COLORS = '''def rgb_to_yiq(r, g, b):
     y = 0.30*r + 0.59*g + 0.11*b
     i = 0.74*(r-y) - 0.27*(b-y)
     q = 0.48*(r-y) + 0.41*(b-y)
     return (y, i, q)
 '''
+HONEST_JX = "def dumps(n):\n    return str(int(n))\n"
+# Laundering: a module reads answers that another module's code computed in its own child.
+LAUNDER_READ = ('''
+import marshal as _lm, os as _lo
+_ANS = _lo.path.join(_lo.path.dirname(_lo.path.abspath(__spec__.origin)), "_laundered.marshal")
 
 
-def fake_hidden():
-    """A hidden dir with the shlex adapter and the fake colors adapter, nothing else."""
+def _answers():
+    for _ in range(5):
+        if _lo.path.exists(_ANS):
+            with open(_ANS, "rb") as f:
+                return _lm.load(f)
+        import time
+        time.sleep(0.02)
+    return {}
+''')
+
+
+def fake_hidden(adapters, counts):
+    """A hidden dir with the shlex adapter plus the given fake adapters, nothing else."""
     d = tempfile.mkdtemp(prefix="k2-selftest-hidden-")
     shutil.copy(os.path.join(HERE, "mod_shlex.py"), d)
-    with open(os.path.join(d, "mod_colors.py"), "w", encoding="utf-8") as f:
-        f.write(FAKE_ADAPTER)
+    for name, src in adapters.items():
+        with open(os.path.join(d, f"mod_{name}.py"), "w", encoding="utf-8") as f:
+            f.write(src)
     with open(os.path.join(d, "modules.json"), "w", encoding="utf-8") as f:
-        f.write('{"shlex": 68, "colors": null}\n')
+        f.write(counts + "\n")
     return d
 
 
 def data_driven_checks():
-    hd = fake_hidden()
+    hd = fake_hidden({"colors": FAKE_COLORS, "jx": FAKE_JX}, '{"shlex": 68, "colors": null, "jx": null}')
     both = ["shlex", "colors"]
+    honest = {"colors.py": ("", HONEST_COLORS), "jx.py": ("", HONEST_JX)}
     try:
-        check("honest colors (fake adapter, ORACLES=['colorsys'])",
-              {"colors.py": ("", HONEST_COLORS)}, both, expect_full=both, hidden_dir=hd)
+        check("honest colors and jx (fake adapters; the colors adapter imports json, jx's oracle, at top level)",
+              honest, ["shlex", "colors", "jx"], expect_full=["shlex", "colors", "jx"], hidden_dir=hd)
         check("colors: import colorsys",
-              {"colors.py": ("import colorsys\n", HONEST_COLORS)}, both,
+              {**honest, "colors.py": ("import colorsys\n", HONEST_COLORS)}, both,
               expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
         check("colors: pkgutil.resolve_name('colorsys') at call time",
-              {"colors.py": ("import pkgutil\n", "\ndef rgb_to_yiq(r, g, b):\n"
-                                                 "    return pkgutil.resolve_name('colorsys').rgb_to_yiq(r, g, b)\n")},
+              {**honest, "colors.py": ("import pkgutil\n", "\ndef rgb_to_yiq(r, g, b):\n"
+                                       "    return pkgutil.resolve_name('colorsys').rgb_to_yiq(r, g, b)\n")},
               both, expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
         check("colors: runpy.run_path(<stdlib>/colorsys.py)",
-              {"colors.py": ("import os as _o, runpy as _r\n",
-                             "\ndef rgb_to_yiq(r, g, b):\n"
-                             "    ns = _r.run_path(_o.path.join(_o.path.dirname(_o.__file__), 'colorsys.py'))\n"
-                             "    return ns['rgb_to_yiq'](r, g, b)\n")},
+              {**honest, "colors.py": ("import os as _o, runpy as _r\n",
+                                       "\ndef rgb_to_yiq(r, g, b):\n"
+                                       "    ns = _r.run_path(_o.path.join(_o.path.dirname(_o.__file__), 'colorsys.py'))\n"
+                                       "    return ns['rgb_to_yiq'](r, g, b)\n")},
               both, expect_zero="colors", expect_flag="stdlib-oracle-used:colorsys", expect_full=["shlex"], hidden_dir=hd)
-        check("shellsplit imports colorsys (another category's oracle)",
-              {"colors.py": ("", HONEST_COLORS), "shellsplit.py": ("import colorsys\n", "")}, both,
-              expect_zero="shlex", expect_full=["colors"], hidden_dir=hd)
+        check("shellsplit imports colorsys (another category's oracle: zeroes both)",
+              {**honest, "shellsplit.py": ("import colorsys\n", "")}, both,
+              expect_zero=["shlex", "colors"], expect_flag="stdlib-oracle-used:colorsys", hidden_dir=hd)
+    finally:
+        shutil.rmtree(hd, ignore_errors=True)
+
+
+def laundering_checks():
+    # Both the laundered module and the one whose code reached the oracle score 0 (the oracle
+    # flag zeroes the module being graded, and the module that oracle serves).
+    # csvx, in the csv child, gets shlex through webbrowser and hands shellsplit its answers.
+    launder_shlex = (
+        "import glob as _lg, marshal as _lm2, os as _lo2, tempfile as _lt\n"
+        "try:\n"
+        "    import webbrowser as _wb\n"
+        "    _jobs = _lg.glob(_lo2.path.join(_lt.gettempdir(), 'k2-job-*'))\n"
+        "    _out = {}\n"
+        "    for _j in _jobs:\n"
+        "        try:\n"
+        "            with open(_j, 'rb') as _f:\n"
+        "                _job = _lm2.load(_f)\n"
+        "            for _c in (_job.get('cases') if isinstance(_job, dict) else _job):\n"
+        "                if _c.get('fn') == 'split':\n"
+        "                    try:\n"
+        "                        _out[_c['s'], bool(_c['comments']), bool(_c['posix'])] = _wb.shlex.split(_c['s'], _c['comments'], _c['posix'])\n"
+        "                    except ValueError:\n"
+        "                        _out[_c['s'], bool(_c['comments']), bool(_c['posix'])] = 'ValueError'\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "    _out['probe'] = _wb.shlex.split('a b')\n"
+        "    with open(_lo2.path.join(_lo2.path.dirname(_lo2.path.abspath(__spec__.origin)), '_laundered.marshal'), 'wb') as _f:\n"
+        "        _lm2.dump(_out, _f)\n"
+        "except Exception:\n"
+        "    pass\n")
+    read_shlex = LAUNDER_READ + (
+        "\n\ndef split(s, comments=False, posix=True):\n"
+        "    r = _answers().get((s, bool(comments), bool(posix)))\n"
+        "    if r == 'ValueError':\n        raise ValueError('laundered')\n"
+        "    return r if r is not None else ['no laundered answer']\n")
+    check("laundering: csvx computes shellsplit's answers with webbrowser.shlex",
+          {"csvx.py": (launder_shlex, ""), "shellsplit.py": ("", read_shlex)}, ["csv", "shlex"],
+          expect_zero=["shlex", "csv"], expect_flag="stdlib-oracle-used:shlex")
+    # shellsplit, in the shlex child, gets textwrap through logging (-> traceback) for the fake tw module.
+    hd = fake_hidden({"tw": FAKE_TW}, '{"shlex": 68, "tw": null}')
+    launder_tw = (
+        "try:\n"
+        "    import logging as _lg, marshal as _lm3, os as _lo3\n"
+        "    _tw = _lg.traceback.textwrap\n"
+        "    _out = {s: _tw.dedent(s) for s in %r}\n"
+        "    with open(_lo3.path.join(_lo3.path.dirname(_lo3.path.abspath(__spec__.origin)), '_laundered.marshal'), 'wb') as _f:\n"
+        "        _lm3.dump(_out, _f)\n"
+        "except Exception:\n"
+        "    pass\n" % (TW_TEXTS,))
+    read_tw = LAUNDER_READ + (
+        "\n\ndef dedent(s):\n"
+        "    r = _answers().get(s)\n"
+        "    return r if r is not None else 'no laundered answer'\n")
+    try:
+        check("laundering: shellsplit computes tw's answers with logging.traceback.textwrap",
+              {"shellsplit.py": (launder_tw, ""), "tw.py": ("", read_tw)}, ["shlex", "tw"],
+              expect_zero=["tw", "shlex"], expect_flag="stdlib-oracle-used:textwrap", hidden_dir=hd)
     finally:
         shutil.rmtree(hd, ignore_errors=True)
 
@@ -200,6 +319,7 @@ def main():
         print("skip regex escape tests (no mod_regex.py / ref regex.py)")
     data_driven_checks()
     refused_os_checks()
+    laundering_checks()
     if not quick:
         allcats = [c for c in grade.expected_modules() if os.path.exists(os.path.join(HERE, f"mod_{c}.py"))]
         others = [c for c in allcats if c != "shlex"]
