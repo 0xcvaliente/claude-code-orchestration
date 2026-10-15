@@ -1,22 +1,30 @@
 """Sandbox child: runs one adapter's cases against a toolkit solution.
 
-Usage: python3 -I -S -B runner.py SOL_ROOT ADAPTER_PATH JOB_MARSHAL START MODULE NAME
+Usage: python3 -I -S -B runner.py SOL_ROOT ADAPTER_PATH - START MODULE NAME
 
-JOB_MARSHAL holds {"cases": [...], "oracles": {category: [module, ...]}, "wrap": [...]}:
-every loaded adapter's ORACLES (the stdlib modules it reimplements) and this
-category's WRAP (oracle entry points to watch). Everything the sandbox refuses
-or watches is derived from those lists plus a fixed base list, so a new module
-plugs in by declaring ORACLES and WRAP in its adapter.
+The job arrives on stdin (marshal, read in full before anything else runs; no
+file on disk): {"cases": [...], "oracles": {category: [module, ...]},
+"wrap": {category: ["<module>.<name>", ...]}}: every loaded adapter's ORACLES
+(the stdlib modules it reimplements) and WRAP (oracle entry points to watch).
+Everything the sandbox refuses or watches is derived from those lists plus a
+fixed base list, so a new module plugs in by declaring ORACLES and WRAP.
 
-  - Toolkit code may not import any category's oracle, nor the BASE_BLOCK modules.
-  - This category's own oracles may not be imported by anyone in this process
-    (an attempt from toolkit code is flagged), except WATCH_ONLY modules, which
-    the standard library imports everywhere: those are watched instead.
-  - Wrappers on this category's WRAP entry points flag calls from toolkit code
-    during cases; an audit hook flags toolkit code that reads, compiles or runs
-    the sources of this category's oracles.
+In every child, whatever category it grades (k1 parity: one child must not
+compute answers for another category's module, e.g. through webbrowser.shlex):
+  - Every category's oracles, except WATCH_ONLY, may not be imported by anyone
+    in this process; an attempt with toolkit code on the stack is flagged as a
+    use of that oracle, which zeroes the category the oracle belongs to.
+  - Toolkit code may not import any oracle, nor the BASE_BLOCK modules.
+  - Wrappers on every category's WRAP entry points, and an audit hook on every
+    oracle's source files, flag toolkit code that reaches them.
   - Spawning processes and hard links (os.system, os.posix_spawn, os.exec*,
     os.fork, os.spawn*, os.link) are refused while toolkit code is on the stack.
+WATCH_ONLY modules (re and the sre_* shims) are imported all over the standard
+library, so they stay importable; they are watched only while the cases of the
+category that owns them (regex) run, as in k1.
+Known limit, the same as k1: `re` laundering between children is not detected:
+code in another category's child may compute regex answers with the real `re`
+(outside regex cases) and hand them over.
 
 Startup order matters: nothing that imports `re` is loaded before the solution
 module (no json, no importlib.abc, no site, no adapter).
@@ -42,14 +50,14 @@ IMPORT_LIMIT_S = 10
 
 # Refused for toolkit code in every category, whatever the adapters declare.
 BASE_BLOCK = ["subprocess", "ctypes", "sqlite3", "socket", "multiprocessing", "importlib"]
-# Imported by much of the standard library (json, dataclasses, inspect, ...): when they are
-# this category's oracles they stay importable and are watched (wrappers, audit) instead.
+# Imported by much of the standard library (json, dataclasses, inspect, ...): these oracles stay
+# importable and are watched (wrappers, audit) during their own category's cases instead.
 WATCH_ONLY = {"re", "sre_compile", "sre_parse", "sre_constants", "_sre"}
 # Audit events refused while toolkit code is on the stack (event name, or prefix ending in ".").
 REFUSED_EVENTS = {"os.system", "os.posix_spawn", "os.exec", "os.fork", "os.forkpty", "os.spawn",
                   "os.link", "subprocess.Popen", "pty.spawn"}
 
-sol, adapter_path, job_path, start, module_name, cat = (
+sol, adapter_path, _stdin_marker, start, module_name, cat = (
     sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5], sys.argv[6])
 sol = os.path.realpath(sol)
 TOOLKIT_DIR = os.path.join(sol, "toolkit") + os.sep
@@ -68,18 +76,29 @@ def emit(obj):
     proto.write(len(data).to_bytes(4, "big") + data)
 
 
-with open(job_path, "rb") as f:
-    job = marshal.load(f)
+def _read_job():
+    chunks = []
+    while True:
+        b = os.read(0, 1 << 20)
+        if not b:
+            break
+        chunks.append(b)
+    nul = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(nul, 0)
+    os.close(nul)
+    return marshal.loads(b"".join(chunks))
+
+
+job = _read_job()
 cases = job["cases"]
 ORACLES_BY_CAT = {str(k): [str(m) for m in v] for k, v in job["oracles"].items()}
-OWN = list(ORACLES_BY_CAT.get(cat, []))
-OWN_WRAP = [str(w) for w in job.get("wrap", [])]
+WRAP_BY_CAT = {str(k): [str(w) for w in v] for k, v in job.get("wrap", {}).items()}
+del job
+ALL_ORACLES = sorted({m for mods in ORACLES_BY_CAT.values() for m in mods})
+OWN = set(ORACLES_BY_CAT.get(cat, []))
 
-BLOCK = set(BASE_BLOCK)
-for _mods in ORACLES_BY_CAT.values():
-    BLOCK.update(_mods)
-STRICT = {m for m in OWN if m not in WATCH_ONLY}   # refused for every importer
-WATCHED = set(OWN)                                   # flagged when toolkit code reaches them
+BLOCK = set(BASE_BLOCK) | set(ALL_ORACLES)              # refused for toolkit code
+STRICT = {m for m in ALL_ORACLES if m not in WATCH_ONLY}  # refused for every importer
 
 STATE = {"in_case": False, "flagged": set()}
 
@@ -113,6 +132,37 @@ def toolkit_on_stack(depth=2):
     return False
 
 
+ADAPTER_DIR = os.path.dirname(os.path.realpath(adapter_path)) + os.sep
+
+
+def adapter_on_stack(depth=2):
+    """True when an adapter's own code (a file in the adapter's dir other than this runner) is on the stack."""
+    try:
+        frame = sys._getframe(depth)
+    except ValueError:
+        return False
+    while frame is not None:
+        fn = frame.f_code.co_filename
+        if fn and not fn.startswith("<"):
+            try:
+                rp = os.path.realpath(fn)
+            except (TypeError, ValueError):
+                rp = ""
+            if rp.startswith(ADAPTER_DIR) and rp != RUNNER_FILE:
+                return True
+        frame = frame.f_back
+    return False
+
+
+def strict_refused(hit):
+    """A strict oracle import: flagged and refused with toolkit code on the stack; allowed for the
+    adapter's own code (bookkeeping, run_oracle); refused for anything else (threads, callbacks)."""
+    if toolkit_on_stack(depth=3):
+        flag_oracle(hit)
+        return True
+    return not adapter_on_stack(depth=3)
+
+
 def flag_oracle(modname):
     key = "stdlib-oracle-used:" + modname
     if key not in STATE["flagged"]:
@@ -130,9 +180,9 @@ class Blocker:
     def find_spec(self, name, path, target=None):
         hit = _matches(name, STRICT)
         if hit is not None:
-            if toolkit_on_stack():
-                flag_oracle(hit)
-            raise ImportError(blocked_msg(name))
+            if strict_refused(hit):
+                raise ImportError(blocked_msg(name))
+            return None
         if _matches(name, BLOCK) is None:
             return None
         frame = sys._getframe(1)
@@ -156,9 +206,7 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         names = [name] + [f"{name}.{x}" for x in (fromlist or ()) if isinstance(x, str)]
         for n in names:
             hit = _matches(n, STRICT)
-            if hit is not None:
-                if toolkit_on_stack():
-                    flag_oracle(hit)
+            if hit is not None and strict_refused(hit):
                 raise ImportError(blocked_msg(n))
         if globals is not None and inside_toolkit(globals.get("__file__")):
             for n in names:
@@ -177,9 +225,16 @@ def purge_strict():
 _wrapped = {}
 
 
+def _active(modname):
+    """Strict oracles are watched always; WATCH_ONLY ones only during their own category's cases."""
+    if modname in WATCH_ONLY:
+        return STATE["in_case"] and modname in OWN
+    return True
+
+
 def _make_wrapper(modname, orig):
     def wrapper(*args, **kwargs):
-        if STATE["in_case"] and toolkit_on_stack():
+        if _active(modname) and toolkit_on_stack():
             flag_oracle(modname)
         return orig(*args, **kwargs)
     return wrapper
@@ -221,12 +276,12 @@ def _resolve_wrap(entry):
 
 
 def install_watch():
-    for entry in OWN_WRAP:
+    for entry in (w for ws in WRAP_BY_CAT.values() for w in ws):
         hit = _resolve_wrap(entry)
         if hit is None:
             continue
         owner, attr, modname = hit
-        tag = _matches(modname, WATCHED) or modname
+        tag = _matches(modname, ALL_ORACLES) or modname
         target = owner.__dict__.get(attr) if isinstance(owner, type) else getattr(owner, attr, None)
         if isinstance(target, type):
             for a, v in list(vars(target).items()):  # a class: wrap its plain methods
@@ -235,7 +290,7 @@ def install_watch():
         else:
             _wrap_function(owner, attr, tag)
     # Clear oracle caches (re.purge) so cached compilations go through the wrapped entry points.
-    for m in OWN:
+    for m in sorted(OWN & WATCH_ONLY):
         mod = sys.modules.get(m)
         purge = getattr(mod, "purge", None) if mod is not None else None
         if callable(purge):
@@ -271,7 +326,7 @@ def _oracle_paths(mods):
     return out
 
 
-ORACLE_PATHS = _oracle_paths(OWN)
+ORACLE_PATHS = _oracle_paths(ALL_ORACLES)
 AUDIT_EVENTS = {"open", "compile", "exec", "import"}
 _audit_busy = [False]
 
@@ -339,7 +394,7 @@ def audit(event, args):
         modname = _oracle_of(target)
         if modname is None:
             return
-        if modname in WATCH_ONLY and _importing_by_name(modname):
+        if modname in WATCH_ONLY and (modname not in OWN or _importing_by_name(modname)):
             return  # the stdlib loading a watch-only module normally
         if not toolkit_on_stack(depth=2):
             return
@@ -382,6 +437,7 @@ except BaseException as e:  # noqa: BLE001
 spec = importlib.util.spec_from_file_location("_k2_adapter", adapter_path)
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
+install_watch()  # wrap any oracle the adapter loaded before it leaves sys.modules
 purge_strict()
 
 emit({"event": "ready"})
