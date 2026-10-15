@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { aucOf, analyze, evaluateHypotheses, latestRows, outsideGraded, processOf, tokensOf } from "./analyze.mjs";
+import { aucOf, analyze, evaluateHypotheses, latestGrades, latestRows, outsideGraded, processOf, timelineOf, tokensOf } from "./analyze.mjs";
 import { renderHtml, renderMarkdown } from "./report.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, median, medianDiff, mulberry32, quantile, ratioCI } from "./lib/stats.mjs";
@@ -160,6 +160,29 @@ test("fixture: last row per run_id wins; superseded rows count as retries", () =
   assert.equal(summary.counts.rate_limited, 1);
   assert.equal(summary.campaigns[0].rows, 19);
   assert.equal(summary.campaigns[0].runs, 17);
+});
+
+test("fixture: a crashed final grade followed by a good one uses the good one", () => {
+  const r = run("k1-stdlib-toolkit__O-mix__main__r1");
+  assert.equal(r.score_pct, 100);
+  assert.equal(r.pass, true);
+  assert.equal(r.timeline.filter(([s]) => s === 1500).length, 1);
+  assert.deepEqual(r.timeline, [[60, 0], [600, 40], [1200, 95], [1500, 100]]); // one point per snap, the last row of each
+  const t = timelineOf([
+    { run_id: "a", snap: "t0060", secs: 60, passed: 1, total: 2 },
+    { run_id: "a", snap: "final", secs: 90, passed: 0, total: 2, crashed: true, flags: ["grader-crash"] },
+    { run_id: "a", snap: "t0060", secs: 60, passed: 2, total: 2 },
+    { run_id: "a", snap: "final", secs: 90, passed: 2, total: 2, pass: true },
+  ], 90);
+  assert.deepEqual(t.timeline, [[60, 100], [90, 100]]);
+  assert.equal(t.final.passed, 2);
+  const g = latestGrades([
+    { run_id: "a", snap: "final", passed: 0, crashed: true },
+    { run_id: "a", snap: "t0060", passed: 1 },
+    { run_id: "a", snap: "final", passed: 5 },
+    { run_id: "b", snap: "final", passed: 2 },
+  ]);
+  assert.deepEqual(g.map((x) => [x.run_id, x.snap, x.passed]), [["a", "t0060", 1], ["a", "final", 5], ["b", "final", 2]]);
 });
 
 test("latestRows keeps the last row per run_id in file order", () => {

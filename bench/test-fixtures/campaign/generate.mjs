@@ -123,6 +123,13 @@ for (const s of runs) {
 const retried = rows.findIndex((r) => r.run_id === "t1-parallel__O-mix__main__r1");
 rows.splice(retried, 0, { ...rows[retried], started_at: iso(-600), ended_at: iso(-580), wall_ms: 20000, exit_code: 1, end_reason: "rate_limited", results: [], error: "usage limit reached" });
 rows.push({ ...rows.find((r) => r.run_id === "t1-parallel__AUTO__main__r2") });
+// Grader retry: k1 O-mix r1's final grade first crashed (crashed:true, flag "grader-crash"), then a fresh row was
+// appended. The analysis keeps the last row per (run_id, snap).
+const regraded = grades.findIndex((g) => g.run_id === "k1-stdlib-toolkit__O-mix__main__r1" && g.snap === "final");
+grades.splice(regraded, 0, { ...grades[regraded], pass: false, passed: 0, crashed: true, flags: ["grader-crash"] });
+// A duplicated snapshot row: k1 O-mix r1's t0600 graded twice (first 30, then the kept 40).
+const snapIdx = grades.findIndex((g) => g.run_id === "k1-stdlib-toolkit__O-mix__main__r1" && g.snap === "t0600");
+grades.splice(snapIdx, 0, { ...grades[snapIdx], passed: 30 });
 const lines = (xs) => xs.map((x) => `${JSON.stringify(x)}\n`).join("");
 writeFileSync(join(DIR, "runs.jsonl"), lines(rows));
 writeFileSync(join(DIR, "grades.jsonl"), lines(grades));
