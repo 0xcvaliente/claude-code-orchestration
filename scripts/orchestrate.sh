@@ -95,6 +95,10 @@ else
   done <<< "${ORCH_EXTRA_ALLOWED_TOOLS:-}"
 fi
 
+# Block Claude Code's built-in subagents (general-purpose, Explore, Plan, ...) in headless runs: this repo's own agents
+# do those jobs, with gates. DENIED_AGENTS in src/config.ts; src/policy.test.ts fails if this line goes away.
+export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
+
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
 args+=(--output-format json --permission-mode dontAsk --no-session-persistence)

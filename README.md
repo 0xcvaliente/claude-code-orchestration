@@ -200,7 +200,7 @@ The interactive orchestrator cannot hand over to a plain session, because it has
 
 ### The plugin
 
-The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract and the `/route` skill, but not permission denies (headless runs deny push, remote, `sudo` and `rm -rf` on the command line; for interactive sessions add the denies you want to your own settings) and not this repo's `worktree` setting.
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract and the `/route` skill, but not permission denies (headless runs deny push, remote, `sudo` and `rm -rf` on the command line; for interactive sessions add the denies you want to your own settings, including `Agent(general-purpose)` and the other built-in subagents this repo blocks; headless runs also set `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1`) and not this repo's `worktree` setting.
 
 **Parallel code slices need `baseRef: "head"`.** Only code in a git repository runs slices in worktrees, and Claude Code starts a worktree from the remote default branch unless told otherwise, so a parallel slice would not see your unpushed or feature-branch commits. For parallel slices of unpushed or feature-branch work, add this to your own `.claude/settings.json` (or `~/.claude/settings.json`):
 
