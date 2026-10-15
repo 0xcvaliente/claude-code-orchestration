@@ -1,0 +1,26 @@
+[
+  {
+    "name": "wrap-m1-underscore-not-letter",
+    "file": "toolkit/wrap.py",
+    "from": "return _is_word(c) and not (c in _DIGITS",
+    "to": "return c in _ALPHA and not (c in _DIGITS"
+  },
+  {
+    "name": "wrap-m2-sentence-end-any-case",
+    "file": "toolkit/wrap.py",
+    "from": "chunk[n - 2] in _LOWER",
+    "to": "chunk[n - 2] in _ALPHA"
+  },
+  {
+    "name": "wrap-m3-long-word-no-hyphen-break",
+    "file": "toolkit/wrap.py",
+    "from": "                    end = h + 1\n",
+    "to": "                    end = space\n"
+  },
+  {
+    "name": "wrap-m4-dedent-margin-shrink",
+    "file": "toolkit/wrap.py",
+    "from": "        elif margin.startswith(ind):\n            margin = ind\n",
+    "to": "        elif margin.startswith(ind):\n            pass\n"
+  }
+]
