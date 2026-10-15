@@ -17,6 +17,8 @@ For each branch: `git merge --no-ff --no-edit <branch>`. On a conflict, run `git
 
 After merging, run the acceptance check from the brief.
 
+Unattended runs allow only plain commands, so run each git command and the check as its own Bash call from the current directory, with literal branch names and paths: no shell variables (`D=...`), loops, `$?` or `${PIPESTATUS[...]}`, `timeout` or `cd`; the Bash result already shows the exit code. Never copy a slice's files by hand (`cp`, `git checkout <branch> -- <file>`): a branch that does not merge goes under CONFLICTED.
+
 Reply in under 200 words in this format:
 STATUS: pass if every branch merged and the check passed, otherwise fail
 MERGED: branches merged

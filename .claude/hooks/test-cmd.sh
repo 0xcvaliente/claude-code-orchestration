@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Sourceable helpers (no side effects when sourced) shared by verify.sh and scripts/orchestrate.sh.
 #   orch_detect_test_cmd <dir>  print the project's test command, or nothing.
-#   orch_allow_rules <cmd>      print the permission allow rules needed to run <cmd>, one per line.
+#   orch_allow_rules <cmd>      print the permission allow rules needed to run <cmd> (and, for a Python runner, the
+#                               interpreter), one per line.
 
 orch_detect_test_cmd() {
   local dir="${1:-.}"
@@ -47,9 +48,15 @@ orch_allow_rules() {
   cmd="${cmd#"${cmd%%[![:space:]]*}"}"
   cmd="${cmd%"${cmd##*[![:space:]]}"}"
   [ -n "$cmd" ] || return 0
+  # A Python runner also gets its interpreter, as npm and node are always allowed: agents check their work with their
+  # own scripts (python3 -c, python3 - <<EOF, scratch/diff.py), not only with the test command. The UNSAFE_BASH denies
+  # still win over these rules.
   case "$cmd" in
-    "python3 -m pytest"*) echo 'Bash(python3 -m pytest*)'; echo 'Bash(pytest*)' ;;
-    "python3 -m unittest"*) echo 'Bash(python3 -m unittest*)' ;;
+    "python3 -m pytest"*) echo 'Bash(python3 *)'; echo 'Bash(pytest*)' ;;
+    "python -m pytest"*) echo 'Bash(python *)'; echo 'Bash(pytest*)' ;;
+    "python3 "*) echo 'Bash(python3 *)' ;;
+    "python "*) echo 'Bash(python *)' ;;
+    pytest | "pytest "*) echo 'Bash(pytest*)'; echo 'Bash(python3 *)' ;;
     "cargo test"*) echo 'Bash(cargo test*)'; echo 'Bash(cargo build*)' ;;
     "go test"*) echo 'Bash(go test*)'; echo 'Bash(go build*)'; echo 'Bash(go vet*)' ;;
     "swift test"*) echo 'Bash(swift test*)'; echo 'Bash(swift build*)' ;;

@@ -42,8 +42,8 @@ test("detect: each runner, and nothing for an empty project", () => {
 });
 
 test("allow rules per runner", () => {
-  assert.deepEqual(rules("python3 -m pytest -q"), ["Bash(python3 -m pytest*)", "Bash(pytest*)"]);
-  assert.deepEqual(rules("python3 -m unittest discover -q"), ["Bash(python3 -m unittest*)"]);
+  assert.deepEqual(rules("python3 -m pytest -q"), ["Bash(python3 *)", "Bash(pytest*)"]);
+  assert.deepEqual(rules("python3 -m unittest discover -q"), ["Bash(python3 *)"]);
   assert.deepEqual(rules("cargo test --quiet"), ["Bash(cargo test*)", "Bash(cargo build*)"]);
   assert.deepEqual(rules("go test ./..."), ["Bash(go test*)", "Bash(go build*)", "Bash(go vet*)"]);
   assert.deepEqual(rules("swift test"), ["Bash(swift test*)", "Bash(swift build*)"]);
@@ -88,7 +88,7 @@ test("orchestrate.sh dry run: runner rules, --model and extra rules", () => {
     });
   const base = run({});
   assert.equal(base.status, 0);
-  assert.match(base.stdout, /Bash\(python3 -m (pytest|unittest)\*\)/);
+  assert.match(base.stdout, /^Bash\(python3 \*\)$/m);
   assert.doesNotMatch(base.stdout, /--model/);
   assert.ok(base.stdout.split("\n").includes("SendMessage"), "headless orchestrator retries need SendMessage to resume the implementer");
   const full = run({ ORCH_MODEL: "sonnet", ORCH_EXTRA_ALLOWED_TOOLS: "Bash(ruff*)\n\nBash(mypy*)" });
@@ -156,7 +156,7 @@ test("auto.sh: a set ORCH_BUDGET_USD or a bad ORCH_BUDGET_TOKENS exits 1 before 
 });
 
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
-  const repo = withAgents(tmp());
+  const repo = withAgents(join(tmp(), "a repo")); // a space in the path must still give one rule per line
   mkdirSync(join(repo, "tests"));
   writeFileSync(join(repo, "tests", "test_a.py"), "");
   // A fake claude records its arguments, one call per file, and answers STATUS: pass.
@@ -174,8 +174,13 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
   const calls = readdirSync(log).map((f) => readFileSync(join(log, f), "utf8"));
   const reviewer = calls.find((c) => c.includes("--agent\nreviewer"));
   assert.ok(reviewer, "reviewer call recorded");
-  assert.match(reviewer, /^Bash\(python3 -m (pytest|unittest)\*\)$/m);
+  assert.match(reviewer, /^Bash\(python3 \*\)$/m);
   assert.match(reviewer, /^Bash\(git diff\*\)$/m);
+  // git -C only in its read-only forms, pinned to this repo's absolute path: a wildcard before the subcommand would also
+  // match `git -C . commit -am diff`. reviewer.md tells reviewers to use git -C <path> diff with literal paths.
+  const repoAbs = realpathSync(repo);
+  for (const sub of ["diff", "status", "log", "show"]) assert.ok(reviewer.split("\n").includes(`Bash(git -C ${repoAbs} ${sub}*)`), sub);
+  assert.doesNotMatch(reviewer, /^Bash\(git -C \*/m);
   assert.doesNotMatch(reviewer, /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m);
 });
 
@@ -349,7 +354,7 @@ test("auto.sh reviewed route, code outside git: the reviewer gets the report and
   assert.doesNotMatch(reviewer, /git diff HEAD/);
   assert.doesNotMatch(reviewer, /git status --short/);
   assert.doesNotMatch(reviewer, /check every requirement/);
-  assert.match(reviewer, /^Bash\(python3 -m (pytest|unittest)\*\)$/m, "the runner's rules let it run the tests");
+  assert.match(reviewer, /^Bash\(python3 \*\)$/m, "the runner's rules let it run the tests");
   assert.doesNotMatch(reviewer, WRITES);
 });
 
@@ -657,6 +662,36 @@ test("detect: a planted pytest.py in the repo is never imported", () => {
   });
   assert.match(r.stdout, /^python3 -m /);
   assert.equal(existsSync(marker), false);
+});
+
+test("allow rules: a Python runner also allows its interpreter, for the agents' own check scripts", () => {
+  assert.deepEqual(rules("python3 tests/run_public.py"), ["Bash(python3 *)"]);
+  assert.deepEqual(rules("python -m pytest -q"), ["Bash(python *)", "Bash(pytest*)"]);
+  assert.deepEqual(rules("python tests/run.py"), ["Bash(python *)"]);
+  assert.deepEqual(rules("pytest -q"), ["Bash(pytest*)", "Bash(python3 *)"]);
+  assert.deepEqual(rules("pytest"), ["Bash(pytest*)", "Bash(python3 *)"]);
+  // Only a runner that starts with the interpreter: a name that merely begins with "python" or "pytest" gets its own rule.
+  assert.deepEqual(rules("python3x run"), ["Bash(python3x run*)"]);
+  assert.deepEqual(rules("pytest-watch"), ["Bash(pytest-watch*)"]);
+});
+
+test("orchestrate.sh dry run: a Python ORCH_TEST_CMD allows python3, and the unsafe denies stay unchanged", () => {
+  const repo = tmp();
+  const r = spawnSync("bash", [orchestrateSh, "t", repo], {
+    env: { ...process.env, ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_TEST_CMD: "python3 tests/run_public.py" },
+    encoding: "utf8",
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split("\n");
+  const allowed = lines.slice(lines.indexOf("--allowedTools") + 1).filter(Boolean);
+  assert.ok(allowed.includes("Bash(python3 *)"), allowed.join(", "));
+  assert.ok(allowed.includes("Bash(mkdir -p *)"));
+  assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), UNSAFE_BASH);
+  // No allow rule names a denied command, or a wrapper that could carry one past the deny's prefix match.
+  for (const rule of allowed) {
+    assert.doesNotMatch(rule, /^Bash\((?:\*|(?:git (?:\* )?(?:push|remote)|sudo|rm|timeout|env|xargs|bash|sh|exec|nohup)[ *)])/, rule);
+    assert.notEqual(rule, "Bash(git *)");
+  }
 });
 
 test("allow rules: trims, ignores empty, rejects multi-line", () => {
