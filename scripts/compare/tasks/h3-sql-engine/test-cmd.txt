@@ -1,1 +1,0 @@
-python3 tests/run_public.py
