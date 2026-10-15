@@ -27,10 +27,14 @@
 export const NEGATED =
   /\b(?:0|zero|no|none|without(?: any)?)\s+(?:(?:tests?|checks?|cases?)\s+)?(?:failed|failures?|failing(?:\s+(?:tests?|checks?))?|errors?|regressions?|blockers?|known\s+(?:issues?|gaps?|limitations?|bugs?)|remaining\s+(?:issues?|failures?|gaps?|work)|issues?|gaps?)\b|\b(?:nothing|none)\s+(?:failed|is\s+missing|missing)\b|\bnot\s+blocked\b/gi;
 export const BEHAVIOUR =
-  /\b(?:throws?|raises?)\s+(?:an?\s+)?[`'"]?[\w.]+[`'"]?|\brejects?\b|\brejected\b|\breturns?\s+an?\s+error\b|\berror[\s-]+handling\b|`[^`\n]*(?:Error|Exception)[^`\n]*`|\b\w*(?:Error|Exception)\b|\bfix(?:ed|es)\s+(?:(?:the|all|\d+|those|these)\s+)*(?:failing|failures?|errors?|broken)\b|\bhandles?\s+(?:\w+\s+)?errors?\b|\berrors?\s+gracefully\b/gi;
+  /\b(?:throws?|raises?)\s+(?:an?\s+)?[`'"]?[\w.]+[`'"]?|\brejects?\b|\brejected\b|\breturns?\s+an?\s+error\b|\berror[\s-]+handling\b|`[^`\n]*(?:Error|Exception)[^`\n]*`|\b\w*(?:Error|Exception)\b/g;
+export const BEHAVIOUR_CI =
+  /\bfix(?:ed|es)\s+(?:(?:the|all|\d+|those|these)\s+)*(?:failing|failures?|errors?|broken)\b|\bhandles?\s+(?:\w+\s+)?errors?\b|\berrors?\s+gracefully\b/gi;
+export const HEDGE =
+  /\b(?:except|not\s+able\s+to|untested|unverified|not\s+verified|didn't\s+run|did\s+not\s+run|haven't\s+run|have\s+not\s+run|not\s+run|skipped|cannot\s+confirm|can't\s+confirm|should\s+(?:pass|work))\b/i;
 export const STATUS_LINE = /^[ \t*_#`]*STATUS[ \t*_`]*:[ \t*_`]*(pass|fail)\b/gim;
 export const STRONG_FAIL =
-  /\b(?:incomplete|not\s+(?:yet\s+)?(?:done|finished|completed?|implemented)|(?:could\s*not|couldn't|unable\s+to|failed\s+to)\s+(?:(?:[\w-]+\s+){0,4}(?:pass|passing|work|working)\b|\w+)|(?:did\s*(?:not|n't)|didn't|won't|will\s+not)\s+(?:finish|complete|pass|work)|not\s+all\s+(?:[\w-]+\s+){0,3}pass\w*|ran\s+out\s+of\s+time|gave\s+up|blocked)\b/gi;
+  /\b(?:incomplete|not\s+(?:yet\s+)?(?:done|finished|completed?|implemented)|(?:could\s*not|couldn't|unable\s+to|failed\s+to)\s+(?:(?:[\w-]+\s+){0,4}(?:pass|passing|work|working)\b|\w+)|(?:did\s*(?:not|n't)|didn't|won't|will\s+not)\s+(?:finish|complete|pass|work)|not\s+all\s+(?:[\w-]+\s+){0,3}pass\w*|(?:build|compile|compilation|syntax)\s+errors?|cannot\s+compile|(?:does\s*not|doesn't|did\s*not|didn't)\s+compile|ran\s+out\s+of\s+time|gave\s+up|blocked)\b/gi;
 export const FAIL = /\b(?:failed|failing|fails|broken|errors?(?!\s+(?:handling|messages?|cases?|paths?|codes?|types?))|does\s*(?:not|n't)\s+(?:work|pass)|doesn't\s+(?:work|pass)|(?:tests?|checks?|cases?)\s+fail)\b/i;
 export const GAP =
   /\b(?:known\s+(?:issues?|gaps?|limitations?|bugs?)|remaining\s+(?:issues?|failures?|gaps?|work)|todo|not\s+(?:yet\s+)?(?:supported|handled|covered)|still\s+(?:fail(?:s|ing)?|missing|broken)|(?:is|are)\s+missing|partially|partial\s+(?:implementation|support|solution)|mostly\s+(?:done|working|complete|passing)|except\s+for)\b/i;
@@ -45,9 +49,10 @@ export function classifyClaim(text) {
   if (text.length > 20000) text = text.slice(0, 10000) + "\n" + text.slice(-10000);
   const statuses = [...text.matchAll(STATUS_LINE)].map((m) => m[1].toLowerCase());
   if (statuses.includes("fail")) return "failure";
-  let t = text.replace(BEHAVIOUR, " ").replace(NEGATED, " ");
+  const clean = text.replace(BEHAVIOUR, " ").replace(BEHAVIOUR_CI, " ");
+  let t = clean.replace(NEGATED, " ");
   let gap = GAP.test(t);
-  let fracDone = ZERO_FAIL.test(text.replace(BEHAVIOUR, " "));
+  let fracDone = ZERO_FAIL.test(clean);
   for (const m of t.matchAll(COLON_FRACTION)) {
     if (Number(m[1]) < Number(m[2])) gap = true;
     else if (Number(m[2]) > 0) fracDone = true;
@@ -63,7 +68,8 @@ export function classifyClaim(text) {
   t = t.replace(STRONG_FAIL, " ");
   const fail = FAIL.test(t);
   const done = fracDone || statuses.includes("pass") || DONE.test(t.replace(FRACTION, " "));
-  if (done && (fail || strong || gap)) return "partial";
+  const hedge = HEDGE.test(t);
+  if (done && (fail || strong || gap || hedge)) return "partial";
   if (strong || fail) return "failure";
   if (gap) return "partial";
   if (done) return "success";
