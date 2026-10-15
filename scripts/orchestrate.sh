@@ -17,7 +17,8 @@
 #      ORCH_EXTRA_ALLOWED_TOOLS (one extra permission rule per line, appended to the default list; the default list has
 #        no web tools, so add WebSearch and WebFetch for research, scripts/auto.sh does it for a task that is not code),
 #      ORCH_MODEL (passes --model, e.g. sonnet or opus, for plain-model baselines),
-#      ORCH_TEST_CMD (test command; its permission rules are added automatically, else detected from the repo),
+#      ORCH_TEST_CMD (test command; its permission rules are added automatically, else detected from the repo; a Python
+#        runner such as python3 tests/run.py or python3 -m pytest adds Bash(python3 *), so agents can run their own checks),
 #      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
 #      ORCH_AGENT_PREFIX (e.g. orchestration: always runs <prefix><name>, the plugin's agents, without checking the
 #        folder or the installed plugins; for CI or a plugin loaded another way; a missing trailing colon is added),
@@ -75,7 +76,7 @@ tools=(
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git -C *)" "Bash(cd *)"
-  "Bash(npm *)" "Bash(node *)" "Bash(ls*)"
+  "Bash(npm *)" "Bash(node *)" "Bash(ls*)" "Bash(mkdir -p *)"
 )
 if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
   tools=()
@@ -83,7 +84,8 @@ if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
     [ -n "$rule" ] && tools+=("$rule")
   done <<< "$ORCH_ALLOWED_TOOLS"
 else
-  # Let the repo's own test runner through (pytest, cargo, go, swift, make ...), then any extra rules.
+  # Let the repo's own test runner through (pytest, cargo, go, swift, make ...; a Python runner also gets python3 or
+  # python itself, as node is always allowed), then any extra rules.
   source "$here/../.claude/hooks/test-cmd.sh"
   while IFS= read -r rule; do
     [ -n "$rule" ] && tools+=("$rule")
