@@ -10,12 +10,12 @@ import sys
 
 EXAMPLES = [
     {"name": "dumps-mixed", "op": "dumps",
-     "obj": lambda: {"name": "café", "n": [1, 2.0, None, True], 3: (4, 5)}},
+     "obj": lambda: {"name": "caf\u00e9", "n": [1, 2.0, None, True], 3: (4, 5)}},
     {"name": "dumps-indent-sorted", "op": "dumps",
      "obj": lambda: {"b": [1, {}], "a": {"y": [], "x": "q\"t"}},
      "kw": {"indent": 2, "sort_keys": True}},
     {"name": "dumps-no-ascii-separators", "op": "dumps",
-     "obj": lambda: ["ü\n\x01", 1e-7, float("inf")],
+     "obj": lambda: ["\u00fc\n\x01", 1e-7, float("inf")],
      "kw": {"ensure_ascii": False, "separators": (",", ":")}},
     {"name": "dumps-nan-forbidden", "op": "dumps",
      "obj": lambda: [1, float("nan")], "kw": {"allow_nan": False}},
