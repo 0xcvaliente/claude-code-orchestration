@@ -8,5 +8,5 @@
   "test_cmd": "python3 tests/run_public.py",
   "graded_paths": ["toolkit"],
   "snapshot_every_s": 120,
-  "total": 503
+  "total": 1762
 }
