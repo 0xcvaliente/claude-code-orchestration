@@ -30,8 +30,16 @@ NAME = "cal"
 MODULE = "toolkit.cal"
 ORACLES = ["calendar"]
 # _strptime (datetime.strptime, time.strptime) imports calendar: it stays importable, and its
-# WRAP entry points are watched only during cal cases (runner.py, WATCH_ONLY).
+# WRAP entry points are watched only during cal cases (runner.py, WATCH_ONLY). A watched call
+# made by genuine _strptime code (calendar.isleap for %W/%U/%G formats) is not solution use,
+# even with toolkit code further up the stack (WATCH_CALLERS). Residual limit: calendar can be
+# cloned at import time, outside cases, by rebuilding its functions from their code objects
+# (types.FunctionType over a copied globals dict); clones bypass the wrapped entry points (a
+# captured reference to a wrapped function is caught, a rebuilt clone is not). A reviewer's
+# clone scored 147/156 with no flag; the static scan flags __code__, FunctionType, _strptime
+# and vars( for the post-run audit.
 WATCH_ONLY = True
+WATCH_CALLERS = ["_strptime"]
 WRAP = ["calendar.Calendar", "calendar.TextCalendar", "calendar.monthrange",
         "calendar.weekday", "calendar.isleap", "calendar.leapdays",
         "calendar.monthcalendar", "calendar.month", "calendar.calendar",
