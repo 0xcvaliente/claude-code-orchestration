@@ -5,7 +5,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFi
 import { cp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { command, prepareClaudeDir, runEnv } from "../arms.mjs";
-import { buildPrompt, diffFiles, enabledPluginIds, isRateLimited, parseResults, snapName } from "./run-core.mjs";
+import { AUTH_PAUSE_REASON, buildPrompt, diffFiles, enabledPluginIds, isAuthError, isRateLimited, parseAuthStatus, parseResults, snapName } from "./run-core.mjs";
 import { totalTokens } from "../../scripts/tokens.mjs";
 
 export const sh = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, ...opts });
@@ -243,8 +243,28 @@ export async function executeRun(run, ctx) {
   row.end_reason = r.endReason;
   if (r.spawnError) row.error = r.spawnError;
   await collect(repo, outDir, graded, initSha, row);
-  if (isRateLimited(row.results)) row.end_reason = "rate_limited";
+  classifyRow(row);
   return row;
+}
+
+// Post-run classification: rate limit, then expired login, then the zero-token guard (a fast exit with no model usage).
+export function classifyRow(row) {
+  if (isRateLimited(row.results)) row.end_reason = "rate_limited";
+  else if (isAuthError(row.results)) row.end_reason = "auth_error";
+  else if (row.end_reason === "exited" && row.wall_ms < 30_000 && tokensOf(row) === 0) {
+    row.end_reason = "error";
+    row.error = "no model usage";
+  }
+  return row;
+}
+
+// `claude auth status` (no model call): true only when it runs, prints JSON and says loggedIn true.
+export function checkLoggedIn(run = () => sh("claude", ["auth", "status"], { timeout: 30_000 })) {
+  try {
+    return parseAuthStatus(run()?.stdout);
+  } catch {
+    return false;
+  }
 }
 
 async function collect(repo, outDir, graded, initSha, row) {
@@ -270,3 +290,33 @@ async function collect(repo, outDir, graded, initSha, row) {
 }
 
 export const tokensOf = (row) => (row.results ?? []).reduce((s, r) => s + totalTokens(r), 0);
+
+// A rate-limited or auth-failed run creates PAUSE and goes back on the queue as its own block.
+export function pauseAndRequeue(row, run, pauseFile, queue) {
+  const reason = row.end_reason === "rate_limited" ? `rate limited: ${run.run_id}` : row.end_reason === "auth_error" ? `${AUTH_PAUSE_REASON}\n${run.run_id}` : null;
+  if (!reason) return false;
+  writeFileSync(pauseFile, `${reason} at ${new Date().toISOString()}\nRemove this file to resume.\n`);
+  queue.push({ key: `${run.block} (requeued ${run.run_id})`, runs: [run] });
+  return true;
+}
+
+// Hold while PAUSE exists, then until `claude auth status` shows loggedIn (a failed check writes PAUSE and waits once more).
+export async function waitUntilClear({ pauseFile, pollMs = 30_000, log = () => {}, check = checkLoggedIn, wait = sleep, stop = interrupted }) {
+  const hold = async () => {
+    while (existsSync(pauseFile) && !stop()) await wait(pollMs);
+  };
+  if (existsSync(pauseFile)) {
+    log("paused");
+    await hold();
+  }
+  let announced = false;
+  while (!stop() && !check()) {
+    if (!announced) {
+      announced = true;
+      if (!existsSync(pauseFile)) writeFileSync(pauseFile, `${AUTH_PAUSE_REASON}\nRemove this file to resume.\n`);
+      log("paused: not logged in");
+    }
+    await wait(pollMs);
+    await hold();
+  }
+}

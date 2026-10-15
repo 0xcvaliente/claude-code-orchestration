@@ -8,10 +8,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   blockKeyOf, buildPrompt, diffFiles, enabledPluginIds, expandMatrix, filterResume, finishedRunIds, footer, groupBlocks,
-  hms, isRateLimited, mergeSettings, parseResults, resolveSeed, runIdOf, shuffle, snapName,
+  hms, isAuthError, parseAuthStatus, isRateLimited, mergeSettings, parseResults, resolveSeed, runIdOf, shuffle, snapName,
 } from "./lib/run-core.mjs";
 import { ARMS, envAdditions, prepareClaudeDir, runEnv } from "./arms.mjs";
-import { executeRun, loadTask } from "./lib/run-exec.mjs";
+import { checkLoggedIn, classifyRow, executeRun, loadTask, pauseAndRequeue, waitUntilClear } from "./lib/run-exec.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -265,6 +265,94 @@ if (!interrupted()) appendFileSync(${JSON.stringify(rowsFile)}, JSON.stringify(r
     assert.match(out, /RUNNER INTERRUPTED/);
     assert.throws(() => process.kill(-pgid, 0), /ESRCH/, "agent group gone after the interrupt");
     assert.equal(existsSync(rowsFile), false, "no row for the interrupted run");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+const AUTH_DOC = { type: "result", is_error: true, subtype: "success", terminal_reason: "api_error", result: "Failed to authenticate: OAuth session expired and could not be refreshed", modelUsage: {} };
+
+test("auth failure classification and zero-token guard", () => {
+  assert.equal(isAuthError([AUTH_DOC]), true);
+  assert.equal(isAuthError([{ is_error: true, result: "Invalid API key" }]), true);
+  assert.equal(isAuthError([{ is_error: false, result: "fixed the OAuth bug" }]), false);
+  assert.equal(isAuthError([{ is_error: true, result: "tests failed" }]), false);
+  const base = { end_reason: "exited", wall_ms: 3000 };
+  assert.equal(classifyRow({ ...base, results: [AUTH_DOC] }).end_reason, "auth_error");
+  assert.equal(classifyRow({ ...base, results: [{ is_error: true, result: "usage limit" }] }).end_reason, "rate_limited");
+  const z = classifyRow({ ...base, results: [{ is_error: false, result: "x", modelUsage: {} }] });
+  assert.equal(z.end_reason, "error");
+  assert.equal(z.error, "no model usage");
+  const used = { is_error: false, result: "x", modelUsage: { m: { inputTokens: 5, outputTokens: 5 } } };
+  assert.equal(classifyRow({ ...base, results: [used] }).end_reason, "exited");
+  assert.equal(classifyRow({ ...base, wall_ms: 31_000, results: [] }).end_reason, "exited");
+  assert.deepEqual([...finishedRunIds(`${JSON.stringify({ run_id: "a", end_reason: "auth_error" })}\n`)], []);
+});
+
+test("auth preflight parses status JSON with an injected command", () => {
+  assert.equal(parseAuthStatus('{"loggedIn": true, "authMethod": "oauth"}'), true);
+  assert.equal(parseAuthStatus('{"loggedIn": false}'), false);
+  assert.equal(parseAuthStatus("not json"), false);
+  assert.equal(parseAuthStatus(""), false);
+  assert.equal(checkLoggedIn(() => ({ status: 0, stdout: '{"loggedIn":true}' })), true);
+  assert.equal(checkLoggedIn(() => ({ status: 0, stdout: '{"loggedIn":false}' })), false);
+  assert.equal(checkLoggedIn(() => ({ status: 1, stdout: "" })), false);
+  assert.equal(checkLoggedIn(() => { throw new Error("ENOENT"); }), false);
+});
+
+test("waitUntilClear: logged out writes PAUSE and waits for removal and login", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-wait-"));
+  try {
+    const pauseFile = join(tmp, "PAUSE");
+    const logs = [];
+    let loggedIn = false;
+    let waits = 0;
+    await waitUntilClear({
+      pauseFile, log: (m) => logs.push(m), stop: () => false, check: () => loggedIn,
+      wait: async () => {
+        waits++;
+        if (waits === 1) assert.match(readFileSync(pauseFile, "utf8"), /claude auth login/);
+        if (waits === 2) rmSync(pauseFile); // user removes PAUSE but is still logged out: keep waiting
+        if (waits === 4) loggedIn = true;
+      },
+    });
+    assert.deepEqual(logs, ["paused: not logged in"]);
+    assert.ok(waits >= 3);
+    assert.equal(existsSync(pauseFile), false);
+    // logged in and no PAUSE: returns at once
+    await waitUntilClear({ pauseFile, stop: () => false, check: () => true, wait: async () => assert.fail("must not wait") });
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("auth failure: auth_error row, PAUSE written, run requeued; zero-token exit is an error", { timeout: 60_000 }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-auth-"));
+  try {
+    const taskDir = join(tmp, "tasks", "fx");
+    mkdirSync(join(taskDir, "setup"), { recursive: true });
+    writeFileSync(join(taskDir, "setup", "a.txt"), "a\n");
+    writeFileSync(join(taskDir, "task.md"), "Fake task.\n");
+    writeFileSync(join(taskDir, "meta.json"), JSON.stringify({ id: "fx", cap_min: 0.5, test_cmd: null, graded_paths: ["."], snapshot_every_s: 0 }));
+    const task = loadTask(join(tmp, "tasks"), "fx");
+    const ctx = { root, campaignDir: join(tmp, "campaign"), reposDir: join(tmp, "repos"), tasks: { fx: task }, disabledIds: ["x@y"], skipIsolation: true, graceMs: 500 };
+    ctx.commandFor = () => ({ cmd: "bash", args: ["-c", `echo '${JSON.stringify(AUTH_DOC)}'`], cwd: tmp });
+    const run = { run_id: "fx__P-S__main__r1", task: "fx", arm: "P-S", cell: "main", rep: 1, cap_min: 0.5, budget_tokens: null, block: "fx__main__r1" };
+    const row = await executeRun(run, ctx);
+    assert.equal(row.end_reason, "auth_error");
+    const pauseFile = join(tmp, "PAUSE");
+    const queue = [];
+    assert.equal(pauseAndRequeue(row, run, pauseFile, queue), true);
+    assert.match(readFileSync(pauseFile, "utf8"), /claude CLI not logged in; run `claude auth login`/);
+    assert.equal(queue.length, 1);
+    assert.deepEqual(queue[0].runs, [run]);
+    assert.equal(pauseAndRequeue({ end_reason: "exited" }, run, join(tmp, "P2"), queue), false);
+    assert.equal(existsSync(join(tmp, "P2")), false);
+
+    ctx.commandFor = () => ({ cmd: "bash", args: ["-c", "echo nothing"], cwd: tmp });
+    const zero = await executeRun({ ...run, run_id: "fx__P-O__main__r1" }, ctx);
+    assert.equal(zero.end_reason, "error");
+    assert.equal(zero.error, "no model usage");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
