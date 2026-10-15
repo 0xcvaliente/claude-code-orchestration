@@ -25,6 +25,7 @@ export const TASK_META = {
   "k2-stdlib-toolkit-xl": { tier: "large", shape: "splittable" },
 };
 export const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
+const CLAIMS = new Set(["success", "partial", "failure", "unclear", "none"]);
 export const EXCLUDED_REASONS = new Set(["rate_limited", "error"]);
 const BOOT_ITERATIONS = 10_000;
 const MIN_N = 2; // below this a hypothesis is inconclusive
@@ -62,6 +63,8 @@ export function loadCampaign(dir) {
     runs: readJsonl(join(abs, "runs.jsonl")),
     grades: latestGrades(readJsonl(join(abs, "grades.jsonl"))),
     // Secondary (lenient) grades of final/ only; null when the campaign has no grades-lenient.jsonl.
+    // Optional manual claim audit: {"<run_id>": {claim, note}}; null when absent or unreadable.
+    audit: readJson(join(abs, "claims-audit.json")),
     lenient: existsSync(join(abs, "grades-lenient.jsonl")) ? latestGrades(readJsonl(join(abs, "grades-lenient.jsonl"))) : null,
   };
 }
@@ -226,7 +229,25 @@ export function analyzeRun(row, grades, campaign) {
     ? { score_pct_lenient: lenScore === null ? null : Math.round(lenScore * 100) / 100, pass_lenient: lenRow ? Boolean(lenRow.pass) : null }
     : {};
   const finalDoc = results.at(-1);
-  const claim = classifyClaim(finalDoc?.result);
+  const claimAuto = classifyClaim(finalDoc?.result);
+  const auditRow = campaign.audit?.[row.run_id];
+  const audited = CLAIMS.has(auditRow?.claim);
+  const claim = audited ? auditRow.claim : claimAuto;
+  const events = readJsonl(join(runDir, "state", "telemetry.jsonl"));
+  const proc = processOf(events);
+  let subagents = proc.subagents;
+  let subagentCount = proc.subagent_count;
+  let subagentsSource = events.length ? "telemetry" : "none";
+  if (!events.length) {
+    // No hooks (plain sessions): the result docs carry the built-in subagent counts.
+    const stats = results.map((d) => d?.subagent_stats?.by_type).filter((b) => b && typeof b === "object");
+    if (stats.length) {
+      subagentsSource = "subagent_stats";
+      subagents = {};
+      for (const b of stats) for (const [k, v] of Object.entries(b)) if (typeof v === "number") subagents[k] = (subagents[k] ?? 0) + v;
+      subagentCount = Object.values(subagents).reduce((a, v) => a + v, 0);
+    }
+  }
   const diffFiles = existsSync(join(runDir, "diff-files.txt"))
     ? readFileSync(join(runDir, "diff-files.txt"), "utf8").split("\n").map((l) => l.trim()).filter(Boolean)
     : [];
@@ -258,11 +279,19 @@ export function analyzeRun(row, grades, campaign) {
     t90_s: g.t90_s,
     t100_s: g.t100_s,
     auc: capMin ? aucOf(g.timeline, capMin * 60) : null,
-    ...processOf(readJsonl(join(runDir, "state", "telemetry.jsonl"))),
+    ...proc,
+    subagents,
+    subagent_count: subagentCount,
+    subagents_source: subagentsSource,
+    self_delegated: String(row.arm).startsWith("P-") && subagentCount > 0,
+    max_concurrent_subagents: events.length ? proc.max_concurrent_subagents : null,
     gates: gatesOf(readJsonl(join(runDir, "state", "gates.jsonl"))),
     routes: routes.map((r) => r.mode ?? r.route ?? r.decision ?? "unknown"),
     permission_denials: results.reduce((a, d) => a + (Array.isArray(d?.permission_denials) ? d.permission_denials.length : 0), 0),
     claim,
+    claim_auto: claimAuto,
+    claim_source: audited ? "audit" : "auto",
+    ...(audited && auditRow.note ? { claim_note: String(auditRow.note) } : {}),
     false_success: claim === "success" && pass === false,
     files_touched: diffFiles.length,
     outside_graded: outsideGraded(diffFiles, meta?.graded_paths),

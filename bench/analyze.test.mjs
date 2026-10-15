@@ -414,3 +414,72 @@ test("lenient grades add score_pct_lenient, pass_lenient and score_median_lenien
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("plain runs take subagent counts from subagent_stats; telemetry wins when present", async () => {
+  const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tmp = mkdtempSync(join(tmpdir(), "an-sub-"));
+  try {
+    const doc = (extra) => ({ type: "result", result: "All tests pass.", num_turns: 1, modelUsage: {}, permission_denials: [], ...extra });
+    const rows = [
+      { run_id: "t__P-O__main__r1", task: "t1-parallel", arm: "P-O", cell: "main", rep: 1, wall_ms: 1000, end_reason: "exited", results: [doc({ subagent_stats: { spawned: 3, by_type: { "general-purpose": 3 } } })] },
+      { run_id: "t__P-S__main__r1", task: "t1-parallel", arm: "P-S", cell: "main", rep: 1, wall_ms: 1000, end_reason: "exited", results: [doc({})] },
+      { run_id: "t__O-mix__main__r1", task: "t1-parallel", arm: "O-mix", cell: "main", rep: 1, wall_ms: 1000, end_reason: "exited", results: [doc({ subagent_stats: { by_type: { "general-purpose": 9 } } })] },
+    ];
+    writeFileSync(join(tmp, "runs.jsonl"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    mkdirSync(join(tmp, "t__O-mix__main__r1", "state"), { recursive: true });
+    writeFileSync(
+      join(tmp, "t__O-mix__main__r1", "state", "telemetry.jsonl"),
+      [
+        { event: "SubagentStart", agent_type: "implementer", agent_id: "a", ts: 1 },
+        { event: "SubagentStop", agent_type: "implementer", agent_id: "a", ts: 2 },
+      ].map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+    const s = analyze([tmp], { now: "x" });
+    const get = (id) => s.runs.find((r) => r.run_id === id);
+    const p = get("t__P-O__main__r1");
+    assert.deepEqual(p.subagents, { "general-purpose": 3 });
+    assert.equal(p.subagent_count, 3);
+    assert.equal(p.subagents_source, "subagent_stats");
+    assert.equal(p.self_delegated, true);
+    assert.equal(p.max_concurrent_subagents, null);
+    assert.equal(get("t__P-S__main__r1").subagents_source, "none");
+    assert.equal(get("t__P-S__main__r1").self_delegated, false);
+    const o = get("t__O-mix__main__r1");
+    assert.deepEqual(o.subagents, { implementer: 1 });
+    assert.equal(o.subagents_source, "telemetry");
+    assert.equal(o.self_delegated, false);
+    assert.equal(o.max_concurrent_subagents, 1);
+    assert.match(renderMarkdown(s), /t1-parallel: 1 of 2 plain runs delegated to built-in subagents\./);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("claims-audit.json overrides the claim for false_success and H4", async () => {
+  const { cpSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tmp = mkdtempSync(join(tmpdir(), "an-audit-"));
+  try {
+    const base = analyze([FIXTURE], { now: "x" });
+    const id = "t1-parallel__P-O__main__r2";
+    assert.equal(base.runs.find((r) => r.run_id === id).false_success, true);
+    assert.ok(base.runs.every((r) => r.claim_source === "auto" && r.claim_auto === r.claim));
+    const dir = join(tmp, "c");
+    cpSync(FIXTURE, dir, { recursive: true });
+    writeFileSync(join(dir, "claims-audit.json"), JSON.stringify({ [id]: { claim: "partial", note: "text admits a gap" } }));
+    const s = analyze([dir], { now: "x" });
+    const r = s.runs.find((x) => x.run_id === id);
+    assert.equal(r.claim, "partial");
+    assert.equal(r.claim_auto, "success");
+    assert.equal(r.claim_source, "audit");
+    assert.equal(r.false_success, false);
+    const h4 = (x) => x.hypotheses.find((h) => h.id === "H4").evidence.plain.false_success;
+    assert.equal(h4(s), h4(base) - 1);
+    const md = renderMarkdown(s);
+    assert.match(md, /2 auto \/ 1 audited/);
+    assert.match(md, /t1-parallel__P-O__main__r2: auto success, audited partial\. text admits a gap/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
