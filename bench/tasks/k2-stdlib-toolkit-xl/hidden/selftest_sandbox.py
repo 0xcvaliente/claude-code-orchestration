@@ -365,6 +365,29 @@ def calendar_checks():
                       "\n_mr0 = monthrange\ndef monthrange(year, month):\n"
                       "    _sp.calendar.monthrange(year, month)\n    return _mr0(year, month)\n")},
           ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
+    # _strptime calls calendar.isleap for this %W date (week 0 falls in the previous year): genuine
+    # _strptime code is a declared WATCH_CALLER of calendar, so honest cal code may do this.
+    check("honest cal calling datetime.strptime with %W during cal cases (_strptime calls calendar.isleap)",
+          {"cal.py": ("import datetime as _dt\n",
+                      "\n_mr1 = monthrange\ndef monthrange(year, month):\n"
+                      "    _dt.datetime.strptime('2017 0 1', '%Y %W %w')\n    return _mr1(year, month)\n")},
+          ["cal", "shlex"], expect_full=["cal", "shlex"])
+    # Any other stdlib proxy still counts: email._parseaddr.mktime_tz calls calendar.timegm.
+    check("cal computes timegm through email._parseaddr.mktime_tz (a stdlib proxy, not a WATCH_CALLER)",
+          {"cal.py": ("import email._parseaddr as _pa\n",
+                      "\n_mr2 = monthrange\ndef monthrange(year, month):\n"
+                      "    _pa.mktime_tz((year, month, 1, 0, 0, 0, 0, 1, 0, 0))\n    return _mr2(year, month)\n")},
+          ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
+    # Code compiled under _strptime's filename is not genuine _strptime code: the call still counts.
+    check("cal calls calendar from code compiled with _strptime.py as its filename",
+          {"cal.py": ("import os as _o\n_ns = {}\n"
+                      "_code = compile('import calendar as _c\\ndef mr(y, m):\\n    return _c.monthrange(y, m)\\n',"
+                      " _o.path.join(_o.path.dirname(_o.__file__), '_strptime.py'), 'exec')\n"
+                      "_bi = __builtins__ if isinstance(__builtins__, dict) else vars(__builtins__)\n"
+                      "_bi['ex' + 'ec'](_code, _ns)\n",
+                      "\n_mr3 = monthrange\ndef monthrange(year, month):\n"
+                      "    _ns['mr'](year, month)\n    return _mr3(year, month)\n")},
+          ["cal", "shlex"], expect_zero="cal", expect_flag="stdlib-oracle-used:calendar", expect_full=["shlex"])
 
 
 def main():

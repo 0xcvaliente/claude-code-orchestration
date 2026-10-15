@@ -42,7 +42,9 @@ TIMEOUT_BUDGET = 5
 CRASH_BUDGET = 5
 MODULE_WALL_S = 600.0
 BASE_STATIC_PATTERNS = ["__import__", "importlib", "sys.modules", "eval(", "exec(", "builtins",
-                        "runpy", "shutil.copy", "copytree", "copyfile", "sysconfig", "get_path", ".__file__"]
+                        "runpy", "shutil.copy", "copytree", "copyfile", "sysconfig", "get_path", ".__file__",
+                        # rebuilding a watch-only oracle's functions from their code objects
+                        "__code__", "FunctionType", "_strptime", "vars("]
 ORACLE_FLAG = "stdlib-oracle-used:"      # an oracle was reached: zeroes this module and the oracle's
 REFUSED_FLAG = "stdlib-oracle-refused:"  # an oracle import was refused: zeroes this module only
 ZERO_FLAGS = (ORACLE_FLAG, REFUSED_FLAG)
@@ -75,12 +77,16 @@ def load_adapters(hidden_dir=HERE):
             watch_only = getattr(mod, "WATCH_ONLY", False)
             if not isinstance(watch_only, bool):
                 raise ValueError("WATCH_ONLY must be True or False")
+            callers = _str_list(mod, "WATCH_CALLERS", bool) if hasattr(mod, "WATCH_CALLERS") else []
+            if callers and not watch_only:
+                raise ValueError("WATCH_CALLERS needs WATCH_ONLY = True")
             cases = list(mod.cases())
             ids = [c["id"] for c in cases]
             if len(set(ids)) != len(ids):
                 raise ValueError("duplicate case ids")
             adapters[mod.NAME] = {"path": path, "mod": mod, "name": mod.NAME, "cases": cases,
-                                  "oracles": oracles, "wrap": wrap, "watch_only": watch_only}
+                                  "oracles": oracles, "wrap": wrap, "watch_only": watch_only,
+                                  "watch_callers": callers}
         except Exception as e:  # noqa: BLE001
             errors.append(f"grader error: adapter {os.path.basename(path)} failed to load: {type(e).__name__}: {e}"[:300])
     return adapters, errors
@@ -128,7 +134,7 @@ def static_patterns(adapters):
     return pats
 
 
-def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=()):
+def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=(), watch_callers=None):
     """Run every case of one adapter in sandboxed children; return ({index: record}, flags)."""
     cases = ad["cases"]
     n = len(cases)
@@ -137,7 +143,7 @@ def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=()):
     t_module = time.time()
     # The job goes to each child over its stdin pipe: no job file a solution could find on disk.
     job = marshal.dumps({"cases": cases, "oracles": oracles_by_cat, "wrap": wrap_by_cat,
-                         "watch_only": list(watch_only)})
+                         "watch_only": list(watch_only), "watch_callers": dict(watch_callers or {})})
 
     def fail_rest(frm, why):
         for j in range(frm, n):
@@ -299,6 +305,9 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
     wrap_by_cat = {name: ad["wrap"] for name, ad in adapters.items()}
     # Oracles of adapters declaring WATCH_ONLY = True stay importable (the runner adds re itself).
     watch_only = sorted({m for ad in adapters.values() if ad["watch_only"] for m in ad["oracles"]})
+    # Stdlib modules whose genuine calls into a watch-only oracle are not solution use (cal: _strptime).
+    watch_callers = {m: list(ad["watch_callers"]) for ad in adapters.values() if ad["watch_callers"]
+                     for m in ad["oracles"]}
     oracle_cat = oracle_category(adapters)
     cats = {}  # name -> {"passed", "total", "cases", "status", "done"}
     for name, count in expected_counts.items():
@@ -355,7 +364,7 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
         name = ad["name"]
         try:
             expected = oracle_results(ad)
-            got, mflags = run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only)
+            got, mflags = run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only, watch_callers)
             passed, per_case = compare(ad, expected, got, mflags)
             failed_import = [r for r in got.values() if r.get("status") == "import_failed"]
             status = failed_import[0]["msg"] if failed_import else "ok"

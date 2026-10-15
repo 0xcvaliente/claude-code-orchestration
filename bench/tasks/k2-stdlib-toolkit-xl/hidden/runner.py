@@ -4,9 +4,10 @@ Usage: python3 -I -S -B runner.py SOL_ROOT ADAPTER_PATH - START MODULE NAME
 
 The job arrives on stdin (marshal, read in full before anything else runs; no
 file on disk): {"cases": [...], "oracles": {category: [module, ...]},
-"wrap": {category: ["<module>.<name>", ...]}, "watch_only": [module, ...]}: every
-loaded adapter's ORACLES (the stdlib modules it reimplements) and WRAP (oracle entry
-points to watch), plus the oracles of adapters that declare WATCH_ONLY = True.
+"wrap": {category: ["<module>.<name>", ...]}, "watch_only": [module, ...],
+"watch_callers": {module: [stdlib module, ...]}}: every loaded adapter's ORACLES (the
+stdlib modules it reimplements) and WRAP (oracle entry points to watch), plus the
+oracles of adapters that declare WATCH_ONLY = True and their WATCH_CALLERS.
 Everything the sandbox refuses or watches is derived from those lists plus a
 fixed base list, so a new module plugs in by declaring ORACLES and WRAP.
 
@@ -26,10 +27,25 @@ WATCH_ONLY modules (re and the sre_* shims, always; plus the oracles of any adap
 declaring WATCH_ONLY = True, i.e. calendar for cal) are imported by other standard
 library modules, so they stay importable; they are watched only while the cases of
 the category that owns them run, as in k1.
-Known limit, the same as k1: laundering of a WATCH_ONLY oracle (`re`, `calendar`)
-between children is not detected: code in another category's child may compute
-regex or cal answers with the real module (outside that category's cases) and hand
-them over.
+A watched call counts as solution use when toolkit code is on the stack. For an
+adapter-declared watch-only oracle (calendar), a call whose nearest caller outside
+the oracle's own files (and this runner's wrappers) is genuine code of one of the
+adapter's WATCH_CALLERS (cal: _strptime, which calls calendar.isleap for %W/%U/%G
+formats) does not count, even with toolkit code further up the stack. "Genuine" is
+checked by value: the caller's code object must equal one compiled here from that
+module's own source file, so code compiled or rebuilt with a borrowed filename is
+not exempt. Any other stdlib proxy (email._parseaddr.mktime_tz -> calendar.timegm)
+still counts.
+Known limits:
+  - The same as k1: laundering of a WATCH_ONLY oracle (`re`, `calendar`) between
+    children is not detected: code in another category's child may compute regex or
+    cal answers with the real module (outside that category's cases) and hand them over.
+  - A WATCH_ONLY oracle can be cloned at import time, outside cases: rebuilding its
+    functions from their code objects (types.FunctionType(f.__code__, dict(vars(mod))))
+    gives copies that never pass through the wrapped entry points (a captured
+    reference to a wrapped function is caught; a rebuilt clone is not). A reviewer's
+    clone scored cal 147/156 and regex 168/205 with no flag. The static scan flags
+    `__code__`, `FunctionType`, `_strptime` and `vars(` for the post-run audit.
 
 Startup order matters: nothing that imports `re` is loaded before the solution
 module (no json, no importlib.abc, no site, no adapter).
@@ -108,6 +124,7 @@ cases = job["cases"]
 ORACLES_BY_CAT = {str(k): [str(m) for m in v] for k, v in job["oracles"].items()}
 WRAP_BY_CAT = {str(k): [str(w) for w in v] for k, v in job.get("wrap", {}).items()}
 WATCH_ONLY = BASE_WATCH_ONLY | {str(m) for m in job.get("watch_only", [])}
+WATCH_CALLERS = {str(k): [str(m) for m in v] for k, v in job.get("watch_callers", {}).items()}
 del job
 ALL_ORACLES = sorted({m for mods in ORACLES_BY_CAT.values() for m in mods})
 OWN = set(ORACLES_BY_CAT.get(cat, []))
@@ -256,9 +273,25 @@ def _active(modname):
     return True
 
 
+def _solution_call(modname):
+    """Called from a wrapper: does this call of oracle `modname` count as solution use?"""
+    codes = GENUINE_CALLERS.get(modname)
+    if codes:
+        frame = sys._getframe(2)  # the wrapper's caller
+        while frame is not None:
+            fn = frame.f_code.co_filename
+            if os.path.realpath(fn) == RUNNER_FILE or _oracle_of(fn) == modname:
+                frame = frame.f_back  # nested wrappers, the oracle's own internals
+                continue
+            break
+        if frame is not None and frame.f_code in codes:
+            return False  # genuine WATCH_CALLERS code (e.g. _strptime) made this call
+    return toolkit_on_stack(depth=3)
+
+
 def _make_wrapper(modname, orig):
     def wrapper(*args, **kwargs):
-        if _active(modname) and toolkit_on_stack():
+        if _active(modname) and _solution_call(modname):
             flag_oracle(modname)
         return orig(*args, **kwargs)
     return wrapper
@@ -351,6 +384,31 @@ def _oracle_paths(mods):
 
 
 ORACLE_PATHS = _oracle_paths(ALL_ORACLES)
+
+
+def _genuine_codes(mods):
+    """Every code object compiled from the source files of stdlib modules `mods` (by value)."""
+    code_type = type(_genuine_codes.__code__)
+    out = set()
+    for m in mods:
+        try:
+            spec = importlib.util.find_spec(m)
+            origin = spec.origin if spec is not None else None
+            if not origin or not origin.endswith(".py") or not os.path.isabs(origin):
+                continue
+            with open(origin, "rb") as f:
+                todo = [compile(f.read(), origin, "exec")]
+        except Exception:  # noqa: BLE001
+            continue
+        while todo:
+            c = todo.pop()
+            out.add(c)
+            todo.extend(k for k in c.co_consts if isinstance(k, code_type))
+    return out
+
+
+# Only this category's watch-only oracles are ever active here, so only their callers matter.
+GENUINE_CALLERS = {m: _genuine_codes(WATCH_CALLERS[m]) for m in OWN if m in WATCH_CALLERS and m in WATCH_ONLY}
 AUDIT_EVENTS = {"open", "compile", "exec", "import"}
 _audit_busy = [False]
 
