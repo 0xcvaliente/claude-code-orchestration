@@ -4,8 +4,7 @@
   "groups": [
     {
       "tasks": [
-        "k1-stdlib-toolkit",
-        "h3-sql-engine"
+        "k2-stdlib-toolkit-xl"
       ],
       "arms": [
         "P-O",
@@ -21,12 +20,12 @@
           "cap_min": 60
         },
         {
-          "id": "budget1M",
-          "budget_tokens": 1000000
-        },
-        {
           "id": "budget3M",
           "budget_tokens": 3000000
+        },
+        {
+          "id": "budget8M",
+          "budget_tokens": 8000000
         }
       ],
       "reps": 2

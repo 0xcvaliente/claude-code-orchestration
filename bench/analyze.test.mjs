@@ -299,7 +299,7 @@ test("fixture: cells and comparisons", () => {
 
 test("fixture: hypothesis verdicts", () => {
   const v = Object.fromEntries(summary.hypotheses.map((h) => [h.id, h.verdict]));
-  assert.deepEqual(v, { H1: "inconclusive", H2: "inconclusive", H4: "supported", H5: "inconclusive", H6: "inconclusive", H7: "inconclusive" });
+  assert.deepEqual(v, { H1: "inconclusive", H2: "inconclusive", H4: "supported", H5: "supported", H6: "inconclusive", H7: "inconclusive" }); // H5: AUTO is within 10% on both tasks with data
   const h4 = summary.hypotheses.find((h) => h.id === "H4").evidence;
   assert.deepEqual(h4, { orchestrated: { false_success: 0, n: 4, rate: 0 }, plain: { false_success: 1, n: 4, rate: 0.25 } });
 });
@@ -311,11 +311,14 @@ const pair = (task, arm, cellName, score, tokens, wall) => [1, 2].map((rep) => m
 
 test("hypotheses: supported and not supported on synthetic data", () => {
   const k1 = "k1-stdlib-toolkit";
+  const k2 = "k2-stdlib-toolkit-xl";
   const h3 = "h3-sql-engine";
   const runs = [
-    ...pair(k1, "P-O", "main", 90, 2e6, 1800),
-    ...pair(k1, "O-mix", "main", 88, 3e6, 1200),
-    ...pair(k1, "O-O", "main", 92, 4e6, 1000),
+    ...pair(k1, "P-O", "main", 100, 2e6, 200),
+    ...pair(k1, "O-O", "main", 100, 2e6, 200),
+    ...pair(k2, "P-O", "main", 90, 2e6, 1800),
+    ...pair(k2, "O-mix", "main", 88, 3e6, 1200),
+    ...pair(k2, "O-O", "main", 92, 4e6, 1000),
     ...pair(h3, "P-O", "main", 70, 2e6, 1800),
     ...pair(h3, "O-O", "main", 75, 4e6, 1500),
     ...pair(h3, "O-mix", "main", 75, 3e6, 1500),
@@ -328,11 +331,11 @@ test("hypotheses: supported and not supported on synthetic data", () => {
     ...pair("t2-single", "O-mix", "main", 100, 1.6e5, 120),
     ...pair("t2-single", "O-O", "main", 100, 1.6e5, 120),
   ];
-  for (const t of [k1, h3]) {
+  for (const t of [k2]) {
     runs.push(...pair(t, "P-O", "cap10", 50, 1e6, 600), ...pair(t, "O-mix", "cap10", 40, 1e6, 600));
     runs.push(...pair(t, "P-O", "cap60", 90, 3e6, 3600), ...pair(t, "O-mix", "cap60", 99, 3e6, 3000));
-    runs.push(...pair(t, "P-O", "budget1M", 60, 1e6, 900), ...pair(t, "O-mix", "budget1M", 30, 1e6, 900));
-    runs.push(...pair(t, "P-O", "budget3M", 80, 3e6, 1500), ...pair(t, "O-mix", "budget3M", 70, 3e6, 1500));
+    runs.push(...pair(t, "P-O", "budget3M", 60, 3e6, 900), ...pair(t, "O-mix", "budget3M", 30, 3e6, 900));
+    runs.push(...pair(t, "P-O", "budget8M", 80, 8e6, 1500), ...pair(t, "O-mix", "budget8M", 70, 8e6, 1500));
   }
   runs.find((r) => r.task === "t1-parallel" && r.arm === "P-S").false_success = true;
   const v = Object.fromEntries(evaluateHypotheses(runs).map((h) => [h.id, h.verdict]));
@@ -340,14 +343,18 @@ test("hypotheses: supported and not supported on synthetic data", () => {
   assert.equal(v.H2, "supported");
   assert.equal(v.H4, "supported");
   assert.equal(v.H6, "supported");
-  assert.equal(v.H7, "supported"); // k1: -10 < -2 < +9; h3: -10 < +5 < +9; P-O ahead at both budgets
+  assert.equal(v.H7, "supported"); // k2: -10 < -2 < +9; P-O ahead at both budget cells
   assert.equal(v.H5, "inconclusive"); // no AUTO runs
 
   const worse = runs.map((r) => (r.task === h3 && r.arm === "O-O" && r.cell === "main" ? { ...r, score_pct: 60 } : r));
   const w = Object.fromEntries(evaluateHypotheses(worse).map((h) => [h.id, h.verdict]));
   assert.equal(w.H6, "not supported");
-  const slow = runs.map((r) => (r.task === k1 && r.arm === "O-mix" && r.cell === "main" ? { ...r, wall_s: 2000 } : r));
+  const slow = runs.map((r) => (r.task === k2 && r.arm === "O-mix" && r.cell === "main" ? { ...r, wall_s: 2000 } : r));
   assert.equal(evaluateHypotheses(slow).find((h) => h.id === "H1").verdict, "not supported");
+  const noBudget = runs.filter((r) => !r.cell.startsWith("budget"));
+  assert.equal(evaluateHypotheses(noBudget).find((h) => h.id === "H7").verdict, "inconclusive");
+  const k1Lower = runs.map((r) => (r.task === k1 && r.arm === "O-O" ? { ...r, score_pct: 90 } : r));
+  assert.equal(evaluateHypotheses(k1Lower).find((h) => h.id === "H6").verdict, "not supported"); // k1 is large
   const cheap = runs.map((r) => (r.task === "t2-single" && r.arm === "O-mix" ? { ...r, tokens: { total: 1.2e5 } } : r));
   assert.equal(evaluateHypotheses(cheap).find((h) => h.id === "H2").verdict, "not supported");
 });
@@ -356,6 +363,8 @@ test("H5 counts tasks where AUTO is within 10% of the best efficiency", () => {
   const tasks = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine"];
   const runs = tasks.flatMap((t, i) => [...pair(t, "P-O", "main", 100, 1e6, 100), ...pair(t, "AUTO", "main", 100, i < 4 ? 1.05e6 : 2e6, 100)]);
   assert.equal(evaluateHypotheses(runs).find((h) => h.id === "H5").verdict, "supported");
+  const withData = tasks.slice(0, 3).flatMap((t, i) => [...pair(t, "P-O", "main", 100, 1e6, 100), ...pair(t, "AUTO", "main", 100, i < 2 ? 1.05e6 : 2e6, 100)]);
+  assert.equal(evaluateHypotheses(withData).find((h) => h.id === "H5").verdict, "supported"); // 2 of 3 tasks with data
   const bad = tasks.flatMap((t) => [...pair(t, "P-O", "main", 100, 1e6, 100), ...pair(t, "AUTO", "main", 100, 2e6, 100)]);
   assert.equal(evaluateHypotheses(bad).find((h) => h.id === "H5").verdict, "not supported");
 });
