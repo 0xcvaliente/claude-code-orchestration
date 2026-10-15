@@ -13,8 +13,8 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARMS, command, envAdditions } from "./arms.mjs";
-import { expandMatrix, filterResume, finishedRunIds, groupBlocks, hms, shuffle, stamp, enabledPluginIds } from "./lib/run-core.mjs";
-import { checkIsolation, createRunRepo, executeRun, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
+import { expandMatrix, filterResume, finishedRunIds, groupBlocks, hms, shuffle, stamp, enabledPluginIds, resolveSeed } from "./lib/run-core.mjs";
+import { checkIsolation, createRunRepo, executeRun, installInterruptHandlers, interrupted, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
 import { formatTokens } from "../scripts/tokens.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,18 +38,28 @@ const tasksDir = resolve(opt("tasks-dir", join(here, "tasks")));
 const resumeDir = opt("resume", null) && resolve(opt("resume"));
 let matrix;
 let campaignDir;
+let resumeManifest = null;
 if (resumeDir) {
   const mf = join(resumeDir, "manifest.json");
   if (!existsSync(mf)) die(`no manifest.json in ${resumeDir}`);
-  matrix = JSON.parse(readFileSync(mf, "utf8")).matrix;
+  resumeManifest = JSON.parse(readFileSync(mf, "utf8"));
+  matrix = resumeManifest.matrix;
   campaignDir = resumeDir;
 } else {
   const file = opt("matrix", null);
   if (!file) die("usage: node bench/run.mjs --matrix <file> [--campaign name] [--resume dir] [--dry-run] [--only s] [--parallel-blocks N] [--seed N] [--tasks-dir dir] [--check-isolation]");
   matrix = JSON.parse(readFileSync(resolve(file), "utf8"));
 }
-const seed = Number(opt("seed", matrix.seed ?? 1));
-const campaign = resumeDir ? JSON.parse(readFileSync(join(resumeDir, "manifest.json"), "utf8")).campaign : opt("campaign", `${matrix.name ?? "bench"}-${stamp()}`);
+// A resumed campaign keeps the seed in its manifest (and so its block order); an older manifest without one gets it saved.
+let seed;
+try {
+  const s = resolveSeed({ resumeManifest, cliSeed: opt("seed", null), matrixSeed: matrix.seed });
+  seed = s.seed;
+  if (s.save && !flag("dry-run")) writeFileSync(join(resumeDir, "manifest.json"), `${JSON.stringify({ ...resumeManifest, seed }, null, 2)}\n`);
+} catch (e) {
+  die(e.message);
+}
+const campaign = resumeDir ? resumeManifest.campaign : opt("campaign", `${matrix.name ?? "bench"}-${stamp()}`);
 campaignDir ??= join(root, "runs", "bench", campaign);
 const reposDir = process.env.BENCH_REPOS_DIR ? resolve(process.env.BENCH_REPOS_DIR, campaign) : join(homedir(), "orch-bench", campaign);
 
@@ -167,6 +177,7 @@ async function runOne(run) {
   } catch (e) {
     row = { run_id: run.run_id, task: run.task, arm: run.arm, cell: run.cell, rep: run.rep, cap_min: run.cap_min, budget_tokens: run.budget_tokens ?? null, started_at: new Date().toISOString(), ended_at: new Date().toISOString(), wall_ms: 0, exit_code: null, end_reason: "error", results: [], routes: [], dir: run.run_id, error: e.message };
   }
+  if (interrupted()) return; // no row for a run the interrupt cut short: --resume reruns it
   appendFileSync(rowsFile, `${JSON.stringify(row)}\n`);
   if (row.error) log(`RUN ERROR ${run.run_id}: ${row.error}`);
   log(`[${hms()}] done ${run.run_id} ${row.end_reason} ${Math.round(row.wall_ms / 1000)}s tokens=${formatTokens(tokensOf(row))}`);
@@ -177,17 +188,20 @@ async function runOne(run) {
 }
 
 async function worker() {
-  while (queue.length) {
+  while (queue.length && !interrupted()) {
     await waitWhilePaused();
+    if (interrupted()) break;
     const block = queue.shift();
     if (!block) break;
     await Promise.all(block.runs.map(runOne));
   }
 }
 
+// SIGINT, SIGTERM or a crash: TERM every live run's process group, KILL what is left after 8 s, exit non-zero.
+installInterruptHandlers({ log });
 log(`campaign ${campaign}: ${runs.length} runs in ${blocks.length} blocks, seed ${seed}`);
 const parallel = Math.max(1, Number(opt("parallel-blocks", "1")) || 1);
 // A worker that finds the queue empty stops; a requeued run is picked up by any worker still looping, so keep
 // starting workers until the queue stays empty.
-while (queue.length) await Promise.all(Array.from({ length: Math.min(parallel, queue.length) }, worker));
-log(`CAMPAIGN DONE ${campaignDir}`);
+while (queue.length && !interrupted()) await Promise.all(Array.from({ length: Math.min(parallel, queue.length) }, worker));
+if (!interrupted()) log(`CAMPAIGN DONE ${campaignDir}`);

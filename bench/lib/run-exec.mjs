@@ -81,6 +81,53 @@ export async function copyGraded(repo, gradedPaths, dest) {
   }
 }
 
+// Process groups of runs still alive, so an interrupted or crashing runner can stop them (they are detached and
+// would otherwise keep spending tokens until their cap).
+export const liveGroups = new Set();
+let interruptState = null;
+export const interrupted = () => interruptState !== null;
+
+const groupAlive = (pid) => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// TERM every live group, wait up to graceMs for them to go, KILL the rest.
+export async function killAllGroups(graceMs = 8000) {
+  const pids = [...liveGroups];
+  for (const pid of pids) killGroup(pid, "SIGTERM");
+  const until = Date.now() + graceMs;
+  while (Date.now() < until && pids.some(groupAlive)) await sleep(100);
+  for (const pid of pids) killGroup(pid, "SIGKILL");
+}
+
+// On SIGINT/SIGTERM or an uncaught exception: stop every run, print RUNNER INTERRUPTED, exit non-zero.
+// Callers check interrupted() so no row is appended for a run cut short. A second signal kills at once.
+export function installInterruptHandlers({ log = console.log, graceMs = 8000, exit = (c) => process.exit(c) } = {}) {
+  const stop = async (why, code) => {
+    if (interruptState) {
+      for (const pid of liveGroups) killGroup(pid, "SIGKILL");
+      return;
+    }
+    interruptState = why;
+    await killAllGroups(graceMs);
+    log(`RUNNER INTERRUPTED (${why})`);
+    exit(code);
+  };
+  process.on("SIGINT", () => stop("SIGINT", 130));
+  process.on("SIGTERM", () => stop("SIGTERM", 143));
+  const crash = (e) => {
+    console.error(e);
+    stop(`uncaught: ${e?.message ?? e}`, 1);
+  };
+  process.on("uncaughtException", crash);
+  process.on("unhandledRejection", crash);
+}
+
 const killGroup = (pid, sig) => {
   try {
     process.kill(-pid, sig);
@@ -105,6 +152,7 @@ export function launch({ cmd, args, cwd, env, stdoutFile, stderrFile, capMs, sna
       resolve({ exitCode: null, endReason: "error", spawnError: e.message });
       return;
     }
+    if (child.pid) liveGroups.add(child.pid);
     child.stdout.pipe(out);
     child.stderr.pipe(err);
     let deadlineHit = false;
@@ -135,6 +183,7 @@ export function launch({ cmd, args, cwd, env, stdoutFile, stderrFile, capMs, sna
       if (killTimer) clearTimeout(killTimer);
       if (ticker) clearInterval(ticker);
       killGroup(child.pid, "SIGKILL");
+      liveGroups.delete(child.pid);
       while (busy) await sleep(50);
       await Promise.all([new Promise((r) => out.end(r)), new Promise((r) => err.end(r))]);
       resolve({ exitCode: code, endReason: spawnError ? "error" : deadlineHit ? "deadline" : "exited", spawnError });

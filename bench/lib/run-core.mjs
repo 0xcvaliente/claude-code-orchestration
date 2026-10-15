@@ -180,3 +180,19 @@ export const snapName = (secs) => `t${pad(secs, 4)}`;
 // .claude/ paths and blank lines removed, sorted unique.
 export const diffFiles = (lists) =>
   [...new Set(lists.flatMap((t) => String(t).split("\n")).map((l) => l.trim()).filter((l) => l && !l.startsWith(".claude/")))].sort();
+
+// The campaign seed. Resume: the manifest's seed (save=true when an older manifest lacks one, then the matrix seed is
+// used and must be written back); an explicit --seed on resume is an error. New campaign: --seed, else matrix seed, else 1.
+export function resolveSeed({ resumeManifest, cliSeed, matrixSeed }) {
+  const num = (v, what) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) throw new Error(`${what} must be a number (got ${v})`);
+    return n;
+  };
+  if (resumeManifest) {
+    if (cliSeed != null) throw new Error("--seed cannot be used with --resume: a resumed campaign keeps the seed in its manifest.json");
+    if (resumeManifest.seed != null) return { seed: num(resumeManifest.seed, "manifest seed"), save: false };
+    return { seed: num(matrixSeed ?? 1, "matrix seed"), save: true };
+  }
+  return { seed: num(cliSeed ?? matrixSeed ?? 1, "--seed"), save: false };
+}
