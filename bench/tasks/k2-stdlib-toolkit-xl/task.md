@@ -15,7 +15,7 @@ Implement the `toolkit` Python package described in `SPEC.md`: twelve independen
 | `toolkit/jsonx.py` | a subset of `json` | `spec/jsonx.md` |
 | `toolkit/cal.py` | a subset of `calendar` | `spec/cal.md` |
 
-The stubs are already in `toolkit/`; they raise `NotImplementedError`. Keep the module names and the public API in each spec. Read the rules in `SPEC.md` before you start: the standard library modules each module reimplements (for example `re`, `json`, `base64` and `textwrap`) may not be imported by your code, and using the one you reimplement in any way makes that module score zero.
+The stubs are already in `toolkit/`; they raise `NotImplementedError`. Keep the module names and the public API in each spec. Read the rules in `SPEC.md` before you start: the twelve standard library modules being reimplemented (for example `json`, `base64` and `textwrap`) may not be imported or used by your code, and neither may any stdlib module that imports one of them itself (for example `logging`, `traceback`, `pydoc`, `statistics`, `email.*`; the list in `SPEC.md` is not exhaustive). Such an import is refused and the module that does it scores zero.
 
 `python3 tests/run_public.py` runs the public examples. Each example compares your module's result with the real standard library on the same input and prints pass or fail; the command exits 0 only when every example passes.
 

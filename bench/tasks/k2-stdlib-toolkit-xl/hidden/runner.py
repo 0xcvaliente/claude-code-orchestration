@@ -12,11 +12,13 @@ fixed base list, so a new module plugs in by declaring ORACLES and WRAP.
 In every child, whatever category it grades (k1 parity: one child must not
 compute answers for another category's module, e.g. through webbrowser.shlex):
   - Every category's oracles, except WATCH_ONLY, may not be imported by anyone
-    in this process; an attempt with toolkit code on the stack is flagged as a
-    use of that oracle, which zeroes the category the oracle belongs to.
+    in this process (the adapter only while its module loads and in run_oracle,
+    in the main thread). An attempt with toolkit code on the stack is flagged as
+    refused, which zeroes only the module being graded: nothing was reached.
   - Toolkit code may not import any oracle, nor the BASE_BLOCK modules.
   - Wrappers on every category's WRAP entry points, and an audit hook on every
-    oracle's source files, flag toolkit code that reaches them.
+    oracle's source files, flag toolkit code that reaches them as a use, which
+    also zeroes the category the oracle belongs to.
   - Spawning processes and hard links (os.system, os.posix_spawn, os.exec*,
     os.fork, os.spawn*, os.link) are refused while toolkit code is on the stack.
 WATCH_ONLY modules (re and the sre_* shims) are imported all over the standard
@@ -33,11 +35,13 @@ Protocol on the original stdout: frames of a 4-byte big-endian length plus a
 marshal-encoded dict:
   {"event": "ready"}                      solution module imported
   {"fatal": "..."}                        import failed; nothing else follows
-  {"flag": "stdlib-oracle-used:<mod>"}    solution code reached an oracle module
+  {"flag": "stdlib-oracle-used:<mod>"}    solution code reached an oracle module (call, source read)
+  {"flag": "stdlib-oracle-refused:<mod>"} solution code tried to import an oracle (refused)
   {"i": n, "event": "start"}              case n started
   {"i": n, "r": <result>}                 run_impl returned
   {"i": n, "status": "timeout"|"exception"|"badresult", "msg": "..."}
 """
+import _thread
 import builtins
 import importlib.util
 import marshal
@@ -100,7 +104,7 @@ OWN = set(ORACLES_BY_CAT.get(cat, []))
 BLOCK = set(BASE_BLOCK) | set(ALL_ORACLES)              # refused for toolkit code
 STRICT = {m for m in ALL_ORACLES if m not in WATCH_ONLY}  # refused for every importer
 
-STATE = {"in_case": False, "flagged": set()}
+STATE = {"in_case": False, "flagged": set(), "loading_adapter": False}
 
 
 def _matches(name, mods):
@@ -132,39 +136,48 @@ def toolkit_on_stack(depth=2):
     return False
 
 
-ADAPTER_DIR = os.path.dirname(os.path.realpath(adapter_path)) + os.sep
+ADAPTER_FILE = os.path.realpath(adapter_path)
+MAIN_THREAD = _thread.get_ident()
 
 
-def adapter_on_stack(depth=2):
-    """True when an adapter's own code (a file in the adapter's dir other than this runner) is on the stack."""
+def _in_run_oracle(depth):
+    """True when the adapter's run_oracle is on the stack."""
     try:
         frame = sys._getframe(depth)
     except ValueError:
         return False
     while frame is not None:
-        fn = frame.f_code.co_filename
-        if fn and not fn.startswith("<"):
+        code = frame.f_code
+        if code.co_name == "run_oracle" and code.co_filename and not code.co_filename.startswith("<"):
             try:
-                rp = os.path.realpath(fn)
+                if os.path.realpath(code.co_filename) == ADAPTER_FILE:
+                    return True
             except (TypeError, ValueError):
-                rp = ""
-            if rp.startswith(ADAPTER_DIR) and rp != RUNNER_FILE:
-                return True
+                pass
         frame = frame.f_back
     return False
 
 
+def adapter_exempt(depth=2):
+    """The adapter may import any oracle, but only in the main thread while its module is being
+    loaded or inside its run_oracle (never with toolkit code on the stack; checked by the caller)."""
+    if _thread.get_ident() != MAIN_THREAD:
+        return False
+    return STATE["loading_adapter"] or _in_run_oracle(depth + 1)
+
+
 def strict_refused(hit):
-    """A strict oracle import: flagged and refused with toolkit code on the stack; allowed for the
-    adapter's own code (bookkeeping, run_oracle); refused for anything else (threads, callbacks)."""
+    """Should an import of strict oracle `hit` be refused? With toolkit code on the stack it is
+    refused and flagged as refused (the importing module scores 0; no oracle was reached, so the
+    oracle's own module is not zeroed). The adapter's exempt imports pass; anything else is refused."""
     if toolkit_on_stack(depth=3):
-        flag_oracle(hit)
+        flag_oracle(hit, refused=True)
         return True
-    return not adapter_on_stack(depth=3)
+    return not adapter_exempt(depth=3)
 
 
-def flag_oracle(modname):
-    key = "stdlib-oracle-used:" + modname
+def flag_oracle(modname, refused=False):
+    key = ("stdlib-oracle-refused:" if refused else "stdlib-oracle-used:") + modname
     if key not in STATE["flagged"]:
         STATE["flagged"].add(key)
         emit({"flag": key})
@@ -436,7 +449,11 @@ except BaseException as e:  # noqa: BLE001
 # 2. The adapter (it may import json, random, ...; never its own oracles outside run_oracle).
 spec = importlib.util.spec_from_file_location("_k2_adapter", adapter_path)
 adapter = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(adapter)
+STATE["loading_adapter"] = True
+try:
+    spec.loader.exec_module(adapter)
+finally:
+    STATE["loading_adapter"] = False
 install_watch()  # wrap any oracle the adapter loaded before it leaves sys.modules
 purge_strict()
 
