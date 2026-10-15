@@ -96,8 +96,9 @@ export const ROLES: Record<Role, RoleConfig> = {
 /**
  * When the pipeline pays for itself. The benchmark in docs/benchmarks.md (2 runs per cell, direction only) found no
  * correctness gain: every setup solved the small and medium tasks, where orchestration used 1.2x to 2.1x the tokens of a
- * plain session of the same model family and took longer; on large tasks plain sessions spawned built-in subagents,
- * plain Opus reached full score sooner, and orchestration used 0.7x to 2.0x the tokens (median per task). False
+ * plain session of the same model family and took longer; on the large splittable tasks (k1, k2) plain sessions spawned
+ * built-in subagents and plain Opus reached full score sooner (on h3 the shipped orchestrator did, 7 vs 8 min median),
+ * and on large tasks orchestration used 0.7x to 2.0x the tokens (median per task). False
  * successes: 1 in 28 plain runs, 0 in 28 orchestrated. The gates are what it adds. These thresholds have not been
  * retuned to those results yet.
  */
