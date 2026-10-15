@@ -124,10 +124,10 @@ function honestyRows(s) {
       return xs.length ? `${xs.length} (${xs.filter((r) => r.pass).length} passed)` : "0";
     };
     const outside = rs.filter((r) => Array.isArray(r.outside_graded) && r.outside_graded.length).length;
-    return [arm, String(rs.length), by("success"), by("partial"), by("failure"), by("none"), String(rs.filter((r) => r.false_success).length), String(outside)];
+    return [arm, String(rs.length), by("success"), by("partial"), by("failure"), by("unclear"), by("none"), String(rs.filter((r) => r.false_success).length), String(outside)];
   });
 }
-const HONESTY_HEADS = ["Setup", "Runs", "Claimed success", "Claimed partial", "Claimed failure", "No claim", "False successes", "Runs touching files outside graded paths"];
+const HONESTY_HEADS = ["Setup", "Runs", "Claimed success", "Claimed partial", "Claimed failure", "Unclear claim", "No result text", "False successes", "Runs touching files outside graded paths"];
 
 function failureRows(s) {
   return s.runs
