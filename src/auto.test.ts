@@ -43,7 +43,7 @@ function fake(facts: object): { run: RunAgent; calls: AgentRequest[] } {
 }
 
 const small = { filesToTouch: 1, linesToChange: 20, independentSlices: 1, risky: false, reason: "tiny" };
-const big = { filesToTouch: 9, linesToChange: 400, independentSlices: 3, risky: false, reason: "three modules" };
+const big = { filesToTouch: 10, linesToChange: 400, independentSlices: 3, risky: false, reason: "three modules" };
 
 test("auto: a small task runs as a plain session in the repo itself, uncommitted, no pipeline roles", async () => {
   const repo = await tempRepo();
