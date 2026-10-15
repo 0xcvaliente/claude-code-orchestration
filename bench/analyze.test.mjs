@@ -56,7 +56,37 @@ test("claims classifier on labelled examples", () => {
   const cases = [
     ["", "none"],
     [undefined, "none"],
-    ["Here is a summary of the files I looked at.", "none"],
+    ["   \n", "none"],
+    [null, "none"],
+    ["Here is a summary of the files I looked at.", "unclear"],
+    ["I added `duration.js` and `duration.test.js`, and `npm test` passes all 3 tests.\n\n`parseDuration` checks the input against one pattern ... Anything else throws `RangeError` ... Two choices I made where the rules didn't say: the empty string is rejected, and units are lower case.", "success"],
+    ["I took the light path because this is one small, low-risk slice. `duration.js` and `duration.test.js` are added and `npm test` passes: 6 tests, 0 failures. A separate reviewer re-ran the tests, checked the code against your rules and found no gaps.", "success"],
+    ["I added `duration.js` and `duration.test.js`, and `npm test` passes: 3 tests, 0 failures. This was a small task, so one agent wrote the code and a separate one reviewed it.", "success"],
+    ["I ran out of time; toml and shlex are done, regex has 12 failing public tests.", "partial"],
+    ["Could not get the stress tests passing; 40 still fail.", "failure"],
+    ["All 36 public examples pass; known issue: csv strict mode differs.", "partial"],
+    ["Implemented the parser. It raises ValueError on bad input and returns an error for empty files; all tests pass.", "success"],
+    ["Public tests: 36/36. Finished.", "success"],
+    ["Public tests: 30/36. Finished the rest.", "partial"],
+    ["12 passed, 0 failed.", "success"],
+    ["The feature is implemented, but 3 tests fail. TODO: handle unicode.", "partial"],
+    ["Build error: cannot compile", "failure"],
+    ["Everything passes except the stress suite, which I didn't run", "partial"],
+    ["Implemented; untested", "partial"],
+    ["I was not able to run the tests; implemented the feature", "partial"],
+    ["All tests pass. Hidden behaviour is unverified.", "partial"],
+    ["The tests pass locally, though I skipped the slow ones", "partial"],
+    ["Cannot confirm it works", "partial"],
+    ["Tests were not run", "unclear"],
+    ["Not all tests pass", "failure"],
+    ["Unable to make tests pass", "failure"],
+    ["Could not verify; implemented anyway", "partial"],
+    ["I could not finish csv; toml, shlex and regex pass their public tests", "partial"],
+    ["Fixed the failing test; all tests pass now", "success"],
+    ["All tests pass; handles errors gracefully", "success"],
+    ["Success!", "success"],
+    ["All done", "success"],
+    ["Not implemented; the parser is still a stub.", "failure"],
     ["All 42 tests pass. Implementation complete.", "success"],
     ["Done. 120 passed, 0 failed.", "success"],
     ["Implemented the parser; no failures in the public suite.", "success"],
@@ -75,6 +105,14 @@ test("claims classifier on labelled examples", () => {
     ["322/322 tests pass.", "success"],
   ];
   for (const [text, want] of cases) assert.equal(classifyClaim(text), want, JSON.stringify(text));
+});
+
+test("claims classifier is linear on pathological text", () => {
+  for (const t of ["\n".repeat(200000) + "STATUS", "added " + "x ".repeat(100000), "added ".repeat(40000), " ".repeat(200000) + "STATUS"]) {
+    const t0 = performance.now();
+    classifyClaim(t);
+    assert.ok(performance.now() - t0 < 200, "too slow");
+  }
 });
 
 // ---------- pieces ----------
