@@ -176,6 +176,9 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
   assert.ok(reviewer, "reviewer call recorded");
   assert.match(reviewer, /^Bash\(python3 \*\)$/m);
   assert.match(reviewer, /^Bash\(git diff\*\)$/m);
+  // git -C only in its read-only forms: reviewer.md tells reviewers to use git -C <path> diff with literal paths.
+  for (const sub of ["diff", "status", "log", "show"]) assert.ok(reviewer.split("\n").includes(`Bash(git -C * ${sub}*)`), sub);
+  assert.doesNotMatch(reviewer, /^Bash\(git -C \*\)$/m);
   assert.doesNotMatch(reviewer, /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m);
 });
 
