@@ -48,10 +48,15 @@ const countStr = (o) => Object.entries(o).map(([k, v]) => `${k} ${v}`).join(", "
 
 // ---------- tables (shared by HTML and Markdown) ----------
 
+// A task has a lenient column only when some cell of it carries score_median_lenient.
+const hasLenient = (s, task) => s.cells.some((c) => c.task === task && typeof c.score_median_lenient === "number");
+const resultHeads = (s, task) => (hasLenient(s, task) ? [...RESULT_HEADS.slice(0, 4), "Median score, lenient", ...RESULT_HEADS.slice(4)] : RESULT_HEADS);
+
 function resultsRows(s, task, cell) {
+  const len = hasLenient(s, task);
   return s.cells
     .filter((c) => c.task === task && c.cell === cell)
-    .map((c) => [
+    .map((c) => withLenient(c, len, [
       c.arm,
       `${c.n}${c.direction_only ? " (direction only)" : ""}`,
       c.pass_rate === null ? "n/a" : `${rate(c.pass_rate)} (${Math.round(c.pass_rate * c.graded)}/${c.graded})`,
@@ -62,8 +67,9 @@ function resultsRows(s, task, cell) {
       c.reached_100 ? `${secs(c.t100_median_s)} (${c.reached_100}/${c.n})` : "never",
       String(c.false_success),
       String(c.retries ?? 0),
-    ]);
+    ]));
 }
+const withLenient = (c, len, row) => (len ? [...row.slice(0, 4), typeof c.score_median_lenient === "number" ? pct(c.score_median_lenient) : "n/a", ...row.slice(4)] : row);
 const RESULT_HEADS = ["Setup", "n", "Pass rate", "Median score", "Median tokens", "Median output tokens", "Median wall time", "t100", "False successes", "Retries"];
 
 const ci = (st, f) => (st?.ci ? `${f(st.estimate)} [${f(st.ci[0])}, ${f(st.ci[1])}]` : f(st?.estimate));
@@ -374,11 +380,14 @@ function caveats(s) {
   ];
 }
 
+const LENIENT_NOTE = "k2 has two scores. The strict score is the official one: the task forbids importing any oracle module, so a toolkit module that imports re (the regex oracle) fails to import and scores 0. The lenient score is a secondary variant that lets every module except toolkit/regex.py import re, with the regex cases watched exactly as in the strict grade; it shows capability without that one rule. Hypotheses use the strict score.";
+
 function method(s) {
   return [
     "Each setup works on the task text alone; hidden tests the agent never sees grade a snapshot during the run and the final tree. Score is passed / total hidden tests; a run passes when every hidden test passes.",
     "t90 and t100 are the first graded snapshot at 90% and 100%. AUC is the time-weighted mean score over the time limit, the timeline read as a step function from 0.",
     "A false success is a run whose final message claims success (bench/lib/claims.mjs) while the hidden grade fails.",
+    ...(hasLenient(s, "k2-stdlib-toolkit-xl") ? [LENIENT_NOTE] : []),
   ];
 }
 
@@ -389,7 +398,7 @@ export function renderHtml(s, { title = "Orchestration benchmark", mdPath } = {}
   const models = [...new Set(s.runs.flatMap((r) => Object.keys(r.tokens?.by_model ?? {})))].sort();
   const mlegend = `<p class="legend">${models.map((m) => `<span><i class="sw ${modelClass(m)}"></i>${esc(m)}</span>`).join("")}</p>`;
   const perTask = tasks
-    .map((t) => `<h3>${esc(t)}</h3>${cellsIn(s.cells.filter((c) => c.task === t)).map((cell) => `<h4>${esc(cell)}: ${esc(CELL_TEXT[cell] ?? cell)}</h4>${htmlTable(RESULT_HEADS, resultsRows(s, t, cell))}`).join("")}`)
+    .map((t) => `<h3>${esc(t)}</h3>${cellsIn(s.cells.filter((c) => c.task === t)).map((cell) => `<h4>${esc(cell)}: ${esc(CELL_TEXT[cell] ?? cell)}</h4>${htmlTable(resultHeads(s, t), resultsRows(s, t, cell))}`).join("")}`)
     .join("");
   const charts = (fn, ts) => ts.map((t) => fn(s, t)).filter(Boolean).join("") || "<p>No data.</p>";
   const big = ["k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
@@ -466,7 +475,7 @@ export function renderMarkdown(s, { sources, htmlPath } = {}) {
   md += "## Results per task\n\n";
   for (const t of tasks) {
     md += `### ${t}\n\n`;
-    for (const cell of cellsIn(s.cells.filter((c) => c.task === t))) md += `**${cell}** (${CELL_TEXT[cell] ?? cell})\n\n${mdTable(RESULT_HEADS, resultsRows(s, t, cell))}\n`;
+    for (const cell of cellsIn(s.cells.filter((c) => c.task === t))) md += `**${cell}** (${CELL_TEXT[cell] ?? cell})\n\n${mdTable(resultHeads(s, t), resultsRows(s, t, cell))}\n`;
   }
   md += `### Comparisons with the baselines\n\n${mdTable(COMPARISON_HEADS, comparisonRows(s))}\n`;
   md += `## Process\n\n${mdTable(PROCESS_HEADS, processRows(s))}\n## Claims vs results\n\n${mdTable(HONESTY_HEADS, honestyRows(s))}\n## Failures and exclusions\n\n${mdTable(FAILURE_HEADS, failureRows(s))}\n### Retries\n\n${retryNote(s)}\n\n${retryRows(s).length ? `${mdTable(RETRY_HEADS, retryRows(s))}\n` : ""}`;

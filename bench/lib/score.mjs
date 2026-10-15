@@ -1,6 +1,6 @@
 // Shared scoring helpers for bench tasks.
 //   loadTask(id, tasksDir?)          -> {id, dir, meta, taskText}
-//   scoreDir(id, dir, tasksDir?)     -> the task's score.mjs result for dir (a snapshot dir or a full repo)
+//   scoreDir(id, dir, tasksDir?, variant?) -> the task's score.mjs result for dir (a snapshot dir or a full repo)
 //   applyMutant(refCopyDir, mutant)  -> writes the mutated file into refCopyDir
 //   scoreNodeHidden(taskDir, dir)    -> shared scorer for node tasks that ship hidden.test.js
 //   runProc(cmd, args, opts)         -> async spawn with a process-group kill on timeout
@@ -29,10 +29,19 @@ export function metaTotal(id, tasksDir = DEFAULT_TASKS_DIR) {
   } catch { return null; }
 }
 
-export async function scoreDir(id, dir, tasksDir = DEFAULT_TASKS_DIR) {
+// True when the task's score.mjs lists `variant` in its exported VARIANTS (e.g. k2's "lenient").
+export async function supportsVariant(id, variant, tasksDir = DEFAULT_TASKS_DIR) {
+  try {
+    const mod = await import(pathToFileURL(join(tasksDir, id, "score.mjs")).href);
+    return Array.isArray(mod.VARIANTS) && mod.VARIANTS.includes(variant);
+  } catch { return false; }
+}
+
+// variant: optional secondary grading variant (passed to score(dir, {variant})); omitted = official score.
+export async function scoreDir(id, dir, tasksDir = DEFAULT_TASKS_DIR, variant = null) {
   const mod = await import(pathToFileURL(join(tasksDir, id, "score.mjs")).href);
   try {
-    const r = await mod.score(dir);
+    const r = await (variant ? mod.score(dir, { variant }) : mod.score(dir));
     if (r && Number.isFinite(r.total)) lastTotal.set(id, r.total);
     return r;
   } catch {

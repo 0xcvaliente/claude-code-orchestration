@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -109,6 +109,83 @@ test("grade.mjs --final-only and --only filter the work", () => {
     assert.deepEqual(rows.map((r) => `${r.run_id}/${r.snap}`), ["run-a/final"]);
     grade(campaign); // resumes: the rest is appended
     assert.equal(lines(join(campaign, "grades.jsonl")).length, 5);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ---------- lenient variant ----------
+
+const K2 = join(here, "tasks", "k2-stdlib-toolkit-xl");
+const gradePy = (sol, only, ...extra) => {
+  const r = spawnSync("python3", [join(K2, "hidden", "grade.py"), sol, "--only", only, ...extra], { encoding: "utf8", env: { ...process.env, K2_LENIENT_RE: "" } });
+  assert.equal(r.status, 0, r.stderr);
+  const m = new RegExp(`^\\s+${only}\\s+(\\d+)/\\s*(\\d+)`, "m").exec(r.stdout);
+  return { passed: Number(m[1]), total: Number(m[2]), out: r.stdout };
+};
+
+test("k2 lenient: tomlparse importing re scores 0 strict, full lenient; regex.py importing re scores 0 in both", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "k2-lenient-"));
+  try {
+    cpSync(join(K2, "ref", "toolkit"), join(tmp, "toolkit"), { recursive: true });
+    const patch = (name) => {
+      const f = join(tmp, "toolkit", name);
+      writeFileSync(f, `import re  # noqa\n${readFileSync(f, "utf8")}`);
+    };
+    patch("tomlparse.py");
+    const strictToml = gradePy(tmp, "toml");
+    assert.equal(strictToml.passed, 0);
+    assert.ok(strictToml.total > 0);
+    const lenToml = gradePy(tmp, "toml", "--lenient");
+    assert.deepEqual([lenToml.passed, lenToml.total], [strictToml.total, strictToml.total]);
+    assert.match(lenToml.out, /lenient:/, "lenient flags carry the note");
+    assert.doesNotMatch(strictToml.out, /lenient:/);
+
+    patch("regex.py");
+    assert.equal(gradePy(tmp, "regex").passed, 0);
+    assert.equal(gradePy(tmp, "regex", "--lenient").passed, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("grade.mjs --variant lenient grades final/ only, skips tasks without the variant, and is idempotent", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "grade-lenient-"));
+  try {
+    const tasks = join(tmp, "tasks");
+    for (const [id, variants] of [["vt", '["lenient"]'], ["plain", "[]"]]) {
+      mkdirSync(join(tasks, id), { recursive: true });
+      writeFileSync(join(tasks, id, "meta.json"), '{"total":4}');
+      writeFileSync(join(tasks, id, "task.md"), "x");
+      writeFileSync(join(tasks, id, "score.mjs"), `export const VARIANTS = ${variants};
+export async function score(dir, o = {}) { return { pass: !!o.variant, passed: o.variant ? 4 : 1, total: 4, flags: o.variant ? ["lenient: x"] : [] }; }\n`);
+    }
+    const campaign = join(tmp, "campaign");
+    const runs = [];
+    for (const [run, task] of [["vt-r1", "vt"], ["plain-r1", "plain"]]) {
+      mkdirSync(join(campaign, run, "final"), { recursive: true });
+      mkdirSync(join(campaign, run, "snapshots", "t0010"), { recursive: true });
+      writeFileSync(join(campaign, run, "final", "a.txt"), run);
+      writeFileSync(join(campaign, run, "snapshots", "t0010", "a.txt"), run);
+      runs.push({ run_id: run, task, wall_ms: 5000 });
+    }
+    writeFileSync(join(campaign, "runs.jsonl"), runs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const out = grade(campaign, "--tasks-dir", tasks, "--variant", "lenient");
+    assert.match(out, /not supported by task\(s\) plain/);
+    const rows = lines(join(campaign, "grades-lenient.jsonl"));
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0].run_id, rows[0].snap, rows[0].pass, rows[0].passed], ["vt-r1", "final", true, 4]);
+    assert.deepEqual(rows[0].flags, ["lenient: x"]);
+    const cache = JSON.parse(readFileSync(join(campaign, "grades-cache.json"), "utf8"));
+    assert.ok(Object.keys(cache).every((k) => k.startsWith("lenient:")), "cache keys carry the variant");
+    // Strict grading of the same campaign keeps its own file and cache keys.
+    grade(campaign, "--tasks-dir", tasks, "--final-only");
+    const strict = lines(join(campaign, "grades.jsonl"));
+    assert.deepEqual(strict.map((r) => [r.run_id, r.passed]).sort(), [["plain-r1", 1], ["vt-r1", 1]]);
+    // Idempotent.
+    const before = readFileSync(join(campaign, "grades-lenient.jsonl"), "utf8");
+    grade(campaign, "--tasks-dir", tasks, "--variant", "lenient");
+    assert.equal(readFileSync(join(campaign, "grades-lenient.jsonl"), "utf8"), before);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
