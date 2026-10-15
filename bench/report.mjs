@@ -60,9 +60,10 @@ function resultsRows(s, task, cell) {
       secs(c.wall_median_s),
       c.reached_100 ? `${secs(c.t100_median_s)} (${c.reached_100}/${c.n})` : "never",
       String(c.false_success),
+      String(c.retries ?? 0),
     ]);
 }
-const RESULT_HEADS = ["Setup", "n", "Pass rate", "Median score", "Median tokens", "Median output tokens", "Median wall time", "t100", "False successes"];
+const RESULT_HEADS = ["Setup", "n", "Pass rate", "Median score", "Median tokens", "Median output tokens", "Median wall time", "t100", "False successes", "Retries"];
 
 const ci = (st, f) => (st?.ci ? `${f(st.estimate)} [${f(st.ci[0])}, ${f(st.ci[1])}]` : f(st?.estimate));
 function comparisonRows(s) {
@@ -134,6 +135,14 @@ function failureRows(s) {
     .map((r) => [r.run_id, r.end_reason, r.excluded ? "excluded" : r.pass === false ? `failed (${pct(r.score_pct)})` : "passed", r.claim, r.error ?? ""]);
 }
 const FAILURE_HEADS = ["Run", "End", "Result", "Claim", "Error"];
+
+// Attempts superseded by a later row with the same run_id (a requeued retry); only the last row per run is analysed.
+const retryRows = (s) => (s.retries ?? []).map((r) => [r.run_id, `${r.task} / ${r.arm} / ${r.cell}`, r.end_reason ?? "unknown", r.started_at ?? "n/a", r.error ?? ""]);
+const RETRY_HEADS = ["Run", "Cell", "Superseded attempt ended", "Attempt started", "Error"];
+const retryNote = (s) => {
+  const by = Object.entries(s.counts?.retries_by_reason ?? {}).map(([k, v]) => `${v} ${k}`).join(", ");
+  return `${s.counts?.retries ?? 0} superseded attempt(s) (retries)${by ? `: ${by}` : ""}. Only the last row per run is analysed; a rate-limited run that was never retried is listed above as excluded.`;
+};
 
 function methodRows(s) {
   return s.campaigns.map(({ manifest: m, runs, dir }) => [
@@ -358,7 +367,7 @@ function caveats(s) {
     `Runs per cell range from ${ns.length ? Math.min(...ns) : 0} to ${ns.length ? Math.max(...ns) : 0}; ${dir} of ${s.cells.length} cells have fewer than 3 runs and show direction only.`,
     "Confidence intervals are 95% percentile bootstrap intervals (10,000 seeded resamples), paired by rep when both setups share at least two reps. With a handful of runs they are wide and only roughly calibrated.",
     `Hypotheses are evaluated mechanically on medians; a verdict needs at least 2 runs in every cell it reads, otherwise it is inconclusive.`,
-    `${s.counts.excluded} run(s) were excluded (${s.counts.rate_limited} rate limited, ${s.counts.error} harness errors); ${inc.length} were analysed.`,
+    `${s.counts.excluded} run(s) were excluded (${s.counts.rate_limited} rate limited, ${s.counts.error} harness errors); ${inc.length} were analysed; ${s.counts.retries ?? 0} earlier attempt(s) were superseded by a retry.`,
     "Everything ran on a single machine against a subscription account, so rate limits and machine load can shift wall times between runs.",
     "Token counts are input, output, cache-read and cache-write tokens summed over every model; they do not weigh models, and an Opus token is worth more than a Sonnet token.",
   ];
@@ -438,6 +447,7 @@ ${["opus", "sonnet", "haiku", "triage", "other"].map((m) => `.legend .m-${m}{bac
 <h2>Process</h2>${htmlTable(PROCESS_HEADS, processRows(s))}
 <h2>Claims vs results</h2>${htmlTable(HONESTY_HEADS, honestyRows(s))}
 <h2>Failures and exclusions</h2>${htmlTable(FAILURE_HEADS, failureRows(s))}
+<h3>Retries</h3><p>${esc(retryNote(s))}</p>${retryRows(s).length ? htmlTable(RETRY_HEADS, retryRows(s)) : ""}
 <h2>Caveats</h2><ul>${caveats(s).map((c) => `<li>${esc(c)}</li>`).join("")}</ul>
 </main></body></html>
 `;
@@ -458,7 +468,7 @@ export function renderMarkdown(s, { sources, htmlPath } = {}) {
     for (const cell of cellsIn(s.cells.filter((c) => c.task === t))) md += `**${cell}** (${CELL_TEXT[cell] ?? cell})\n\n${mdTable(RESULT_HEADS, resultsRows(s, t, cell))}\n`;
   }
   md += `### Comparisons with the baselines\n\n${mdTable(COMPARISON_HEADS, comparisonRows(s))}\n`;
-  md += `## Process\n\n${mdTable(PROCESS_HEADS, processRows(s))}\n## Claims vs results\n\n${mdTable(HONESTY_HEADS, honestyRows(s))}\n## Failures and exclusions\n\n${mdTable(FAILURE_HEADS, failureRows(s))}\n`;
+  md += `## Process\n\n${mdTable(PROCESS_HEADS, processRows(s))}\n## Claims vs results\n\n${mdTable(HONESTY_HEADS, honestyRows(s))}\n## Failures and exclusions\n\n${mdTable(FAILURE_HEADS, failureRows(s))}\n### Retries\n\n${retryNote(s)}\n\n${retryRows(s).length ? `${mdTable(RETRY_HEADS, retryRows(s))}\n` : ""}`;
   md += `## Caveats\n\n${caveats(s).map((c) => `- ${c}`).join("\n")}\n`;
   return md;
 }

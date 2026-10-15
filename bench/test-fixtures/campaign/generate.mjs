@@ -2,7 +2,8 @@
 // Writes the synthetic campaign used by bench/analyze.test.mjs into this folder (deterministic; rerun after edits):
 //   node bench/test-fixtures/campaign/generate.mjs
 // 2 tasks (t1-parallel, k1-stdlib-toolkit) x 3 arms (P-O, O-mix, AUTO) x 2 reps in the main cell, a cap60 sweep cell
-// on k1 for P-O and O-mix, and one rate-limited run that the analysis must exclude.
+// on k1 for P-O and O-mix, one rate-limited run that was never retried (excluded), one rate-limited attempt superseded
+// by its retry, and one row duplicated verbatim.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,6 +118,11 @@ for (const s of runs) {
   writeFileSync(join(state, "gates.jsonl"), (s.gates ?? []).map((g, i) => `${JSON.stringify({ ts: iso(100 + i), ...g })}\n`).join(""));
   writeFileSync(join(DIR, id, "diff-files.txt"), (s.diff ?? []).map((p) => `${p}\n`).join(""));
 }
+// Retries: t1 O-mix r1 first hit a rate limit and was requeued (its rate_limited row comes before the real one), and
+// t1 AUTO r2's row was appended twice, identically. The analysis keeps the last row per run_id.
+const retried = rows.findIndex((r) => r.run_id === "t1-parallel__O-mix__main__r1");
+rows.splice(retried, 0, { ...rows[retried], started_at: iso(-600), ended_at: iso(-580), wall_ms: 20000, exit_code: 1, end_reason: "rate_limited", results: [], error: "usage limit reached" });
+rows.push({ ...rows.find((r) => r.run_id === "t1-parallel__AUTO__main__r2") });
 const lines = (xs) => xs.map((x) => `${JSON.stringify(x)}\n`).join("");
 writeFileSync(join(DIR, "runs.jsonl"), lines(rows));
 writeFileSync(join(DIR, "grades.jsonl"), lines(grades));
