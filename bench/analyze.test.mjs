@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { aucOf, analyze, evaluateHypotheses, latestGrades, latestRows, outsideGraded, processOf, timelineOf, tokensOf } from "./analyze.mjs";
-import { renderHtml, renderMarkdown } from "./report.mjs";
+import { matrixText, renderHtml, renderMarkdown } from "./report.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, median, medianDiff, mulberry32, quantile, ratioCI } from "./lib/stats.mjs";
 
@@ -383,6 +383,18 @@ test("report renders HTML and Markdown with no dollar figures", () => {
   assert.match(md, /### Retries\n\n2 superseded attempt\(s\) \(retries\): 1 rate_limited, 1 exited\./);
   assert.match(md, /\| t1-parallel__O-mix__main__r1 \| t1-parallel \/ O-mix \/ main \| rate_limited \|/);
   assert.match(html, /<h3>Retries<\/h3>/);
+});
+
+test("campaigns table renders an object matrix readably and shows no absolute paths", () => {
+  const mx = { name: "lite", groups: [{ tasks: ["a", "b"], arms: ["P-S", "P-O", "AUTO"], cells: [{ id: "main" }], reps: 2 }] };
+  assert.equal(matrixText(mx), "lite: 2 tasks × 3 arms × main × 2 reps");
+  assert.equal(matrixText("fixture"), "fixture");
+  const s = { ...summary, campaigns: summary.campaigns.map((c) => ({ ...c, dir: "/Users/x/tmp/c1", manifest: { ...c.manifest, matrix: mx } })) };
+  const md = renderMarkdown(s, { htmlPath: "benchmark-report.html" });
+  const html = renderHtml(s, { mdPath: "benchmarks.md" });
+  assert.match(md, /lite: 2 tasks × 3 arms × main × 2 reps/);
+  assert.match(md, /`benchmark-report\.html`/);
+  for (const t of [md, html]) assert.doesNotMatch(t, /\[object Object\]|\/Users\//);
 });
 
 test("lenient grades add score_pct_lenient, pass_lenient and score_median_lenient; strict stays untouched", async () => {
