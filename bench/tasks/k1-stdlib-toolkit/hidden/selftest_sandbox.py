@@ -81,6 +81,24 @@ def main():
     check("webbrowser.shlex (module level)",
           {"shellsplit.py": ("import webbrowser\n", "\ndef split(s, comments=False, posix=True):\n    return webbrowser.shlex.split(s, comments, posix)\n")},
           ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-used:shlex", expect_full=["toml"])
+    check("runpy.run_path(<stdlib>/shlex.py)",
+          {"shellsplit.py": ("import os as _o, runpy as _r\n",
+                             "\ndef split(s, comments=False, posix=True):\n"
+                             "    ns = _r.run_path(_o.path.join(_o.path.dirname(_o.__file__), 'shlex.py'))\n"
+                             "    return ns['split'](s, comments, posix)\n")},
+          ["toml", "shlex"], expect_zero="shlex", expect_flag="stdlib-oracle-used:shlex", expect_full=["toml"])
+    check("shutil.copytree(<stdlib>/tomllib) imported as mytoml",
+          {"tomlparse.py": ("import os as _o, sys as _s, shutil as _sh, tempfile as _t, pkgutil as _p\n",
+                            "\ndef loads(s, /):\n    tmp = _t.mkdtemp()\n"
+                            "    _sh.copytree(_o.path.join(_o.path.dirname(_o.__file__), 'tomllib'), _o.path.join(tmp, 'mytoml'))\n"
+                            "    _s.path.insert(0, tmp)\n    return _p.resolve_name('mytoml').loads(s)\n")},
+          ["toml", "shlex"], expect_zero="toml", expect_flag="stdlib-oracle-used:tomllib", expect_full=["shlex"])
+    check("symlink to <stdlib>/tomllib imported as mytoml2",
+          {"tomlparse.py": ("import os as _o, sys as _s, tempfile as _t, pkgutil as _p\n",
+                            "\ndef loads(s, /):\n    tmp = _t.mkdtemp()\n"
+                            "    _o.symlink(_o.path.join(_o.path.dirname(_o.__file__), 'tomllib'), _o.path.join(tmp, 'mytoml2'))\n"
+                            "    _s.path.insert(0, tmp)\n    return _p.resolve_name('mytoml2').loads(s)\n")},
+          ["toml", "shlex"], expect_zero="toml", expect_flag="stdlib-oracle-used:tomllib", expect_full=["shlex"])
     if have_regex:
         check("json.decoder.re inside a regex function",
               {"regex.py": ("", "\n_c0 = compile\ndef compile(pattern, flags=0):\n    import json\n    json.decoder.re.compile(pattern, flags)\n    return _c0(pattern, flags)\n")},

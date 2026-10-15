@@ -38,7 +38,11 @@ IMPORT_LIMIT_S = 12.0   # parent watchdog; the child's own import alarm is 10 s
 TIMEOUT_BUDGET = 5
 CRASH_BUDGET = 5
 MODULE_WALL_S = 600.0
-STATIC_PATTERNS = ["__import__", "importlib", "sys.modules", "eval(", "exec(", "builtins"]
+STATIC_PATTERNS = ["__import__", "importlib", "sys.modules", "eval(", "exec(", "builtins",
+                   "runpy", "shutil.copy", "copytree", "copyfile", "sysconfig", "get_path", ".__file__",
+                   "'tomllib'", '"tomllib"', "shlex.py", "csv.py"]
+# Oracle module named in a stdlib-oracle-used flag -> the category it serves.
+ORACLE_CATEGORY = {"tomllib": "toml", "shlex": "shlex", "csv": "csv", "_csv": "csv", "re": "regex"}
 ORACLE_FLAG = "stdlib-oracle-used:"
 
 
@@ -299,6 +303,17 @@ def grade(sol, only=None, out_path=None):
     write()
     with ThreadPoolExecutor(max_workers=max(1, len(adapters))) as ex:
         list(ex.map(work, adapters.values()))
+    # An oracle flag raised while grading one module also zeroes the module that oracle serves.
+    with lock:
+        for name, c in list(cats.items()):
+            for f in c.get("flags", ()):
+                target = ORACLE_CATEGORY.get(f[len(ORACLE_FLAG):])
+                if target in cats and target != name and cats[target]["passed"]:
+                    t = cats[target]
+                    t["passed"] = 0
+                    t["status"] = f"scored 0: {f} (raised while grading {name})"
+                    for cid in t["cases"]:
+                        t["cases"][cid] = {"pass": False, "detail": t["status"]}
     out = build()
     write()
     return out
