@@ -52,6 +52,8 @@ The pilot showed that k1 and h3 saturate within minutes, so the splittable-task 
 
 `bench/run.mjs` flags: `--matrix <file>`, `--campaign <name>`, `--resume <campaign dir>`, `--dry-run` (prints each run's command and environment additions), `--only <substring of run_id>`, `--parallel-blocks N`, `--seed N`, `--tasks-dir <dir>`, `--check-isolation`.
 `bench/grade.mjs` flags: `--jobs N`, `--only <substring>`, `--final-only`, `--tasks-dir <dir>`. Identical (task, content hash) pairs are graded once (`grades-cache.json`), and finished (run, snapshot) pairs are skipped, so grading can be rerun.
+
+Lenient variant (k2 only): `node bench/grade.mjs <campaign> --variant lenient` grades `final/` only into `grades-lenient.jsonl` (other tasks are skipped with a note). In that grade `re` may be imported by any toolkit module except `toolkit/regex.py` (task rule 2 otherwise zeroes a module that imports it); regex cases stay watched as in the strict grade, and flags carry a `lenient:` prefix. `analyze.mjs` then adds `score_pct_lenient`, `pass_lenient` and `score_median_lenient`, and the report adds a lenient column for k2. The strict score stays official and hypotheses use it.
 `bench/validate.mjs` flags: `--task <id>`, `--tasks-dir <dir>`.
 
 A matrix file has `name`, `seed` and `groups`; each group lists `tasks`, `arms`, `cells` (`id`, plus `cap_min` or `budget_tokens`) and `reps`.

@@ -134,7 +134,7 @@ def static_patterns(adapters):
     return pats
 
 
-def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=(), watch_callers=None):
+def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=(), watch_callers=None, lenient=False):
     """Run every case of one adapter in sandboxed children; return ({index: record}, flags)."""
     cases = ad["cases"]
     n = len(cases)
@@ -143,7 +143,8 @@ def run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only=(), watch_caller
     t_module = time.time()
     # The job goes to each child over its stdin pipe: no job file a solution could find on disk.
     job = marshal.dumps({"cases": cases, "oracles": oracles_by_cat, "wrap": wrap_by_cat,
-                         "watch_only": list(watch_only), "watch_callers": dict(watch_callers or {})})
+                         "watch_only": list(watch_only), "watch_callers": dict(watch_callers or {}),
+                         **({"lenient": True} if lenient else {})})
 
     def fail_rest(frm, why):
         for j in range(frm, n):
@@ -296,8 +297,10 @@ def static_scan(sol, patterns=BASE_STATIC_PATTERNS):
     return flags, sloc
 
 
-def grade(sol, only=None, out_path=None, hidden_dir=HERE):
+def grade(sol, only=None, out_path=None, hidden_dir=HERE, lenient=None):
     """hidden_dir: where modules.json and the mod_*.py adapters live (the selftest passes its own)."""
+    if lenient is None:
+        lenient = os.environ.get("K2_LENIENT_RE") == "1"
     sol = os.path.abspath(sol)
     expected_counts = expected_modules(hidden_dir)
     adapters, flags = load_adapters(hidden_dir)
@@ -346,6 +349,10 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
         out["pct"] = round(100.0 * out["passed"] / out["total"], 1) if out["total"] else 0.0
         oracle = sorted({f"{f} ({name})" for name, c in cats.items() for f in c.get("flags", ())})
         out["flags"] = flags + oracle + sflags
+        if lenient:
+            out["flags"] = ["lenient: " + f for f in out["flags"]] + [
+                "lenient: variant grade, re may be imported outside toolkit/regex.py"]
+        out["lenient"] = bool(lenient)
         out["sloc"] = sloc
         out["complete"] = all(c["done"] for c in cats.values())
         return out
@@ -364,7 +371,7 @@ def grade(sol, only=None, out_path=None, hidden_dir=HERE):
         name = ad["name"]
         try:
             expected = oracle_results(ad)
-            got, mflags = run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only, watch_callers)
+            got, mflags = run_module(sol, ad, oracles_by_cat, wrap_by_cat, watch_only, watch_callers, lenient)
             passed, per_case = compare(ad, expected, got, mflags)
             failed_import = [r for r in got.values() if r.get("status") == "import_failed"]
             status = failed_import[0]["msg"] if failed_import else "ok"
@@ -408,9 +415,10 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--only", help="comma-separated category names")
     ap.add_argument("-v", action="store_true")
+    ap.add_argument("--lenient", action="store_true", help="secondary variant: re importable outside toolkit/regex.py (also K2_LENIENT_RE=1)")
     a = ap.parse_args()
     only = set(a.only.split(",")) if a.only else None
-    out = grade(a.solution, only, a.out)
+    out = grade(a.solution, only, a.out, lenient=True if a.lenient else None)
     for cat, (p, t) in out["by_cat"].items():
         status = out["modules"][cat]
         print(f"  {cat:8s} {p:4d}/{t:4d}" + ("" if status == "ok" else f"  ({status[:120]})"))

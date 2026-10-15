@@ -125,12 +125,29 @@ ORACLES_BY_CAT = {str(k): [str(m) for m in v] for k, v in job["oracles"].items()
 WRAP_BY_CAT = {str(k): [str(w) for w in v] for k, v in job.get("wrap", {}).items()}
 WATCH_ONLY = BASE_WATCH_ONLY | {str(m) for m in job.get("watch_only", [])}
 WATCH_CALLERS = {str(k): [str(m) for m in v] for k, v in job.get("watch_callers", {}).items()}
+LENIENT = bool(job.get("lenient", False))  # opt-in secondary grading variant, see lenient_ok()
 del job
 ALL_ORACLES = sorted({m for mods in ORACLES_BY_CAT.values() for m in mods})
 OWN = set(ORACLES_BY_CAT.get(cat, []))
 
 BLOCK = set(BASE_BLOCK) | set(ALL_ORACLES)              # refused for toolkit code
 STRICT = {m for m in ALL_ORACLES if m not in WATCH_ONLY}  # refused for every importer
+
+RE_FAMILY = BASE_WATCH_ONLY
+
+
+def lenient_ok(name, filename):
+    """Lenient variant only: may toolkit file `filename` import `name`? True for re and its sre_*
+    shims, from any toolkit file except toolkit/regex.py (or toolkit/regex/), and never while the
+    regex category itself runs: those cases are watched and refused exactly as in strict mode."""
+    if not LENIENT or _matches(name, RE_FAMILY) is None or OWN & RE_FAMILY:
+        return False
+    try:
+        rel = os.path.relpath(os.path.realpath(filename), TOOLKIT_DIR[:-1]).replace(os.sep, "/")
+    except (TypeError, ValueError):
+        return False
+    return not (rel == "regex.py" or rel.startswith("regex/"))
+
 
 STATE = {"in_case": False, "flagged": set(), "loading_adapter": False}
 
@@ -233,6 +250,8 @@ class Blocker:
                 frame = frame.f_back
                 continue
             if inside_toolkit(fn):
+                if lenient_ok(name, fn):
+                    return None
                 raise ImportError(blocked_msg(name))
             return None
         return None
@@ -251,7 +270,7 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
                 raise ImportError(blocked_msg(n))
         if globals is not None and inside_toolkit(globals.get("__file__")):
             for n in names:
-                if _matches(n, BLOCK) is not None:
+                if _matches(n, BLOCK) is not None and not lenient_ok(n, globals.get("__file__")):
                     raise ImportError(blocked_msg(n))
     return _orig_import(name, globals, locals, fromlist, level)
 
