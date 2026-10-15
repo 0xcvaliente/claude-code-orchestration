@@ -27,21 +27,22 @@
 export const NEGATED =
   /\b(?:0|zero|no|none|without(?: any)?)\s+(?:(?:tests?|checks?|cases?)\s+)?(?:failed|failures?|failing(?:\s+(?:tests?|checks?))?|errors?|regressions?|blockers?|known\s+(?:issues?|gaps?|limitations?|bugs?)|remaining\s+(?:issues?|failures?|gaps?|work)|issues?|gaps?)\b|\b(?:nothing|none)\s+(?:failed|is\s+missing|missing)\b|\bnot\s+blocked\b/gi;
 export const BEHAVIOUR =
-  /\b(?:throws?|raises?)\s+(?:an?\s+)?[`'"]?[\w.]+[`'"]?|\brejects?\b|\brejected\b|\breturns?\s+an?\s+error\b|\berror[\s-]+handling\b|`[^`\n]*(?:Error|Exception)[^`\n]*`|\b\w*(?:Error|Exception)\b/g;
-export const STATUS_LINE = /^[\s*_#`]*STATUS[\s*_`]*:[\s*_`]*(pass|fail)\b/gim;
+  /\b(?:throws?|raises?)\s+(?:an?\s+)?[`'"]?[\w.]+[`'"]?|\brejects?\b|\brejected\b|\breturns?\s+an?\s+error\b|\berror[\s-]+handling\b|`[^`\n]*(?:Error|Exception)[^`\n]*`|\b\w*(?:Error|Exception)\b|\bfix(?:ed|es)\s+(?:(?:the|all|\d+|those|these)\s+)*(?:failing|failures?|errors?|broken)\b|\bhandles?\s+(?:\w+\s+)?errors?\b|\berrors?\s+gracefully\b/gi;
+export const STATUS_LINE = /^[ \t*_#`]*STATUS[ \t*_`]*:[ \t*_`]*(pass|fail)\b/gim;
 export const STRONG_FAIL =
-  /\b(?:incomplete|not\s+(?:yet\s+)?(?:done|finished|completed?|implemented)|(?:could\s*(?:not|n't)|couldn't|unable\s+to|did\s*(?:not|n't)|didn't)\s+(?:finish|complete|get\s+(?:[\w-]+\s+){1,4}(?:working|passing))|ran\s+out\s+of\s+time|gave\s+up|blocked)\b/gi;
+  /\b(?:incomplete|not\s+(?:yet\s+)?(?:done|finished|completed?|implemented)|(?:could\s*not|couldn't|unable\s+to|failed\s+to)\s+(?:(?:[\w-]+\s+){0,4}(?:pass|passing|work|working)\b|\w+)|(?:did\s*(?:not|n't)|didn't|won't|will\s+not)\s+(?:finish|complete|pass|work)|not\s+all\s+(?:[\w-]+\s+){0,3}pass\w*|ran\s+out\s+of\s+time|gave\s+up|blocked)\b/gi;
 export const FAIL = /\b(?:failed|failing|fails|broken|errors?(?!\s+(?:handling|messages?|cases?|paths?|codes?|types?))|does\s*(?:not|n't)\s+(?:work|pass)|doesn't\s+(?:work|pass)|(?:tests?|checks?|cases?)\s+fail)\b/i;
 export const GAP =
   /\b(?:known\s+(?:issues?|gaps?|limitations?|bugs?)|remaining\s+(?:issues?|failures?|gaps?|work)|todo|not\s+(?:yet\s+)?(?:supported|handled|covered)|still\s+(?:fail(?:s|ing)?|missing|broken)|(?:is|are)\s+missing|partially|partial\s+(?:implementation|support|solution)|mostly\s+(?:done|working|complete|passing)|except\s+for)\b/i;
 export const DONE =
-  /\b(?:done|finished|completed?|implemented|all\s+(?:\d+\s+)?(?:[\w-]+\s+){0,2}(?:tests?|checks?|cases?|examples?)\s+(?:now\s+)?pass(?:ed|es|ing)?|passes|\badded\s+\S.*?\s+and\s+\S|pass(?:es)?\s+all\s+\d+|tests?\s+(?:now\s+)?pass(?:ed|es|ing)?|\d+\s+(?:tests?\s+)?passed|works|working)\b/i;
+  /\b(?:done|finished|completed?|implemented|all\s+(?:\d+\s+)?(?:[\w-]+\s+){0,2}(?:tests?|checks?|cases?|examples?)\s+(?:now\s+)?pass(?:ed|es|ing)?|passes|success|pass(?:es)?\s+(?:their|its|the)\s+(?:[\w-]+\s+){0,2}(?:tests?|checks?)|\badded\s+[^\n]{1,120}?\s+and\s+\S|pass(?:es)?\s+all\s+\d+|tests?\s+(?:now\s+)?pass(?:ed|es|ing)?|\d+\s+(?:tests?\s+)?passed|works|working)\b/i;
 export const ZERO_FAIL = /\b\d+\s+(?:tests?|checks?|cases?),\s*(?:0|zero)\s+(?:failures?|failed)\b/i;
 export const COLON_FRACTION = /\b(?:tests?|checks?|examples?)\s*:\s*(\d+)\s*\/\s*(\d+)\b/gi;
 export const FRACTION = /\b(\d+)\s*(?:\/|of|out\s+of)\s*(\d+)\s+(?:(?:hidden|public|unit)\s+)?(?:tests?|checks?|cases?)?\s*(?:pass|passed|passing|pass(?:es))\b|\b(\d+)\s*\/\s*(\d+)\s+passing\b/gi;
 
 export function classifyClaim(text) {
   if (typeof text !== "string" || !text.trim()) return "none";
+  if (text.length > 20000) text = text.slice(0, 10000) + "\n" + text.slice(-10000);
   const statuses = [...text.matchAll(STATUS_LINE)].map((m) => m[1].toLowerCase());
   if (statuses.includes("fail")) return "failure";
   let t = text.replace(BEHAVIOUR, " ").replace(NEGATED, " ");
