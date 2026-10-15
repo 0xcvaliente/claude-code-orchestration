@@ -60,13 +60,27 @@ and out of quotes (including an escaped line ending), `skipinitialspace`,
 `doublequote=False`, `QUOTE_NONE` (quotechar is an ordinary character),
 characters after a closing quote (kept when not `strict`).
 
-An escaped line ending (escapechar followed by `\r` or `\n`, outside
-quotes) adds that character to the field and continues the field on the
-next string: the end of that string does not end the record, and neither
-does the end of following strings while the field continues with plain
-characters; the record ends at the next unescaped `\r` or `\n` (or at
-the end of a later string after another escaped character or a
-delimiter). This is `csv`'s behaviour; match it exactly.
+The end of each string acts as a line ending: it ends an unquoted
+field and the record (`reader(['abc'])` gives `[['abc']]`, in strict mode
+too). The exceptions, where the record continues on the next string:
+
+- inside a quoted field (the field continues on the next string; the
+  string end adds nothing);
+- a string that ends with the escapechar, in or out of quotes: the
+  escapechar and the string end together add `"\n"` to the field, and the
+  field continues on the next string (`reader(['a\\', 'b\n'],
+  escapechar='\\')` gives `[['a\nb']]`). If that next string ends the
+  field normally, the record ends there as usual
+  (`reader(['a\\', 'b'], escapechar='\\')` also gives `[['a\nb']]`);
+- an escaped line ending (escapechar followed by `\r` or `\n`, outside
+  quotes): that character is added to the field, and the end of the
+  string does not end the record. Neither does the end of following
+  strings while the field continues with plain characters; the record
+  ends at the next unescaped `\r` or `\n`, or at the end of a later
+  string after another escaped character or a delimiter
+  (`reader(['\\\n', '  2.5'], escapechar='\\')` gives `[['\n  2.5']]`).
+
+This is `csv`'s behaviour; match it exactly.
 
 Reading errors (all raise `csvx.Error` unless noted):
 
@@ -74,10 +88,14 @@ Reading errors (all raise `csvx.Error` unless noted):
   `csvx.Error`, raised when that item is reached;
 - `strict` is true and a character other than the delimiter, the
   quotechar or a line ending follows a closing quote;
-- the input ends while a field is in progress (inside an open quoted
-  field, or with characters collected for the current field but no line
-  ending after them) and `strict` is true; when `strict` is false the
-  partial record is returned as the last record instead;
+- `strict` is true and the input ends while a record is still open
+  (one of the three continuation cases above) and either a quoted field
+  is open or the current field has collected at least one character:
+  `reader(['"ab'], strict=True)`, `reader(['a\\'], escapechar='\\',
+  strict=True)` and `reader(['\\\n', '  2.5'], escapechar='\\',
+  strict=True)` raise. When `strict` is false the open record is returned
+  as the last record instead (`[['ab']]`, `[['a\n']]`, `[['\n  2.5']]`).
+  A string that ends an unquoted field normally never causes this error;
 - an unescaped `\r` or `\n` outside a quoted field is followed, on the
   same string, by a character other than `\r` or `\n` (for example the
   string `"a\rb\n"`);
