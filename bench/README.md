@@ -28,6 +28,7 @@ In `bench/tasks/<id>/`. The cap is the task's own wall-clock limit (`cap_min`); 
 | `h2-scheduler` | medium | splittable | 30 min | node |
 | `k1-stdlib-toolkit` | large | splittable (4 modules: toml 124, shlex 68, regex 205, csv 106 hidden cases; 503 total) | 30 min | python |
 | `h3-sql-engine` | large | monolithic (minisql, matched against SQLite) | 30 min | python |
+| `k2-stdlib-toolkit-xl` | large | splittable (12 modules: k1's four plus ipaddr, fraction, urls, b64, diff, wrap, jsonx, cal; about 1,600 hidden tests) | 30 min | python |
 
 `k1-stdlib-toolkit` (test command `python3 tests/run_public.py`, graded path `toolkit`) is graded in a sandbox: the stdlib oracle modules are blocked, and using them in any way scores that module 0. It may arrive from another branch; `node bench/validate.mjs` lists what is present.
 
@@ -37,11 +38,15 @@ In `bench/tasks/<id>/`. The cap is the task's own wall-clock limit (`cap_min`); 
 npm run bench:validate                                   # no model calls: stub fails, reference passes, every mutant is caught, meta.total matches
 npm run bench -- --matrix bench/matrix/pilot.json        # 1 rep: t2 on all arms, k1 and h3 at 10 min (smoke test of the whole pipeline)
 npm run bench -- --matrix bench/matrix/lite.json         # 2 reps, all six tasks, all five arms, main cell
-npm run bench -- --matrix bench/matrix/sweeps.json       # k1 and h3, P-O vs O-mix, caps 10 and 60 min, budgets 1M and 3M tokens
+npm run bench -- --matrix bench/matrix/pilot-k2.json     # 1 rep: k2, P-O and O-mix, main cell
+npm run bench -- --matrix bench/matrix/lite-k2.json      # 2 reps: k2, all five arms, main cell (10 runs)
+npm run bench -- --matrix bench/matrix/sweeps.json       # k2 only, P-O vs O-mix, caps 10 and 60 min, budgets 3M and 8M tokens (16 runs)
 npm run bench:grade -- runs/bench/<campaign>             # offline grading of snapshots into grades.jsonl
 npm run bench:analyze -- runs/bench/<campaign>           # summary.json: token metrics, comparisons, hypothesis verdicts
 npm run bench:report -- runs/bench/<campaign>/summary.json   # report.html, plus benchmarks.md for docs/benchmarks.md
 ```
+
+The pilot showed that k1 and h3 saturate within minutes, so the splittable-task hypothesis (H1) and both sweeps (H7) moved to `k2-stdlib-toolkit-xl`, which has its own main campaign (`lite-k2`) and the sweeps; `lite.json` stays unchanged and keeps k1 as a saturated large task. See the amendment in [HYPOTHESES.md](HYPOTHESES.md).
 
 `bench:analyze` accepts several campaign dirs (pooled) and `--out`. `bench:report` takes `--html` and `--md`.
 

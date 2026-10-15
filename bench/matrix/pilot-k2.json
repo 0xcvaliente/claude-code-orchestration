@@ -1,0 +1,21 @@
+{
+  "name": "pilot-k2",
+  "seed": 1,
+  "groups": [
+    {
+      "tasks": [
+        "k2-stdlib-toolkit-xl"
+      ],
+      "arms": [
+        "P-O",
+        "O-mix"
+      ],
+      "cells": [
+        {
+          "id": "main"
+        }
+      ],
+      "reps": 1
+    }
+  ]
+}
