@@ -1,0 +1,24 @@
+{
+  "name": "lite-k2",
+  "seed": 1,
+  "groups": [
+    {
+      "tasks": [
+        "k2-stdlib-toolkit-xl"
+      ],
+      "arms": [
+        "P-S",
+        "P-O",
+        "O-mix",
+        "O-O",
+        "AUTO"
+      ],
+      "cells": [
+        {
+          "id": "main"
+        }
+      ],
+      "reps": 2
+    }
+  ]
+}

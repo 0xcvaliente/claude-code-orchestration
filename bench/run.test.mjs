@@ -20,7 +20,7 @@ const matrixOf = (name) => JSON.parse(readFileSync(join(here, "matrix", `${name}
 const metaOf = (id) => loadTask(fixtures, id).meta;
 
 test("matrix expansion: run counts and block counts of the shipped matrices", () => {
-  const counts = { pilot: [8, 3], lite: [60, 12], sweeps: [32, 16] };
+  const counts = { pilot: [8, 3], lite: [60, 12], sweeps: [16, 8], "lite-k2": [10, 2], "pilot-k2": [2, 1] };
   for (const [name, [nRuns, nBlocks]] of Object.entries(counts)) {
     const runs = expandMatrix(matrixOf(name), metaOf);
     assert.equal(runs.length, nRuns, name);
@@ -32,12 +32,12 @@ test("matrix expansion: run counts and block counts of the shipped matrices", ()
 
 test("matrix expansion: cell cap_min overrides meta, budget cells carry budget_tokens", () => {
   const runs = expandMatrix(matrixOf("sweeps"), metaOf);
-  const one = (cell) => runs.find((r) => r.task === "k1-stdlib-toolkit" && r.cell === cell);
+  const one = (cell) => runs.find((r) => r.task === "k2-stdlib-toolkit-xl" && r.cell === cell);
   assert.equal(one("cap10").cap_min, 10);
   assert.equal(one("cap60").cap_min, 60);
-  assert.equal(one("budget1M").cap_min, metaOf("k1-stdlib-toolkit").cap_min);
-  assert.equal(one("budget1M").budget_tokens, 1_000_000);
+  assert.equal(one("budget3M").cap_min, metaOf("k2-stdlib-toolkit-xl").cap_min);
   assert.equal(one("budget3M").budget_tokens, 3_000_000);
+  assert.equal(one("budget8M").budget_tokens, 8_000_000);
   assert.equal(one("cap10").budget_tokens, null);
 });
 

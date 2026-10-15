@@ -1,0 +1,13 @@
+{
+  "id": "k2-stdlib-toolkit-xl",
+  "title": "Fixture k2-stdlib-toolkit-xl",
+  "tier": "large",
+  "shape": "fixture",
+  "lang": "python",
+  "cap_min": 90,
+  "test_cmd": "python3 -m unittest -q",
+  "graded_paths": [
+    "."
+  ],
+  "snapshot_every_s": 60
+}

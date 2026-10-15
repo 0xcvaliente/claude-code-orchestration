@@ -10,8 +10,8 @@ import { formatTokens } from "../scripts/tokens.mjs";
 import { median } from "./lib/stats.mjs";
 
 const ARMS = ["P-S", "P-O", "O-mix", "O-O", "AUTO"];
-const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine"];
-const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M"];
+const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
+const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 const SETUPS = {
   "P-S": "Plain Sonnet session",
   "P-O": "Plain Opus session",
@@ -25,6 +25,7 @@ const CELL_TEXT = {
   cap60: "60 min time limit",
   budget1M: "1M token cap, 30 min",
   budget3M: "3M token cap, 30 min",
+  budget8M: "8M token cap, 30 min",
 };
 
 // ---------- formatting ----------
@@ -184,7 +185,7 @@ function headline(h) {
     case "H1": {
       const part = (k, label) => (e[k]?.score_diff_pts !== undefined ? `${label} ${pts(e[k].score_diff_pts)} points, ${secs(e[k].wall_median_s)} vs ${secs(e.P_O?.wall_median_s)}` : null);
       const p = [part("O_mix", "O-mix"), part("O_O", "O-O")].filter(Boolean).join("; ");
-      return `k1 at the shipped limit: orchestrators close to a plain Opus session and faster: ${v}${p ? `. ${p}` : ""}${tail}.`;
+      return `k2 at the shipped limit: orchestrators close to a plain Opus session and faster: ${v}${p ? `. ${p}` : ""}${tail}.`;
     }
     case "H2": {
       const p = Object.entries(e)
@@ -196,7 +197,7 @@ function headline(h) {
     case "H4":
       return `False successes, orchestrated vs plain (main cells): ${v}. ${e.orchestrated?.false_success ?? 0}/${e.orchestrated?.n ?? 0} vs ${e.plain?.false_success ?? 0}/${e.plain?.n ?? 0}${tail}.`;
     case "H5":
-      return `AUTO within 10% of the best setup's score per million tokens on 4 of 6 tasks: ${v}. Within on ${e.tasks_within ?? 0} of ${e.tasks_evaluable ?? 0} tasks with data${tail}.`;
+      return `AUTO within 10% of the best setup's score per million tokens on two-thirds of the tasks with data: ${v}. Within on ${e.tasks_within ?? 0} of ${e.tasks_evaluable ?? 0} tasks with data${tail}.`;
     case "H6": {
       const p = Object.entries(e)
         .filter(([, x]) => x.score_diff_pts !== undefined)
@@ -331,8 +332,8 @@ function sweepChart(s, task) {
 }
 
 function budgetChart(s, task) {
-  const cats = ["budget1M", "budget3M"];
-  const cs = s.cells.filter((c) => c.task === task && cats.includes(c.cell) && typeof c.score_median === "number");
+  const cs = s.cells.filter((c) => c.task === task && c.cell.startsWith("budget") && typeof c.score_median === "number");
+  const cats = [...new Set(cs.map((c) => c.cell))].sort((a, b) => idx(CELLS, a) - idx(CELLS, b));
   if (!cs.length) return "";
   const arms = armsIn(cs);
   const gw = (X1 - X0) / cats.length;
@@ -391,7 +392,7 @@ export function renderHtml(s, { title = "Orchestration benchmark", mdPath } = {}
     .map((t) => `<h3>${esc(t)}</h3>${cellsIn(s.cells.filter((c) => c.task === t)).map((cell) => `<h4>${esc(cell)}: ${esc(CELL_TEXT[cell] ?? cell)}</h4>${htmlTable(RESULT_HEADS, resultsRows(s, t, cell))}`).join("")}`)
     .join("");
   const charts = (fn, ts) => ts.map((t) => fn(s, t)).filter(Boolean).join("") || "<p>No data.</p>";
-  const big = ["k1-stdlib-toolkit", "h3-sql-engine"];
+  const big = ["k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Benchmark report</title>
 <style>
 :root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#d9d9de;--panel:#f1f1f3;--ok:#1f7a3a;--bad:#b42318;--mid:#8a6100;
