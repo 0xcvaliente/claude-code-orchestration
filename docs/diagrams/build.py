@@ -34,8 +34,8 @@ def sequence_svg(theme):
     """Native sequence notation: the scene renderer has no lifelines or alt frames."""
     c = PALETTES[theme]
     p = f"gates-{theme}"
-    W, H = 900, 584
-    xs = dict(o=90, i=270, v=450, r=630, g=810)
+    W, H = 1080, 844
+    xs = dict(o=90, p=270, i=450, v=630, r=810, g=990)
     out = []
     add = out.append
 
@@ -62,22 +62,26 @@ def sequence_svg(theme):
 
     add(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="{p}-title {p}-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">')
     add(f'<title id="{p}-title">Native gates: hooks that block an agent from finishing</title>')
-    add(f'<desc id="{p}-desc">The orchestrator briefs an implementer. When the implementer tries to finish, verify.sh runs the tests unless there is no test runner or, in a git work tree, only prose changed: on failure it blocks the implementer with the test output; when they pass or are skipped, the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator\'s final reply until a reviewer has passed the last implementer.</desc>')
+    add(f'<desc id="{p}-desc">The orchestrator sends the plan to a reviewer. When it launches an implementer, plan-check.mjs blocks the launch for overlapping files, a dependency cycle or a missing plan review, and otherwise lets it through. When the implementer tries to finish, verify.sh runs the tests unless there is no test runner or, in a git work tree, only prose changed: on failure it blocks the implementer with the test output; when they pass or are skipped, the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator\'s final reply until a reviewer has passed the last implementer.</desc>')
     add("<defs>")
     add(f'<marker id="{p}-filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M0 0 L12 6 L0 12 Z" fill="{c["edge"]}"/></marker>')
     add(f'<marker id="{p}-open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1 L11 6 L1 11" fill="none" stroke="{c["edge"]}" stroke-width="1.6"/></marker>')
     add("</defs>")
     add(f'<rect width="{W}" height="{H}" fill="{c["paper"]}"/>')
 
-    # alt frame first, so lifelines and messages draw over it
-    add(f'<rect x="30" y="192" width="480" height="156" rx="4" fill="none" stroke="{c["rule"]}" stroke-width="1.5"/>')
-    add(f'<path d="M30 192 H78 V212 L70 220 H30 Z" fill="{c["accent_surface"]}" stroke="{c["rule"]}" stroke-width="1.5"/>')
-    text(42, 210, "alt", 13, 700, c["accent"], "start")
-    add(f'<line x1="30" y1="272" x2="510" y2="272" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="5 5"/>')
+    # alt frames first, so lifelines and messages draw over them
+    def alt(top, bottom, split, right):
+        add(f'<rect x="30" y="{top}" width="{right - 30}" height="{bottom - top}" rx="4" fill="none" stroke="{c["rule"]}" stroke-width="1.5"/>')
+        add(f'<path d="M30 {top} H78 V{top + 20} L70 {top + 28} H30 Z" fill="{c["accent_surface"]}" stroke="{c["rule"]}" stroke-width="1.5"/>')
+        text(42, top + 18, "alt", 13, 700, c["accent"], "start")
+        add(f'<line x1="30" y1="{split}" x2="{right}" y2="{split}" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="5 5"/>')
+
+    alt(234, 390, 314, 510)
+    alt(452, 608, 532, 690)
 
     for key, x in xs.items():
-        add(f'<line x1="{x}" y1="84" x2="{x}" y2="544" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="4 6"/>')
-    people = dict(o=("Orchestrator", None), i=("Implementer", None), v=("verify.sh", "SubagentStop hook"),
+        add(f'<line x1="{x}" y1="84" x2="{x}" y2="804" stroke="{c["rule"]}" stroke-width="1.5" stroke-dasharray="4 6"/>')
+    people = dict(o=("Orchestrator", None), p=("plan-check.mjs", "PreToolUse hook"), i=("Implementer", None), v=("verify.sh", "SubagentStop hook"),
                   r=("Reviewer", None), g=("review-gate.mjs", "Stop hook"))
     for key, (name, sub) in people.items():
         x = xs[key]
@@ -88,17 +92,23 @@ def sequence_svg(theme):
         else:
             text(x, 57, name, 15, 700)
 
-    message("o", "i", 130, "brief: goal, files, check")
-    message("i", "v", 172, "tries to finish")
-    guard(102, 210, "[tests fail]")
-    message("v", "i", 250, "blocked + test output", reply=True)
-    guard(102, 292, "[tests pass or skipped]")
-    message("v", "o", 328, "allowed", reply=True)
-    message("o", "r", 388, "review the slice")
-    message("r", "o", 430, "STATUS: pass or fail", reply=True)
-    message("o", "g", 472, "final reply")
-    message("g", "o", 514, "blocked until a reviewer passes the last implementer", reply=True)
-    text(30, 572, "Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.", 12, 400, c["muted"], "start")
+    message("o", "r", 130, "PLAN REVIEW: task, findings, plan")
+    message("r", "o", 172, "STATUS: pass or fail, gaps", reply=True)
+    message("o", "p", 214, "launch implementer: brief")
+    guard(102, 254, "[overlap, cycle or no plan review]")
+    message("p", "o", 292, "blocked: fix the plan", reply=True)
+    guard(102, 334, "[plan ok]")
+    message("p", "i", 370, "allowed", reply=True)
+    message("i", "v", 432, "tries to finish")
+    guard(102, 470, "[tests fail]")
+    message("v", "i", 510, "blocked + test output", reply=True)
+    guard(102, 552, "[tests pass or skipped]")
+    message("v", "o", 588, "allowed", reply=True)
+    message("o", "r", 648, "review the slice")
+    message("r", "o", 690, "STATUS: pass or fail", reply=True)
+    message("o", "g", 732, "final reply")
+    message("g", "o", 774, "blocked until a reviewer passes the last implementer", reply=True)
+    text(30, 832, "Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.", 12, 400, c["muted"], "start")
     add("</svg>")
     return "\n".join(out) + "\n"
 
