@@ -1,0 +1,11 @@
+[
+  {"name": "banned synonym", "file": "handbook/access.md", "from": "Turn on [MFA](glossary.md#mfa) everywhere", "to": "Turn on [MFA](glossary.md#mfa) (2FA) everywhere"},
+  {"name": "rule duplicated in another section", "file": "handbook/incidents.md", "from": "What to do when something looks wrong.", "to": "What to do when something looks wrong. Keep your disk encrypted ([DV-1](../sources/device-standard.md#dv-1))."},
+  {"name": "number changed", "file": "handbook/devices.md", "from": "within 7 days of release", "to": "within a week of release"},
+  {"name": "citation missing", "file": "handbook/data.md", "from": "- [DT-4](../sources/data-classification.md#dt-4): Customer", "to": "- DT-4: Customer"},
+  {"name": "first mention not linked", "file": "handbook/incidents.md", "from": "becomes the [incident commander](glossary.md#incident-commander) and", "to": "becomes the incident commander and"},
+  {"name": "glossary entry missing", "file": "handbook/glossary.md", "from": "## PII\n", "to": "PII\n"},
+  {"name": "README order", "file": "handbook/README.md", "from": "1. [Access](access.md)\n2. [Devices](devices.md)", "to": "1. [Devices](devices.md)\n2. [Access](access.md)"},
+  {"name": "broken anchor", "file": "handbook/devices.md", "from": "(../sources/device-standard.md#dv-2)", "to": "(../sources/device-standard.md#dv2)"},
+  {"name": "rule in wrong section", "file": "handbook/access.md", "from": "- [AC-3](../sources/access-policy.md#ac-3): Your manager reviews your team's access every 90 days and removes what is no longer needed.\n", "to": ""}
+]

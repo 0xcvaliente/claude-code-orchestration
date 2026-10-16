@@ -9,14 +9,15 @@ import { pathToFileURL } from "node:url";
 import { formatTokens } from "../scripts/tokens.mjs";
 import { median } from "./lib/stats.mjs";
 
-const ARMS = ["P-S", "P-O", "O-mix", "O-O", "AUTO"];
-const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
+const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "AUTO"];
+const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook"];
 const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 const SETUPS = {
   "P-S": "Plain Sonnet session",
   "P-O": "Plain Opus session",
   "O-mix": "Orchestrator as shipped: Opus orchestrator, Sonnet implementers and reviewers, Haiku researchers",
   "O-O": "Orchestrator with every agent on Opus",
+  "O-next": "O-mix plus the revised proposals: plan check in code, plan review, per-slice review with FOCUS, editor slice, run journal",
   AUTO: "scripts/auto.sh: a Sonnet triage call picks plain, reviewed or the orchestrator",
 };
 const CELL_TEXT = {
@@ -441,11 +442,11 @@ export function renderHtml(s, { title = "Orchestration benchmark", mdPath } = {}
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Benchmark report</title>
 <style>
 :root{--bg:#fbfbfa;--fg:#1d1d1f;--muted:#6b6b70;--line:#d9d9de;--panel:#f1f1f3;--ok:#1f7a3a;--bad:#b42318;--mid:#8a6100;
---PS:#0f8b8d;--PO:#d1495b;--Omix:#2f6fde;--OO:#8e44ad;--AUTO:#b7791f;--opus:#8e44ad;--sonnet:#2f6fde;--haiku:#0f8b8d;--triage:#b7791f;--other:#8a8a90}
+--PS:#0f8b8d;--PO:#d1495b;--Omix:#2f6fde;--OO:#8e44ad;--Onext:#2e8b57;--AUTO:#b7791f;--opus:#8e44ad;--sonnet:#2f6fde;--haiku:#0f8b8d;--triage:#b7791f;--other:#8a8a90}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#151517;--fg:#ececef;--muted:#a0a0a8;--line:#3a3a40;--panel:#202024;--ok:#5ac77a;--bad:#ff7b6e;--mid:#e0b04a;
---PS:#3cc4c6;--PO:#ff7a8a;--Omix:#6d9cff;--OO:#c08ae0;--AUTO:#e6a94a;--opus:#c08ae0;--sonnet:#6d9cff;--haiku:#3cc4c6;--triage:#e6a94a;--other:#9a9aa2}}
+--PS:#3cc4c6;--PO:#ff7a8a;--Omix:#6d9cff;--OO:#c08ae0;--Onext:#5cc98a;--AUTO:#e6a94a;--opus:#c08ae0;--sonnet:#6d9cff;--haiku:#3cc4c6;--triage:#e6a94a;--other:#9a9aa2}}
 :root[data-theme="dark"]{--bg:#151517;--fg:#ececef;--muted:#a0a0a8;--line:#3a3a40;--panel:#202024;--ok:#5ac77a;--bad:#ff7b6e;--mid:#e0b04a;
---PS:#3cc4c6;--PO:#ff7a8a;--Omix:#6d9cff;--OO:#c08ae0;--AUTO:#e6a94a;--opus:#c08ae0;--sonnet:#6d9cff;--haiku:#3cc4c6;--triage:#e6a94a;--other:#9a9aa2}
+--PS:#3cc4c6;--PO:#ff7a8a;--Omix:#6d9cff;--OO:#c08ae0;--Onext:#5cc98a;--AUTO:#e6a94a;--opus:#c08ae0;--sonnet:#6d9cff;--haiku:#3cc4c6;--triage:#e6a94a;--other:#9a9aa2}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1000px;margin:0 auto;padding:24px 16px 64px}

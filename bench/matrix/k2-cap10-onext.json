@@ -1,0 +1,12 @@
+{
+  "name": "k2-cap10-onext",
+  "seed": 11,
+  "groups": [
+    {
+      "tasks": ["k2-stdlib-toolkit-xl"],
+      "arms": ["O-mix", "O-next"],
+      "cells": [{ "id": "cap10", "cap_min": 10 }],
+      "reps": 4
+    }
+  ]
+}

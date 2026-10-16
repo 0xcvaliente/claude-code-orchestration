@@ -1,0 +1,12 @@
+{
+  "name": "fair-cap5-onext",
+  "seed": 13,
+  "groups": [
+    {
+      "tasks": ["c1-unit-registry", "d1-handbook"],
+      "arms": ["O-mix", "O-next"],
+      "cells": [{ "id": "cap5", "cap_min": 5 }],
+      "reps": 4
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+[
+  {"name": "registry drops a category", "file": "src/registry.js", "from": "[length, mass, time, data, volume, temperature]", "to": "[length, mass, time, data, volume]"},
+  {"name": "inverted factor", "file": "src/index.js", "from": "(value * c.units[from]) / c.units[to]", "to": "(value * c.units[to]) / c.units[from]"},
+  {"name": "no absolute-zero check", "file": "src/units/temperature.js", "from": "if (k < 0) throw", "to": "if (k < -1e9) throw"},
+  {"name": "categories unsorted", "file": "src/index.js", "from": "Object.keys(registry).sort()", "to": "Object.keys(registry)"},
+  {"name": "wrong mile", "file": "src/units/length.js", "from": "mi: 1609.344", "to": "mi: 1609"},
+  {"name": "KiB as 1000", "file": "src/units/data.js", "from": "KiB: 1024", "to": "KiB: 1000"},
+  {"name": "string values accepted", "file": "src/index.js", "from": "!Number.isFinite(value)", "to": "Number.isNaN(value)"}
+]
