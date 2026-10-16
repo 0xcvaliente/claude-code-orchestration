@@ -1,5 +1,7 @@
 # Benchmark: O-next (revised proposals) vs O-mix (orchestrator as shipped)
 
+> **Status.** The O-next changes were promoted into the shipped orchestrator on branch `feat/o-next-architecture` (hooks `plan-check.mjs` and `journal.mjs`, the orchestrator and reviewer prompts, the route skill and the nudge). The `O-next` benchmark arm and `bench/variants/` are removed, because an overlay on the shipped prompt no longer has anything to replace. From then on `O-mix` runs the new orchestrator; to rerun the old baseline, check out `06169c4` or earlier. The numbers below are unchanged, and `bench/analyze.mjs` and `bench/report.mjs` still read the `O-next` arm so these campaigns can be re-analysed. `bench/matrix/k2-cap10-onext.json` is data-only now: `run.mjs` rejects its `O-next` arm. The promotion rests on a tie on k2 plus the design argument, not on a measured gain; the 5-minute document and shared-registry tasks (`d1-handbook`, `c1-unit-registry`) were built to test that and have not been run.
+
 Date: 2026-10-16. Campaign `k2-cap10-onext` (`bench/matrix/k2-cap10-onext.json`), branch `o-next-benchmark` (working tree on top of `06169c4`). Raw data: `runs/bench/k2-cap10-onext/` (`summary.json`, `grades.jsonl`, `grades-lenient.jsonl`, `report.html`).
 
 One task, `k2-stdlib-toolkit-xl` (twelve modules, 1,762 hidden tests), with a 10-minute wall-clock cap and 4 runs per arm. In each block the two arms started together. Cost is in tokens, over every model.

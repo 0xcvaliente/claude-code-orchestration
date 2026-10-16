@@ -152,7 +152,7 @@ for (const wave of waves) {
       let reviews = []
       for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
         work = await agent(
-          `Slice ${s.id}\nGoal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
+          `ORCHESTRATION: workflow\nSlice ${s.id}\nGoal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
             `Overall task: ${task}\nFindings:\n${findings || '(none)'}\n` +
             (isolated
               ? 'You are in an isolated worktree: commit all changes on the current branch and report its name.\n'
