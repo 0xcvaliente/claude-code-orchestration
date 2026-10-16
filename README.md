@@ -202,8 +202,9 @@ The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMax
 | Order is enforced by | Code | The orchestrator's prompt plus hook gates (the optional scripted workflow fixes order in code) |
 | Test gate | The harness runs `--test-cmd` | `verify.sh` hook on `SubagentStop`: runs the tests wherever there is a test command, skips a prose-only change in a git work tree (see below) |
 | Review gate | Verifier per slice in code | `review-gate.mjs` hook on `Stop`, for every task |
+| Plan check | Slices come from a validated plan in code | `plan-check.mjs` hook on `PreToolUse` (`Agent`): every implementer brief names its slice, files and dependencies; it blocks overlapping files, dependency cycles and a start before a `PLAN REVIEW` reviewer has finished (the light path skips the review) |
 | Isolation | One worktree per slice | `isolation: "worktree"` on parallel implementers of code in git (needs `worktree.baseRef: "head"`, see below); other work shares your folder, and code outside git runs one slice at a time |
-| Resume, replan, retry | Yes | Retry only: the orchestrator resumes the same implementer with `SendMessage`, so it keeps its context, and its worktree and branch when isolated |
+| Resume, replan, retry | Yes | Retry: the orchestrator resumes the same implementer with `SendMessage`, so it keeps its context, and its worktree and branch when isolated. Resume: `journal.mjs` records each slice's result in `.claude/state/journal.jsonl`, and an orchestrator asked to resume skips slices whose last review passed. No automatic replan |
 | Needs | An API login for the Agent SDK | A logged-in `claude`. A headless run that uses an agent (`npm run native`, or the reviewer and orchestrator of `npm run auto`) runs the folder's own `.claude/agents/<name>.md` or, without it, the plugin's agent when the plugin is enabled there; with neither, that agent step exits 1 with the reason and calls no model |
 
 Natively, the gates are hooks that block an agent from finishing:
