@@ -33,11 +33,19 @@ The orchestrator sizes the task first. It decides whether the task changes code 
 ```mermaid
 sequenceDiagram
     participant O as Orchestrator
+    participant P as plan-check.mjs (PreToolUse)
     participant I as Implementer
     participant V as verify.sh (SubagentStop)
     participant R as Reviewer
     participant G as review-gate.mjs (Stop)
-    O->>I: brief: goal, files, acceptance check
+    O->>R: PLAN REVIEW: task, findings, plan
+    R-->>O: STATUS pass or fail, gaps
+    O->>P: launch implementer: brief
+    alt overlap, cycle or no plan review
+        P-->>O: exit 2 (blocked; after 2 blocks, allowed and logged as gave_up)
+    else plan ok
+        P-->>I: allowed
+    end
     I-->>V: tries to finish
     alt tests fail
         V-->>I: exit 2, test output (blocked)
