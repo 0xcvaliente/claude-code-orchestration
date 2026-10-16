@@ -337,6 +337,7 @@ src/
   agents/                         orchestrator, researcher, implementer,
                                   integrator, reviewer
   hooks/                          verify.sh, test-cmd.sh, review-gate.mjs,
+                                  plan-check.mjs, journal.mjs,
                                   telemetry.mjs, state.mjs, nudge.mjs
   skills/                         route, orchestration-conventions
   workflows/orchestrate.js        the scripted flow

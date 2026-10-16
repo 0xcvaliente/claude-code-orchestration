@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PreToolUse gate on Agent (O-next variant): checks each implementer brief against the slices launched earlier in
+// PreToolUse gate on Agent: checks each implementer brief against the slices launched earlier in
 // this session, in code, before the implementer starts. The brief carries three lines:
 //   SLICE: <id>    FILES: <owned files, comma-separated>    DEPENDS: <slice ids, or none>
 // Blocks (exit 2, reason on stderr) when a FILES entry overlaps a file another slice owns and that slice is not in
@@ -13,10 +13,10 @@
 // session, so a broken journal or a skipped review never stalls a run.
 // A wave's launches arrive at the same time, so read-decide-append runs under a lock (an exclusive mkdir); a lock
 // older than STALE_MS is taken over, and after WAIT_MS without it the hook decides unlocked rather than stall.
-// Exits 0 on malformed input.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+// A brief with an ORCHESTRATION: workflow line (the scripted workflow) is not checked. Exits 0 on malformed input.
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_FORMAT_BLOCKS = 2;
 const MAX_REVIEW_BLOCKS = 2;
@@ -26,6 +26,7 @@ const STALE_MS = 10000;
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
+if (duplicate("plan-check.mjs")) process.exit(0); // the project's own copy decides this launch
 let input;
 try {
   input = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -35,6 +36,8 @@ try {
 const tool = input?.tool_input ?? {};
 const role = String(tool.subagent_type ?? "").split(":").pop();
 if (role !== "implementer" || typeof tool.prompt !== "string") process.exit(0);
+// The scripted workflow fixes the order in code and plans its own slices, so its briefs say so and skip this check.
+if (/^[ \t>*_`-]*ORCHESTRATION:\**[ \t]*workflow\b/im.test(tool.prompt)) process.exit(0);
 const sessionId = input.session_id ?? "";
 
 const line = (key) => tool.prompt.match(new RegExp(`^[ \\t>*_\`-]*${key}:\\**[ \\t]*(.+)$`, "im"))?.[1].trim();
@@ -69,20 +72,23 @@ try {
   // no state dir: decide unlocked
 }
 
-const readLog = (name) =>
-  existsSync(join(stateDir, name))
-    ? readFileSync(join(stateDir, name), "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .map((l) => {
-          try {
-            return JSON.parse(l);
-          } catch {
-            return null;
-          }
-        })
-        .filter((e) => e && e.session_id === sessionId)
-    : [];
+const readLog = (name) => {
+  try {
+    return readFileSync(join(stateDir, name), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter((e) => e && e.session_id === sessionId);
+  } catch {
+    return []; // no log yet, or unreadable: decide as if nothing was launched, and still release the lock
+  }
+};
 const prior = readLog(LOG);
 
 function decide(decision, reason, message) {

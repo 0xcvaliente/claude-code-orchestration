@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Run journal (O-next variant): one line per finished implementer or reviewer in journal.jsonl in the state dir,
+// Run journal: one line per finished implementer or reviewer in journal.jsonl in the state dir,
 // keyed by the SLICE line of the worker's brief (a brief starting with PLAN REVIEW is slice "plan"), with the STATUS
 // from its final report. An orchestrator asked to resume reads it and skips slices whose last review passed;
 // plan-check.mjs reads it to see that the plan review finished.
@@ -12,10 +12,11 @@
 // sessions) the brief is read from it as before. Exits 0 on malformed input.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
+if (duplicate("journal.mjs")) process.exit(0); // the project's own copy records this event
 let p;
 try {
   p = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");

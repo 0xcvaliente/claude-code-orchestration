@@ -5,54 +5,17 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { prepareClaudeDir } from "./arms.mjs";
-import { edit, withHooks } from "./variants/o-next.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-test("O-next overlay applies to the shipped .claude/ and keeps O-mix's models and hooks", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "bench-onext-"));
-  try {
-    prepareClaudeDir("O-next", tmp, root, ["orchestration@m"]);
-    const claude = join(tmp, ".claude");
-    const orch = readFileSync(join(claude, "agents", "orchestrator.md"), "utf8");
-    const rev = readFileSync(join(claude, "agents", "reviewer.md"), "utf8");
-    for (const s of ["2a. Plan review", "SLICE: <id>", "review each slice as soon as its implementer returns", "final editor slice", "## Resume"]) assert.ok(orch.includes(s), s);
-    for (const s of ["PLAN REVIEW", "FOCUS:"]) assert.ok(rev.includes(s), s);
-    const shipped = (a) => readFileSync(join(root, ".claude", "agents", a), "utf8").match(/^---\n[\s\S]*?\n---/)[0];
-    assert.equal(orch.match(/^---\n[\s\S]*?\n---/)[0], shipped("orchestrator.md"));
-    assert.equal(rev.match(/^---\n[\s\S]*?\n---/)[0], shipped("reviewer.md"));
-    for (const h of ["plan-check.mjs", "journal.mjs", "state.mjs"]) assert.ok(existsSync(join(claude, "hooks", h)), h);
-    const settings = JSON.parse(readFileSync(join(claude, "settings.json"), "utf8"));
-    assert.equal(settings.enabledPlugins["orchestration@m"], false);
-    assert.ok(settings.hooks.Stop, "shipped review gate kept");
-    assert.ok(settings.hooks.PreToolUse.some((e) => JSON.stringify(e).includes("plan-check.mjs")));
-    assert.equal(settings.hooks.SubagentStop.length, 3, "telemetry, verify and journal");
-    assert.ok(settings.hooks.PostToolUse.some((e) => JSON.stringify(e).includes("journal.mjs")), "journal records launches");
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
-
-test("edit throws on a missing or repeated anchor; withHooks appends", () => {
-  assert.throws(() => edit("a b", [["c", "d"]], "f.md"), /found 0 times in f\.md/);
-  assert.throws(() => edit("a a", [["a", "d"]], "f.md"), /found 2 times/);
-  assert.equal(edit("a $& b", [["b", "$1"]], "f.md"), "a $& $1");
-  const s = withHooks({ hooks: { SubagentStop: [{ x: 1 }] }, model: "m" });
-  assert.equal(s.model, "m");
-  assert.equal(s.hooks.SubagentStop.length, 2);
-  assert.equal(s.hooks.PreToolUse.length, 1);
-  assert.equal(s.hooks.PostToolUse.length, 1);
-});
-
-// A throwaway project with the variant's hooks and the shipped state.mjs, as a run repo gets them. By default the
+// A throwaway project with the hooks and state.mjs copied from .claude/hooks. By default the
 // plan review has finished in sessions s1 and other-session, so the plan-review gate is open.
 function project({ reviewed = true } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "bench-onext-hook-"));
+  const dir = mkdtempSync(join(tmpdir(), "plan-hooks-"));
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
   copyFileSync(join(root, ".claude", "hooks", "state.mjs"), join(hooks, "state.mjs"));
-  for (const h of ["plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, "bench", "variants", "o-next", "hooks", h), join(hooks, h));
+  for (const h of ["plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   if (reviewed) {
     mkdirSync(join(dir, ".claude", "state"), { recursive: true });
     const plan = (session) => JSON.stringify({ ts: "t", session_id: session, slice: "plan", role: "reviewer", status: "pass", agent_id: "r0" });
@@ -200,6 +163,47 @@ test("journal: headless (no transcript) takes the slice from the launch, in eith
     post("x2", "implementer", "no slice line");
     const log = readFileSync(join(dir, ".claude", "state", "journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.deepEqual(log.map((e) => [e.slice, e.role, e.status, e.agent_id]), [["toml", "implementer", "pass", "bg1"], ["toml", "reviewer", "fail", "a5f80f257663a4fed"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plugin copies step aside where the project registers its own, so nothing is decided or recorded twice", () => {
+  const dir = project();
+  try {
+    writeFileSync(join(dir, ".claude", "settings.json"), JSON.stringify({ hooks: { x: ".claude/hooks/plan-check.mjs .claude/hooks/journal.mjs" } }));
+    const clash = (extra) => spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs"), ...extra], { input: JSON.stringify({ session_id: "s9", tool_name: "Agent", tool_input: { subagent_type: "orchestration:implementer", prompt: "Goal: no lines" } }), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+    assert.equal(clash(["--plugin"]).status, 0, "plugin copy exits at once");
+    assert.equal(existsSync(join(dir, ".claude", "state", "plan-check.jsonl")), false, "and records nothing");
+    assert.equal(clash([]).status, 2, "the project copy still blocks the same launch");
+    const journal = spawnSync("node", [join(dir, ".claude", "hooks", "journal.mjs"), "--plugin"], { input: JSON.stringify({ hook_event_name: "SubagentStop", session_id: "s9", agent_id: "a1", agent_type: "reviewer", last_assistant_message: "STATUS: pass" }), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+    assert.equal(journal.status, 0);
+    assert.equal(existsSync(join(dir, ".claude", "state", "journal-pending.jsonl")), false, "the plugin journal wrote nothing");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the project settings and the plugin build register both hooks", () => {
+  const settings = JSON.parse(readFileSync(join(root, ".claude", "settings.json"), "utf8"));
+  const commands = (event, matcher) => (settings.hooks[event] ?? []).filter((e) => e.matcher === matcher).flatMap((e) => e.hooks.map((h) => h.command));
+  assert.ok(commands("PreToolUse", "Agent|Task").some((c) => c.includes("plan-check.mjs")));
+  assert.ok(commands("PostToolUse", "Agent|Task").some((c) => c.includes("journal.mjs")));
+  assert.ok(commands("SubagentStop", undefined).some((c) => c.includes("journal.mjs")));
+  const plugin = JSON.parse(readFileSync(join(root, "dist", "plugin", "hooks", "hooks.json"), "utf8"));
+  assert.ok(plugin.hooks.PreToolUse[0].hooks[0].command.endsWith('plan-check.mjs" --plugin'));
+  assert.ok(plugin.hooks.PostToolUse[0].hooks[0].command.endsWith('journal.mjs" --plugin'));
+  assert.ok(plugin.hooks.SubagentStop.some((e) => e.hooks[0].command.includes("journal.mjs")));
+});
+
+test("plan check: a workflow brief is not checked, and an unreadable log still releases the lock", () => {
+  const dir = project({ reviewed: false });
+  try {
+    assert.equal(launch(dir, "ORCHESTRATION: workflow\nSlice a\nFiles you own: x.py").status, 0);
+    assert.equal(existsSync(join(dir, ".claude", "state", "plan-check.jsonl")), false, "nothing recorded");
+    mkdirSync(join(dir, ".claude", "state", "plan-check.jsonl"), { recursive: true }); // reading it as a file throws
+    assert.equal(launch(dir, "SLICE: a\nFILES: x.py\nDEPENDS: none\nPATH: light").status, 0);
+    assert.equal(existsSync(join(dir, ".claude", "state", "plan-check.lock")), false, "lock released");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

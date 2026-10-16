@@ -38,9 +38,12 @@ const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROO
 const hooks = {
   hooks: {
     SessionStart: [{ hooks: [{ type: "command", command: run("nudge.mjs") }] }],
+    PreToolUse: [{ matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs") }] }],
+    PostToolUse: [{ matcher: "Agent|Task", hooks: [{ type: "command", command: run("journal.mjs") }] }],
     SubagentStart: [{ hooks: [{ type: "command", command: run("telemetry.mjs") }] }],
     SubagentStop: [
       { hooks: [{ type: "command", command: run("telemetry.mjs") }] },
+      { hooks: [{ type: "command", command: run("journal.mjs") }] },
       { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh") }] },
     ],
     Stop: [{ hooks: [{ type: "command", command: run("review-gate.mjs") }] }],

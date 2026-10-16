@@ -6,7 +6,7 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts && node --test bench/*.test.mjs",
+    "test": "tsx --test src/*.test.ts src/*.test.mjs && node --test bench/*.test.mjs",
     "sync-agents": "tsx src/sync-agents.ts",
     "check-agents": "tsx src/sync-agents.ts --check",
     "native": "scripts/orchestrate.sh",
