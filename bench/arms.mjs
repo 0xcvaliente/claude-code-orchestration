@@ -3,17 +3,23 @@
 //   P-O    plain Opus session       same with ORCH_MODEL=opus
 //   O-mix  orchestrator, agents as shipped (this repo's .claude/ copied in)
 //   O-O    orchestrator, every agent's model: line rewritten to opus
+//   O-next orchestrator as O-mix plus the bench/variants/o-next.mjs overlay (plan check and review, per-slice review,
+//          editor slice, run journal)
 //   AUTO   scripts/auto.sh (triage picks plain, reviewed or the orchestrator); .claude/ copied, settings model sonnet
 // Every run repo gets .claude/settings.json with "enabledPlugins": {<each user-enabled plugin>: false}.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { mergeSettings } from "./lib/run-core.mjs";
+import { applyONext } from "./variants/o-next.mjs";
+
+const VARIANTS = { "o-next": applyONext };
 
 export const ARMS = {
   "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet" }, copyClaude: false },
   "P-O": { label: "Plain session (Opus)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false },
   "O-mix": { label: "Orchestrator, shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
   "O-O": { label: "Orchestrator, all agents Opus", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, agentModel: "opus" },
+  "O-next": { label: "Orchestrator, revised proposals", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, variant: "o-next" },
   AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, settings: { model: "sonnet" } },
 };
 
@@ -44,7 +50,7 @@ export function command(armId, prompt, runRepo, root) {
 }
 
 // Writes the run repo's .claude/: a copy of root/.claude (without state/ and worktrees/) for orchestrator arms,
-// agent models rewritten for O-O, then settings.json merged with the disabled plugins.
+// agent models rewritten for O-O, a variant overlay applied for O-next, then settings.json merged with the disabled plugins.
 export function prepareClaudeDir(armId, runRepo, root, disabledIds) {
   const arm = armOf(armId);
   const dest = join(runRepo, ".claude");
@@ -64,6 +70,7 @@ export function prepareClaudeDir(armId, runRepo, root, disabledIds) {
         writeFileSync(file, readFileSync(file, "utf8").replace(/^model:.*$/m, `model: ${arm.agentModel}`));
       }
     }
+    if (arm.variant) VARIANTS[arm.variant](dest);
   }
   mkdirSync(dest, { recursive: true });
   const file = join(dest, "settings.json");

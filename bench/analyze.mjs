@@ -13,8 +13,8 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "AUTO"];
-export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl"];
+export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "AUTO"];
+export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook"];
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },
   "t2-single": { tier: "small", shape: "single" },
@@ -398,6 +398,7 @@ export function buildComparisons(runs, opts) {
     const arms = ARMS.filter((a) => of(a).length).concat([...new Set(runs.filter((r) => r.task === task && r.cell === cell).map((r) => r.arm))].filter((a) => !ARMS.includes(a)));
     const todo = arms.filter((a) => a !== "P-O").map((a) => [a, "P-O"]);
     if (arms.includes("O-mix")) todo.push(["O-mix", "P-S"]);
+    if (arms.includes("O-mix")) todo.push(["O-next", "O-mix"]);
     for (const [a, b] of todo) {
       if (!of(a).length || !of(b).length) continue;
       out.push({ task, cell, arm: a, baseline: b, ...compare(of(a), of(b), `${task}|${cell}|${a}|${b}`, opts) });
