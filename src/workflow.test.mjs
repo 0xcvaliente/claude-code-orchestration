@@ -22,13 +22,20 @@ function loadMeta() {
 const meta = loadMeta();
 const body = source.replace(/^export const meta = /m, "const meta = ");
 
+/** @param {string} id @param {Record<string, unknown>} [o] */
 const slice = (id, o = {}) => ({ id, goal: `goal ${id}`, files: [`${id}.txt`], acceptance: `check ${id}`, dependsOn: [], risky: false, ...o });
 
 // Runs the script with a fake runtime. `slices` is the plan; `verdict(label)` returns a reviewer verdict.
+/** @typedef {{ args?: Record<string, unknown>, slices?: any[], questions?: string[], verdict?: (label: string) => any, implement?: (label: string, opts: any) => any }} RunOpts */
+/** @param {RunOpts} [opts] */
 async function run({ args = {}, slices, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement } = {}) {
+  /** @type {any[]} */
   const calls = [];
+  /** @type {string[]} */
   const phases = [];
+  /** @type {string[]} */
   const logs = [];
+  /** @param {string} prompt @param {any} [opts] */
   const fakeAgent = async (prompt, opts = {}) => {
     calls.push({ prompt, opts });
     const { label = "", agentType } = opts;
@@ -41,13 +48,17 @@ async function run({ args = {}, slices, questions = [], verdict = () => ({ pass:
     if (agentType === "integrator") return "merged";
     throw new Error(`unexpected agent call ${label}`);
   };
+  /** @param {Array<() => unknown>} fns */
   const parallel = (fns) => Promise.all(fns.map((f) => f()));
+  /** @param {any[]} items @param {(item: any) => unknown} fn */
   const pipeline = (items, fn) => Promise.all(items.map((i) => fn(i)));
   const fn = new AsyncFunction("args", "agent", "parallel", "pipeline", "phase", "log", body);
-  const result = await fn({ task: "do the thing", ...args }, fakeAgent, parallel, pipeline, (t) => phases.push(t), (m) => logs.push(m));
+  const result = await fn({ task: "do the thing", ...args }, fakeAgent, parallel, pipeline, (/** @type {string} */ t) => phases.push(t), (/** @type {string} */ m) => logs.push(m));
   return { result, calls, phases, logs };
 }
+/** @param {any[]} calls */
 const labels = (calls) => calls.map((c) => c.opts.label);
+/** @param {any[]} calls */
 const implementers = (calls) => calls.filter((c) => c.opts.agentType === "implementer");
 
 test("meta is a pure literal whose phases match the phase() titles the script uses", async () => {
@@ -55,9 +66,9 @@ test("meta is a pure literal whose phases match the phase() titles the script us
   assert.ok(meta.description && meta.description.length > 10);
   const titles = Array.from(meta.phases, (p) => p.title);
   assert.deepEqual(titles, ["Plan", "Explore", "Build", "Integrate"]);
-  const used = new Set([...source.matchAll(/\bphase\('([^']+)'\)/g)].map((m) => m[1]));
+  const used = new Set([...source.matchAll(/\bphase\('([^']+)'\)/g)].map((m) => /** @type {string} */ (m[1])));
   for (const u of used) assert.ok(titles.includes(u), `phase ${u} declared in meta`);
-  const optsUsed = new Set([...source.matchAll(/phase: '([^']+)'/g)].map((m) => m[1]));
+  const optsUsed = new Set([...source.matchAll(/phase: '([^']+)'/g)].map((m) => /** @type {string} */ (m[1])));
   for (const u of optsUsed) assert.ok(titles.includes(u), `agent phase ${u} declared in meta`);
   const r = await run({ slices: [slice("a")] });
   assert.deepEqual(r.phases, ["Plan", "Explore", "Build"], "Integrate only when worktrees were used");
@@ -85,7 +96,7 @@ test("multi-slice plan: dependencies fix the order; shared-tree code runs one sl
   const slices = [slice("a"), slice("b"), slice("c", { dependsOn: ["a", "b"] })];
   const r = await run({ slices });
   const l = labels(r.calls);
-  const idx = (x) => l.indexOf(x);
+  const idx = (/** @type {string} */ x) => l.indexOf(x);
   assert.ok(idx("plan:slices") < idx("build:a#1"));
   // without baseRefHead a wave of two runs sequentially: a built and reviewed before b starts
   assert.ok(idx("build:a#1") < idx("review:a#1") && idx("review:a#1") < idx("build:b#1"));
@@ -115,6 +126,7 @@ test("code: false runs a wave in the shared folder with no checkpoint, integrato
 });
 
 test("the plan is bounded to 6 slices by default and by args.maxSlices", async () => {
+  /** @param {number} [maxSlices] */
   const planCall = async (maxSlices) => {
     const r = await run({ args: maxSlices ? { maxSlices } : {}, slices: [slice("a")] });
     return r.calls.find((c) => c.opts.label === "plan:slices");
@@ -165,6 +177,7 @@ function hookProject() {
   for (const h of ["state.mjs", "plan-check.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   return dir;
 }
+/** @param {string} dir @param {string} prompt */
 const launch = (dir, prompt) =>
   spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs")], {
     input: JSON.stringify({ session_id: "wf", tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt } }),

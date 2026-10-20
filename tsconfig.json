@@ -7,7 +7,12 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "allowJs": true
+    "allowJs": true,
+    "checkJs": true
   },
-  "include": ["src"]
+  // bench/** is deliberately NOT included: checkJs reports ~1000 errors there (untyped
+  // accumulators, JSON-shaped records, 400+ in the bench/*.test.mjs files this slice may not edit).
+  // Typing it is a separate project; it is out, not half-typed.
+  "include": ["src/**/*", ".claude/hooks/**/*.mjs", "scripts/**/*.mjs"],
+  "exclude": ["node_modules", "dist", "runs", ".claude/worktrees", "bench"]
 }
