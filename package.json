@@ -1,11 +1,12 @@
 {
-  "name": "claude-code-orchestrator",
+  "name": "claude-code-orchestration",
   "version": "0.1.6",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run check-agents && npm run check-plugin",
     "test": "tsx --test src/*.test.ts src/*.test.mjs && node --test bench/*.test.mjs",
     "sync-agents": "tsx src/sync-agents.ts",
     "check-agents": "tsx src/sync-agents.ts --check",

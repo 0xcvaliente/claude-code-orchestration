@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      # The benchmark graders' oracle is the Python 3.13 stdlib.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Tests shell out to bash and git (both preinstalled on ubuntu-latest); tests that commit need an identity.
+      - name: Configure git identity
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@example.com"
+      - run: npm ci
+      - run: npm run check
