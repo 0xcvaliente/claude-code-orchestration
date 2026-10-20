@@ -40,7 +40,9 @@ if (role !== "implementer" || typeof tool.prompt !== "string") process.exit(0);
 if (/^[ \t>*_`-]*ORCHESTRATION:\**[ \t]*workflow\b/im.test(tool.prompt)) process.exit(0);
 const sessionId = input.session_id ?? "";
 
+/** @param {string} key */
 const line = (key) => tool.prompt.match(new RegExp(`^[ \\t>*_\`-]*${key}:\\**[ \\t]*(.+)$`, "im"))?.[1].trim();
+/** @param {string | undefined} v */
 const list = (v) =>
   (v ?? "")
     .split(",")
@@ -72,6 +74,7 @@ try {
   // no state dir: decide unlocked
 }
 
+/** @param {string} name @returns {any[]} */
 const readLog = (name) => {
   try {
     return readFileSync(join(stateDir, name), "utf8")
@@ -91,6 +94,7 @@ const readLog = (name) => {
 };
 const prior = readLog(LOG);
 
+/** @param {string} decision @param {string} reason @param {string} [message] */
 function decide(decision, reason, message) {
   try {
     ensureStateDir();
@@ -135,7 +139,9 @@ if (!open && !light) {
 }
 
 // A glob counts as its literal prefix; two paths overlap when equal or when one is a folder of the other.
+/** @param {string} p */
 const base = (p) => p.replace(/\*.*$/, "").replace(/\/+$/, "");
+/** @param {string} a @param {string} b */
 const overlaps = (a, b) => {
   const [x, y] = [base(a), base(b)];
   if (!x || !y) return true;
