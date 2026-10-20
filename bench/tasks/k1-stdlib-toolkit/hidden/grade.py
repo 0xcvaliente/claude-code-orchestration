@@ -21,6 +21,7 @@ import json
 import marshal
 import os
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 sys.dont_write_bytecode = True
+
+# The oracle is the Python 3.13 stdlib (run in this process); newer tomllib/shlex/etc. accept or reject
+# different inputs, so re-run under 3.13 when started on another version. K2_PYTHON overrides the lookup.
+if sys.version_info[:2] != (3, 13) and __name__ == "__main__" and not os.environ.get("K2_REEXEC"):
+    _py = os.environ.get("K2_PYTHON") or shutil.which("python3.13")
+    if _py:
+        os.environ["K2_REEXEC"] = "1"
+        os.execv(_py, [_py, *sys.argv])
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(HERE, "runner.py")
