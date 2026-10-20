@@ -4,10 +4,12 @@
 //   O-mix  orchestrator, agents as shipped (this repo's .claude/ copied in)
 //   O-O    orchestrator, every agent's model: line rewritten to opus
 //   AUTO   scripts/auto.sh (triage picks plain, reviewed or the orchestrator); .claude/ copied, settings model sonnet
+//   SDK    the SDK pipeline (npx tsx src/cli.ts --mode orchestrate), no .claude/ copied, no mid-run snapshots (launcher "sdk", bench/lib/sdk.mjs)
 // Every run repo gets .claude/settings.json with "enabledPlugins": {<each user-enabled plugin>: false}.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { mergeSettings } from "./lib/run-core.mjs";
+import { sdkCommand } from "./lib/sdk.mjs";
 
 export const ARMS = {
   "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet" }, copyClaude: false },
@@ -15,6 +17,7 @@ export const ARMS = {
   "O-mix": { label: "Orchestrator, shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
   "O-O": { label: "Orchestrator, all agents Opus", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, agentModel: "opus" },
   AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, settings: { model: "sonnet" } },
+  SDK: { label: "SDK pipeline (orchestrate mode)", launcher: "sdk", env: {}, copyClaude: false, snapshots: false },
 };
 
 export function armOf(id) {
@@ -25,7 +28,9 @@ export function armOf(id) {
 
 // The variables a run adds to the environment (printed by --dry-run).
 export function envAdditions(armId, meta, run) {
-  const add = { ...armOf(armId).env };
+  const arm = armOf(armId);
+  const add = { ...arm.env };
+  if (arm.launcher === "sdk") return add; // flags, not ORCH_* variables (see sdkCommand); ANTHROPIC_* passes through runEnv
   if (meta.test_cmd) add.ORCH_TEST_CMD = meta.test_cmd;
   if (run.budget_tokens != null) add.ORCH_BUDGET_TOKENS = String(run.budget_tokens);
   add.ORCH_EXTRA_ALLOWED_TOOLS = "Bash(date*)";
@@ -39,8 +44,11 @@ export function runEnv(armId, meta, run, base = process.env) {
   return { ...env, ...envAdditions(armId, meta, run) };
 }
 
-export function command(armId, prompt, runRepo, root) {
-  return { cmd: "bash", args: [join(root, "scripts", armOf(armId).script), prompt, runRepo], cwd: root };
+// opts (SDK arm only): {outDir, testCmd, budgetTokens}.
+export function command(armId, prompt, runRepo, root, opts = {}) {
+  const arm = armOf(armId);
+  if (arm.launcher === "sdk") return sdkCommand({ prompt, runRepo, root, ...opts });
+  return { cmd: "bash", args: [join(root, "scripts", arm.script), prompt, runRepo], cwd: root };
 }
 
 // Writes the run repo's .claude/: a copy of root/.claude (without state/ and worktrees/) for orchestrator arms,

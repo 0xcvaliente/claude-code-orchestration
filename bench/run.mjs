@@ -8,14 +8,16 @@
 // Isolation: every user-enabled plugin is disabled in each run repo's .claude/settings.json; a run whose repo still shows an
 // enabled plugin is not launched (end_reason "error", error "isolation").
 // Touch <campaign dir>/PAUSE to hold before the next block; a rate-limited or auth-failed run creates it and is requeued.
-// Before each block `claude auth status` must show loggedIn true, else PAUSE is written and the runner waits.
+// Before each block `claude auth status` must show loggedIn true (for a campaign with the SDK arm, an API key in the environment
+// is enough), else PAUSE is written and the runner waits.
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ARMS, command, envAdditions } from "./arms.mjs";
 import { expandMatrix, filterResume, finishedRunIds, groupBlocks, hms, shuffle, stamp, enabledPluginIds, resolveSeed } from "./lib/run-core.mjs";
-import { checkIsolation, pauseAndRequeue, waitUntilClear, createRunRepo, executeRun, installInterruptHandlers, interrupted, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
+import { sdkAuthOk } from "./lib/sdk.mjs";
+import { checkIsolation, checkLoggedIn, pauseAndRequeue, waitUntilClear, createRunRepo, executeRun, installInterruptHandlers, interrupted, loadTask, pluginListIn, sh, tokensOf } from "./lib/run-exec.mjs";
 import { formatTokens } from "../scripts/tokens.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -126,9 +128,9 @@ if (flag("dry-run")) {
     for (const r of b.runs) {
       const t = taskOf(r.task);
       const add = envAdditions(r.arm, t.meta, r);
-      const c = command(r.arm, "<prompt>", join(reposDir, r.run_id), root);
+      const c = command(r.arm, "<prompt>", join(reposDir, r.run_id), root, { outDir: join(campaignDir, r.run_id, "sdk"), testCmd: t.meta.test_cmd, budgetTokens: r.budget_tokens });
       log(`  ${r.run_id}  arm=${r.arm} cap=${r.cap_min}min budget=${r.budget_tokens ?? "none"}`);
-      log(`    env: ${Object.entries(add).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ")}`);
+      log(`    env: ${Object.entries(add).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ") || "(no additions; ANTHROPIC_* passes through, ORCH_* stripped)"}`);
       log(`    cmd: (cd ${c.cwd} && ${c.cmd} ${c.args.map((a) => JSON.stringify(a)).join(" ")})`);
     }
   }
@@ -161,7 +163,10 @@ if (!existsSync(manifestFile)) {
 const rowsFile = join(campaignDir, "runs.jsonl");
 const pauseFile = join(campaignDir, "PAUSE");
 
-const waitWhilePaused = () => waitUntilClear({ pauseFile, pollMs: POLL_MS, log: (m) => log(`[${hms()}] ${m}`) });
+// With an SDK arm in the campaign, an ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN) in the environment counts as logged in.
+const usesSdk = runs.some((r) => ARMS[r.arm].launcher === "sdk");
+const check = usesSdk ? () => sdkAuthOk({ loggedIn: checkLoggedIn }) : checkLoggedIn;
+const waitWhilePaused = () => waitUntilClear({ pauseFile, pollMs: POLL_MS, log: (m) => log(`[${hms()}] ${m}`), check });
 
 const ctx = { root, campaignDir, reposDir, tasks, disabledIds, log };
 const queue = [...blocks];

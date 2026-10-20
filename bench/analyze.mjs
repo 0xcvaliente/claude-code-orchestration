@@ -13,7 +13,7 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "AUTO"];
+export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO"];
 export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook"];
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },
@@ -219,6 +219,10 @@ export function analyzeRun(row, grades, campaign) {
   const meta = taskMeta(campaign.dir, row.run_id, row.task);
   const capMin = row.cap_min ?? meta?.cap_min ?? null;
   const g = timelineOf(grades.filter((x) => x.run_id === row.run_id), wallS);
+  // An arm with no mid-run snapshots (SDK: its result is not in the working tree until the end) has no timeline:
+  // the timeline metrics are null, never zero, and the final grade is the only point.
+  const noSnapshots = row.snapshots === "none";
+  if (noSnapshots) Object.assign(g, { timeline: [], t90_s: null, t100_s: null });
   const score = pctOf(g.final);
   const pass = g.final ? Boolean(g.final.pass) : null;
   // Lenient variant (bench/grade.mjs --variant lenient): only when grades-lenient.jsonl exists. A run
@@ -278,7 +282,9 @@ export function analyzeRun(row, grades, campaign) {
     timeline: g.timeline,
     t90_s: g.t90_s,
     t100_s: g.t100_s,
-    auc: capMin ? aucOf(g.timeline, capMin * 60) : null,
+    auc: capMin && !noSnapshots ? aucOf(g.timeline, capMin * 60) : null,
+    has_snapshots: !noSnapshots,
+    sdk_capped: results.some((d) => d?.sdk && d.sdk.has_report === false), // SDK run with no report.json: killed, token total is an undercount
     ...proc,
     subagents,
     subagent_count: subagentCount,
@@ -399,6 +405,7 @@ export function buildComparisons(runs, opts) {
     const todo = arms.filter((a) => a !== "P-O").map((a) => [a, "P-O"]);
     if (arms.includes("O-mix")) todo.push(["O-mix", "P-S"]);
     if (arms.includes("O-mix")) todo.push(["O-next", "O-mix"]);
+    if (arms.includes("O-mix")) todo.push(["SDK", "O-mix"]);
     for (const [a, b] of todo) {
       if (!of(a).length || !of(b).length) continue;
       out.push({ task, cell, arm: a, baseline: b, ...compare(of(a), of(b), `${task}|${cell}|${a}|${b}`, opts) });
@@ -560,6 +567,30 @@ export function evaluateHypotheses(runs) {
       ev[task] = { o_mix_minus_p_o: d, grows, budgets };
     }
     push("H7", "On k2-stdlib-toolkit-xl, the O-mix minus P-O score difference grows from cap10 to main to cap60; at the two budget cells P-O scores at least as high as O-mix.", missing ? INC : verdict(ok), ev, missing ? "missing sweep cells or n < 2" : undefined);
+  }
+
+  // H8: SDK pipeline vs native orchestrator, strict score, paired by rep. Two-sided: it says nothing about which wins.
+  // Reported only for campaigns that contain an SDK run (the other campaigns' hypothesis lists are unchanged).
+  if (runs.some((r) => r.arm === "SDK")) {
+    const task = "k2-stdlib-toolkit-xl";
+    const cell = "cap10";
+    const of = (arm) => runs.filter((r) => r.task === task && r.cell === cell && r.arm === arm);
+    const [a, b] = [of("SDK"), of("O-mix")];
+    const statement = "On k2-stdlib-toolkit-xl at cap10, the SDK pipeline and O-mix differ in strict final score: the paired (by rep) bootstrap CI of the median score difference SDK minus O-mix excludes 0.";
+    const sc = compare(a, b, `${task}|${cell}|SDK|O-mix`);
+    const ev = {
+      n: { SDK: a.length, "O-mix": b.length },
+      pairs: sc.paired ? sc.score_diff_pts.n_a : 0,
+      score_median: { SDK: median(a.map((r) => r.score_pct)), "O-mix": median(b.map((r) => r.score_pct)) },
+      score_diff_pts: sc.score_diff_pts,
+      tokens_ratio: sc.tokens_ratio,
+      wall_diff_s: sc.wall_diff_s,
+      capped_sdk_runs: a.filter((r) => r.sdk_capped).length,
+      deadline_runs: { SDK: a.filter((r) => r.end_reason === "deadline").length, "O-mix": b.filter((r) => r.end_reason === "deadline").length },
+    };
+    const ci = sc.score_diff_pts.ci;
+    const usable = a.length >= MIN_N && b.length >= MIN_N && sc.paired && sc.score_diff_pts.n_a >= MIN_N && ci;
+    push("H8", statement, usable ? verdict(ci[0] > 0 || ci[1] < 0) : INC, ev, usable ? undefined : "missing cells, fewer than 2 pairs or n < 2");
   }
   return out;
 }
