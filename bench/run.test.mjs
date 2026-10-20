@@ -357,3 +357,39 @@ test("auth failure: auth_error row, PAUSE written, run requeued; zero-token exit
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// The SDK arm through executeRun with a fake launcher: killed at the cap, its passed slice is salvaged into the graded tree.
+test("executeRun: SDK arm, killed run is salvaged from journal.json and tokens come from telemetry", { timeout: 60_000 }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-exec-sdk-"));
+  try {
+    const taskDir = join(tmp, "tasks", "fx");
+    mkdirSync(join(taskDir, "setup"), { recursive: true });
+    writeFileSync(join(taskDir, "setup", "a.txt"), "a\n");
+    writeFileSync(join(taskDir, "task.md"), "Fake task.\n");
+    writeFileSync(join(taskDir, "meta.json"), JSON.stringify({ id: "fx", cap_min: 0.05, test_cmd: null, graded_paths: ["."], snapshot_every_s: 1 }));
+    const ctx = { root, campaignDir: join(tmp, "campaign"), reposDir: join(tmp, "repos"), tasks: { fx: loadTask(join(tmp, "tasks"), "fx") }, disabledIds: [], skipIsolation: true, graceMs: 500 };
+    const run = { run_id: "fx__SDK__main__r1", task: "fx", arm: "SDK", cell: "main", rep: 1, cap_min: 0.05, budget_tokens: null };
+    const sdkDir = join(ctx.campaignDir, run.run_id, "sdk", "20260101000000-abcd");
+    const journal = JSON.stringify({ slices: [{ id: "s1" }], finished: [{ id: "s1", branch: "orch/20260101000000-abcd/s1", status: "passed" }] });
+    const line = JSON.stringify({ role: "writer", model: "claude-x", tokens: 777, ok: true, usage: { input: 700, output: 77, cacheRead: 0, cacheWrite: 0 } });
+    ctx.commandFor = (r, prompt, repo) => ({
+      cmd: "bash",
+      args: ["-c", `cd "${repo}" && git checkout -q -b orch/20260101000000-abcd/s1 && echo s > s.txt && git add -A && git commit -qm s1 && git checkout -q - && mkdir -p "${sdkDir}" && echo '${journal}' > "${sdkDir}/journal.json" && echo '${line}' > "${sdkDir}/telemetry.jsonl" && sleep 30`],
+      cwd: tmp,
+    });
+    const row = await executeRun(run, ctx);
+    assert.equal(row.end_reason, "deadline");
+    assert.equal(row.snapshots, "none");
+    assert.equal(row.sdk.mode, "salvage");
+    assert.deepEqual(row.sdk.merged, ["orch/20260101000000-abcd/s1"]);
+    assert.equal(row.results.length, 1);
+    assert.equal(row.results[0].modelUsage["claude-x"].inputTokens, 700);
+    const out = join(ctx.campaignDir, run.run_id);
+    assert.equal(readFileSync(join(out, "final", "s.txt"), "utf8"), "s\n");
+    assert.equal(existsSync(join(out, "snapshots", "t0001")), false);
+    assert.ok(existsSync(join(out, "sdk-adapter.json")));
+    assert.equal(readFileSync(join(out, "diff-files.txt"), "utf8"), "s.txt\n");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -6,7 +6,7 @@ Pre-registered hypotheses and decision rules: [HYPOTHESES.md](HYPOTHESES.md). Re
 
 ## Arms
 
-Defined in `bench/arms.mjs`. Every arm goes through the product scripts unmodified.
+Defined in `bench/arms.mjs`. Every arm except `SDK` goes through the product scripts unmodified.
 
 | Arm | What runs |
 | --- | --- |
@@ -15,6 +15,7 @@ Defined in `bench/arms.mjs`. Every arm goes through the product scripts unmodifi
 | `O-mix` | Orchestrator with agents as shipped (this repo's `.claude/` copied in) |
 | `O-O` | Orchestrator with every agent's `model:` line rewritten to Opus |
 | `AUTO` | `scripts/auto.sh`: triage picks plain, reviewed or the orchestrator |
+| `SDK` | The SDK pipeline: `npx tsx src/cli.ts --repo <run repo> --task <prompt> --mode orchestrate --no-escalate --out <run dir>/sdk [--test-cmd <task test_cmd>] [--budget <tokens>]`; no `.claude/` copied; no mid-run snapshots (see "The SDK arm") |
 
 ## Tasks
 
@@ -41,6 +42,7 @@ npm run bench -- --matrix bench/matrix/lite.json         # 2 reps, all six tasks
 npm run bench -- --matrix bench/matrix/pilot-k2.json     # 1 rep: k2, P-O and O-mix, main cell
 npm run bench -- --matrix bench/matrix/lite-k2.json      # 2 reps: k2, all five arms, main cell (10 runs)
 npm run bench -- --matrix bench/matrix/sweeps.json       # k2 only, P-O vs O-mix, caps 10 and 60 min, budgets 3M and 8M tokens (16 runs)
+npm run bench -- --matrix bench/matrix/sdk-vs-native.json   # NOT RUN: k2 at cap10, O-mix vs SDK, 4 reps (8 runs); H8 in HYPOTHESES.md
 npm run bench:grade -- runs/bench/<campaign>             # offline grading of snapshots into grades.jsonl
 npm run bench:analyze -- runs/bench/<campaign>           # summary.json: token metrics, comparisons, hypothesis verdicts
 npm run bench:report -- runs/bench/<campaign>/summary.json   # report.html, plus benchmarks.md for docs/benchmarks.md
@@ -59,6 +61,19 @@ Lenient variant (k2 only): `node bench/grade.mjs <campaign> --variant lenient` g
 `bench/validate.mjs` flags: `--task <id>`, `--tasks-dir <dir>`.
 
 A matrix file has `name`, `seed` and `groups`; each group lists `tasks`, `arms`, `cells` (`id`, plus `cap_min` or `budget_tokens`) and `reps`.
+
+## The SDK arm
+
+Compares the SDK pipeline (`src/cli.ts`) with the native orchestrator (`O-mix`) on the same task, cap and grading. This campaign has NOT been run and nothing here claims a result. H8 in [HYPOTHESES.md](HYPOTHESES.md) pre-registers the comparison and lists the known differences between the arms. The SDK-specific code is `bench/lib/sdk.mjs`; run-exec makes one call into it.
+
+- Result location. The pipeline merges passing slices onto branch `orch/<runId>/result` in a worktree and leaves the run repo's working tree at the init commit. After the launch and before anything is read, the harness merges that branch into the working tree (fast-forward, else merge). `sdk-adapter.json` in the run folder records what was merged.
+- Capped runs. If the cap kills the run, step 7 never ran: no result branch, no `report.json`. The harness reads the SDK run directory's `journal.json`, merges the `orch/<runId>/<slice>` branch of each slice recorded as passed (a conflicting or missing branch is skipped and listed in `sdk-adapter.json`), and grades that: passed, verified slices only. Native keeps whatever is in its tree. This asymmetry is documented in H8.
+- No snapshots. The working tree is empty mid-run, so the row has `snapshots: "none"`, no snapshot is taken, and `analyze` sets t90, t100 and AUC to null for the arm.
+- Tokens. The row's result document is synthesized from the SDK run directory: `report.json` `spentTokens` when present, else the sum of `tokens` in `telemetry.jsonl` (one line per worker, written as it finishes, so a killed run keeps the spend of workers that finished, not all spend: the tokens of workers still running when the cap kills the run are lost, so a capped SDK run's total is an undercount). Basis as in `scripts/tokens.mjs`: input + output + cache read + cache write.
+- Errors. `report.error`, failed slices, failed workers' text and the tail of stderr are scanned for rate-limit and authentication wording; a match sets the same `rate_limited` / `auth_error` end reason as the other arms, so the run pauses and is requeued instead of being scored as a quality failure.
+- Authentication. The SDK starts the Claude Code executable, so it uses `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN`) when set in the environment and otherwise the `claude` login. In a campaign with the SDK arm the preflight therefore passes when one of those variables is set (its value is never printed) and otherwise falls back to `claude auth status`. `runEnv` strips `ORCH_*` only, so `ANTHROPIC_*` passes through. Not verified live.
+- Cost. O-mix medians were about 4.7M tokens per run, so the 8 runs of `sdk-vs-native.json` are roughly 40M tokens plus the SDK's own spend. `ORCH_BUDGET_TOKENS` (a cell's `budget_tokens`) becomes `--budget` for the SDK; this campaign sets none.
+- No claims. The SDK prints no result claim, so its false-success rate is not meaningful.
 
 ## Outputs
 
