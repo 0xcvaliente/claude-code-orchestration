@@ -1,3 +1,10 @@
+// Verification status.
+// TESTED with a stubbed runtime (src/workflow.test.mjs: fake agent(), parallel(), pipeline(), phase(), log()): the meta
+//   block is a pure literal whose phases match the phase() titles; the stage order (plan, explore, build, review, then
+//   integrate for isolated waves); the slice cap; retries with reviewer gaps and the failed result; and that every
+//   implementer brief starts with `ORCHESTRATION: workflow`, which plan-check.mjs skips (run against the real hook).
+// UNVERIFIED against a live run: whether this script's agent() launches reach PreToolUse hooks (plan-check.mjs,
+//   journal.mjs) at all, and whether the Stop gates (verify.sh, the review gate) fire for them. Do not rely on either.
 export const meta = {
   name: 'orchestrate',
   description: 'Plan a task, build slices with the implementer agent, review each with a fresh reviewer, merge isolated code branches',
