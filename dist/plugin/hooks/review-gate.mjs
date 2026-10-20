@@ -10,6 +10,7 @@ import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // since the last implementer finished; a new implementer run resets the count
 let sessionId = "";
+/** @param {string} decision @param {string} reason @param {number} code */
 function decide(decision, reason, code) {
   try {
     ensureStateDir();
@@ -19,6 +20,7 @@ function decide(decision, reason, code) {
   }
   process.exit(code);
 }
+/** @param {number} fd @param {string} text */
 const say = (fd, text) => {
   try {
     writeSync(fd, `${text}\n`);
@@ -30,6 +32,7 @@ const say = (fd, text) => {
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
 if (duplicate("review-gate.mjs")) process.exit(0); // the project's own copy gates this reply
+/** @type {any} */
 let input = {};
 try {
   input = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -38,6 +41,7 @@ try {
 }
 sessionId = input.session_id ?? "";
 
+/** @param {string} name @returns {any[]} */
 const readLog = (name) =>
   readFileSync(join(stateDir, name), "utf8")
     .split("\n")
@@ -55,6 +59,7 @@ if (!existsSync(join(stateDir, "telemetry.jsonl"))) decide("allow", "no_telemetr
 const events = readLog("telemetry.jsonl").filter((e) => e.hook_event_name === "SubagentStop" && e.session_id === input.session_id);
 
 // Plugin agents arrive namespaced ("orchestration:implementer"); compare the bare role name.
+/** @param {any} e */
 const role = (e) => String(e.agent_type ?? "").split(":").pop();
 const lastImpl = events.map(role).lastIndexOf("implementer");
 if (lastImpl === -1) decide("allow", "no_implementer_in_session", 0);
@@ -65,6 +70,7 @@ const since = Date.parse(events[lastImpl].ts) || 0;
 const priorBlocks = existsSync(join(stateDir, "gates.jsonl"))
   ? readLog("gates.jsonl").filter((g) => g.gate === "review" && g.decision === "block" && g.session_id === sessionId && Date.parse(g.ts) >= since).length
   : 0;
+/** @param {string} reason @param {string} message */
 const capped = (reason, message) => {
   if (priorBlocks < MAX_BLOCKS) {
     const last = priorBlocks === MAX_BLOCKS - 1 ? " This is the last block: if no reviewer can pass the work, say in your reply that it is unverified and report the slice as failed." : "";
