@@ -6,7 +6,8 @@ Two orchestrators for the same job (split a task, build slices in parallel, gate
 - Native: `.claude/` (agents, hooks, skill, workflow). Any task: code, research, writing, analysis or operations. Run with `claude --agent orchestrator`. Order is the orchestrator's prompt, plus hook gates (test gate, review gate, plan check and run journal). Git machinery (worktrees, checkpoint commits, the integrator) is for code in git: parallel slices run in worktrees there, code outside git runs one slice at a time, and work that changes no code may run slices with disjoint files in parallel in the shared folder. The test gate runs wherever there is a test command and skips only a prose-only change in a git work tree. The triage fact `code` changes one routing rule, the parallel-files threshold (`TRIAGE.minParallelFilesCode` 10, `minParallelFilesNonCode` 4; a missing `code` counts as code). It also decides whether git machinery is used and, in `npm run auto`, whether web tools are allowed. The test gate never reads it. The review gate covers every task.
 
 ## Commands
-- `npm test` / `npm run typecheck`: must pass before finishing.
+- `npm run check`: typecheck, tests, check-agents and check-plugin in one go; CI (`.github/workflows/ci.yml`) runs it on push and pull request to main. It must pass before finishing.
+- `npm test` / `npm run typecheck`: the first two parts of that.
 - `npm run check-agents`: fails if `.claude/agents/*.md` drift from `src/config.ts`; `npm run sync-agents` fixes it.
 - `npm run native -- "task" [repo]`: headless native run (needs a logged-in `claude`). `npm run auto -- "task" [repo]`: same, but triage picks plain, reviewed or the orchestrator first.
 - `npm run report`: HTML timeline from `.claude/state/` (or the plugin's per-user state dir). `npm run build-plugin`: `dist/plugin` (committed; `npm run check-plugin` fails when stale).

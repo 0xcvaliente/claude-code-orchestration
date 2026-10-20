@@ -311,6 +311,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm start` | SDK pipeline with triage |
 | `npm run route` | Triage only, prints JSON; `--repo` can be any folder, git or not |
 | `npm run auto`, `npm run native` | Headless native run, with or without triage; `auto` prints its route on stderr and ends the line with `(code: yes)` or `(code: no)` |
+| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin` |
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check; both must pass before finishing |
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin`, or fail when the committed build is stale |
@@ -348,8 +349,9 @@ dist/plugin/                      the built plugin (committed)
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
                                   report.mjs
 bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
-docs/                             benchmarks.md, native-mode.md, diagrams/
-orchestration/                    the original architecture diagram
+docs/                             benchmarks.md, native-mode.md, diagrams/ (incl. the
+                                  original architecture diagram, orchestration.html)
+.github/workflows/ci.yml          CI: npm run check
 ```
 
 ## Development
@@ -360,7 +362,10 @@ npm test               # unit tests: scripted fake model, temp git repos
 npm run typecheck
 npm run check-agents   # agents in sync with src/config.ts
 npm run check-plugin   # committed plugin build is current
+npm run check          # all of the above; CI (`.github/workflows/ci.yml`) runs this on push and pull request to main
 ```
+
+**Why `state.mjs` lives in `.claude/hooks`.** `.claude/` is copied into other repos and `build-plugin` flattens `hooks/` into the plugin, so the shared state module cannot live outside `.claude/hooks`. `src/route.ts` and `scripts/report.mjs` import it from a checkout, which is deliberate.
 
 The README diagrams are SVGs in `docs/diagrams/`, in a light and a dark version. To change one, edit its `*.scene.json` (or the sequence in `build.py`) and run `python3 docs/diagrams/build.py`; it uses the diagram-craft skill's renderer.
 
