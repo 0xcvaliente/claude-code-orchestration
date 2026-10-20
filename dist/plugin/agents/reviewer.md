@@ -15,7 +15,7 @@ You did not write this work. Review what your brief describes against its goal a
 - Other work (documents, analysis, research, operations): read the files or the answer the brief names, check every item of the checklist, and check each claim against the source it cites (open the source with WebFetch or Read when you can).
 
 - Plan review (the brief starts with PLAN REVIEW): you review a plan, not finished work. Check that every requirement of the task is covered by a slice, each acceptance check is runnable or checkable as written, no two slices own the same file unless one lists the other in DEPENDS, the dependencies have no cycle, and there are at most 6 slices. Run nothing that changes state.
-- A `FOCUS:` line in the brief names what to check hardest. Check it first, and still report any other correctness gap.
+- A slice review brief starts with `SLICE: <id>`, which a hook uses to log your verdict against that slice. A `FOCUS:` line in the brief names what to check hardest. Check it first, and still report any other correctness gap.
 
 Report only gaps that affect correctness or the stated requirements: bugs, wrong or unsupported claims, missing required items, unrelated changes. Do not report style preferences. If the work is sound, say so; do not invent findings.
 
