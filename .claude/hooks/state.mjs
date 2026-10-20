@@ -13,6 +13,7 @@ import { join } from "node:path";
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
 // The project's own settings register .claude/hooks/<script>, and the script is there.
+/** @param {string} project @param {string} script */
 export function projectRegisters(project, script) {
   if (!existsSync(join(project, ".claude", "hooks", script))) return false;
   return ["settings.json", "settings.local.json"].some((f) => {
@@ -25,6 +26,7 @@ export function projectRegisters(project, script) {
 }
 
 // Bytes, not UTF-16 units, so verify.sh's `LC_ALL=C tr` gives the same key for a non-ASCII path.
+/** @param {string} project */
 export const stateKey = (project) => Buffer.from(project).toString("latin1").replace(/[^A-Za-z0-9]/g, "-").slice(-200);
 
 /**
@@ -52,6 +54,7 @@ export function stateDirFor(project, { plugin = true, env = process.env } = {}) 
  */
 export function userStateDirs(project, env = process.env) {
   const data = join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "plugins", "data");
+  /** @type {string[]} */
   let installed = [];
   try {
     installed = readdirSync(data)
@@ -60,7 +63,7 @@ export function userStateDirs(project, env = process.env) {
   } catch {
     // no plugin data dir yet
   }
-  const roots = [env.CLAUDE_PLUGIN_DATA, ...installed, join(homedir(), ".claude", "orchestration")].filter(Boolean);
+  const roots = /** @type {string[]} */ ([env.CLAUDE_PLUGIN_DATA, ...installed, join(homedir(), ".claude", "orchestration")].filter(Boolean));
   return [...new Set(roots.map((r) => join(r, "state", stateKey(project))))];
 }
 
@@ -68,6 +71,7 @@ const project = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const plugin = process.argv.includes("--plugin");
 
 // This is the plugin copy of a hook the project also registers: exit 0 and leave the event to the project copy.
+/** @param {string} script */
 export const duplicate = (script) => plugin && projectRegisters(project, script);
 
 const own = stateDirFor(project, { plugin });

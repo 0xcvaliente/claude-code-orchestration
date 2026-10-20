@@ -27,13 +27,14 @@ for (const f of readdirSync(join(src, "hooks"))) cpSync(join(src, "hooks", f), j
 const orch = join(out, "agents", "orchestrator.md");
 writeFileSync(
   orch,
-  readFileSync(orch, "utf8").replace(/^tools: Agent\(([^)]*)\)/m, (_, list) => {
+  readFileSync(orch, "utf8").replace(/^tools: Agent\(([^)]*)\)/m, (_, /** @type {string} */ list) => {
     const names = list.split(",").map((n) => `${NAME}:${n.trim()}`).join(", ");
     return `tools: Agent(${names})`;
   }),
 );
 
 // --plugin: keep state outside the user's repo, and step aside where the project registers its own copy (state.mjs).
+/** @param {string} script */
 const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"` : `"\${CLAUDE_PLUGIN_ROOT}/hooks/${script}"`} --plugin`;
 const hooks = {
   hooks: {
