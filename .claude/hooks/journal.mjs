@@ -26,7 +26,9 @@ try {
 if (!p || typeof p !== "object") process.exit(0);
 
 const ROLES = ["implementer", "reviewer"];
-const bare = (t) => String(t ?? "").split(":").pop();
+/** @param {unknown} t */
+const bare = (t) => /** @type {string} */ (String(t ?? "").split(":").pop()); // split always yields one element
+/** @param {string} name @returns {any[]} */
 const readLog = (name) =>
   existsSync(join(stateDir, name))
     ? readFileSync(join(stateDir, name), "utf8")
@@ -41,6 +43,7 @@ const readLog = (name) =>
         })
         .filter(Boolean)
     : [];
+/** @param {string} name @param {Record<string, unknown>} entry */
 const append = (name, entry) => {
   try {
     ensureStateDir();
@@ -49,20 +52,24 @@ const append = (name, entry) => {
     // the journal must never fail the agent
   }
 };
+/** @param {any} content */
 const textOf = (content) =>
   typeof content === "string"
     ? content
     : Array.isArray(content)
       ? content.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n")
       : "";
+/** @param {string} brief */
 const sliceOf = (brief) =>
   /^\s*PLAN REVIEW\b/.test(brief) ? "plan" : brief.match(/^[ \t>*_`-]*SLICE:\**[ \t]*([^\s`'"*]+)/im)?.[1];
 // Same rule as telemetry.mjs: line-anchored, the last STATUS line wins, the template "pass or fail" does not count.
+/** @param {unknown} text */
 const statusOf = (text) => {
   const found = [...String(text ?? "").matchAll(/^[ \t>*_`-]*STATUS:\**[ \t]*(pass|fail)\b(?![ \t]+or\b)/gim)];
-  return found.length ? found[found.length - 1][1].toLowerCase() : undefined;
+  return found.length ? /** @type {string} */ (/** @type {RegExpMatchArray} */ (found[found.length - 1])[1]).toLowerCase() : undefined;
 };
 // A foreground result may carry the agent id only in its text ("agentId: a1b2...").
+/** @param {any} r */
 const agentIdOf = (r) =>
   (r && typeof r === "object" && typeof r.agentId === "string" && r.agentId) ||
   JSON.stringify(r ?? "").match(/agentId["\\: ]+([A-Za-z0-9_-]{6,})/)?.[1];

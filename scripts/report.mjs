@@ -13,13 +13,15 @@ import { TOKENS_PER_USD, formatTokens } from "./tokens.mjs";
 
 const repo = resolve(process.argv[2] ?? process.cwd());
 const candidates = [join(repo, ".claude", "state"), ...userStateDirs(repo)];
-const has = (names) => (d) => names.some((n) => existsSync(join(d, n)));
+/** @param {string[]} names */
+const has = (names) => (/** @type {string} */ d) => names.some((n) => existsSync(join(d, n)));
 const dir =
   candidates.find(has(["telemetry.jsonl", "runs.jsonl"])) ??
   candidates.find(has(["routes.jsonl", "gates.jsonl"])) ??
   stateDirFor(repo).dir;
 
 const sources = new Map(); // dir -> the logs read from it
+/** @param {string} name @returns {any[]} */
 const read = (name) => {
   const from = candidates.find(has([name]));
   if (!from) return [];
@@ -36,22 +38,26 @@ const read = (name) => {
     });
 };
 
-const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+/** @param {unknown} v */
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => /** @type {string} */ (/** @type {Record<string, string>} */ ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]));
 const runs = read("runs.jsonl");
 const events = read("telemetry.jsonl");
 const routes = read("routes.jsonl");
 const gates = read("gates.jsonl");
+/** @param {string[]} heads @param {unknown[][]} rows */
 const table = (heads, rows) =>
   `<table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 
+/** @type {Map<string, any[]>} */
 const bySession = new Map();
 for (const e of events) {
   const k = e.session_id ?? "unknown";
-  (bySession.get(k) ?? bySession.set(k, []).get(k)).push(e);
+  /** @type {any[]} */ (bySession.get(k) ?? bySession.set(k, []).get(k)).push(e);
 }
 
 // Tokens of a run; a legacy row (cost_usd, no tokens) shows "≈" + an estimate from its list-price cost.
 let estimated = false;
+/** @param {any} r */
 const tokenCell = (r) => {
   if (typeof r.tokens === "number") return formatTokens(r.tokens);
   if (typeof r.cost_usd !== "number") return "n/a";

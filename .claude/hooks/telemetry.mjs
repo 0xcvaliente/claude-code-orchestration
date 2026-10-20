@@ -9,6 +9,7 @@ import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
 if (duplicate("telemetry.mjs")) process.exit(0); // the project's own copy logs this event
+/** @type {any} */
 let payload = {};
 try {
   payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
@@ -18,20 +19,22 @@ try {
 
 // Status comes only from the worker's final report, never from the whole payload (it may echo the brief).
 // Line-anchored; the format template "STATUS: pass or fail" does not match.
+/** @param {unknown} text */
 function statusOf(text) {
   if (typeof text !== "string") return undefined;
   const found = [...text.matchAll(/^[ \t>*_`-]*STATUS:\**[ \t]*(pass|fail)\b(?![ \t]+or\b)/gim)];
-  return found.length ? found[found.length - 1][1].toLowerCase() : undefined;
+  return found.length ? /** @type {string} */ (/** @type {RegExpMatchArray} */ (found[found.length - 1])[1]).toLowerCase() : undefined;
 }
 
 // Final report from the subagent transcript: the last assistant text block or SubagentHandback message.
+/** @param {string} path */
 function reportFromTranscript(path) {
   try {
     const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
     for (let i = lines.length - 1; i >= 0; i--) {
       let entry;
       try {
-        entry = JSON.parse(lines[i]);
+        entry = JSON.parse(/** @type {string} */ (lines[i]));
       } catch {
         continue;
       }
@@ -57,6 +60,7 @@ if (payload.hook_event_name === "SubagentStop") {
   if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
 }
 
+/** @param {unknown} v */
 const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
 const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
 

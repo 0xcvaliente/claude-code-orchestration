@@ -18,13 +18,15 @@ function project({ reviewed = true } = {}) {
   for (const h of ["plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   if (reviewed) {
     mkdirSync(join(dir, ".claude", "state"), { recursive: true });
-    const plan = (session) => JSON.stringify({ ts: "t", session_id: session, slice: "plan", role: "reviewer", status: "pass", agent_id: "r0" });
+    const plan = (/** @type {string} */ session) => JSON.stringify({ ts: "t", session_id: session, slice: "plan", role: "reviewer", status: "pass", agent_id: "r0" });
     writeFileSync(join(dir, ".claude", "state", "journal.jsonl"), `${plan("s1")}\n${plan("other-session")}\n`);
   }
   return dir;
 }
+/** @param {string} dir @param {string} script @param {unknown} payload */
 const run = (dir, script, payload) =>
   spawnSync("node", [join(dir, ".claude", "hooks", script)], { input: typeof payload === "string" ? payload : JSON.stringify(payload), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+/** @param {string} dir @param {string} prompt */
 const launch = (dir, prompt, type = "implementer", session = "s1") =>
   run(dir, "plan-check.mjs", { session_id: session, tool_name: "Agent", tool_input: { subagent_type: type, prompt } });
 
@@ -67,6 +69,7 @@ test("plan check: a brief without SLICE or FILES is blocked twice per session, t
 test("journal: records slice, role and status from the subagent transcript; plan reviews are slice plan", () => {
   const dir = project({ reviewed: false });
   try {
+    /** @param {unknown} brief @param {string} report */
     const transcript = (brief, report) => {
       const f = join(dir, `t-${Math.random()}.jsonl`);
       const lines = [
@@ -76,6 +79,7 @@ test("journal: records slice, role and status from the subagent transcript; plan
       writeFileSync(f, lines.map((l) => JSON.stringify(l)).join("\n"));
       return f;
     };
+    /** @param {string} type @param {unknown} brief @param {string} report @param {string} [last] */
     const stop = (type, brief, report, last) =>
       run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: "s1", agent_id: "a1", agent_type: type, agent_transcript_path: transcript(brief, report), last_assistant_message: last });
     assert.equal(stop("implementer", "SLICE: toml\nFILES: toolkit/toml.py\nDEPENDS: none", "STATUS: pass\nDONE").status, 0);
@@ -95,7 +99,7 @@ test("plan check: launches of one wave that arrive together still see each other
   const dir = project();
   try {
     const { spawn } = await import("node:child_process");
-    const one = (slice) =>
+    const one = (/** @type {string} */ slice) =>
       new Promise((resolve) => {
         const p = spawn("node", [join(dir, ".claude", "hooks", "plan-check.mjs")], { env: { ...process.env, CLAUDE_PROJECT_DIR: dir } });
         p.on("close", resolve);
@@ -117,7 +121,7 @@ test("plan check: the first implementers wait for a finished plan review, PATH: 
     assert.equal(blocked.status, 2);
     assert.match(blocked.stderr, /PLAN REVIEW/);
     assert.equal(launch(dir, "SLICE: b\nFILES: b.py\nDEPENDS: none").status, 2, "a whole wave waits");
-    const lite = (id) => launch(dir, `SLICE: ${id}\nFILES: ${id}.py\nDEPENDS: none\nPATH: light`, "implementer", "s2");
+    const lite = (/** @type {string} */ id) => launch(dir, `SLICE: ${id}\nFILES: ${id}.py\nDEPENDS: none\nPATH: light`, "implementer", "s2");
     assert.equal(lite("l1").status, 0, "light path: a single slice");
     assert.equal(lite("l1").status, 0, "a retry of the light slice");
     const multi = lite("l2");
@@ -151,8 +155,10 @@ test("plan check: without a plan review each slice is blocked twice, then let th
 test("journal: headless (no transcript) takes the slice from the launch, in either event order", () => {
   const dir = project({ reviewed: false });
   try {
+    /** @param {string} agentId @param {string} type @param {string} prompt @param {unknown} [response] */
     const post = (agentId, type, prompt, response) =>
       run(dir, "journal.mjs", { hook_event_name: "PostToolUse", session_id: "s1", tool_name: "Agent", tool_input: { subagent_type: type, prompt }, tool_response: response ?? { isAsync: true, status: "async_launched", agentId } });
+    /** @param {string} agentId @param {string} type @param {string} last */
     const stop = (agentId, type, last) =>
       run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: "s1", agent_id: agentId, agent_type: type, agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: last });
     post("bg1", "implementer", "SLICE: toml\nFILES: toolkit/toml.py\nDEPENDS: none");
@@ -172,7 +178,7 @@ test("plugin copies step aside where the project registers its own, so nothing i
   const dir = project();
   try {
     writeFileSync(join(dir, ".claude", "settings.json"), JSON.stringify({ hooks: { x: ".claude/hooks/plan-check.mjs .claude/hooks/journal.mjs" } }));
-    const clash = (extra) => spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs"), ...extra], { input: JSON.stringify({ session_id: "s9", tool_name: "Agent", tool_input: { subagent_type: "orchestration:implementer", prompt: "Goal: no lines" } }), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+    const clash = (/** @type {string[]} */ extra) => spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs"), ...extra], { input: JSON.stringify({ session_id: "s9", tool_name: "Agent", tool_input: { subagent_type: "orchestration:implementer", prompt: "Goal: no lines" } }), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
     assert.equal(clash(["--plugin"]).status, 0, "plugin copy exits at once");
     assert.equal(existsSync(join(dir, ".claude", "state", "plan-check.jsonl")), false, "and records nothing");
     assert.equal(clash([]).status, 2, "the project copy still blocks the same launch");
@@ -186,14 +192,15 @@ test("plugin copies step aside where the project registers its own, so nothing i
 
 test("the project settings and the plugin build register both hooks", () => {
   const settings = JSON.parse(readFileSync(join(root, ".claude", "settings.json"), "utf8"));
-  const commands = (event, matcher) => (settings.hooks[event] ?? []).filter((e) => e.matcher === matcher).flatMap((e) => e.hooks.map((h) => h.command));
+  /** @param {string} event @param {string | undefined} matcher @returns {string[]} */
+  const commands = (event, matcher) => /** @type {any[]} */ (settings.hooks[event] ?? []).filter((e) => e.matcher === matcher).flatMap((e) => e.hooks.map((/** @type {any} */ h) => h.command));
   assert.ok(commands("PreToolUse", "Agent|Task").some((c) => c.includes("plan-check.mjs")));
   assert.ok(commands("PostToolUse", "Agent|Task").some((c) => c.includes("journal.mjs")));
   assert.ok(commands("SubagentStop", undefined).some((c) => c.includes("journal.mjs")));
   const plugin = JSON.parse(readFileSync(join(root, "dist", "plugin", "hooks", "hooks.json"), "utf8"));
   assert.ok(plugin.hooks.PreToolUse[0].hooks[0].command.endsWith('plan-check.mjs" --plugin'));
   assert.ok(plugin.hooks.PostToolUse[0].hooks[0].command.endsWith('journal.mjs" --plugin'));
-  assert.ok(plugin.hooks.SubagentStop.some((e) => e.hooks[0].command.includes("journal.mjs")));
+  assert.ok(plugin.hooks.SubagentStop.some((/** @type {any} */ e) => e.hooks[0].command.includes("journal.mjs")));
 });
 
 test("plan check: a workflow brief is not checked, and an unreadable log still releases the lock", () => {
