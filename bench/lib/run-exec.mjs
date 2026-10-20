@@ -4,7 +4,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync, renameSync } from "node:fs";
 import { cp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { command, prepareClaudeDir, runEnv } from "../arms.mjs";
+import { armOf, command, prepareClaudeDir, runEnv } from "../arms.mjs";
+import { finalizeSdkRun } from "./sdk.mjs";
 import { AUTH_PAUSE_REASON, buildPrompt, diffFiles, enabledPluginIds, isAuthError, isRateLimited, parseAuthStatus, parseResults, snapName } from "./run-core.mjs";
 import { totalTokens } from "../../scripts/tokens.mjs";
 
@@ -227,9 +228,15 @@ export async function executeRun(run, ctx) {
   const start = new Date();
   const prompt = buildPrompt(task.taskMd, run.cap_min, start, new Date(start.getTime() + capMs));
   writeFileSync(join(outDir, "prompt.txt"), prompt);
-  const c = ctx.commandFor ? ctx.commandFor(run, prompt, repo) : command(run.arm, prompt, repo, ctx.root);
+  const arm = armOf(run.arm);
+  const sdkOut = join(outDir, "sdk"); // the SDK arm writes its run directory here (bench/lib/sdk.mjs)
+  const c = ctx.commandFor
+    ? ctx.commandFor(run, prompt, repo)
+    : command(run.arm, prompt, repo, ctx.root, { outDir: sdkOut, testCmd: meta.test_cmd, budgetTokens: run.budget_tokens });
   const graded = Array.isArray(meta.graded_paths) && meta.graded_paths.length ? meta.graded_paths : ["."];
-  const every = Number(meta.snapshot_every_s) || 0;
+  // An arm whose result is not in the working tree mid-run (SDK) has no snapshots; the row says so and analyze skips its timeline.
+  const every = arm.snapshots === false ? 0 : Number(meta.snapshot_every_s) || 0;
+  if (arm.snapshots === false) row.snapshots = "none";
   row.started_at = start.toISOString();
   const t0 = Date.now();
   const r = await launch({
@@ -242,7 +249,10 @@ export async function executeRun(run, ctx) {
   row.exit_code = r.exitCode;
   row.end_reason = r.endReason;
   if (r.spawnError) row.error = r.spawnError;
+  // SDK arm: merge its result branch (or its passed slices, after a kill) into the working tree before anything is read.
+  const sdk = arm.launcher === "sdk" ? finalizeSdkRun({ runRepo: repo, outDir: sdkOut, runOutDir: outDir, stderrFile: join(outDir, "stderr.txt"), exitCode: r.exitCode }) : null;
   await collect(repo, outDir, graded, initSha, row);
+  if (sdk) Object.assign(row, { results: sdk.results, sdk: sdk.sdk });
   classifyRow(row);
   return row;
 }

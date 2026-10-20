@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { aucOf, analyze, evaluateHypotheses, latestGrades, latestRows, outsideGraded, processOf, timelineOf, tokensOf } from "./analyze.mjs";
+import { aucOf, analyze, buildComparisons, evaluateHypotheses, latestGrades, latestRows, outsideGraded, processOf, timelineOf, tokensOf } from "./analyze.mjs";
 import { matrixText, renderHtml, renderMarkdown } from "./report.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, median, medianDiff, mulberry32, quantile, ratioCI } from "./lib/stats.mjs";
@@ -496,4 +496,43 @@ test("claims-audit.json overrides the claim for false_success and H4", async () 
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// ---------- H8: SDK pipeline vs O-mix ----------
+
+test("H8 and the [SDK, O-mix] pair on fixture rows", () => {
+  const mk = (arm, rep, score, tokens, wall) => ({
+    run_id: `k2__${arm}__cap10__r${rep}`, campaign: "c", task: "k2-stdlib-toolkit-xl", arm, cell: "cap10", rep, score_pct: score,
+    pass: score === 100, tokens: { total: tokens, output_total: 1 }, wall_s: wall, end_reason: "deadline", excluded: false,
+    timeline: [], t90_s: null, t100_s: null, auc: null,
+  });
+  const reps = [1, 2, 3, 4];
+  const apart = [...reps.map((r) => mk("O-mix", r, 60 + r, 4e6, 600)), ...reps.map((r) => mk("SDK", r, 80 + r, 3e6, 550))];
+  const h8 = (runs) => evaluateHypotheses(runs).find((h) => h.id === "H8");
+  const supported = h8(apart);
+  assert.equal(supported.verdict, "supported");
+  assert.equal(supported.evidence.score_diff_pts.estimate, 20);
+  assert.equal(supported.evidence.tokens_ratio.estimate, 0.75);
+  assert.equal(supported.evidence.pairs, 4);
+  // the same scores: CI is exactly 0, not supported (a two-sided test says nothing about direction)
+  const tied = [...reps.map((r) => mk("O-mix", r, 70, 4e6, 600)), ...reps.map((r) => mk("SDK", r, 70, 3e6, 550))];
+  assert.equal(h8(tied).verdict, "not supported");
+  // SDK worse is also "supported" (they differ), with a negative estimate
+  const worse = [...reps.map((r) => mk("O-mix", r, 90, 4e6, 600)), ...reps.map((r) => mk("SDK", r, 50, 3e6, 550))];
+  assert.equal(h8(worse).verdict, "supported");
+  assert.equal(h8(worse).evidence.score_diff_pts.estimate, -40);
+  // missing arm or a single rep: inconclusive; no SDK run at all: H8 is not reported
+  assert.equal(h8(apart.filter((r) => r.arm === "SDK")).verdict, "inconclusive");
+  assert.equal(h8(apart.filter((r) => r.arm === "O-mix")), undefined);
+  assert.equal(h8(apart.filter((r) => r.rep === 1)).verdict, "inconclusive");
+  // the explicit pair exists in the comparisons
+  const pair = buildComparisons(apart, { iterations: 200 }).find((c) => c.arm === "SDK" && c.baseline === "O-mix");
+  assert.ok(pair && pair.paired && pair.score_diff_pts.estimate === 20);
+});
+
+test("H8 evidence counts capped SDK runs next to the token ratio", () => {
+  const mk2 = (arm, rep, capped) => ({ run_id: `${arm}${rep}`, campaign: "c", task: "k2-stdlib-toolkit-xl", arm, cell: "cap10", rep, score_pct: 50, tokens: { total: 1e6 }, wall_s: 600, end_reason: "deadline", sdk_capped: capped });
+  const runs = [1, 2, 3].flatMap((r) => [mk2("O-mix", r, false), mk2("SDK", r, r < 3)]);
+  const h8 = evaluateHypotheses(runs).find((h) => h.id === "H8");
+  assert.equal(h8.evidence.capped_sdk_runs, 2);
 });

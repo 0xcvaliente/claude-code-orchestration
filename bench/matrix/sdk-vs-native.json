@@ -1,0 +1,12 @@
+{
+  "name": "sdk-vs-native",
+  "seed": 21,
+  "groups": [
+    {
+      "tasks": ["k2-stdlib-toolkit-xl"],
+      "arms": ["O-mix", "SDK"],
+      "cells": [{ "id": "cap10", "cap_min": 10 }],
+      "reps": 4
+    }
+  ]
+}
