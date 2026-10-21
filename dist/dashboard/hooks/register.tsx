@@ -50,7 +50,12 @@ const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}~` : 
 const resultOf = (answer: string) => {
   const lines = answer
     .split('\n')
-    .map(l => l.replace(/^[\s>*_`#-]+/, '').trim())
+    .map(l => {
+      // a bold line (`**GAPS:**`) loses both markers; a line that merely ends in `_` or `*` (`__init__`, `src/**`) is left alone
+      const t = l.replace(/^[\s>#-]+/, '').trim()
+      const bold = /^(\*\*|__)/.exec(t)?.[1]
+      return (bold && t.endsWith(bold) ? t.slice(0, -bold.length) : t).replace(/^[\s>*_`#-]+/, '').trim()
+    })
     .filter(l => l && !/^(STATUS|FINDINGS|OPEN|EVIDENCE|SUMMARY)\b/i.test(l) && !/^GAPS:?$/i.test(l))
   const line = lines.find(l => /^answer:/i.test(l))?.replace(/^answer:\s*/i, '') ?? lines[0] ?? ''
   return line.replace(/`/g, '').replace(/(?:\/[^\s/]+)+\/([^\s/]+\/[^\s/]+)/g, '$1')
@@ -124,7 +129,9 @@ const elbow = (a: number, b: number) =>
 
 // One diagram node per slice: its implementer and reviewer(s) grouped, plus a queued ghost for a dependency not launched yet.
 type Node = { id: string; deps: string[]; files: number; agents: Agent[] }
-const nodesOf = (list: Agent[]): Map<string, Node> => {
+// A queued ghost card stands in for a dependency not launched yet; `ghosts` false (the run is signed off) leaves them out, so a dependency
+// on work from an earlier run does not hang around as a queued card.
+const nodesOf = (list: Agent[], ghosts = true): Map<string, Node> => {
   const map = new Map<string, Node>()
   for (const a of list) {
     if (!a.slice) continue
@@ -133,8 +140,13 @@ const nodesOf = (list: Agent[]): Map<string, Node> => {
     n.agents.push(a)
     map.set(a.slice, n)
   }
-  for (const n of [...map.values()]) for (const d of n.deps) if (!map.has(d)) map.set(d, { id: d, deps: [], files: 0, agents: [] })
+  if (ghosts) for (const n of [...map.values()]) for (const d of n.deps) if (!map.has(d)) map.set(d, { id: d, deps: [], files: 0, agents: [] })
   return map
+}
+// A dependency is satisfied when its slice is built (or reviewed) and passed; one with no card (a ghost left out once the run is signed off) is not.
+const satisfiedIn = (map: Map<string, Node>, id: string) => {
+  const n = map.get(id)
+  return !!n && ['pass', 'done'].includes(stateOf(n))
 }
 const lastOf = (n: Node, role: string) => n.agents.filter(a => a.role === role).pop()
 const stateOf = (n: Node): State => {
@@ -226,7 +238,7 @@ const gutterOf = (prev: Node[], next: Node[], map: Map<string, Node>, f: number)
       const pi = prev.findIndex(p => p.id === d)
       if (pi < 0) continue
       const rs = pc[pi] as number
-      const color = edge(moving, ['pass', 'done'].includes(stateOf(map.get(d) as Node)))
+      const color = edge(moving, satisfiedIn(map, d))
       const path: [number, number][] = []
       for (let c = 0; c < sx; c++) {
         mark(rs, c, 4 | 8)
@@ -268,7 +280,7 @@ const trunkOf = (layer: Node[], map: Map<string, Node>, f: number): GRow[] => {
   const centers = centersOf(layer)
   const lastC = centers[centers.length - 1] as number
   const colorOf = (n: Node) =>
-    edge(stateOf(n) === 'running', n.deps.length ? n.deps.every(d => ['pass', 'done'].includes(stateOf(map.get(d) as Node))) : true)
+    edge(stateOf(n) === 'running', n.deps.length ? n.deps.every(d => satisfiedIn(map, d)) : true)
   const anyMoving = layer.some(n => stateOf(n) === 'running')
   return Array.from({ length: layerRows(layer) }, (_, r) => {
     const k = centers.indexOf(r)
@@ -312,15 +324,22 @@ const openPane = async ($: PaneApi) => {
   }
 }
 
+// Prompts the engine queues that the person did not type (a background task's notification, a peer session, a schedule): they are not new work.
+const NOT_THE_PERSON = [
+  'task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay', 'channel', 'coordinator', 'observer', 'observer-activity',
+  'auto-continuation', 'slack-ping',
+]
+
 type Ctx = Parameters<Hook<'agent.spawn'>>[0]
-// Nothing runs and the last agent ended over two minutes ago (or none ever ran): what follows starts a new run.
-const isNewRun = (list: Agent[], t: number) => !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) >= 120_000
+// Nothing runs and the last agent ended over two minutes ago (or none ever ran): what follows starts a new run. `force` (a new prompt from the person)
+// drops the two minutes: once nothing runs, new input is new work.
+const isNewRun = (list: Agent[], t: number, force = false) => !list.some(a => a.status === 'running') && (force || t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) >= 120_000)
 
 // A new run drops the old diagram: agents, log and main. With `keepVerdict` (the spawn path) the verdict and the work line stay when they are newer than
 // the old run's last agent: the person's prompt and the router both came before the first spawn of this run.
-async function newRun($: Ctx, t: number, keepVerdict: boolean) {
+async function newRun($: Ctx, t: number, keepVerdict: boolean, force = false) {
   const before = await read($, agents)
-  if (!isNewRun(before, t)) return
+  if (!isNewRun(before, t, force)) return
   const kept = await read($, triage)
   const lastEnd = Math.max(0, ...before.map(a => a.endedAt ?? 0))
   const keep = keepVerdict && kept && kept.at > lastEnd ? kept : null
@@ -356,12 +375,12 @@ export const register: Register = on => {
 
   // The prompt the person typed starts the work, with or without agents or a repository: open the pane and keep it moving.
   on('prompt.submit', async ($, e, next) => {
-    if (e.command || e.isMeta || !e.text.trim()) return next(e)
+    if (e.command || e.isMeta || !e.text.trim() || NOT_THE_PERSON.includes(e.origin?.kind as string)) return next(e)
     try {
       const now = await $.clock.now()
       // a prompt while the main session still works with no answer yet is a follow-up in the same turn window: reset nothing
       const working = await read($, workAtom)
-      if (!(working && !working.endedAt)) await newRun($, now, false)
+      if (!(working && !working.endedAt)) await newRun($, now, false, true)
       const running = (await read($, agents)).some(a => a.status === 'running')
       if (!running && !(working && !working.endedAt)) {
         const line = e.text.split('\n').find(l => l.trim()) ?? ''
@@ -413,11 +432,11 @@ export const register: Register = on => {
     const spawned = await next(e)
     const role = bare(e.subagentType)
     if (!ROLES.includes(role) || !('agentId' in spawned) || !spawned.agentId) return spawned
-    const plan = /^\s*PLAN REVIEW/m.test(e.prompt)
-    const slice = sliceOf(e.prompt)
+    const plan = /^\s*PLAN REVIEW\b/.test(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
+    const slice = plan ? undefined : sliceOf(e.prompt) // a plan review is a stage of its own, whatever SLICE line its brief carries
     const agent: Agent = {
       id: spawned.agentId, role, model: spawned.model, slice, label: slice ?? (plan ? 'plan review' : e.description),
-      deps: depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
+      deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
       tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
     }
     // a spawn with nothing running and the last agent done over two minutes ago starts a new run: drop the old diagram
@@ -529,7 +548,7 @@ export const register: Register = on => {
     const f = await read($, tick)
     const now = await $.clock.now()
     const g = (st: State) => (st === 'running' ? (SPIN[f % SPIN.length] as string) : GLYPH[st])
-    const map = nodesOf(list)
+    const map = nodesOf(list, list.some(a => a.status === 'running'))
     const fix = fixedBy(list, map)
     const fixedOf = (a: Agent) => (a.status === 'fail' ? fix.get(a.slice ?? a.id) : undefined)
     // A failure that was fixed later counts as done, not as a failure.
@@ -642,7 +661,7 @@ export const register: Register = on => {
         </Box>
       )
     }
-    const satisfied = (id: string) => ['pass', 'done'].includes(stateOf(map.get(id) as Node))
+    const satisfied = (id: string) => satisfiedIn(map, id)
     const gutters = layers.map((l, i) => (i > 0 && !vertical ? gutterOf(layers[i - 1] as Node[], l, map, f) : undefined))
     const card = (n: Node) => {
       const s: State = fix.has(n.id) ? 'done' : stateOf(n)
