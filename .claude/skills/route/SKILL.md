@@ -29,6 +29,8 @@ Size the task before doing it.
 
      Thresholds: minParallelSlices 2, minParallelFilesCode 10, minParallelFilesNonCode 4, bigFiles 12, reviewedMaxFiles 3, bigLines 1500, reviewedMaxLines 200. minParallelFilesCode was raised from 4 after a 2-rep, coding-only benchmark (bench/, docs/benchmarks.md); minParallelFilesNonCode keeps the earlier 4 because nothing measured non-code work.
 
+     Then, if a route-recording tool is listed (`mcp__orchestration__route`, or `mcp__orchestration-dashboard__route` when the standalone dashboard mod is loaded), call it once with the mode, the reason and the five facts so the orchestration pane shows the triage. If no such tool is listed, carry on.
+
 2. Tell the user the mode and the reason in one or two sentences, then act on it. Only code in a git repository uses git machinery (worktrees, the integrator, checkpoint commits, branch reports, `git diff` reviews). The test gate runs the tests whenever a test command exists (detected, or `ORCH_TEST_CMD`) and skips them only for a prose-only change in a git work tree; it judges the changed files, never `code`. The review gate applies to every task.
    - `plain`: do the task in this session. If it changed code, run the project's tests before saying it is done; otherwise check the result against the request (every requested item is there, and each claim is backed by a source you read).
    - `reviewed`: do the task here, then have `orchestration:reviewer` check the result before reporting: `git diff HEAD` for code in a git repository, otherwise the files or answer you produced, with the request and what a correct result must contain.

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { Hook, Register, Timer } from 'claude-code'
 
-import type { Agent, LogEntry, TriageInfo } from '../types'
+import type { Agent, LogEntry, TriageInfo, Work } from '../types'
 
 const PANE = 'orchestration'
 const ROLES = ['researcher', 'implementer', 'reviewer', 'integrator']
@@ -10,6 +10,7 @@ const log = atom({ plugin: 'orchestration', key: 'log' } as const, [])
 const tick = atom({ plugin: 'orchestration', key: 'tick' } as const, 0)
 const main = atom({ plugin: 'orchestration', key: 'main' } as const, '')
 const triage = atom({ plugin: 'orchestration', key: 'triage' } as const, null)
+const workAtom = atom({ plugin: 'orchestration', key: 'work' } as const, null)
 
 const GLYPH = { running: '●', pass: '✔', fail: '✖', done: '◆', queued: '◌' } as const
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -305,11 +306,94 @@ const openPane = async ($: PaneApi) => {
   }
 }
 
+type Ctx = Parameters<Hook<'agent.spawn'>>[0]
+// Nothing runs and the last agent ended over two minutes ago (or none ever ran): what follows starts a new run.
+const isNewRun = (list: Agent[], t: number) => !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) >= 120_000
+
+// A new run drops the old diagram: agents, log and main. With `keepVerdict` (the spawn path) the verdict and the work line stay when they are newer than
+// the old run's last agent: the person's prompt and the router both came before the first spawn of this run.
+async function newRun($: Ctx, t: number, keepVerdict: boolean) {
+  const before = await read($, agents)
+  if (!isNewRun(before, t)) return
+  const kept = await read($, triage)
+  const lastEnd = Math.max(0, ...before.map(a => a.endedAt ?? 0))
+  const keep = keepVerdict && kept && kept.at > lastEnd ? kept : null
+  const w = await read($, workAtom)
+  await update($, agents, () => [])
+  await update($, triage, () => keep)
+  await update($, log, () => (keep ? [{ at: keep.at, kind: 'triage', role: 'router', label: keep.mode, model: '' } as LogEntry] : []))
+  await update($, main, () => '')
+  if (!(keepVerdict && w && w.startedAt > lastEnd)) await update($, workAtom, () => null)
+  told = false
+}
+
+// Redraw four times a second for the animation while an agent runs, finished under 2.5 s ago, or the main session works; then stop.
+function startTimer($: Ctx, slot: { timer?: Timer }) {
+  const pulse = async () => {
+    const list = await read($, agents)
+    const w = await read($, workAtom)
+    const t = await $.clock.now()
+    if (!(w && !w.endedAt) && !list.some(a => a.status === 'running') && list.every(a => t - (a.endedAt ?? 0) > 2500)) {
+      slot.timer?.cancel()
+      slot.timer = undefined
+      return
+    }
+    await update($, tick, n => n + 1)
+  }
+  slot.timer ??= $.clock.every(250, () => {
+    void pulse().catch(() => {}) // a redraw that fails (the module is gone) is skipped
+  })
+}
+
 export const register: Register = on => {
-  let timer: { cancel: () => void } | undefined
+  const slot: { timer?: Timer } = {} // the one redraw timer of this load
+
+  // The prompt the person typed starts the work, with or without agents or a repository: open the pane and keep it moving.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.command || e.isMeta || !e.text.trim()) return next(e)
+    try {
+      const now = await $.clock.now()
+      // a prompt while the main session still works with no answer yet is a follow-up in the same turn window: reset nothing
+      const working = await read($, workAtom)
+      if (!(working && !working.endedAt)) await newRun($, now, false)
+      const running = (await read($, agents)).some(a => a.status === 'running')
+      if (!running && !(working && !working.endedAt)) {
+        const line = e.text.split('\n').find(l => l.trim()) ?? ''
+        await update($, workAtom, () => ({ text: line.trim().slice(0, 120), startedAt: now }))
+      }
+      await openPane($)
+      startTimer($, slot)
+    } catch {
+      // the pane must never change the prompt
+    }
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'orchestration', description: 'Show the orchestration agents, slice diagram and token usage in a pane' })
+    // A plugin-only install has no `npm run route`: the model records the verdict through this tool. `isDeferred: false` keeps it out of ToolSearch.
+    try {
+      await $.tool.register({
+        name: 'route',
+        description: 'Record the triage verdict (mode, reason and the five facts) so the orchestration pane can show it. Call it once after sizing a task.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mode: { type: 'string', enum: MODES },
+            reason: { type: 'string' },
+            filesToTouch: { type: 'number' },
+            linesToChange: { type: 'number' },
+            independentSlices: { type: 'number' },
+            risky: { type: 'boolean' },
+            code: { type: 'boolean' },
+          },
+          required: ['mode', 'reason'],
+        },
+        isDeferred: false,
+      })
+    } catch {
+      // the tool is a convenience: the pane works without it
+    }
     return next(e)
   })
 
@@ -330,37 +414,37 @@ export const register: Register = on => {
       deps: depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
       tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
     }
-    // A spawn with nothing running and the last agent done over two minutes ago starts a new run: drop the old diagram.
-    const fresh = (list: Agent[]) =>
-      list.some(a => a.status === 'running') || agent.startedAt - Math.max(0, ...list.map(a => a.endedAt ?? 0)) < 120_000 ? list : []
-    const before = await read($, agents)
-    if (fresh(before).length === 0 && before.length > 0) {
-      // a verdict later than the last agent's end belongs to this new run: keep it (and its log line); an older one is dropped
-      const kept = await read($, triage)
-      const keep = kept && kept.at > Math.max(0, ...before.map(a => a.endedAt ?? 0)) ? kept : null
-      await update($, triage, () => keep)
-      await update($, log, () => (keep ? [{ at: keep.at, kind: 'triage', role: 'router', label: keep.mode, model: '' } as LogEntry] : []))
-      told = false
-    }
-    await update($, agents, list => [...fresh(list), agent].slice(-80))
+    // a spawn with nothing running and the last agent done over two minutes ago starts a new run: drop the old diagram
+    if ((await read($, agents)).length > 0) await newRun($, agent.startedAt, true)
+    await update($, agents, list => [...list, agent].slice(-80))
     await update($, main, () => e.parentModel)
     await update($, log, l => [...l, { at: agent.startedAt, kind: 'start', role, label: agent.label, model: agent.model } as LogEntry].slice(-60))
     await openPane($)
-    // Redraw four times a second for the animation while an agent runs or finished under 2.5 s ago, then stop.
-    const pulse = async () => {
-      const list = await read($, agents)
-      const t = await $.clock.now()
-      if (!list.some(a => a.status === 'running') && list.every(a => t - (a.endedAt ?? 0) > 2500)) {
-        timer?.cancel()
-        timer = undefined
-        return
-      }
-      await update($, tick, n => n + 1)
-    }
-    timer ??= $.clock.every(250, () => {
-      void pulse()
-    })
+    startTimer($, slot)
     return spawned
+  })
+
+  // The route tool (the engine names it mcp__<plugin>__route; the plugin build renames the plugin inside this one literal).
+  on('tool.call', { tool: 'mcp__orchestration__route' }, async ($, e) => {
+    if (e.agentId) return { result: 'ignored: only the main session records a route' }
+    try {
+      const t = e as unknown as Record<string, unknown>
+      const input = 'input' in t ? t.input : t
+      const o = input && typeof input === 'object' ? (input as Record<string, unknown>) : undefined
+      if (!o) return { result: 'ignored: the input is not an object' }
+      if (!MODES.includes(o.mode as string)) return { result: 'ignored: mode must be plain, reviewed or orchestrate' }
+      if (typeof o.reason !== 'string') return { result: 'ignored: reason must be text' }
+      const at = await $.clock.now()
+      const facts = factsOf(o)
+      const found = { mode: o.mode as TriageInfo['mode'], reason: o.reason, ...(facts ? { facts } : {}) }
+      await update($, triage, () => ({ at, ...found }))
+      await update($, log, l => [...l, { at, kind: 'triage', role: 'router', label: found.mode, model: '' } as LogEntry].slice(-60))
+      await openPane($)
+      startTimer($, slot)
+      return { result: `route recorded: ${found.mode}` }
+    } catch {
+      return { result: 'ignored: the pane could not record the route' }
+    }
   })
 
   // What a running agent is doing: its latest tool and target. The main loop's `npm run route` also gives the pane its triage.
@@ -392,6 +476,16 @@ export const register: Register = on => {
   // An agent finishes: its report's STATUS line and first result line, its tokens and its time.
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
+    if (!id) {
+      // the main session's turn ended: the work is answered, or stopped (aborted, refused, failed)
+      try {
+        const now = await $.clock.now()
+        const outcome = e.reason === 'answer' ? 'answered' : 'stopped'
+        await update($, workAtom, w => (w && !w.endedAt ? { ...w, endedAt: now, outcome } : w))
+      } catch {
+        // the pane must never change the turn
+      }
+    }
     if (id) {
       const now = await $.clock.now()
       const u = e.usage
@@ -425,6 +519,7 @@ export const register: Register = on => {
     const lines = await read($, log)
     const orchestrator = await read($, main)
     const verdict = await read($, triage)
+    const work = (await read($, workAtom)) ?? undefined // state holds null, not undefined
     const f = await read($, tick)
     const now = await $.clock.now()
     const g = (st: State) => (st === 'running' ? (SPIN[f % SPIN.length] as string) : GLYPH[st])
@@ -462,20 +557,36 @@ export const register: Register = on => {
       const state: State = !group.length ? 'queued' : group.some(a => a.status === 'running') ? 'running' : group.some(a => eff(a) === 'fail') ? 'fail' : 'pass'
       return { name, group, done, n: group.length, state, mode }
     }
-    const mode = verdict?.mode ?? inferMode(list)
-    const signed = list.length > 0 && !running
+    // The main session's own work, which exists with no agents: the prompt in a box, then running, answered or stopped.
+    const solo = list.length === 0
+    const working = !!work && !work.endedAt
+    const workState: State = !work ? 'queued' : working ? 'running' : work.outcome === 'answered' ? 'pass' : 'done'
+    const active = list.length > 0 || !!work || !!verdict
+    const flow = running > 0 || working
+    const mode = verdict?.mode ?? inferMode(list) ?? (work?.endedAt ? 'plain' : undefined)
+    const signed = list.length > 0 ? !running : !!work?.endedAt
     // The orchestrator plans itself, so the plan stage has no agent: it is done once plan review or a build has started.
     const planned = list.some(a => a.role === 'implementer' || a.label === 'plan review')
     // No integrator ran (one slice at a time in a shared tree, or no code): once the run is signed off the merge stage is skipped.
     const merges = list.filter(a => a.role === 'integrator')
+    // Plain and reviewed runs skip the stages they do not use; the build the main session does itself reads "this session".
+    const unused = mode === 'plain' ? ['plan', 'plan review', 'review', 'merge'] : mode === 'reviewed' ? ['plan', 'plan review', 'merge'] : []
     const stages = [
       { ...phase('triage', []), state: (mode ? 'pass' : 'queued') as State, mode },
       (p => (planned && (p.state === 'queued' || p.state === 'pass') ? { ...p, state: 'pass' as State, mode: 'orchestrator' } : p))(phase('plan', list.filter(a => a.role === 'researcher'))),
       phase('plan review', list.filter(a => a.label === 'plan review')),
       phase('build', list.filter(a => a.role === 'implementer')),
       phase('review', list.filter(a => a.role === 'reviewer' && a.label !== 'plan review')),
-      { ...phase('merge', merges), ...(signed && !merges.length ? { state: 'done' as State, mode: 'skipped' } : {}) },
-    ]
+      { ...phase('merge', merges), ...(signed && !solo && !merges.length ? { state: 'done' as State, mode: 'skipped' } : {}) },
+    ].map(p =>
+      p.name === 'triage' || p.group.length || (p.name === 'plan' && planned)
+        ? p
+        : unused.includes(p.name)
+          ? { ...p, state: 'done' as State, mode: 'skipped' }
+          : p.name === 'build' && unused.length
+            ? { ...p, state: (list.length ? (work?.outcome === 'stopped' ? 'done' : 'pass') : workState) as State, mode: 'this session' }
+            : p,
+    )
     const cols = width >= 100 ? 6 : width >= 40 ? 3 : 2
     const pw = Math.max(6, Math.floor((width - 3 * (cols - 1) - 1) / cols))
     const stageRows = Array.from({ length: Math.ceil(stages.length / cols) }, (_, r) => stages.slice(r * cols, r * cols + cols))
@@ -506,6 +617,8 @@ export const register: Register = on => {
       if (name === 'build') return nodes.filter(n => n.agents.every(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'implementer')))
       if (name === 'review') return nodes.filter(n => n.agents.some(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'reviewer')))
       if (name === 'plan' && !group.length && planned) return ['pass']
+      const own = stages.find(p => p.name === name && p.mode === 'this session')
+      if (own && !group.length) return [own.state]
       return group.map(eff)
     }
     // The most recent cells that fit in w, then `+N` for the hidden ones; an empty stage shows dim dots.
@@ -615,16 +728,16 @@ export const register: Register = on => {
     const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇' } as const
     const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle' } as const
 
-    const mainState: State = running ? 'running' : !list.length ? 'queued' : failed ? 'fail' : 'pass'
+    const mainState: State = running ? 'running' : solo ? workState : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
     const diagramRows = vertical ? layers.reduce((t, l) => t + layerRows(l) + 1, 0) : Math.max(0, ...layers.map(layerRows))
-    const needsScroll = bodyRows > 0 && 26 + (verdict || list.length ? 5 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length > bodyRows
+    const needsScroll = bodyRows > 0 && 26 + (active ? 5 : 0) + (work ? 4 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length > bodyRows
 
     return (
       <Box flexDirection="column">
         {needsScroll && <Text dimColor>↑↓ scroll · click the pane or /orchestration</Text>}
-        {list.length === 0 && <Text dimColor>No orchestration agents yet.</Text>}
+        {!active && <Text dimColor>No orchestration agents yet.</Text>}
         {list.length > 0 && (
           <Box flexWrap="wrap">
             {models.map(m => (
@@ -634,31 +747,47 @@ export const register: Register = on => {
             ))}
           </Box>
         )}
-        {list.length > 0 && (
+        {work && (
+          <Box borderStyle="round" borderDimColor flexDirection="column" width={boxW}>
+            <Text wrap="truncate-end">▸ {work.text}</Text>
+          </Box>
+        )}
+        {work && down(flow, true, 1)}
+        {active && (
           <Box borderStyle={signed ? 'double' : 'bold'} borderColor={COLOR[mainState]} flexDirection="column" width={boxW}>
             <Text bold color={orchestrator ? familyColor(orchestrator) : undefined} wrap="truncate-end">
               {g(mainState)} {short(orchestrator || 'main')} · orchestrator
             </Text>
             <Text color={COLOR[mainState]} wrap="truncate-end">
-              {running ? `dispatching${dots} ${running} running` : failed ? `signed off with ${failed} failed` : fixedN ? `passed · ${fixedN} fixed on the way` : 'all agents passed'}
+              {running
+                ? `dispatching${dots} ${running} running`
+                : solo
+                  ? work ? (working ? `working in this session${dots}` : work.outcome === 'answered' ? 'answered in this session' : 'stopped before an answer') : 'waiting for agents'
+                  : failed ? `signed off with ${failed} failed` : fixedN ? `passed · ${fixedN} fixed on the way` : 'all agents passed'}
             </Text>
             <Text dimColor wrap="truncate-end">
-              {list.length} agents · {tokens(total)} tokens · {clock(last - first)}
+              {list.length} agents · {tokens(total)} tokens · {clock(solo ? (work ? (work.endedAt ?? now) - work.startedAt : 0) : last - first)}
             </Text>
           </Box>
         )}
-        {(verdict || list.length > 0) && mode && (
+        {active && down(flow, true, 1)}
+        {!verdict && solo && working && (
+          <Box borderStyle="round" borderColor="gray" borderDimColor flexDirection="column" width={boxW}>
+            <Text dimColor wrap="truncate-end">triage · sizing…</Text>
+          </Box>
+        )}
+        {(verdict || list.length > 0 || work?.endedAt) && mode && (
           <Box borderStyle="round" borderColor={MODE_COLOR[mode]} flexDirection="column" width={boxW}>
             <Text bold color={MODE_COLOR[mode]} wrap="truncate-end">triage · {mode}</Text>
             {verdict?.facts && (
               <Text wrap="truncate-end">files {verdict.facts.filesToTouch} · lines {verdict.facts.linesToChange} · slices {verdict.facts.independentSlices}</Text>
             )}
             {verdict?.facts && <Text wrap="truncate-end">risky {verdict.facts.risky ? 'yes' : 'no'} · code {verdict.facts.code ? 'yes' : 'no'}</Text>}
-            <Text dimColor wrap="truncate-end">{verdict ? verdict.reason : '(inferred from the agents)'}</Text>
+            <Text dimColor wrap="truncate-end">{verdict ? verdict.reason : solo ? '(inferred: no agents ran)' : '(inferred from the agents)'}</Text>
           </Box>
         )}
-        {list.length > 0 && down(running > 0, true, 1)}
-        {list.length > 0 &&
+        {active && down(flow, true, 1)}
+        {active &&
           stageRows.map((row, r) => (
             <Box flexDirection="column">
               {r > 0 && (
@@ -694,7 +823,7 @@ export const register: Register = on => {
               </Box>
             </Box>
           ))}
-        {layers.length > 0 && down(running > 0, true, 1)}
+        {active && down(flow, true, 1)}
         {vertical ? (
           <Box flexDirection="column">
             {layers.map((layer, i) => (
@@ -737,13 +866,15 @@ export const register: Register = on => {
           </Box>
         )}
         {bus && bus.rows.map(r => <Text color={edge(running > 0, signed)}>{r}</Text>)}
-        {list.length > 0 && (
+        {active && (
           <Box marginLeft={Math.min(Math.max(0, (bus?.mid ?? 0) - Math.floor(boxW / 2)), Math.max(0, width - boxW))} borderStyle={signed ? 'double' : 'round'} borderColor={signed ? COLOR[mainState] : 'gray'} flexDirection="column" width={boxW}>
             <Text bold color={signed ? COLOR[mainState] : undefined} wrap="truncate-end">
               {signed ? GLYPH[mainState] : '◌'} sign off · {short(orchestrator || 'main')}
             </Text>
             <Text dimColor wrap="truncate-end">
-              {signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : 'waiting for agents · verified findings only'}
+              {solo && work
+                ? working ? 'waiting for the reply' : work.outcome === 'answered' ? 'answered in this session' : 'stopped'
+                : signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : 'waiting for agents · verified findings only'}
             </Text>
           </Box>
         )}
