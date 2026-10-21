@@ -28,7 +28,30 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
    - A recorded route verdict, from the `route` tool or from a captured `npm run route`: the mode, the facts (files, lines, slices, risky, code) and the reason. The Bash capture happens only when the `/route` skill runs `npm run route` in a plain session, because `claude --agent orchestrator` has no Bash tool.
    - Otherwise, with agents, the mode is inferred from the agents (an implementer, integrator or plan review means orchestrate; a reviewer alone means reviewed; any other agent means orchestrate) and the box says "(inferred from the agents)". Under the orchestrator the triage is always inferred.
    - With no agents and no verdict, the box reads "sizing…" while the main turn runs, then the mode "plain" with "(inferred: no agents ran)".
-5. **Pipeline stages.** Six boxes: triage, plan, plan review, build, review, merge. Each has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). Arrows join the boxes, with a dot moving along the arrow into a running stage. Between rows a return rail runs from the last box back to the first of the next row. The orchestrator plans itself, so the plan stage turns done (marked "orchestrator") once a plan review or a build has started. Merge reads "skipped" once the run is signed off with no integrator having run. Stages the mode does not use read "skipped" (plain: plan, plan review, review, merge; reviewed: plan, plan review, merge), and build reads "this session" while the main session does the work.
+
+   A recorded verdict draws the box in the mode's colour; an inferred mode draws the same box with a dim border. Below it, a fork of three route boxes (plain, reviewed, orchestrate) shows which route was taken:
+   - From 44 columns the three boxes sit side by side, with a line from the triage box to the chosen one. Below 44 columns the two routes not taken are listed first as one-line `○ name` rows, then the chosen route as a box.
+   - The chosen route is active: a bold border (double once the run is signed off), a `◉` marker, its name in the mode's colour, and a status word in the status colour: `running`, `passed`, `failed`, `stopped` (a main turn that ended without an answer) or `chosen` (a mode with no work yet). The routes not taken are dim, with a round border and `○ not taken`.
+   - While the mode is still being sized, all three boxes are dim (`○ …`) and the line from the triage box branches to all three; no route is linked to a stage.
+   - The recorded verdict and the inferred mode draw the fork and the link the same way; only the triage box differs.
+
+   ```text
+   ╭────────────────────────────────────────────╮
+   │triage · plain                              │
+   │(inferred: no agents ran)                   │
+   ╰────────────────────────────────────────────╯
+    │
+    └─────┐
+          ▼
+   ╔════════════╗  ╭────────────╮  ╭────────────╮
+   ║plain       ║  │reviewed    │  │orchestrate │
+   ║◉ ✔ passed  ║  │○ not taken │  │○ not taken │
+   ╚════════════╝  ╰────────────╯  ╰────────────╯
+          │
+          └──────────────────────────────────────────────────┐
+                                                             ▼
+   ```
+5. **Pipeline stages.** Six boxes: triage, plan, plan review, build, review, merge. Each has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). A link from the active route box enters the first stage the route uses: plan for orchestrate, build for plain and reviewed. While the run works, a dot moves along it; the link is amber while work runs, otherwise the status colour once the run is signed off, grey before that. From 100 columns build is in the first row and the link drops straight onto it. Below 100 columns the stage row wraps and build is in the second row, so the link runs down a lane at the right edge of the first row and turns into the build box. Under 16 columns the link goes to the first stage instead. Arrows join the boxes, with a dot moving along the arrow into a running stage. Between rows a return rail runs from the last box back to the first of the next row. The orchestrator plans itself, so the plan stage turns done (marked "orchestrator") once a plan review or a build has started. Merge reads "skipped" once the run is signed off with no integrator having run. Stages the mode does not use read "skipped" (plain: plan, plan review, review, merge; reviewed: plan, plan review, merge), and build reads "this session" while the main session does the work.
 6. **Slice diagram.** One card per slice, in columns by dependency layer (a slice sits right of everything it waits for).
    - A rail on the left forks an arrowhead into every card of the first layer.
    - Routed box-drawing lines join each layer to the next, entering the target's middle with an arrowhead.
@@ -40,7 +63,7 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 9. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
 10. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too.
 
-A run with no agents (research or simple work that stays in the main session) shows the input box, the orchestrator box, the triage box, the stage boxes and the sign-off box; the tasks table, usage bar and slice diagram need agents. Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, triage to the stage rows (after wrapped rows, the arrow comes after the last row), and the stages to the slice diagram or the sign-off box.
+A run with no agents (research or simple work that stays in the main session) shows the input box, the orchestrator box, the triage box, the stage boxes and the sign-off box; the tasks table, usage bar and slice diagram need agents. Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, triage to the route boxes, the chosen route to its first stage, and the stages to the slice diagram or the sign-off box.
 
 ## Glyphs and colours
 
@@ -51,6 +74,8 @@ A run with no agents (research or simple work that stays in the main session) sh
 | `✖` | failed | red |
 | `◆` | finished with no STATUS line | grey |
 | `◌` | queued | grey |
+| `◉` | the route triage chose | status colour |
+| `○` | a route not taken (or still being sized) | dim |
 
 Flow lines are amber while work moves through them, green once what feeds them is done, grey before that. Models are coloured by family: opus magenta, sonnet yellow, haiku cyan, fable green, others white. Triage modes: plain grey, reviewed yellow, orchestrate cyan. A card is outlined with a double border for 2 seconds after an agent finishes.
 

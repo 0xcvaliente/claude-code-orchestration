@@ -115,6 +115,12 @@ const inferMode = (list: Agent[]): TriageInfo['mode'] | undefined => {
   return list.length ? 'orchestrate' : undefined
 }
 const MODE_COLOR = { plain: 'gray', reviewed: 'yellow', orchestrate: 'cyan' } as const
+// The stage each route enters first (3 = build, 1 = plan), and what the chosen route's box says about the run.
+const ENTRY = { plain: 3, reviewed: 3, orchestrate: 1 } as const
+const WORD: Record<State, string> = { running: 'running', pass: 'passed', fail: 'failed', done: 'stopped', queued: 'chosen' }
+// A line from column a (coming from above) to column b (going down), as one row of box-drawing characters.
+const elbow = (a: number, b: number) =>
+  a === b ? `${' '.repeat(a)}│` : b > a ? `${' '.repeat(a)}└${'─'.repeat(b - a - 1)}┐` : `${' '.repeat(b)}┌${'─'.repeat(a - b - 1)}┘`
 
 // One diagram node per slice: its implementer and reviewer(s) grouped, plus a queued ghost for a dependency not launched yet.
 type Node = { id: string; deps: string[]; files: number; agents: Agent[] }
@@ -732,7 +738,64 @@ export const register: Register = on => {
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
     const diagramRows = vertical ? layers.reduce((t, l) => t + layerRows(l) + 1, 0) : Math.max(0, ...layers.map(layerRows))
-    const needsScroll = bodyRows > 0 && 26 + (active ? 5 : 0) + (work ? 4 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length > bodyRows
+
+    // Triage fork: three routes side by side (stacked under 44 columns), the chosen one joined by a link to the first stage it uses.
+    // Active means a mode or sizing, so the fork is drawn whenever the pane is.
+    const side = width >= 44
+    const rw = Math.floor((boxW - 4) / 3)
+    const rc = [0, 1, 2].map(i => i * (rw + 2) + Math.floor(rw / 2))
+    const k = mode ? MODES.indexOf(mode) : -1
+    const forkColor = mode ? edge(flow, true) : 'subtle'
+    const linkColor = flow ? 'warning' : signed ? COLOR[mainState] : 'subtle'
+    // Under 16 columns pw is clamped and a row can pass the pane: no lane, the link goes straight to the first stage.
+    const entry = mode && width >= 16 ? ENTRY[mode] : 0
+    const left = (entry % cols) * (pw + 3)
+    const fx = Math.floor(pw / 2)
+    const lx = (cols - 1) * (pw + 3) + fx
+    const rowW = cols * pw + 3 * (cols - 1)
+    // Plain and reviewed enter build, which is in the second row below 100 columns: the link runs down a lane right of the first row.
+    const lane = !!mode && Math.floor(entry / cols) >= 1 && rowW <= width - 1
+    const ex = left + pw - 2
+    const sx = side ? (rc[k] as number) : 1
+    const tx = lane ? rowW : Math.max(1, Math.min(left + fx, width - 1))
+    const linkRows = mode ? [`${' '.repeat(sx)}│`, elbow(sx, tx), `${' '.repeat(tx)}${lane ? '│' : '▼'}`] : []
+    // The dot travels the link while work runs: about 12 ticks for a pass, whatever its length.
+    let dotRow = -1
+    if (mode && flow) {
+      const path: [number, number][] = [[0, sx]]
+      for (let x = sx; x !== tx + (tx >= sx ? 1 : -1); x += tx >= sx ? 1 : -1) path.push([1, x])
+      path.push([2, tx])
+      const [r, x] = path[(f * Math.max(1, Math.ceil(path.length / 12))) % path.length] as [number, number]
+      linkRows[r] = `${(linkRows[r] as string).slice(0, x)}●${(linkRows[r] as string).slice(x + 1)}`
+      dotRow = r
+    }
+    // From the triage box to the route boxes: one line to the chosen route, or a branch to all three while sizing.
+    const sizeRow = Array.from({ length: rc[2]! + 1 }, (_, x) => (x === 1 ? '└' : x === rc[2] ? '┐' : x === rc[0] || x === rc[1] ? '┬' : x > 1 ? '─' : ' ')).join('')
+    const forkRows = !side ? [] : mode ? [' │', elbow(1, rc[k] as number), `${' '.repeat(rc[k] as number)}▼`] : [' │', sizeRow, Array.from({ length: rc[2]! + 1 }, (_, x) => (rc.includes(x) ? '▼' : ' ')).join('')]
+    const routeBox = (name: string, w: number, ml = 0) => {
+      const chosen = name === mode
+      return (
+        <Box borderStyle={chosen ? (signed ? 'double' : 'bold') : 'round'} borderColor={chosen && mode ? MODE_COLOR[mode] : 'gray'} borderDimColor={!chosen} flexDirection="column" width={w} marginLeft={ml}>
+          <Text bold={chosen} dimColor={!chosen} color={chosen && mode ? MODE_COLOR[mode] : undefined} wrap="truncate-end">{name}</Text>
+          {chosen ? <Text color={COLOR[mainState]} wrap="truncate-end">◉ {g(mainState)} {WORD[mainState]}</Text> : <Text dimColor wrap="truncate-end">{mode ? '○ not taken' : '○ …'}</Text>}
+        </Box>
+      )
+    }
+    // The return rail into the second row, with the lane running down beside it and turning in at the right of the build box.
+    const laneRail = (lastStage: (typeof stages)[number]) => {
+      const color = edge(lastStage.state === 'running', lastStage.state === 'pass')
+      const gap = ' '.repeat(Math.max(0, rowW - lx - 1))
+      const pad = ' '.repeat(Math.max(0, ex - fx - 1))
+      const rail = [`${' '.repeat(lx)}│`, `${' '.repeat(fx)}┌${'─'.repeat(Math.max(0, lx - fx - 1))}┘`, `${' '.repeat(fx)}│`, `${' '.repeat(fx)}▼`]
+      const beside = [`${gap}│`, `${gap}│`, `${pad}┌${'─'.repeat(Math.max(0, rowW - ex - 1))}┘`, `${pad}▼`]
+      return rail.map((text, i) => [{ text, color }, { text: beside[i] as string, color: linkColor }])
+    }
+    // Rows the fork adds over the old two-row arrow above the stages: the fork, the route boxes, the link, and the lane's extra rail row.
+    const forkHeight = !active ? 0 : side ? 3 + 4 : mode ? 2 + 1 + 4 : 3
+    const needsScroll =
+      bodyRows > 0 &&
+      26 + (active ? 5 : 0) + (work ? 4 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length +
+        (active ? forkHeight + linkRows.length - 2 + (lane ? 1 : 0) : 0) > bodyRows
 
     return (
       <Box flexDirection="column">
@@ -777,7 +840,7 @@ export const register: Register = on => {
           </Box>
         )}
         {(verdict || list.length > 0 || work?.endedAt) && mode && (
-          <Box borderStyle="round" borderColor={MODE_COLOR[mode]} flexDirection="column" width={boxW}>
+          <Box borderStyle="round" borderColor={MODE_COLOR[mode]} borderDimColor={!verdict} flexDirection="column" width={boxW}>
             <Text bold color={MODE_COLOR[mode]} wrap="truncate-end">triage · {mode}</Text>
             {verdict?.facts && (
               <Text wrap="truncate-end">files {verdict.facts.filesToTouch} · lines {verdict.facts.linesToChange} · slices {verdict.facts.independentSlices}</Text>
@@ -786,17 +849,52 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">{verdict ? verdict.reason : solo ? '(inferred: no agents ran)' : '(inferred from the agents)'}</Text>
           </Box>
         )}
-        {active && down(flow, true, 1)}
+        {active && (
+          <Box flexDirection="column">
+            {side ? (
+              <Box flexDirection="column">
+                {forkRows.map(t => (
+                  <Text color={forkColor}>{t}</Text>
+                ))}
+                <Box>{MODES.map((n, i) => routeBox(n, rw, i ? 2 : 0))}</Box>
+              </Box>
+            ) : (
+              <Box flexDirection="column">
+                {MODES.filter(n => n !== mode).map((n, i) => (
+                  <Box>
+                    <Text color={forkColor}>{mode ? ' │ ' : i === 2 ? ' └ ' : ' ├ '}</Text>
+                    <Text dimColor>○ {n}</Text>
+                  </Box>
+                ))}
+                {mode && <Text color={forkColor}>{' ▼'}</Text>}
+                {mode && routeBox(mode, boxW)}
+              </Box>
+            )}
+            {linkRows.map((t, i) => (
+              <Text color={linkColor} bold={i === dotRow}>{t}</Text>
+            ))}
+          </Box>
+        )}
         {active &&
           stageRows.map((row, r) => (
             <Box flexDirection="column">
-              {r > 0 && (
-                <Box flexDirection="column">
-                  {railOf((stageRows[r - 1] as typeof stages)[cols - 1] as (typeof stages)[number]).map(x => (
-                    <Text color={x.color}>{x.text}</Text>
-                  ))}
-                </Box>
-              )}
+              {r > 0 &&
+                (lane && r === 1 ? (
+                  <Box flexDirection="column">
+                    {laneRail((stageRows[0] as typeof stages)[cols - 1] as (typeof stages)[number]).map(([a, b]) => (
+                      <Box>
+                        <Text color={(a as { color: string }).color}>{(a as { text: string }).text}</Text>
+                        <Text color={(b as { color: string }).color}>{(b as { text: string }).text}</Text>
+                      </Box>
+                    ))}
+                  </Box>
+                ) : (
+                  <Box flexDirection="column">
+                    {railOf((stageRows[r - 1] as typeof stages)[cols - 1] as (typeof stages)[number]).map(x => (
+                      <Text color={x.color}>{x.text}</Text>
+                    ))}
+                  </Box>
+                ))}
               <Box>
                 {row.map((p, j) => {
                   const before = stages[r * cols + j - 1]
@@ -820,6 +918,13 @@ export const register: Register = on => {
                     </Box>
                   )
                 })}
+                {lane && r === 0 && (
+                  <Box flexDirection="column">
+                    {[0, 1, 2, 3, 4].map(() => (
+                      <Text color={linkColor}>│</Text>
+                    ))}
+                  </Box>
+                )}
               </Box>
             </Box>
           ))}
