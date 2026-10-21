@@ -231,3 +231,64 @@ test('usage by model is one stacked bar with a legend row per model and no bars'
   expect(t.some(x => /usage by model/.test(x))).toBe(true)
   expect(t.some(x => /agents only/.test(x))).toBe(true)
 })
+
+test('a failure a later slice made good shows as fixed; a bare GAPS heading is skipped; plan and merge are labelled', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'orchestration' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('agent.spawn', (_: unknown, e: any) => ({ model: 'sonnet', agentId: e.tool_use_id }))
+  on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
+  let now = 1000
+  on('clock.now', () => ({ value: (now += 1000) }))
+  on('clock.every', () => ({ value: {} }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const spawn = (id: string, slice: string, deps: string, type: string) =>
+    $.agent.spawn({
+      tool_use_id: id, prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: ${deps}`, description: id, subagentType: type,
+      provider: { plugin: 'orchestration', tier: 'user' }, parentModel: 'opus',
+    } as never)
+  const done = (agentId: string, answer: string) =>
+    ($ as any).turn.complete({ turnId: agentId, agentId, answer, durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 100, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
+  const IMPL = 'orchestration:implementer'
+  const REV = 'orchestration:reviewer'
+
+  // while an agent runs the plan stage is already done (the orchestrator planned) but merge is not "skipped" yet
+  await spawn('a', 'bad', 'none', IMPL)
+  let t = await texts($, 100)
+  expect(t.includes('orchestrator')).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
+  await done('a', 'tried\nSTATUS: fail')
+  await spawn('ra', 'bad', 'none', REV)
+  await done('ra', 'STATUS: fail\nGAPS:\n- the limit is wrong')
+  // slice "good" depends on "bad", started after it ended and passes
+  await spawn('b', 'good', 'bad', IMPL)
+  await done('b', 'fixed it\nSTATUS: pass')
+  await spawn('rb', 'good', 'bad', REV)
+  await done('rb', 'STATUS: pass\nGAPS: none')
+  // a failure nothing fixed, with a bare GAPS heading
+  await spawn('c', 'other', 'none', IMPL)
+  await done('c', 'built\nSTATUS: pass')
+  await spawn('rc', 'other', 'none', REV)
+  await done('rc', 'STATUS: fail\nGAPS:\n- off by one in other.py')
+
+  t = await texts($, 100)
+  expect(t.some(x => /↳ fixed by good/.test(x))).toBe(true)
+  expect(t.some(x => /↳ off by one in other\.py/.test(x))).toBe(true)
+  expect(t.some(x => /^↳ GAPS:?$/.test(x.trim()))).toBe(false)
+  expect(t.some(x => /signed off with 1 failed/.test(x))).toBe(true)
+  expect(t.some(x => /3 passed · 1 failed · 2 fixed/.test(x))).toBe(true)
+  expect(t.some(x => /^◆ bad /.test(x))).toBe(true) // the fixed slice is done, not failed
+  expect(t.some(x => /^[✔●] plan$/.test(x) || /^✔ plan$/.test(x))).toBe(true)
+  expect(t.includes('orchestrator')).toBe(true)
+  expect(t.some(x => /^◆ merge$/.test(x))).toBe(true)
+  expect(t.includes('skipped')).toBe(true)
+
+  // with every failure fixed (the reviewer of "other" failed, "other2" depends on it and passed) the orchestrator box says so
+  await spawn('d', 'other2', 'other', IMPL)
+  await done('d', 'ok\nSTATUS: pass')
+  await spawn('rd', 'other2', 'other', REV)
+  await done('rd', 'STATUS: pass\nGAPS: none')
+  t = await texts($, 100)
+  expect(t.some(x => /passed · 3 fixed on the way/.test(x))).toBe(true)
+  expect(t.some(x => /signed off with/.test(x))).toBe(false)
+})
