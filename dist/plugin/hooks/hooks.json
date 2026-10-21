@@ -79,5 +79,8 @@
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "./dashboard.tsx"
+  ]
 }

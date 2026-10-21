@@ -240,7 +240,9 @@ The orchestrator reads those settings before a parallel wave; if `baseRef` is no
 
 A `SessionStart` hook (`.claude/hooks/nudge.mjs`) nudges every new main session to route non-trivial tasks (code, research, writing, analysis or operations). Headless runs started by `scripts/orchestrate.sh` set `ORCH_NO_NUDGE=1` and are skipped; `export ORCH_NO_NUDGE=1` silences it in one shell. The `/route` skill uses the triager when this repo is at `~/claude-code-orchestration` or `$ORCH_HOME`, and sizes the task in-session otherwise.
 
-After changing anything under `.claude/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. Bump the `version` in `package.json` for installed copies to pick up a change.
+**Live dashboard.** The plugin also carries a function-hooks mod (`dashboard/`, built into `dist/plugin/hooks/dashboard.tsx`) that draws the run in a pane beside the chat as soon as the first orchestration agent starts: the orchestrator, the plan, build, review and merge phases, a flow diagram of the slices (read from each brief's `SLICE:`, `FILES:` and `DEPENDS:` lines) with routed arrows and a dot along every active edge, tokens and the reported result per task, usage by model, and a timestamped session log. It shows only the agents in use, follows the pane's width as you resize it, and scrolls with the arrow keys once the pane has the keyboard (click it, or type `/orchestration`). An unasked pane seats from 144 columns; on a narrower terminal a toast says to type `/orchestration`. In this repo, where the agents come from `.claude/` and not from the plugin, run `npm run orchestrate` (`claude --agent orchestrator --plugin-dir dist/dashboard`) to load the same mod. Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and do not draw it. Claude Code does not report tokens for a running agent, so a task's tokens appear when it finishes, and the orchestrator's own tokens are not counted.
+
+After changing anything under `.claude/` or `dashboard/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. Bump the `version` in `package.json` for installed copies to pick up a change.
 
 ## Resilience: retry, resume, replan
 
@@ -314,7 +316,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin` |
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check; both must pass before finishing |
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
-| `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin`, or fail when the committed build is stale |
+| `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
+| `npm run orchestrate`, `npm run test-dashboard` | Interactive `claude --agent orchestrator` with the live dashboard pane loaded; run the dashboard's own test (`claude plugin test`, skipped when the CLI is missing) |
 | `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md), results in [docs/benchmarks.md](docs/benchmarks.md)): `bench -- --matrix bench/matrix/<name>.json` runs a campaign (flags `--campaign`, `--resume`, `--dry-run`, `--only`, `--parallel-blocks`, `--seed`); `bench:validate` checks every task's graders with no model calls; `bench:grade`, `bench:analyze` and `bench:report` grade snapshots, summarise and render. Cost is reported in tokens |
 
@@ -345,9 +348,10 @@ src/
   workflows/orchestrate.js        the scripted flow
   settings.json, rules/           gates, permission denies, editing rules
 .claude-plugin/marketplace.json   makes the repo installable
-dist/plugin/                      the built plugin (committed)
+dist/plugin/, dist/dashboard/     the built plugin, and the dashboard mod alone (committed)
+dashboard/                        the live pane (register.tsx, types, test), source for both builds
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
-                                  report.mjs
+                                  test-dashboard.mjs, report.mjs
 bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
 docs/                             benchmarks.md, native-mode.md, diagrams/ (incl. the
                                   original architecture diagram, orchestration.html)
