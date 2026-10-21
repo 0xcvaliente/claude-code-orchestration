@@ -17,19 +17,19 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 ## Sections, top to bottom
 
 1. **Model legend.** One coloured square per model in use.
-2. **Orchestrator box.** The orchestrator's model, a state line (dispatching with the count of running agents, signed off with N failed, or all agents passed), and the agent count, total tokens and elapsed time.
+2. **Orchestrator box.** The orchestrator's model, a state line (dispatching with the count of running agents, signed off with N failed, passed with N fixed on the way, or all agents passed), and the agent count, total tokens and elapsed time.
 3. **Triage box.** Shows the mode (plain, reviewed or orchestrate). Two sources:
    - A captured route verdict: the mode, the facts (files, lines, slices, risky, code) and the reason. Capture happens only when the `/route` skill runs `npm run route` in a plain session, because `claude --agent orchestrator` has no Bash tool.
    - Otherwise the mode is inferred from the agents (an implementer, integrator or plan review means orchestrate; a reviewer alone means reviewed; any other agent means orchestrate) and the box says "(inferred from the agents)". Under the orchestrator the triage is always inferred.
-4. **Pipeline stages.** Six boxes: triage, plan, plan review, build, review, merge. Each has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). Arrows join the boxes, with a dot moving along the arrow into a running stage. Between rows a return rail runs from the last box back to the first of the next row.
+4. **Pipeline stages.** Six boxes: triage, plan, plan review, build, review, merge. Each has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). Arrows join the boxes, with a dot moving along the arrow into a running stage. Between rows a return rail runs from the last box back to the first of the next row. The orchestrator plans itself, so the plan stage turns done (marked "orchestrator") once a plan review or a build has started. Merge reads "skipped" once the run is signed off with no integrator having run.
 5. **Slice diagram.** One card per slice, in columns by dependency layer (a slice sits right of everything it waits for).
    - A rail on the left forks an arrowhead into every card of the first layer.
    - Routed box-drawing lines join each layer to the next, entering the target's middle with an arrowhead.
    - A dot travels along the edges whose target is running.
    - A bus under the diagram joins the final slices (those nothing depends on) into one arrow to the sign-off box.
    - A card shows the state glyph, slice id and time; build and review chips; the running agent's latest tool, else the token count or "queued"; and a `◀` line per dependency (up to 3, then "+N more"), green once satisfied. A dependency not yet launched appears as a queued card.
-6. **Sign-off box.** "waiting for agents" until no agent is running, then the passed and failed counts.
-7. **Tasks table.** One row per slice (or per agent without a slice): glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line) or, while running, the latest tool. A totals line gives input, output and cache tokens.
+6. **Sign-off box.** "waiting for agents" until no agent is running, then the passed, failed and fixed counts. A failure counts as fixed (grey `◆`, "fixed by <slice>" in the tasks table) when a later slice that depends on the failed slice started after it ended and passed, or, for a plan review (no slice), when a later plan review passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
+7. **Tasks table.** One row per slice (or per agent without a slice): glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
 8. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
 9. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too.
 

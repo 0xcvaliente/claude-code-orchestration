@@ -50,7 +50,7 @@ const resultOf = (answer: string) => {
   const lines = answer
     .split('\n')
     .map(l => l.replace(/^[\s>*_`#-]+/, '').trim())
-    .filter(l => l && !/^(STATUS|FINDINGS|OPEN|EVIDENCE|SUMMARY)\b/i.test(l))
+    .filter(l => l && !/^(STATUS|FINDINGS|OPEN|EVIDENCE|SUMMARY)\b/i.test(l) && !/^GAPS:?$/i.test(l))
   const line = lines.find(l => /^answer:/i.test(l))?.replace(/^answer:\s*/i, '') ?? lines[0] ?? ''
   return line.replace(/`/g, '').replace(/(?:\/[^\s/]+)+\/([^\s/]+\/[^\s/]+)/g, '$1')
 }
@@ -138,6 +138,23 @@ const stateOf = (n: Node): State => {
   const build = lastOf(n, 'implementer')
   if (build) return build.status === 'fail' ? 'fail' : 'done'
   return (n.agents[n.agents.length - 1] as Agent).status // a research or merge slice: its own report decides
+}
+// A failure a later attempt made good, keyed by slice id (a failed slice that a later slice depending on it came after and passed) or,
+// for an agent with no slice (a plan review), by agent id (a later agent with the same role and label passed). Value: what fixed it.
+const fixedBy = (list: Agent[], map: Map<string, Node>) => {
+  const out = new Map<string, string>()
+  for (const n of map.values()) {
+    if (!n.agents.length || stateOf(n) !== 'fail') continue
+    const end = Math.max(...n.agents.map(a => a.endedAt ?? 0))
+    const m = [...map.values()].find(x => x.deps.includes(n.id) && x.agents.length && ['pass', 'done'].includes(stateOf(x)) && (x.agents[0] as Agent).startedAt >= end)
+    if (m) out.set(n.id, m.id)
+  }
+  for (const a of list) {
+    if (a.slice || a.status !== 'fail') continue
+    const b = list.find(x => !x.slice && x.role === a.role && x.label === a.label && x.status === 'pass' && x.startedAt >= (a.endedAt ?? Infinity))
+    if (b) out.set(a.id, `a later ${a.label}`)
+  }
+  return out
 }
 // Stage chips of a card: build and review for a built slice, else the roles it ran.
 const chipsOf = (n: Node, g: (s: State) => string) => {
@@ -411,8 +428,14 @@ export const register: Register = on => {
     const f = await read($, tick)
     const now = await $.clock.now()
     const g = (st: State) => (st === 'running' ? (SPIN[f % SPIN.length] as string) : GLYPH[st])
+    const map = nodesOf(list)
+    const fix = fixedBy(list, map)
+    const fixedOf = (a: Agent) => (a.status === 'fail' ? fix.get(a.slice ?? a.id) : undefined)
+    // A failure that was fixed later counts as done, not as a failure.
+    const eff = (a: Agent): State => (fixedOf(a) ? 'done' : a.status)
     const running = list.filter(a => a.status === 'running').length
-    const failed = list.filter(a => a.status === 'fail').length
+    const failed = list.filter(a => eff(a) === 'fail').length
+    const fixedN = list.filter(a => fixedOf(a)).length
     const total = list.reduce((n, a) => n + a.tokens, 0)
     const first = list[0]?.startedAt ?? now
     const last = running ? now : Math.max(first, ...list.map(a => a.endedAt ?? 0))
@@ -436,17 +459,22 @@ export const register: Register = on => {
     // Pipeline: triage -> plan -> plan review -> build -> review -> merge, each a box with a progress bar and the models in it.
     const phase = (name: string, group: Agent[], mode?: string) => {
       const done = group.filter(a => a.status !== 'running').length
-      const state: State = !group.length ? 'queued' : group.some(a => a.status === 'running') ? 'running' : group.some(a => a.status === 'fail') ? 'fail' : 'pass'
+      const state: State = !group.length ? 'queued' : group.some(a => a.status === 'running') ? 'running' : group.some(a => eff(a) === 'fail') ? 'fail' : 'pass'
       return { name, group, done, n: group.length, state, mode }
     }
     const mode = verdict?.mode ?? inferMode(list)
+    const signed = list.length > 0 && !running
+    // The orchestrator plans itself, so the plan stage has no agent: it is done once plan review or a build has started.
+    const planned = list.some(a => a.role === 'implementer' || a.label === 'plan review')
+    // No integrator ran (one slice at a time in a shared tree, or no code): once the run is signed off the merge stage is skipped.
+    const merges = list.filter(a => a.role === 'integrator')
     const stages = [
       { ...phase('triage', []), state: (mode ? 'pass' : 'queued') as State, mode },
-      phase('plan', list.filter(a => a.role === 'researcher')),
+      (p => (planned && (p.state === 'queued' || p.state === 'pass') ? { ...p, state: 'pass' as State, mode: 'orchestrator' } : p))(phase('plan', list.filter(a => a.role === 'researcher'))),
       phase('plan review', list.filter(a => a.label === 'plan review')),
       phase('build', list.filter(a => a.role === 'implementer')),
       phase('review', list.filter(a => a.role === 'reviewer' && a.label !== 'plan review')),
-      phase('merge', list.filter(a => a.role === 'integrator')),
+      { ...phase('merge', merges), ...(signed && !merges.length ? { state: 'done' as State, mode: 'skipped' } : {}) },
     ]
     const cols = width >= 100 ? 6 : width >= 40 ? 3 : 2
     const pw = Math.max(6, Math.floor((width - 3 * (cols - 1) - 1) / cols))
@@ -464,7 +492,6 @@ export const register: Register = on => {
     }
 
     // Slice diagram: a column per dependency layer, joined by routed lines; stacked top to bottom when the columns do not fit.
-    const map = nodesOf(list)
     const layers = layersOf(map)
     const colMax = width >= 100 ? 26 : 19
     // Side by side only when every layer, the 3-cell rail and the routing gutters fit across at 14 cells a card or more.
@@ -473,12 +500,13 @@ export const register: Register = on => {
     const vertical = layers.length > 1 && Math.floor(spare / layers.length) < 14
     const colW = vertical ? Math.max(10, Math.min(30, width - 5)) : Math.max(10, Math.min(colMax, Math.floor(spare / Math.max(1, layers.length))))
     // One cell per task in a stage: the build cell is a slice's implementer, the review cell its reviewer, others one per agent.
-    const stOf = (a?: Agent): State => (a ? a.status : 'queued')
+    const stOf = (a?: Agent): State => (a ? eff(a) : 'queued')
     const cellsFor = (name: string, group: Agent[]): State[] => {
       const nodes = [...map.values()]
       if (name === 'build') return nodes.filter(n => n.agents.every(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'implementer')))
       if (name === 'review') return nodes.filter(n => n.agents.some(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'reviewer')))
-      return group.map(a => a.status)
+      if (name === 'plan' && !group.length && planned) return ['pass']
+      return group.map(eff)
     }
     // The most recent cells that fit in w, then `+N` for the hidden ones; an empty stage shows dim dots.
     const cellRow = (cells: State[], w: number) => {
@@ -498,7 +526,7 @@ export const register: Register = on => {
     const satisfied = (id: string) => ['pass', 'done'].includes(stateOf(map.get(id) as Node))
     const gutters = layers.map((l, i) => (i > 0 && !vertical ? gutterOf(layers[i - 1] as Node[], l, map, f) : undefined))
     const card = (n: Node) => {
-      const s = stateOf(n)
+      const s: State = fix.has(n.id) ? 'done' : stateOf(n)
       const live = n.agents.find(a => a.status === 'running')
       const spent = n.agents.reduce((t, a) => t + a.tokens, 0)
       const t0 = n.agents[0]?.startedAt ?? now
@@ -548,15 +576,16 @@ export const register: Register = on => {
         .map(n => {
           const s = stateOf(n)
           const t0 = n.agents[0]?.startedAt ?? now
+          const by = fix.get(n.id)
           return {
-            key: n.id, label: n.id, state: s, tokens: n.agents.reduce((t, a) => t + a.tokens, 0),
+            key: n.id, label: n.id, state: by ? ('done' as State) : s, tokens: n.agents.reduce((t, a) => t + a.tokens, 0),
             ms: (s === 'running' ? now : Math.max(t0, ...n.agents.map(a => a.endedAt ?? 0))) - t0,
-            result: [...n.agents].reverse().find(a => a.result)?.result ?? '', tool: n.agents.find(a => a.status === 'running')?.tool,
+            result: by ? `fixed by ${by}` : ([...n.agents].reverse().find(a => a.result)?.result ?? ''), tool: n.agents.find(a => a.status === 'running')?.tool,
           }
         }),
       ...list
         .filter(a => !a.slice)
-        .map(a => ({ key: a.id, label: a.label, state: a.status as State, tokens: a.tokens, ms: (a.endedAt ?? now) - a.startedAt, result: a.result ?? '', tool: a.tool })),
+        .map(a => ({ key: a.id, label: a.label, state: eff(a), tokens: a.tokens, ms: (a.endedAt ?? now) - a.startedAt, result: fixedOf(a) ? `fixed by ${fixedOf(a)}` : (a.result ?? ''), tool: a.tool })),
     ]
     const finished = tasks.filter(t => t.state !== 'running' && t.state !== 'queued').length
     const maxTok = Math.max(0, ...tasks.map(t => t.tokens))
@@ -586,7 +615,6 @@ export const register: Register = on => {
     const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇' } as const
     const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle' } as const
 
-    const signed = list.length > 0 && !running
     const mainState: State = running ? 'running' : !list.length ? 'queued' : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
@@ -612,7 +640,7 @@ export const register: Register = on => {
               {g(mainState)} {short(orchestrator || 'main')} · orchestrator
             </Text>
             <Text color={COLOR[mainState]} wrap="truncate-end">
-              {running ? `dispatching${dots} ${running} running` : failed ? `signed off with ${failed} failed` : 'all agents passed'}
+              {running ? `dispatching${dots} ${running} running` : failed ? `signed off with ${failed} failed` : fixedN ? `passed · ${fixedN} fixed on the way` : 'all agents passed'}
             </Text>
             <Text dimColor wrap="truncate-end">
               {list.length} agents · {tokens(total)} tokens · {clock(last - first)}
@@ -657,7 +685,7 @@ export const register: Register = on => {
                         <Text bold color={COLOR[p.state]} wrap="truncate-end">{g(p.state)} {p.name}</Text>
                         {p.name === 'triage' ? <Text color={COLOR[p.state]} wrap="truncate-end">{'▰'.repeat(Math.max(3, pw - 4))}</Text> : cellRow(cellsFor(p.name, p.group), Math.max(3, pw - 4))}
                         <Text dimColor wrap="truncate-end">
-                          {p.name === 'triage' ? (p.mode ?? '-') : p.n ? `${p.done}/${p.n} ${[...new Set(p.group.map(a => family(a.model)))].join('+')}` : '-'}
+                          {p.n && p.name !== 'triage' ? `${p.done}/${p.n} ${[...new Set(p.group.map(a => family(a.model)))].join('+')}` : (p.mode ?? '-')}
                         </Text>
                       </Box>
                     </Box>
@@ -715,7 +743,7 @@ export const register: Register = on => {
               {signed ? GLYPH[mainState] : '◌'} sign off · {short(orchestrator || 'main')}
             </Text>
             <Text dimColor wrap="truncate-end">
-              {signed ? `${list.length - failed} passed · ${failed} failed` : 'waiting for agents · verified findings only'}
+              {signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : 'waiting for agents · verified findings only'}
             </Text>
           </Box>
         )}
