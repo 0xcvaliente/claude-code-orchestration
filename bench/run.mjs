@@ -128,7 +128,7 @@ if (flag("dry-run")) {
     for (const r of b.runs) {
       const t = taskOf(r.task);
       const add = envAdditions(r.arm, t.meta, r);
-      const c = command(r.arm, "<prompt>", join(reposDir, r.run_id), root, { outDir: join(campaignDir, r.run_id, "sdk"), testCmd: t.meta.test_cmd, budgetTokens: r.budget_tokens });
+      const c = command(r.arm, "<prompt>", join(reposDir, r.run_id), root, { outDir: join(campaignDir, r.run_id, "sdk"), testCmd: t.meta.sdk_test_cmd ?? t.meta.test_cmd, budgetTokens: r.budget_tokens });
       log(`  ${r.run_id}  arm=${r.arm} cap=${r.cap_min}min budget=${r.budget_tokens ?? "none"}`);
       log(`    env: ${Object.entries(add).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ") || "(no additions; ANTHROPIC_* passes through, ORCH_* stripped)"}`);
       log(`    cmd: (cd ${c.cwd} && ${c.cmd} ${c.args.map((a) => JSON.stringify(a)).join(" ")})`);

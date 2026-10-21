@@ -217,7 +217,7 @@ test("dry-run on the sdk-vs-native matrix prints both arms' commands and env", (
   assert.match(r.stdout, /arm=O-mix cap=10min/);
   assert.match(r.stdout, /arm=SDK cap=10min/);
   assert.match(r.stdout, /ORCH_AGENT="orchestrator"/);
-  assert.match(r.stdout, /npx "tsx" "src\/cli\.ts" "--repo" .* "--mode" "orchestrate" "--no-escalate" "--out" .*\/k2-stdlib-toolkit-xl__SDK__cap10__r1\/sdk" "--test-cmd" "python3 tests\/run_public\.py"/);
+  assert.match(r.stdout, /npx "tsx" "src\/cli\.ts" "--repo" .* "--mode" "orchestrate" "--no-escalate" "--out" .*\/k2-stdlib-toolkit-xl__SDK__cap10__r1\/sdk" "--test-cmd" "python3 tests\/run_public\.py \$\(git diff --name-only /);
   assert.match(r.stdout, /no additions; ANTHROPIC_\* passes through/);
   assert.ok(!/--budget/.test(r.stdout));
 });
