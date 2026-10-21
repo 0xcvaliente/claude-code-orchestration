@@ -65,6 +65,8 @@ Sweeps on k2 (plain Opus vs the shipped orchestrator, 2 runs each): at a 10-minu
 /plugin install orchestration --marketplace 0xcvaliente/claude-code-orchestration
 ```
 
+The plugin also ships the live dashboard pane (it opens on a typed prompt; `/orchestration` focuses it; `/reload-plugins` after an update) and its `route` tool; see [Live dashboard](#live-dashboard).
+
 Start a new chat afterwards. The plugin's `SessionStart` hook then tells Claude to run `orchestration:route` before any non-trivial task (code, research, writing, analysis or operations) and follow the result. `/route <task>` runs the same triage on demand, in any folder.
 
 **Run the SDK pipeline from a checkout** (it takes code in a git repository only):
@@ -240,7 +242,22 @@ The orchestrator reads those settings before a parallel wave; if `baseRef` is no
 
 A `SessionStart` hook (`.claude/hooks/nudge.mjs`) nudges every new main session to route non-trivial tasks (code, research, writing, analysis or operations). Headless runs started by `scripts/orchestrate.sh` set `ORCH_NO_NUDGE=1` and are skipped; `export ORCH_NO_NUDGE=1` silences it in one shell. The `/route` skill uses the triager when this repo is at `~/claude-code-orchestration` or `$ORCH_HOME`, and sizes the task in-session otherwise.
 
-**Live dashboard.** The plugin also carries a function-hooks mod (`dashboard/`, built into `dist/plugin/hooks/dashboard.tsx`) that draws the run in a pane beside the chat as soon as you submit a prompt, in any folder (no git repository or checkout needed; a run with no agents shows the input, orchestrator, triage and sign-off boxes), and keeps drawing when orchestration agents start: the input, the orchestrator, the triage box and the six pipeline stages (triage, plan, plan review, build, review, merge), a flow diagram of the slices (read from each brief's `SLICE:`, `FILES:` and `DEPENDS:` lines) with routed arrows and a dot along every active edge, tokens and the reported result per task, usage by model, and a timestamped session log; the `route` tool lets a plugin-only install show the triage ([docs/dashboard.md](docs/dashboard.md)). It shows only the agents in use, follows the pane's width as you resize it, and scrolls with the arrow keys once the pane has the keyboard (click it, or type `/orchestration`). An unasked pane seats from 144 columns; on a narrower terminal a toast says to type `/orchestration`. In this repo, where the agents come from `.claude/` and not from the plugin, run `npm run orchestrate` (`claude --agent orchestrator --plugin-dir dist/dashboard`) to load the same mod. Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and do not draw it. Claude Code does not report tokens for a running agent, so a task's tokens appear when it finishes, and the orchestrator's own tokens are not counted.
+### Live dashboard
+
+The plugin also carries a function-hooks mod (`dashboard/`, built into `dist/plugin/hooks/dashboard.tsx`) that draws the run in a pane beside the chat. Details and every rule: [docs/dashboard.md](docs/dashboard.md).
+
+- **Get it.** It comes with the plugin install; after updating the plugin, run `/reload-plugins`. `/orchestration` opens the pane focused, so the arrow keys scroll it at once. In this repo, where the agents come from `.claude/` and not from the plugin, run `npm run orchestrate` (`claude --agent orchestrator --plugin-dir dist/dashboard`) to load the same mod.
+- **What opens it.** A prompt you type, in any folder (no git repository or checkout needed). Slash commands, meta prompts, blank prompts and prompts the engine queues that you did not type (a background task's notification, a peer session's message, a scheduled trigger) do not. It also opens when an orchestration agent starts or a route verdict is recorded. An unasked pane seats from 144 columns; on a narrower terminal a toast says to type `/orchestration`.
+- **What it shows.** It follows the pane's width and shows only the agents in use:
+  - the input, the orchestrator, and the triage box with a fork of three routes (plain, reviewed, orchestrate): the active one lit, a link to the first stage it enters; stacked below 44 columns, with a lane at the right edge below 100 columns;
+  - the six stages: triage, plan, plan review (a stage, never a slice card), build, review, merge;
+  - a flow diagram of the slices (read from each brief's `SLICE:`, `FILES:` and `DEPENDS:` lines) with routed arrows and a dot along every active edge;
+  - tokens and the reported result per task, usage by model, and a timestamped session log;
+  - a failure a later attempt made good shows as fixed (grey `◆`, "fixed by ...").
+- **No agents.** A run that stays in the main session shows the input, orchestrator, triage, stages and sign-off boxes: working, answered or stopped, a plain mode "inferred", stages the route does not use as skipped, and build as "this session".
+- **The `route` tool.** A plugin-only install has no `npm run route`, so the dashboard registers a model-callable tool, `mcp__orchestration__route` (`mcp__orchestration-dashboard__route` with the standalone mod). The `/route` skill calls it once after sizing, so the pane shows the triage.
+- **New run and sign-off.** A prompt you type while nothing runs starts a clean run; a prompt mid-work or mid-run resets nothing; notifications and peer messages do not count. With a typed prompt, the run is signed off only when no agent runs and the main turn has ended; between two waves of agents it reads "dispatching... 0 running" and queued cards stay, and once nothing runs they are left out. If the main turn never reports its end and the last agent ended over 10 minutes ago, the work counts as ended (a turn busy for longer is treated the same).
+- **Limits.** Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and do not draw it. Claude Code does not report tokens for a running agent, so a task's tokens appear when it finishes, and the orchestrator's own tokens are not counted.
 
 ### Statusline
 

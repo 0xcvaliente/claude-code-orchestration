@@ -828,3 +828,135 @@ test('a prompt that is a background notification or a peer message is not new wo
   expect(opened.length).toBe(0)
   expect((await texts($)).some(x => /▸ Another Claude/.test(x))).toBe(false)
 })
+
+// Between two waves (plan review done, writers not launched yet) the main turn still works: the run is not signed off.
+const wave = async ($: any, on: any, opts: { clock?: any } = {}) => {
+  await boot($, on, opts)
+  await $.prompt.submit({ text: PROMPT })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: s9', 'orchestration:implementer') // s9 is a queued ghost
+  await finish($, 'b1', 'built\nSTATUS: pass')
+}
+
+test('between two waves the orchestrator reads dispatching, the sign-off waits and merge is not skipped', async ($, on) => {
+  await wave($, on)
+  const t = await texts($)
+  expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true)
+  expect(t.some(x => /waiting for agents/.test(x))).toBe(true)
+  expect(t.some(x => /all agents passed|1 passed/.test(x))).toBe(false)
+  expect(t.includes('skipped')).toBe(false)
+  expect(t.some(x => /◌ s9/.test(x))).toBe(true) // the queued card stays
+})
+
+test('after the main turn completes the run is signed off: merge skipped, passed counted', async ($, on) => {
+  await wave($, on)
+  await $.turn.complete(mainDone('answer'))
+  const t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.some(x => /1 passed · 0 failed/.test(x))).toBe(true)
+  expect(t.includes('skipped')).toBe(true)
+  expect(t.some(x => /dispatching/.test(x))).toBe(false)
+})
+
+test('agents with no typed prompt still sign off when nothing runs', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  await finish($, 'b1', 'built\nSTATUS: pass')
+  const t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.some(x => /1 passed · 0 failed/.test(x))).toBe(true)
+})
+
+test('a spawn over two minutes after the last agent, while the main turn is open, keeps the run', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await wave($, on, { clock })
+  await clock.advance(130_000)
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', 'orchestration:implementer')
+  await finish($, 'b2', 'built\nSTATUS: pass')
+  const t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(true) // the first wave is still there
+  expect(t.some(x => /s2/.test(x))).toBe(true)
+  expect(t.includes(`▸ ${PROMPT.split('\n')[0]}`)).toBe(true) // work survives
+  expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true)
+})
+
+test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await wave($, on, { clock })
+  await clock.advance(300_000) // five minutes: still open
+  expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
+  await clock.advance(400_000) // over ten minutes
+  let t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.some(x => /dispatching/.test(x))).toBe(false)
+  await $.prompt.submit({ text: 'a fresh job' })
+  t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect(t.includes('▸ a fresh job')).toBe(true)
+})
+
+const mountLive = ($: any) => $.ui.mount({ ...PANE, surface: 'terminal' })
+const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => x.text ?? '') as string[]
+
+test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await wave($, on, { clock })
+  const ui = await mountLive($)
+  expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
+  for (let i = 0; i < 59; i++) await clock.advance(10_000) // 590 s of 250 ms pulses: still open
+  expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
+  for (let i = 0; i < 12; i++) await clock.advance(1000) // the pulse that finds it stale draws once more
+  const t = await liveTexts(ui)
+  expect(t.some(x => /dispatching|waiting for agents/.test(x))).toBe(false)
+  expect(t.includes('skipped')).toBe(true)
+  expect(t.some(x => /1 passed · 0 failed/.test(x))).toBe(true)
+  const head = t.find(x => /main · orchestrator/.test(x))
+  await clock.advance(2000) // and the timer is gone: nothing redraws any more
+  expect((await liveTexts(ui)).find(x => /main · orchestrator/.test(x))).toBe(head)
+  await ui.unmount()
+})
+
+test('the timer ticks while work is open with no agents and stops, after a last redraw, at the main turn.complete', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock })
+  const ui = await mountLive($)
+  const head = async () => (await liveTexts(ui)).find(x => /main · orchestrator/.test(x)) as string
+  await ($ as any).prompt.submit({ text: PROMPT })
+  const a = await head()
+  await clock.advance(250)
+  const b = await head()
+  await clock.advance(250)
+  expect(new Set([a, b, await head()]).size).toBe(3) // the spinner glyph advances every pulse
+  await ($ as any).turn.complete(mainDone('answer'))
+  await clock.advance(250) // the pulse that stops draws the ended state
+  const ended = await head()
+  expect(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(ended)).toBe(false)
+  await clock.advance(1000)
+  expect(await head()).toBe(ended)
+  await ui.unmount()
+})
+
+test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await wave($, on, { clock })
+  await clock.advance(700_000) // a long build, no turn.complete yet
+  let t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.some(x => /dispatching/.test(x))).toBe(false)
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', 'orchestration:implementer')
+  t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false) // the old run is dropped
+  expect(t.some(x => /s2/.test(x))).toBe(true)
+})
+
+test('with a recorded verdict, a spawn over two minutes after the last agent while the main turn is open keeps agents and work', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock, route: verdict('orchestrate') })
+  await $.prompt.submit({ text: PROMPT })
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  await finish($, 'b1', 'built\nSTATUS: pass')
+  await clock.advance(130_000)
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', 'orchestration:implementer')
+  const t = await texts($)
+  expect(t.some(x => /s1/.test(x)) && t.some(x => /s2/.test(x)) && t.includes(`▸ ${PROMPT.split('\n')[0]}`) && t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+})

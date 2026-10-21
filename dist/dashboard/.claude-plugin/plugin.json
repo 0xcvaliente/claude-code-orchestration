@@ -1,6 +1,6 @@
 {
   "name": "orchestration-dashboard",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Live pane of the orchestration agents: a flow diagram of the slices, tokens per task, what each reported, and a session log.",
   "author": {
     "name": "0xcvaliente"
