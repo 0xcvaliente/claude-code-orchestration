@@ -22,7 +22,8 @@ export type Agent = {
 
 export type LogEntry = {
   at: number
-  kind: 'start' | 'pass' | 'fail' | 'done'
+  /** 'triage' is the router's verdict; its label is the mode. */
+  kind: 'start' | 'pass' | 'fail' | 'done' | 'triage'
   role: string
   label: string
   model: string
@@ -30,8 +31,16 @@ export type LogEntry = {
   tokens?: number
 }
 
+/** The router's verdict (`npm run route`), as captured from the main loop's Bash result. */
+export type TriageInfo = {
+  at: number
+  mode: 'plain' | 'reviewed' | 'orchestrate'
+  reason: string
+  facts?: { filesToTouch: number; linesToChange: number; independentSlices: number; risky: boolean; code: boolean }
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'orchestration': { agents: Agent[]; log: LogEntry[]; tick: number; main: string }
+    'orchestration': { agents: Agent[]; log: LogEntry[]; tick: number; main: string; triage: TriageInfo | null }
   }
 }
