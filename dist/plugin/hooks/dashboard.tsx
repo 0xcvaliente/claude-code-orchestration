@@ -335,15 +335,24 @@ type Ctx = Parameters<Hook<'agent.spawn'>>[0]
 // drops the two minutes: once nothing runs, new input is new work.
 const isNewRun = (list: Agent[], t: number, force = false) => !list.some(a => a.status === 'running') && (force || t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) >= 120_000)
 
+// The main turn still works: `work` exists and has no end. Stale (a killed or interrupted session whose `turn.complete` never came): agents ran, none runs,
+// the last one ended over ten minutes ago. A solo run (no agents) is never stale by this rule.
+// Tradeoff: a legitimate main turn that stays busy for over ten minutes after the last agent ended (a long build) counts as stale too: the pane shows
+// signed off, and a following spawn passes the `newRun` guard and starts a clean run. A lost `turn.complete` is the likelier case, so this is accepted.
+const STALE_MS = 600_000
+const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
+  !!work && !work.endedAt && !(list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS)
+
 // A new run drops the old diagram: agents, log and main. With `keepVerdict` (the spawn path) the verdict and the work line stay when they are newer than
 // the old run's last agent: the person's prompt and the router both came before the first spawn of this run.
 async function newRun($: Ctx, t: number, keepVerdict: boolean, force = false) {
   const before = await read($, agents)
   if (!isNewRun(before, t, force)) return
+  const w = await read($, workAtom)
+  if (workOpen(w, before, t)) return // the main turn still works: these agents belong to this run
   const kept = await read($, triage)
   const lastEnd = Math.max(0, ...before.map(a => a.endedAt ?? 0))
   const keep = keepVerdict && kept && kept.at > lastEnd ? kept : null
-  const w = await read($, workAtom)
   await update($, agents, () => [])
   await update($, triage, () => keep)
   await update($, log, () => (keep ? [{ at: keep.at, kind: 'triage', role: 'router', label: keep.mode, model: '' } as LogEntry] : []))
@@ -358,9 +367,10 @@ function startTimer($: Ctx, slot: { timer?: Timer }) {
     const list = await read($, agents)
     const w = await read($, workAtom)
     const t = await $.clock.now()
-    if (!(w && !w.endedAt) && !list.some(a => a.status === 'running') && list.every(a => t - (a.endedAt ?? 0) > 2500)) {
+    if (!workOpen(w, list, t) && !list.some(a => a.status === 'running') && list.every(a => t - (a.endedAt ?? 0) > 2500)) {
       slot.timer?.cancel()
       slot.timer = undefined
+      await update($, tick, n => n + 1) // a last redraw: the state that made it stop (stale work, a finished turn) is drawn, whatever the last tick saw
       return
     }
     await update($, tick, n => n + 1)
@@ -380,9 +390,11 @@ export const register: Register = on => {
       const now = await $.clock.now()
       // a prompt while the main session still works with no answer yet is a follow-up in the same turn window: reset nothing
       const working = await read($, workAtom)
-      if (!(working && !working.endedAt)) await newRun($, now, false, true)
+      const before = await read($, agents)
+      const open = workOpen(working, before, now) // a stale one (a lost turn.complete) starts a clean run
+      if (!open) await newRun($, now, false, true)
       const running = (await read($, agents)).some(a => a.status === 'running')
-      if (!running && !(working && !working.endedAt)) {
+      if (!running && !open) {
         const line = e.text.split('\n').find(l => l.trim()) ?? ''
         await update($, workAtom, () => ({ text: line.trim().slice(0, 120), startedAt: now }))
       }
@@ -440,6 +452,7 @@ export const register: Register = on => {
       tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
     }
     // a spawn with nothing running and the last agent done over two minutes ago starts a new run: drop the old diagram
+    // (newRun leaves the run alone while the main turn is open: a slow plan review before the writers must not wipe the agents on the pane)
     if ((await read($, agents)).length > 0) await newRun($, agent.startedAt, true)
     await update($, agents, list => [...list, agent].slice(-80))
     await update($, main, () => e.parentModel)
@@ -548,7 +561,8 @@ export const register: Register = on => {
     const f = await read($, tick)
     const now = await $.clock.now()
     const g = (st: State) => (st === 'running' ? (SPIN[f % SPIN.length] as string) : GLYPH[st])
-    const map = nodesOf(list, list.some(a => a.status === 'running'))
+    const working = workOpen(work, list, now)
+    const map = nodesOf(list, list.some(a => a.status === 'running') || working)
     const fix = fixedBy(list, map)
     const fixedOf = (a: Agent) => (a.status === 'fail' ? fix.get(a.slice ?? a.id) : undefined)
     // A failure that was fixed later counts as done, not as a failure.
@@ -558,7 +572,7 @@ export const register: Register = on => {
     const fixedN = list.filter(a => fixedOf(a)).length
     const total = list.reduce((n, a) => n + a.tokens, 0)
     const first = list[0]?.startedAt ?? now
-    const last = running ? now : Math.max(first, ...list.map(a => a.endedAt ?? 0))
+    const last = running || working ? now : Math.max(first, ...list.map(a => a.endedAt ?? 0))
     const width = (e.props as { bodyColumns?: number } | undefined)?.bodyColumns ?? 44
     const wide = width >= 64
     const models = [...new Set([orchestrator, ...list.map(a => a.model)].filter(Boolean))]
@@ -584,12 +598,13 @@ export const register: Register = on => {
     }
     // The main session's own work, which exists with no agents: the prompt in a box, then running, answered or stopped.
     const solo = list.length === 0
-    const working = !!work && !work.endedAt
     const workState: State = !work ? 'queued' : working ? 'running' : work.outcome === 'answered' ? 'pass' : 'done'
     const active = list.length > 0 || !!work || !!verdict
     const flow = running > 0 || working
     const mode = verdict?.mode ?? inferMode(list) ?? (work?.endedAt ? 'plain' : undefined)
-    const signed = list.length > 0 ? !running : !!work?.endedAt
+    // Agents and a main turn: signed off once nothing runs and the turn ended. With no `work` (agents without a typed prompt, or background agents that woke the
+    // main session) only "nothing runs" is known, so the pane can still flicker to signed off between waves there: a known limit.
+    const signed = list.length > 0 ? !running && !working : !!work?.endedAt
     // The orchestrator plans itself, so the plan stage has no agent: it is done once plan review or a build has started.
     const planned = list.some(a => a.role === 'implementer' || a.label === 'plan review')
     // No integrator ran (one slice at a time in a shared tree, or no code): once the run is signed off the merge stage is skipped.
@@ -753,7 +768,7 @@ export const register: Register = on => {
     const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇' } as const
     const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle' } as const
 
-    const mainState: State = running ? 'running' : solo ? workState : failed ? 'fail' : 'pass'
+    const mainState: State = running || working ? 'running' : solo ? workState : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
     const diagramRows = vertical ? layers.reduce((t, l) => t + layerRows(l) + 1, 0) : Math.max(0, ...layers.map(layerRows))
@@ -841,7 +856,7 @@ export const register: Register = on => {
               {g(mainState)} {short(orchestrator || 'main')} · orchestrator
             </Text>
             <Text color={COLOR[mainState]} wrap="truncate-end">
-              {running
+              {running || (working && !solo)
                 ? `dispatching${dots} ${running} running`
                 : solo
                   ? work ? (working ? `working in this session${dots}` : work.outcome === 'answered' ? 'answered in this session' : 'stopped before an answer') : 'waiting for agents'
@@ -981,7 +996,7 @@ export const register: Register = on => {
                     {layer.map(card)}
                     {!needed.has((layer[layer.length - 1] as Node).id) &&
                       Array.from({ length: Math.max(0, diagramRows - layerRows(layer)) }, () => (
-                        <Text color={edge(running > 0, signed)}>{' '.repeat(Math.floor(colW / 2))}│</Text>
+                        <Text color={edge(flow, signed)}>{' '.repeat(Math.floor(colW / 2))}│</Text>
                       ))}
                   </Box>
                 </Box>
@@ -989,7 +1004,7 @@ export const register: Register = on => {
             })}
           </Box>
         )}
-        {bus && bus.rows.map(r => <Text color={edge(running > 0, signed)}>{r}</Text>)}
+        {bus && bus.rows.map(r => <Text color={edge(flow, signed)}>{r}</Text>)}
         {active && (
           <Box marginLeft={Math.min(Math.max(0, (bus?.mid ?? 0) - Math.floor(boxW / 2)), Math.max(0, width - boxW))} borderStyle={signed ? 'double' : 'round'} borderColor={signed ? COLOR[mainState] : 'gray'} flexDirection="column" width={boxW}>
             <Text bold color={signed ? COLOR[mainState] : undefined} wrap="truncate-end">
