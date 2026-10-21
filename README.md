@@ -242,6 +242,18 @@ A `SessionStart` hook (`.claude/hooks/nudge.mjs`) nudges every new main session 
 
 **Live dashboard.** The plugin also carries a function-hooks mod (`dashboard/`, built into `dist/plugin/hooks/dashboard.tsx`) that draws the run in a pane beside the chat as soon as the first orchestration agent starts: the orchestrator, the plan, build, review and merge phases, a flow diagram of the slices (read from each brief's `SLICE:`, `FILES:` and `DEPENDS:` lines) with routed arrows and a dot along every active edge, tokens and the reported result per task, usage by model, and a timestamped session log. It shows only the agents in use, follows the pane's width as you resize it, and scrolls with the arrow keys once the pane has the keyboard (click it, or type `/orchestration`). An unasked pane seats from 144 columns; on a narrower terminal a toast says to type `/orchestration`. In this repo, where the agents come from `.claude/` and not from the plugin, run `npm run orchestrate` (`claude --agent orchestrator --plugin-dir dist/dashboard`) to load the same mod. Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and do not draw it. Claude Code does not report tokens for a running agent, so a task's tokens appear when it finishes, and the orchestrator's own tokens are not counted.
 
+### Statusline
+
+`statusline/statusline.sh` is the status line used with this repo: the model, the folder and git branch with the number of changed files, lines added and removed, the 5-hour and weekly rate-limit windows with time left, and the context fill as a bar that turns yellow at 70% and red at 90%. A plugin cannot set the `statusLine` setting, so installing it is two steps. It needs `jq`.
+
+```bash
+npm run install-statusline        # copies it to ~/.claude/statusline.sh (refuses to overwrite a different file; --force replaces)
+# then add to ~/.claude/settings.json:
+{ "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" } }
+```
+
+Without a checkout: `curl -fsSL https://raw.githubusercontent.com/0xcvaliente/claude-code-orchestration/main/statusline/statusline.sh -o ~/.claude/statusline.sh`, then the same setting. The rate-limit lines appear only for Claude.ai subscribers after the first response.
+
 After changing anything under `.claude/` or `dashboard/`, run `npm run build-plugin`; `npm run check-plugin` fails when the committed build is stale. Bump the `version` in `package.json` for installed copies to pick up a change.
 
 ## Resilience: retry, resume, replan
@@ -317,6 +329,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check; both must pass before finishing |
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
+| `npm run install-statusline` | Copy `statusline/statusline.sh` to `~/.claude/statusline.sh` and print the `statusLine` setting to add |
 | `npm run orchestrate`, `npm run test-dashboard` | Interactive `claude --agent orchestrator` with the live dashboard pane loaded; run the dashboard's own test (`claude plugin test`, skipped when the CLI is missing) |
 | `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md), results in [docs/benchmarks.md](docs/benchmarks.md)): `bench -- --matrix bench/matrix/<name>.json` runs a campaign (flags `--campaign`, `--resume`, `--dry-run`, `--only`, `--parallel-blocks`, `--seed`); `bench:validate` checks every task's graders with no model calls; `bench:grade`, `bench:analyze` and `bench:report` grade snapshots, summarise and render. Cost is reported in tokens |
@@ -350,6 +363,7 @@ src/
 .claude-plugin/marketplace.json   makes the repo installable
 dist/plugin/, dist/dashboard/     the built plugin, and the dashboard mod alone (committed)
 dashboard/                        the live pane (register.tsx, types, test), source for both builds
+statusline/                       statusline.sh, the status line script (installed by scripts/install-statusline.sh)
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
                                   test-dashboard.mjs, report.mjs
 bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
