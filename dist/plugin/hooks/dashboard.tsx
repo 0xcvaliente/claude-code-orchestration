@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Agent, LogEntry } from '../types'
+import type { Agent, LogEntry, TriageInfo } from '../types'
 
 const PANE = 'orchestration'
 const ROLES = ['researcher', 'implementer', 'reviewer', 'integrator']
@@ -9,6 +9,7 @@ const agents = atom({ plugin: 'orchestration', key: 'agents' } as const, [])
 const log = atom({ plugin: 'orchestration', key: 'log' } as const, [])
 const tick = atom({ plugin: 'orchestration', key: 'tick' } as const, 0)
 const main = atom({ plugin: 'orchestration', key: 'main' } as const, '')
+const triage = atom({ plugin: 'orchestration', key: 'triage' } as const, null)
 
 const GLYPH = { running: '●', pass: '✔', fail: '✖', done: '◆', queued: '◌' } as const
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -34,15 +35,10 @@ const short = (m: string) => m.replace(/^claude-/, '')
 const family = (m: string) => (m.match(/opus|sonnet|haiku|fable/i)?.[0] ?? m).toLowerCase()
 const FAMILY_COLOR: Record<string, string> = { opus: 'magenta', sonnet: 'yellow', haiku: 'cyan', fable: 'green' }
 const familyColor = (m: string) => FAMILY_COLOR[family(m)] ?? 'white'
-// Progress bar: ▰ done, ▱ left; while the phase runs a bright cell sweeps over what is left.
+// Share bar: ▰ for the part of the maximum, ▱ for the rest.
 const share = (n: number, max: number, w: number) => {
   const full = max ? Math.max(n ? 1 : 0, Math.round((w * n) / max)) : 0
   return '▰'.repeat(full) + '▱'.repeat(Math.max(0, w - full))
-}
-const bar = (done: number, n: number, w: number, frame: number, live: boolean) => {
-  const full = n ? Math.round((w * done) / n) : 0
-  const rest = Array.from({ length: w - full }, (_, i) => (live && i === frame % Math.max(1, w - full) ? '▰' : '▱'))
-  return '▰'.repeat(full) + rest.join('')
 }
 const ABBR: Record<string, string> = { researcher: 'scan', implementer: 'build', reviewer: 'review', integrator: 'merge' }
 // A flow edge: amber while work moves through it, green once what feeds it is done, grey before that.
@@ -58,6 +54,66 @@ const resultOf = (answer: string) => {
   const line = lines.find(l => /^answer:/i.test(l))?.replace(/^answer:\s*/i, '') ?? lines[0] ?? ''
   return line.replace(/`/g, '').replace(/(?:\/[^\s/]+)+\/([^\s/]+\/[^\s/]+)/g, '$1')
 }
+
+// The router's verdict. The shape of a Bash result is not declared, so walk it for strings and look in each for a JSON object
+// (npm may print banner lines first) whose mode and reason are the router's.
+const ROUTE_CMD = /npm run (--silent )?route\b/
+const commandOf = (e: unknown) => {
+  const t = e as { command?: unknown; input?: { command?: unknown } }
+  const c = t.command ?? t.input?.command
+  return typeof c === 'string' ? c : ''
+}
+const MODES = ['plain', 'reviewed', 'orchestrate']
+const stringsOf = (v: unknown, out: string[] = [], depth = 0): string[] => {
+  if (out.length > 200 || depth > 8) return out
+  if (typeof v === 'string') out.push(v)
+  else if (Array.isArray(v)) for (const x of v) stringsOf(x, out, depth + 1)
+  else if (v && typeof v === 'object') for (const x of Object.values(v)) stringsOf(x, out, depth + 1)
+  return out
+}
+const factsOf = (f: unknown): NonNullable<TriageInfo['facts']> | undefined => {
+  const o = f as Record<string, unknown> | null
+  if (!o || typeof o !== 'object') return undefined
+  const { filesToTouch, linesToChange, independentSlices, risky, code } = o
+  return typeof filesToTouch === 'number' && typeof linesToChange === 'number' && typeof independentSlices === 'number' && typeof risky === 'boolean' && typeof code === 'boolean'
+    ? { filesToTouch, linesToChange, independentSlices, risky, code }
+    : undefined
+}
+const triageOf = (value: unknown): Omit<TriageInfo, 'at'> | undefined => {
+  for (const text of stringsOf(value)) {
+    const s = text.slice(0, 50_000)
+    for (let i = s.indexOf('{'), tries = 0; i >= 0 && tries < 200; i = s.indexOf('{', i + 1), tries++) {
+      let depth = 0
+      let quoted = false
+      let end = -1
+      for (let j = i; j < s.length && end < 0; j++) {
+        const c = s[j]
+        if (quoted) quoted = c === '\\' ? (j++, true) : c !== '"'
+        else if (c === '"') quoted = true
+        else if (c === '{') depth++
+        else if (c === '}' && --depth === 0) end = j
+      }
+      if (end < 0) continue
+      try {
+        const o = JSON.parse(s.slice(i, end + 1)) as Record<string, unknown>
+        if (o && typeof o.reason === 'string' && MODES.includes(o.mode as string)) {
+          const facts = factsOf(o.facts)
+          return { mode: o.mode as TriageInfo['mode'], reason: o.reason, ...(facts ? { facts } : {}) }
+        }
+      } catch {
+        // not JSON: try the next brace
+      }
+    }
+  }
+  return undefined
+}
+// With no verdict captured, the mode the agents imply.
+const inferMode = (list: Agent[]): TriageInfo['mode'] | undefined => {
+  if (list.some(a => a.role === 'implementer' || a.role === 'integrator' || a.label === 'plan review')) return 'orchestrate'
+  if (list.some(a => a.role === 'reviewer')) return 'reviewed'
+  return list.length ? 'orchestrate' : undefined
+}
+const MODE_COLOR = { plain: 'gray', reviewed: 'yellow', orchestrate: 'cyan' } as const
 
 // One diagram node per slice: its implementer and reviewer(s) grouped, plus a queued ghost for a dependency not launched yet.
 type Node = { id: string; deps: string[]; files: number; agents: Agent[] }
@@ -218,9 +274,22 @@ const busOf = (cols: number[]): { rows: string[]; mid: number } => {
   return { rows: [line.join(''), tip.join('')], mid }
 }
 
+type PaneApi = {
+  ui: { open(o: { id: string; title: string }): Promise<{ isPlaced: boolean }>; toast(text: string, o: { timeoutMs: number }): unknown }
+}
+
+let told = false // the one-line hint for a terminal too narrow to seat the pane by itself
+// Unasked, a pane seats only from 144 columns; on a narrower terminal it waits, so say how to open it.
+const openPane = async ($: PaneApi) => {
+  const opened = await $.ui.open({ id: PANE, title: 'Orchestration' })
+  if (!opened.isPlaced && !told) {
+    told = true
+    void $.ui.toast('Orchestration is running: type /orchestration to see the agents and slice diagram.', { timeoutMs: 8000 })
+  }
+}
+
 export const register: Register = on => {
   let timer: { cancel: () => void } | undefined
-  let told = false // the one-line hint for a terminal too narrow to seat the pane by itself
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'orchestration', description: 'Show the orchestration agents, slice diagram and token usage in a pane' })
@@ -249,18 +318,17 @@ export const register: Register = on => {
       list.some(a => a.status === 'running') || agent.startedAt - Math.max(0, ...list.map(a => a.endedAt ?? 0)) < 120_000 ? list : []
     const before = await read($, agents)
     if (fresh(before).length === 0 && before.length > 0) {
-      await update($, log, () => [])
+      // a verdict later than the last agent's end belongs to this new run: keep it (and its log line); an older one is dropped
+      const kept = await read($, triage)
+      const keep = kept && kept.at > Math.max(0, ...before.map(a => a.endedAt ?? 0)) ? kept : null
+      await update($, triage, () => keep)
+      await update($, log, () => (keep ? [{ at: keep.at, kind: 'triage', role: 'router', label: keep.mode, model: '' } as LogEntry] : []))
       told = false
     }
     await update($, agents, list => [...fresh(list), agent].slice(-80))
     await update($, main, () => e.parentModel)
     await update($, log, l => [...l, { at: agent.startedAt, kind: 'start', role, label: agent.label, model: agent.model } as LogEntry].slice(-60))
-    // Unasked, a pane seats only from 144 columns; on a narrower terminal it waits, so say how to open it.
-    const opened = await $.ui.open({ id: PANE, title: 'Orchestration' })
-    if (!opened.isPlaced && !told) {
-      told = true
-      void $.ui.toast('Orchestration is running: type /orchestration to see the agents and slice diagram.', { timeoutMs: 8000 })
-    }
+    await openPane($)
     // Redraw four times a second for the animation while an agent runs or finished under 2.5 s ago, then stop.
     const pulse = async () => {
       const list = await read($, agents)
@@ -278,7 +346,7 @@ export const register: Register = on => {
     return spawned
   })
 
-  // What a running agent is doing: its latest tool and target.
+  // What a running agent is doing: its latest tool and target. The main loop's `npm run route` also gives the pane its triage.
   on('tool.call', async ($, e, next) => {
     if (e.agentId) {
       const id = e.agentId
@@ -287,7 +355,21 @@ export const register: Register = on => {
       const tool = cut(target ? `${e.tool} ${target}` : e.tool, 30)
       await update($, agents, list => list.map(a => (a.id === id && a.status === 'running' ? { ...a, tool } : a)))
     }
-    return next(e)
+    if (e.agentId || e.tool !== 'Bash' || !ROUTE_CMD.test(commandOf(e))) return next(e)
+    // The router ran in the main loop: take its verdict from the result, and hand the result on untouched.
+    const ran = await next(e)
+    try {
+      const found = triageOf(ran)
+      if (found) {
+        const at = await $.clock.now()
+        await update($, triage, () => ({ at, ...found }))
+        await update($, log, l => [...l, { at, kind: 'triage', role: 'router', label: found.mode, model: '' } as LogEntry].slice(-60))
+        await openPane($)
+      }
+    } catch {
+      // a verdict the pane cannot read must never change the tool call
+    }
+    return ran
   })
 
   // An agent finishes: its report's STATUS line and first result line, its tokens and its time.
@@ -325,6 +407,7 @@ export const register: Register = on => {
     const list = await read($, agents)
     const lines = await read($, log)
     const orchestrator = await read($, main)
+    const verdict = await read($, triage)
     const f = await read($, tick)
     const now = await $.clock.now()
     const g = (st: State) => (st === 'running' ? (SPIN[f % SPIN.length] as string) : GLYPH[st])
@@ -350,20 +433,35 @@ export const register: Register = on => {
       )
     }
 
-    // Phases: plan -> build -> review -> merge, each a box with a progress bar and the models in it.
-    const phase = (name: string, group: Agent[]) => {
+    // Pipeline: triage -> plan -> plan review -> build -> review -> merge, each a box with a progress bar and the models in it.
+    const phase = (name: string, group: Agent[], mode?: string) => {
       const done = group.filter(a => a.status !== 'running').length
       const state: State = !group.length ? 'queued' : group.some(a => a.status === 'running') ? 'running' : group.some(a => a.status === 'fail') ? 'fail' : 'pass'
-      return { name, group, done, n: group.length, state }
+      return { name, group, done, n: group.length, state, mode }
     }
-    const phases = [
-      phase('plan', list.filter(a => a.label === 'plan review' || a.role === 'researcher')),
+    const mode = verdict?.mode ?? inferMode(list)
+    const stages = [
+      { ...phase('triage', []), state: (mode ? 'pass' : 'queued') as State, mode },
+      phase('plan', list.filter(a => a.role === 'researcher')),
+      phase('plan review', list.filter(a => a.label === 'plan review')),
       phase('build', list.filter(a => a.role === 'implementer')),
       phase('review', list.filter(a => a.role === 'reviewer' && a.label !== 'plan review')),
       phase('merge', list.filter(a => a.role === 'integrator')),
     ]
-    const cols = width >= 46 ? 4 : width >= 24 ? 2 : 1
-    const pw = Math.max(9, Math.floor((width - 3 * (cols - 1) - 1) / cols))
+    const cols = width >= 100 ? 6 : width >= 40 ? 3 : 2
+    const pw = Math.max(6, Math.floor((width - 3 * (cols - 1) - 1) / cols))
+    const stageRows = Array.from({ length: Math.ceil(stages.length / cols) }, (_, r) => stages.slice(r * cols, r * cols + cols))
+    // The return rail from the end of one row to the start of the next: down from the middle of the last box, left, then into the first.
+    const railOf = (lastStage: (typeof stages)[number]) => {
+      const first = Math.floor(pw / 2)
+      const lastX = (cols - 1) * (pw + 3) + first
+      const color = edge(lastStage.state === 'running', lastStage.state === 'pass')
+      return [
+        { text: `${' '.repeat(lastX)}│`, color },
+        { text: `${' '.repeat(first)}┌${'─'.repeat(Math.max(0, lastX - first - 1))}┘`, color },
+        { text: `${' '.repeat(first)}▼`, color },
+      ]
+    }
 
     // Slice diagram: a column per dependency layer, joined by routed lines; stacked top to bottom when the columns do not fit.
     const map = nodesOf(list)
@@ -374,6 +472,29 @@ export const register: Register = on => {
     const spare = width - 3 - gutterW.reduce((t, w) => t + w, 0)
     const vertical = layers.length > 1 && Math.floor(spare / layers.length) < 14
     const colW = vertical ? Math.max(10, Math.min(30, width - 5)) : Math.max(10, Math.min(colMax, Math.floor(spare / Math.max(1, layers.length))))
+    // One cell per task in a stage: the build cell is a slice's implementer, the review cell its reviewer, others one per agent.
+    const stOf = (a?: Agent): State => (a ? a.status : 'queued')
+    const cellsFor = (name: string, group: Agent[]): State[] => {
+      const nodes = [...map.values()]
+      if (name === 'build') return nodes.filter(n => n.agents.every(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'implementer')))
+      if (name === 'review') return nodes.filter(n => n.agents.some(a => a.role === 'implementer' || a.role === 'reviewer')).map(n => stOf(lastOf(n, 'reviewer')))
+      return group.map(a => a.status)
+    }
+    // The most recent cells that fit in w, then `+N` for the hidden ones; an empty stage shows dim dots.
+    const cellRow = (cells: State[], w: number) => {
+      if (!cells.length) return <Text dimColor wrap="truncate-end">{'·'.repeat(w)}</Text>
+      let shown = Math.min(cells.length, w)
+      while (shown > 0 && cells.length > shown && shown + 1 + String(cells.length - shown).length > w) shown--
+      const hidden = cells.length - shown
+      return (
+        <Box>
+          {cells.slice(cells.length - shown).map(st => (
+            <Text color={COLOR[st]}>{g(st)}</Text>
+          ))}
+          {hidden > 0 && <Text dimColor>{`+${hidden}`}</Text>}
+        </Box>
+      )
+    }
     const satisfied = (id: string) => ['pass', 'done'].includes(stateOf(map.get(id) as Node))
     const gutters = layers.map((l, i) => (i > 0 && !vertical ? gutterOf(layers[i - 1] as Node[], l, map, f) : undefined))
     const card = (n: Node) => {
@@ -442,6 +563,18 @@ export const register: Register = on => {
     const barW = wide ? 8 : 5
     const taskW = Math.max(6, Math.min(28, width - barW - 15))
     const byModel = [...new Set(list.map(a => a.model))].map(m => ({ m, tokens: list.filter(a => a.model === m).reduce((t, a) => t + a.tokens, 0) }))
+    // The stacked bar: every model with tokens gets one cell, the rest are shared by tokens (largest remainder), summing to stackW.
+    const stackW = Math.max(10, Math.min(width - 2, 40))
+    const stack = (() => {
+      const used = byModel.filter(x => x.tokens > 0)
+      const spare = Math.max(0, stackW - used.length)
+      const exact = used.map(x => (total ? (spare * x.tokens) / total : 0))
+      const cells = exact.map(v => 1 + Math.floor(v))
+      let left = stackW - cells.reduce((t, c) => t + c, 0)
+      const order = exact.map((v, i) => ({ i, r: v - Math.floor(v) })).sort((p, q) => q.r - p.r)
+      for (let k = 0; left > 0 && order.length; k++, left--) cells[(order[k % order.length] as { i: number }).i]!++
+      return used.map((x, i) => ({ m: x.m, cells: cells[i] as number }))
+    })()
     const inTotal = list.reduce((t, a) => t + a.inTokens, 0)
     const outTotal = list.reduce((t, a) => t + a.outTokens, 0)
     const cacheTotal = list.reduce((t, a) => t + a.cacheTokens, 0)
@@ -450,15 +583,15 @@ export const register: Register = on => {
     const logN = wide ? 10 : 7
     const shownLog = lines.slice(-logN)
     const logW = Math.max(10, width - 2)
-    const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆' } as const
-    const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle' } as const
+    const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇' } as const
+    const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle' } as const
 
     const signed = list.length > 0 && !running
     const mainState: State = running ? 'running' : !list.length ? 'queued' : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
     const diagramRows = vertical ? layers.reduce((t, l) => t + layerRows(l) + 1, 0) : Math.max(0, ...layers.map(layerRows))
-    const needsScroll = bodyRows > 0 && 26 + Math.ceil(phases.length / cols) * 5 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length > bodyRows
+    const needsScroll = bodyRows > 0 && 26 + (verdict || list.length ? 5 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length > bodyRows
 
     return (
       <Box flexDirection="column">
@@ -486,30 +619,51 @@ export const register: Register = on => {
             </Text>
           </Box>
         )}
+        {(verdict || list.length > 0) && mode && (
+          <Box borderStyle="round" borderColor={MODE_COLOR[mode]} flexDirection="column" width={boxW}>
+            <Text bold color={MODE_COLOR[mode]} wrap="truncate-end">triage · {mode}</Text>
+            {verdict?.facts && (
+              <Text wrap="truncate-end">files {verdict.facts.filesToTouch} · lines {verdict.facts.linesToChange} · slices {verdict.facts.independentSlices}</Text>
+            )}
+            {verdict?.facts && <Text wrap="truncate-end">risky {verdict.facts.risky ? 'yes' : 'no'} · code {verdict.facts.code ? 'yes' : 'no'}</Text>}
+            <Text dimColor wrap="truncate-end">{verdict ? verdict.reason : '(inferred from the agents)'}</Text>
+          </Box>
+        )}
         {list.length > 0 && down(running > 0, true, 1)}
         {list.length > 0 &&
-          Array.from({ length: Math.ceil(phases.length / cols) }, (_, r) => phases.slice(r * cols, r * cols + cols)).map((row, r) => (
-            <Box>
-              {row.map((p, j) => {
-                const before = phases[r * cols + j - 1]
-                const moving = p.state === 'running'
-                return (
-                  <Box>
-                    {j > 0 && (
-                      <Box flexDirection="column" justifyContent="center" width={3}>
-                        <Text color={edge(moving, before?.state === 'pass')} bold={moving}>
-                          {moving ? ['●─▶', '─●▶', '──▶'][f % 3] : '──▶'}
+          stageRows.map((row, r) => (
+            <Box flexDirection="column">
+              {r > 0 && (
+                <Box flexDirection="column">
+                  {railOf((stageRows[r - 1] as typeof stages)[cols - 1] as (typeof stages)[number]).map(x => (
+                    <Text color={x.color}>{x.text}</Text>
+                  ))}
+                </Box>
+              )}
+              <Box>
+                {row.map((p, j) => {
+                  const before = stages[r * cols + j - 1]
+                  const moving = p.state === 'running'
+                  return (
+                    <Box>
+                      {j > 0 && (
+                        <Box flexDirection="column" justifyContent="center" width={3}>
+                          <Text color={edge(moving, before?.state === 'pass')} bold={moving}>
+                            {moving ? ['●─▶', '─●▶', '──▶'][f % 3] : '──▶'}
+                          </Text>
+                        </Box>
+                      )}
+                      <Box borderStyle="round" borderColor={COLOR[p.state]} borderDimColor={moving && f % 4 < 2} flexDirection="column" width={pw}>
+                        <Text bold color={COLOR[p.state]} wrap="truncate-end">{g(p.state)} {p.name}</Text>
+                        {p.name === 'triage' ? <Text color={COLOR[p.state]} wrap="truncate-end">{'▰'.repeat(Math.max(3, pw - 4))}</Text> : cellRow(cellsFor(p.name, p.group), Math.max(3, pw - 4))}
+                        <Text dimColor wrap="truncate-end">
+                          {p.name === 'triage' ? (p.mode ?? '-') : p.n ? `${p.done}/${p.n} ${[...new Set(p.group.map(a => family(a.model)))].join('+')}` : '-'}
                         </Text>
                       </Box>
-                    )}
-                    <Box borderStyle="round" borderColor={COLOR[p.state]} borderDimColor={moving && f % 4 < 2} flexDirection="column" width={pw}>
-                      <Text bold color={COLOR[p.state]} wrap="truncate-end">{g(p.state)} {p.name}</Text>
-                      <Text color={COLOR[p.state]} wrap="truncate-end">{bar(p.done, p.n, Math.max(3, pw - 4), f, moving)}</Text>
-                      <Text dimColor wrap="truncate-end">{p.n ? `${p.done}/${p.n} ${[...new Set(p.group.map(a => family(a.model)))].join('+')}` : '-'}</Text>
                     </Box>
-                  </Box>
-                )
-              })}
+                  )
+                })}
+              </Box>
             </Box>
           ))}
         {layers.length > 0 && down(running > 0, true, 1)}
@@ -588,9 +742,14 @@ export const register: Register = on => {
         {byModel.length > 0 && total > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>usage by model</Text>
+            <Box>
+              {stack.map(x => (
+                <Text color={familyColor(x.m)}>{'█'.repeat(x.cells)}</Text>
+              ))}
+            </Box>
             {byModel.map(({ m, tokens: n }) => (
               <Text color={familyColor(m)} wrap="truncate-end">
-                ■ {short(m).slice(0, 12).padEnd(12)} {share(n, total, barW)} {tokens(n).padStart(5)} {Math.round((100 * n) / total)}%
+                ■ {short(m).slice(0, 12).padEnd(12)} {tokens(n).padStart(5)} {Math.round((100 * n) / total)}%
               </Text>
             ))}
             <Text dimColor>agents only; the orchestrator's own tokens are not counted</Text>
@@ -600,10 +759,13 @@ export const register: Register = on => {
           <Box flexDirection="column" marginTop={1}>
             <Text bold>session log</Text>
             {shownLog.map(l => {
-              const detail = l.kind === 'start' ? `started · ${short(l.model)}` : `${ABBR[l.role] ?? l.role} · ${clock(l.ms ?? 0)} · ${tokens(l.tokens ?? 0)}`
+              const text =
+                l.kind === 'triage'
+                  ? `triage ${l.label}`
+                  : `${l.label} ${l.kind === 'start' ? `started · ${short(l.model)}` : `${ABBR[l.role] ?? l.role} · ${clock(l.ms ?? 0)} · ${tokens(l.tokens ?? 0)}`}`
               return (
                 <Text color={LOGCOLOR[l.kind]} wrap="truncate-end">
-                  {clock(l.at - first)} {LOGMARK[l.kind]} {cut(`${l.label} ${detail}`, logW)}
+                  {clock(Math.max(0, l.at - first))} {LOGMARK[l.kind]} {cut(text, logW)}
                 </Text>
               )
             })}
