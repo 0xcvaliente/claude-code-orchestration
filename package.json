@@ -1,6 +1,6 @@
 {
   "name": "claude-code-orchestration",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,8 @@
     "report": "node scripts/report.mjs",
     "build-plugin": "node scripts/build-plugin.mjs",
     "check-plugin": "node scripts/build-plugin.mjs --check",
+    "orchestrate": "claude --agent orchestrator --plugin-dir dist/dashboard",
+    "test-dashboard": "node scripts/test-dashboard.mjs",
     "bench": "node bench/run.mjs",
     "bench:validate": "node bench/validate.mjs",
     "bench:grade": "node bench/grade.mjs",

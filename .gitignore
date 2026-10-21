@@ -2,6 +2,7 @@ node_modules/
 runs/
 dist/*
 !dist/plugin/
+!dist/dashboard/
 .claude/state/
 .claude/worktrees/
 *.log
