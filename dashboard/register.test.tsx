@@ -101,8 +101,8 @@ const setup = async ($: any, on: any, output: unknown) => {
   on('clock.every', () => ({ value: {} }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 }
-const texts = async ($: any, columns = 100) => {
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: columns } })
+const texts = async ($: any, columns = 100, bodyRows = 20) => {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: columns, scroll: { offset: 0, bodyRows } } })
   const out = (await ui.findAll({ type: 'Text' })).map((x: any) => x.text ?? '')
   await ui.unmount()
   return out as string[]
@@ -441,7 +441,9 @@ test('the arrows join input, orchestrator, triage, stages and sign-off at every 
     expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
     const arrows = art.filter(x => x.trim() === '▼')
     expect(arrows.length).toBeGreaterThanOrEqual(4) // input, orchestrator, triage, last stage row -> sign-off (plus the return rails)
-    expect(arrows.filter(x => x.indexOf('▼') === 1).length).toBe(4) // x=1 lies inside every box above and below (all are at least 6 wide)
+    // x=1 lies inside every box above and below (all are at least 6 wide): input, orchestrator and last stage row -> sign-off stay at x 1;
+    // triage -> stages is now the fork and the link, whose arrowheads sit at the route centre and the stage (only the stacked fork's ' ▼' is at x 1)
+    expect(arrows.filter(x => x.indexOf('▼') === 1).length).toBeGreaterThanOrEqual(3)
     for (const w of ['sign off', 'triage', 'orchestrator', 'build']) expect(t.some(x => x.includes(w))).toBe(true)
   }
 })
@@ -529,4 +531,239 @@ test('route input that is not valid, or from a sub-agent, is ignored with a resu
   const sub = await call({ tool: NAME, agentId: 'a1', ...VERDICT })
   expect(sub.result).toBe('ignored: only the main session records a route')
   expect((await texts($)).some(x => /triage/.test(x))).toBe(false)
+})
+
+// The triage fork: three route boxes, the chosen one marked and joined by a link to the first stage it uses.
+const ROUTES = ['plain', 'reviewed', 'orchestrate'] as const
+const ART = /^[\s─│┌┐└┘├┤┬┴┼●▶▼╵╷╶╴]+$/
+// The same layout as the pane, worked out again here from the widths alone.
+const tElbow = (a: number, b: number) => (a === b ? `${' '.repeat(a)}│` : b > a ? `${' '.repeat(a)}└${'─'.repeat(b - a - 1)}┐` : `${' '.repeat(b)}┌${'─'.repeat(a - b - 1)}┘`)
+const geom = (width: number, mode: (typeof ROUTES)[number]) => {
+  const boxW = Math.min(width - 1, 46)
+  const side = width >= 44
+  const rw = Math.floor((boxW - 4) / 3)
+  const rx = [0, 1, 2].map(i => i * (rw + 2))
+  const rc = rx.map(x => x + Math.floor(rw / 2))
+  const cols = width >= 100 ? 6 : width >= 40 ? 3 : 2
+  const pw = Math.max(6, Math.floor((width - 3 * (cols - 1) - 1) / cols))
+  const rowW = cols * pw + 3 * (cols - 1)
+  const first = Math.floor(pw / 2)
+  const lastX = (cols - 1) * (pw + 3) + first
+  const k = ROUTES.indexOf(mode)
+  const sx = side ? (rc[k] as number) : 1
+  const entry = width < 16 ? 0 : mode === 'orchestrate' ? 1 : 3
+  const left = (entry % cols) * (pw + 3)
+  const lane = Math.floor(entry / cols) >= 1
+  const ex = left + pw - 2
+  const tx = lane ? rowW : Math.min(left + first, width - 1)
+  const link = [`${' '.repeat(sx)}│`, tElbow(sx, tx), `${' '.repeat(tx)}${lane ? '│' : '▼'}`]
+  const gap = ' '.repeat(rowW - lastX - 1)
+  const pad = ' '.repeat(ex - first - 1)
+  const rail = [`${' '.repeat(lastX)}│`, `${' '.repeat(first)}┌${'─'.repeat(lastX - first - 1)}┘`, `${' '.repeat(first)}│`, `${' '.repeat(first)}▼`]
+  const beside = [`${gap}│`, `${gap}│`, `${pad}┌${'─'.repeat(rowW - ex - 1)}┘`, `${pad}▼`]
+  return { boxW, side, rw, rx, rc, cols, pw, rowW, first, lastX, k, sx, left, lane, ex, tx, link, rail, beside }
+}
+const failed = (id: string) => ({ turnId: 'a', agentId: id, answer: 'broke\nSTATUS: fail', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
+const verdict = (mode: string) => ({ stdout: JSON.stringify({ mode, reason: `${mode} chosen`, facts: { filesToTouch: 2, linesToChange: 40, independentSlices: 1, risky: true, code: true } }) })
+const REVIEWER = 'orchestration:reviewer'
+
+type Scene = { name: string; mode: (typeof ROUTES)[number]; word: string; flow: boolean; build: ($: any, on: any) => Promise<void> }
+const recorded = async ($: any, on: any, mode: string, solo?: boolean) => {
+  await boot($, on, { route: verdict(mode) })
+  if (solo) return
+  await $.prompt.submit({ text: PROMPT })
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+}
+const SCENES: Scene[] = [
+  { name: 'plain answered, inferred', mode: 'plain', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('answer')) } },
+  { name: 'plain stopped, inferred', mode: 'plain', word: 'stopped', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('aborted')) } },
+  { name: 'plain chosen, nothing run yet', mode: 'plain', word: 'chosen', flow: false, build: async ($, on) => { await recorded($, on, 'plain', true); await $.tool.call({ tool: 'Bash', command: ROUTE_CMD }) } },
+  { name: 'reviewed recorded, finished', mode: 'reviewed', word: 'passed', flow: false, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)); await $.turn.complete(done('r1')); await $.turn.complete(mainDone('answer')) } },
+  { name: 'reviewed recorded, running', mode: 'reviewed', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)) } },
+  { name: 'orchestrate recorded, running', mode: 'orchestrate', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')) } },
+  { name: 'orchestrate recorded, failed', mode: 'orchestrate', word: 'failed', flow: false, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(failed('t1')); await $.turn.complete(mainDone('answer')) } },
+  { name: 'orchestrate inferred, finished', mode: 'orchestrate', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(done('t1')) } },
+]
+const WIDTHS = [24, 32, 36, 40, 43, 44, 47, 52, 60, 64, 80, 99, 100, 140]
+
+for (const sc of SCENES) {
+  test(`triage fork: ${sc.name}`, async ($, on) => {
+    await sc.build($, on)
+    const others = ROUTES.filter(r => r !== sc.mode)
+    for (const columns of WIDTHS) {
+      const t = await texts($, columns)
+      const g = geom(columns, sc.mode)
+      // the chosen route carries the marker and the status word; the others do not
+      const marked = t.filter(x => x.startsWith('◉ '))
+      expect(marked.length).toBe(1)
+      expect(marked[0]!.endsWith(` ${sc.word}`)).toBe(true)
+      expect(t.includes(sc.mode)).toBe(true)
+      // the running dot is only on the link while work runs: the fork rows and the route boxes carry none
+      expect(t.some(x => /^[◉○] .*●/.test(x))).toBe(false)
+      if (g.side) {
+        expect(t.filter(x => x === '○ not taken').length).toBe(2)
+        for (const o of others) expect(t.includes(o)).toBe(true)
+        // the fork: a line down, across to the chosen route's centre, and an arrowhead onto it
+        for (const row of [' │', tElbow(1, g.rc[g.k] as number), `${' '.repeat(g.rc[g.k] as number)}▼`]) expect(t.includes(row)).toBe(true)
+        expect(g.sx).toBeGreaterThanOrEqual((g.rx[g.k] as number) + 1) // the link leaves from inside the chosen box
+        expect(g.sx).toBeLessThanOrEqual((g.rx[g.k] as number) + g.rw - 2)
+      } else {
+        for (const o of others) expect(t.includes(`○ ${o}`)).toBe(true)
+        expect(t.includes(`○ ${sc.mode}`)).toBe(false)
+        expect(t.filter(x => x === ' │ ').length).toBeGreaterThanOrEqual(2) // the slice diagram's trunk can add more
+        expect(t.includes(' ▼')).toBe(true)
+        expect(g.sx).toBe(1)
+      }
+      // the link: exact rows when nothing moves along it
+      if (!sc.flow) for (const row of g.link) expect(t.includes(row)).toBe(true)
+      if (!g.lane) {
+        // direct: the arrowhead lies inside the first stage's box
+        expect(g.tx).toBeGreaterThanOrEqual(g.left + 1)
+        expect(g.tx).toBeLessThanOrEqual(g.left + g.pw - 2)
+      } else {
+        // the lane: the rail beside it, row by row, and the lane's own column
+        for (let i = 0; i < 4; i++) {
+          expect(t.includes(g.rail[i] as string)).toBe(true)
+          expect(t.includes(g.beside[i] as string)).toBe(true)
+          expect((g.rail[i] as string).length + (g.beside[i] as string).length).toBeLessThanOrEqual(columns)
+        }
+        expect(t.filter(x => x === '│').length).toBeGreaterThanOrEqual(5)
+        expect(g.ex).toBeGreaterThanOrEqual(g.left + 1)
+        expect(g.ex).toBeLessThanOrEqual(g.left + g.pw - 2)
+      }
+      if (sc.mode === 'orchestrate' || columns >= 100) {
+        // no lane: orchestrate enters plan in the first row, and one row holds all six stages from 100 columns
+        const asPlain = geom(columns, 'plain')
+        if (asPlain.lane || columns < 100) expect(t.includes(asPlain.beside[2] as string)).toBe(false)
+      }
+      for (const stage of ['triage', 'plan', 'plan review', 'build', 'review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(true)
+      const art = t.filter(x => ART.test(x))
+      expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
+    }
+  })
+}
+
+test('triage fork: sizing draws all three routes dim, with no marker and no link', async ($, on) => {
+  await boot($, on)
+  await $.prompt.submit({ text: PROMPT })
+  for (const columns of [24, 36, 43, 44, 60, 100, 140]) {
+    const t = await texts($, columns)
+    const g = geom(columns, 'plain')
+    expect(t.some(x => x.includes('◉'))).toBe(false)
+    expect(t.some(x => /triage · sizing/.test(x))).toBe(true)
+    if (g.side) {
+      expect(t.filter(x => x === '○ …').length).toBe(3)
+      for (const r of ROUTES) expect(t.includes(r)).toBe(true)
+      const [a, b, c] = g.rc as [number, number, number]
+      expect(t.includes(`${' '.repeat(a)}▼${' '.repeat(b - a - 1)}▼${' '.repeat(c - b - 1)}▼`)).toBe(true)
+      expect(t.includes(`└${'─'.repeat(a - 2)}┬${'─'.repeat(b - a - 1)}┬${'─'.repeat(c - b - 1)}┐`.padStart(c + 1))).toBe(true)
+    } else {
+      for (const r of ROUTES) expect(t.includes(`○ ${r}`)).toBe(true)
+      expect(t.filter(x => x === ' ├ ').length).toBe(2)
+      expect(t.filter(x => x === ' └ ').length).toBe(1)
+    }
+    // no link: nothing from a route to a stage (the first link row, a bare line down, also reads like the plain connectors)
+    for (const row of geom(columns, 'orchestrate').link.slice(1)) expect(t.includes(row)).toBe(false)
+  }
+})
+
+test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', async ($, on) => {
+  await boot($, on)
+  await $.prompt.submit({ text: PROMPT })
+  await $.turn.complete(mainDone('answer'))
+  for (let columns = 16; columns <= 200; columns++) {
+    for (const m of ROUTES) {
+      const g = geom(columns, m)
+      expect(g.rowW).toBeLessThanOrEqual(columns - 1)
+      expect(g.tx).toBeLessThanOrEqual(columns - 1)
+      if (!g.lane) {
+        expect(g.tx).toBeGreaterThanOrEqual(g.left + 1)
+        expect(g.tx).toBeLessThanOrEqual(g.left + g.pw - 2)
+      } else {
+        expect(g.first).toBeLessThan(g.ex)
+        expect(g.ex).toBeLessThan(g.rowW)
+        expect(g.lastX).toBeLessThan(g.rowW)
+        expect(g.sx).toBeLessThan(g.rowW)
+        expect(g.ex).toBeGreaterThanOrEqual(g.left + 1)
+      }
+    }
+    const t = await texts($, columns)
+    const art = t.filter(x => ART.test(x))
+    expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
+    const g = geom(columns, 'plain')
+    for (const row of g.link) expect(t.includes(row)).toBe(true)
+  }
+})
+
+test('triage fork: under 16 columns there is no lane and the link goes straight to the first stage', async ($, on) => {
+  await boot($, on)
+  await $.prompt.submit({ text: PROMPT })
+  await $.turn.complete(mainDone('answer'))
+  for (const columns of [8, 10, 12, 15]) {
+    const t = await texts($, columns)
+    const g = geom(columns, 'plain')
+    expect(g.lane).toBe(false)
+    for (const row of g.link) expect(row.length).toBeLessThanOrEqual(columns)
+    for (const row of g.link) expect(t.includes(row)).toBe(true)
+    expect(t.includes(`${' '.repeat(g.tx)}▼`)).toBe(true)
+    expect(t.includes(g.beside[2] as string)).toBe(false) // no lane segment
+  }
+  // the same for orchestrate, which enters plan (stage 1) everywhere else
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  await $.turn.complete(done('t1'))
+  const g = geom(12, 'orchestrate')
+  const t = await texts($, 12)
+  expect(g.tx).toBe(3)
+  for (const row of g.link) expect(t.includes(row)).toBe(true)
+})
+
+test('triage fork: the dot runs along the link while work runs and stops when it is signed off', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock, route: verdict('orchestrate') })
+  await $.prompt.submit({ text: PROMPT })
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  const g = geom(100, 'orchestrate')
+  // the cells the dot visits, in travel order: down from the box, along the elbow, onto the stage
+  const path: [number, number][] = [[0, g.sx]]
+  for (let x = g.sx; x !== g.tx - 1; x--) path.push([1, x])
+  path.push([2, g.tx])
+  const step = Math.max(1, Math.ceil(path.length / 12))
+  expect(path.length).toBe(g.sx - g.tx + 3)
+  const seen = new Set<string>()
+  for (let f = 0; f < 4; f++) {
+    const t = await texts($, 100)
+    expect(t.find(x => /orchestrator$/.test(x))!.startsWith(['⠋', '⠙', '⠹', '⠸'][f] as string)).toBe(true) // which tick this is
+    const [r, x] = path[(f * step) % path.length] as [number, number]
+    const expected = g.link.map((row, i) => (i === r ? `${row.slice(0, x)}●${row.slice(x + 1)}` : row))
+    for (const row of expected) expect(t.includes(row)).toBe(true)
+    seen.add(`${r},${x}`)
+    await clock.advance(250)
+  }
+  expect(seen.size).toBe(4) // it moved every tick
+  await $.turn.complete(done('t1'))
+  await $.turn.complete(mainDone('answer'))
+  const t = await texts($, 100)
+  for (const row of g.link) expect(t.includes(row)).toBe(true) // the plain link, no dot
+  expect(t.some(x => ART.test(x) && x.includes('●') && x.length > 3)).toBe(false)
+})
+
+test('the scroll hint counts the fork, the route boxes, the link and the lane', async ($, on) => {
+  await boot($, on)
+  await $.prompt.submit({ text: PROMPT })
+  const hint = async (columns: number, bodyRows: number) => (await texts($, columns, bodyRows)).some(x => /scroll/.test(x))
+  // sizing at 100: 26 + 5 (orchestrator box) + 4 (input box) + 5 (one stage row) = 40, plus the 3 fork rows and 4 route rows, less the old 2-row arrow = 45
+  expect(await hint(100, 44)).toBe(true)
+  expect(await hint(100, 45)).toBe(false)
+  expect(await hint(100, 50)).toBe(false)
+  await $.turn.complete(mainDone('answer'))
+  // plain at 100: 40 + 3 + 4 + 3 link rows - 2 = 48
+  expect(await hint(100, 47)).toBe(true)
+  expect(await hint(100, 48)).toBe(false)
+  // at 60 the stages wrap (two rows of 5 and a 3-row rail = 13) and the lane adds a rail row: 26 + 5 + 4 + 13 + 3 + 4 + 3 - 2 + 1 = 57
+  expect(await hint(60, 56)).toBe(true)
+  expect(await hint(60, 57)).toBe(false)
+  // stacked at 36: three stage rows (15 + 6 = 21), the fork is 2 rows, the arrow, the 4-row chosen box, the link 3 and the lane 1: 26 + 5 + 4 + 21 + 7 + 3 - 2 + 1 = 65
+  expect(await hint(36, 64)).toBe(true)
+  expect(await hint(36, 65)).toBe(false)
 })
