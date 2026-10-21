@@ -376,14 +376,16 @@ test('an aborted main turn reads stopped before an answer', async ($, on) => {
   expect(t.some(x => /answered in this session/.test(x))).toBe(false)
 })
 
-test('a follow-up soon after a finished run keeps its diagram', async ($, on) => {
+test('a new prompt right after a finished run starts a clean run (new input is new work)', async ($, on) => {
   await boot($, on)
   await $.agent.spawn(spawnImpl('t1', 's1'))
   await ($ as any).turn.complete({ turnId: 'a', agentId: 't1', answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
   expect((await texts($)).some(x => /◆ s1|✔ s1/.test(x))).toBe(true)
-  // the clock steps one second per read: a prompt right after leaves the run alone
-  await ($ as any).prompt.submit({ text: 'and now a follow-up' })
-  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+  // the clock steps one second per read: well inside two minutes, yet nothing runs, so the new input starts a new run
+  await ($ as any).prompt.submit({ text: 'and now something else' })
+  const t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect(t.includes('▸ and now something else')).toBe(true)
 })
 
 test('a prompt over two minutes after the last agent ended starts a clean run', async ($, on) => {
@@ -766,4 +768,63 @@ test('the scroll hint counts the fork, the route boxes, the link and the lane', 
   // stacked at 36: three stage rows (15 + 6 = 21), the fork is 2 rows, the arrow, the 4-row chosen box, the link 3 and the lane 1: 26 + 5 + 4 + 21 + 7 + 3 - 2 + 1 = 65
   expect(await hint(36, 64)).toBe(true)
   expect(await hint(36, 65)).toBe(false)
+})
+
+const finish = ($: any, agentId: string, answer: string) =>
+  $.turn.complete({ turnId: agentId, agentId, answer, durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
+const spawnWith = ($: any, id: string, prompt: string, type: string) =>
+  $.agent.spawn({ tool_use_id: id, prompt, description: id, subagentType: type, provider: { plugin: 'orchestration', tier: 'user' }, parentModel: 'opus' } as never)
+
+test('a plan review is the plan review stage even when its brief has a SLICE line', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: plan\nFOCUS: gaps', 'orchestration:reviewer')
+  await finish($, 'p1', 'STATUS: pass\nGAPS: none')
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  const t = await texts($)
+  expect(t.includes('✔ plan review')).toBe(true) // the stage counts it
+  expect(t.some(x => /^\S plan {2,}\d/.test(x))).toBe(false) // not a slice card called "plan"
+  expect(t.some(x => /^✔ plan review\s+[▰▱]*\s*\S+\s+\d:\d\d$/.test(x) || /^✔ plan review /.test(x))).toBe(true) // a row of its own in the tasks table
+})
+
+test('a bold GAPS heading is skipped so the finding under it is the result', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  await finish($, 'b1', 'built\nSTATUS: pass')
+  await spawnWith($, 'r1', 'SLICE: s1', 'orchestration:reviewer')
+  await finish($, 'r1', '**STATUS: fail**\n\n**GAPS:**\n- the limit is off by one\n')
+  const t = await texts($)
+  expect(t.some(x => /↳ the limit is off by one/.test(x))).toBe(true)
+  expect(t.some(x => /↳ GAPS/.test(x))).toBe(false)
+  // a line that merely ends in `_` or `*` is not damaged
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', 'orchestration:implementer')
+  await finish($, 'b2', 'wrote src/__init__\nSTATUS: pass')
+  expect((await texts($)).some(x => /↳ wrote src\/__init__$/.test(x))).toBe(true)
+})
+
+test('a brief that only mentions PLAN REVIEW on a later line is still a slice', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', 'SLICE: s1\nFOCUS: x\nPLAN REVIEW passed earlier; check the code', 'orchestration:reviewer')
+  const t = await texts($)
+  expect(t.some(x => /^\S s1 /.test(x))).toBe(true) // its slice card stays
+  expect(t.includes('● plan review') || t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] plan review$/.test(x))).toBe(false) // and the plan review stage is not running
+})
+
+test('a dependency never launched shows as a queued card only while the run is going', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: s9', 'orchestration:implementer')
+  expect((await texts($)).some(x => /◌ s9/.test(x))).toBe(true)
+  await finish($, 'b2', 'built\nSTATUS: pass')
+  const t = await texts($)
+  expect(t.some(x => /s2/.test(x))).toBe(true)
+  expect(t.some(x => /◌ s9/.test(x))).toBe(false) // signed off: no ghost for work from an earlier run
+  expect(t.some(x => /◀ s9/.test(x))).toBe(true) // the dependency is still named on the card
+})
+
+test('a prompt that is a background notification or a peer message is not new work', async ($, on) => {
+  const { opened } = await boot($, on)
+  for (const kind of ['task-notification', 'peer', 'scheduled-trigger']) {
+    await ($ as any).prompt.submit({ text: 'Another Claude session sent a message', origin: { kind } })
+  }
+  expect(opened.length).toBe(0)
+  expect((await texts($)).some(x => /▸ Another Claude/.test(x))).toBe(false)
 })

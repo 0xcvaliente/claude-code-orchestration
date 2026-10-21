@@ -4,14 +4,14 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 
 ## Opening it
 
-- The pane opens when you submit a prompt (`prompt.submit`), in any folder: no git repository, checkout or code project is needed. Slash commands, meta prompts and blank prompts do not open it.
+- The pane opens when you submit a prompt (`prompt.submit`), in any folder: no git repository, checkout or code project is needed. Slash commands, meta prompts, blank prompts and prompts the engine queues that you did not type (a background task's notification, a peer session's message, a scheduled trigger; the `NOT_THE_PERSON` origins) do not open it and are not new work.
 - It also opens when the first orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of the `/route` skill's `npm run route` command).
 - `/orchestration` opens it focused, so the arrow keys work at once.
 - A pane nobody asked for seats only from 144 columns. On a narrower terminal a toast (shown once per run) says to type `/orchestration`.
 - What starts a new run (the old agents, log, verdict and input are dropped; `newRun`):
-  - Nothing is running and the last agent ended 2 minutes or more earlier (or no agent ever ran). A prompt or a first agent after that starts a new run.
-  - A prompt while the main session still works on an earlier prompt with no answer yet drops nothing and keeps the first input.
-  - A follow-up prompt less than 2 minutes after the last agent ended drops nothing: the agents, log and verdict stay, and the input box shows the new prompt.
+  - A prompt you type while no agent runs and the main session is not still working on an earlier prompt: it starts a new run at once, however soon after the last agent ended (new input is new work; `newRun` with `force`).
+  - A first agent when nothing runs and the last agent ended 2 minutes or more earlier (or no agent ever ran).
+  - A prompt while the main session still works on an earlier prompt with no answer yet drops nothing and keeps the first input; so does any prompt while an agent runs.
   - A first agent that starts 2 minutes or more after the old run ended, with nothing running, drops the old agents and log but keeps the verdict and the input when they are newer than the old run's last agent (the prompt and the router both came before the spawn). An older verdict or input is dropped.
 
 ## Scrolling and resizing
@@ -57,9 +57,9 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
    - Routed box-drawing lines join each layer to the next, entering the target's middle with an arrowhead.
    - A dot travels along the edges whose target is running.
    - A bus under the diagram joins the final slices (those nothing depends on) into one arrow to the sign-off box.
-   - A card shows the state glyph, slice id and time; build and review chips; the running agent's latest tool, else the token count or "queued"; and a `◀` line per dependency (up to 3, then "+N more"), green once satisfied. A dependency not yet launched appears as a queued card.
+   - A card shows the state glyph, slice id and time; build and review chips; the running agent's latest tool, else the token count or "queued"; and a `◀` line per dependency (up to 3, then "+N more"), green once satisfied. A dependency not yet launched appears as a queued card while the run is going; once the run is signed off (nothing running) those cards are left out, and the `◀` line stays, grey.
 7. **Sign-off box.** "waiting for agents" until no agent is running, then the passed, failed and fixed counts. With no agents it reads "waiting for the reply", then "answered in this session" or "stopped". A failure counts as fixed (grey `◆`, "fixed by <slice>" in the tasks table) when a later slice that depends on the failed slice started after it ended and passed, or, for a plan review (no slice), when a later plan review passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
-8. **Tasks table.** One row per slice (or per agent without a slice): glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
+8. **Tasks table.** One row per slice (or per agent without a slice): glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading (plain or in bold) is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
 9. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
 10. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too.
 
@@ -81,7 +81,7 @@ Flow lines are amber while work moves through them, green once what feeds them i
 
 ## Where the data comes from
 
-- The `SLICE:`, `FILES:` and `DEPENDS:` lines at the start of each agent brief give a slice's id, its file count and its dependencies. A brief starting with `PLAN REVIEW` is labelled "plan review".
+- The `SLICE:`, `FILES:` and `DEPENDS:` lines at the start of each agent brief give a slice's id, its file count and its dependencies. A brief starting with `PLAN REVIEW` is labelled "plan review" and belongs to the plan review stage, whatever `SLICE:` line it also carries: it is never a slice card.
 - The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the report (its last `STATUS: pass` or `STATUS: fail`; none means done), the token usage and the end time. Tool calls give a running agent's latest tool.
 - The route verdict comes from the `route` tool, or from the result of a main-loop `npm run route` call.
 - The input box and the no-agent states come from `prompt.submit` and the main thread's `turn.complete` (reason `answer` is answered; any other reason is stopped).
