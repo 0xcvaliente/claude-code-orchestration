@@ -18,6 +18,7 @@
     "check-plugin": "node scripts/build-plugin.mjs --check",
     "orchestrate": "claude --agent orchestrator --plugin-dir dist/dashboard",
     "test-dashboard": "node scripts/test-dashboard.mjs",
+    "install-statusline": "bash scripts/install-statusline.sh",
     "bench": "node bench/run.mjs",
     "bench:validate": "node bench/validate.mjs",
     "bench:grade": "node bench/grade.mjs",
