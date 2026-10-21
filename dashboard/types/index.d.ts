@@ -39,8 +39,11 @@ export type TriageInfo = {
   facts?: { filesToTouch: number; linesToChange: number; independentSlices: number; risky: boolean; code: boolean }
 }
 
+/** The user's current piece of work: the prompt that started it and how the main session's turn ended. Set on `prompt.submit`, so it exists with no agents; null before and after (state cannot hold undefined). */
+export type Work = { text: string; startedAt: number; endedAt?: number; outcome?: 'answered' | 'stopped' }
+
 declare module 'claude-code' {
   interface PluginState {
-    'orchestration-dashboard': { agents: Agent[]; log: LogEntry[]; tick: number; main: string; triage: TriageInfo | null }
+    'orchestration-dashboard': { agents: Agent[]; log: LogEntry[]; tick: number; main: string; triage: TriageInfo | null; work: Work | null }
   }
 }

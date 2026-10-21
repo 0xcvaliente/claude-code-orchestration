@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'orchestration-dashboard',
@@ -291,4 +291,242 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   t = await texts($, 100)
   expect(t.some(x => /passed · 3 fixed on the way/.test(x))).toBe(true)
   expect(t.some(x => /signed off with/.test(x))).toBe(false)
+})
+
+// The main session's own work: a prompt starts it with no repository and no agents, and the main turn's end finishes it.
+const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown } = {}) => {
+  const seen: any[] = []
+  const opened: any[] = []
+  on('command.register', () => ({ value: { command: 'orchestration' } }))
+  on('ui.open', (_: unknown, e: any) => (opened.push(e), { value: { isPlaced: true } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  on('prompt.submit', (_: unknown, e: any) => (seen.push(e), { text: e.text }))
+  on('agent.spawn', (_: unknown, e: any) => ({ model: 'sonnet', agentId: e.tool_use_id }))
+  on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
+  if (opts.route) on('tool.call', () => ({ result: opts.route, text: 'ok' }))
+  if (!opts.clock) {
+    let now = 1000
+    on('clock.now', () => ({ value: (now += 1000) }))
+    on('clock.every', () => ({ value: {} }))
+  }
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true }) // not a git repository
+  return { seen, opened }
+}
+const mainDone = (reason: string) =>
+  ({ turnId: 'm', answer: 'the reply', durationMs: 5, isAborted: reason === 'aborted', reason, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
+const PROMPT = 'research the tide tables\nand write two lines'
+
+test('a prompt in a folder that is not a repository opens the pane and shows the input box', async ($, on) => {
+  const { opened } = await boot($, on)
+  expect(opened.length).toBe(0)
+  const out = await ($ as any).prompt.submit({ text: PROMPT })
+  expect(out.text).toBe(PROMPT) // handed on unchanged
+  expect(opened.length).toBe(1)
+  const t = await texts($)
+  expect(t.includes('▸ research the tide tables')).toBe(true)
+  expect(t.some(x => /working in this session/.test(x))).toBe(true)
+  expect(t.some(x => /No orchestration agents yet/.test(x))).toBe(false)
+  expect(t.some(x => /triage · sizing/.test(x))).toBe(true)
+  expect(t.some(x => /waiting for the reply/.test(x))).toBe(true)
+  expect(t.some(x => /0 agents/.test(x))).toBe(true)
+  expect(t.some(x => /tasks|usage by model|session log/.test(x))).toBe(false)
+})
+
+test('a slash command, a meta prompt and a blank prompt neither open the pane nor start work', async ($, on) => {
+  const { seen, opened } = await boot($, on)
+  const raise = ($ as any).prompt.submit
+  for (const extra of [{ text: '/review the diff', command: { name: 'review', args: 'the diff' } }, { text: 'a hint', isMeta: true }, { text: '  \n ' }]) {
+    const out = await raise(extra as never)
+    expect(out.text).toBe(extra.text)
+  }
+  expect(seen.length).toBe(3)
+  expect(seen.some(e => e.command)).toBe(true) // the fields reached the hook
+  expect(seen.some(e => e.isMeta)).toBe(true)
+  expect(opened.length).toBe(0)
+  expect((await texts($)).some(x => /No orchestration agents yet/.test(x))).toBe(true)
+})
+
+test('work with no agents reads answered once the main turn ends: plain, skipped stages, this session', async ($, on) => {
+  await boot($, on)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  let t = await texts($)
+  expect(t.some(x => /\(inferred/.test(x))).toBe(false) // still sizing: no mode yet, every stage queued
+  expect(t.includes('skipped')).toBe(false)
+  await ($ as any).turn.complete(mainDone('answer'))
+  t = await texts($)
+  expect(t.filter(x => /answered in this session/.test(x)).length).toBe(2) // orchestrator box and sign-off
+  expect(t.some(x => /triage · plain/.test(x))).toBe(true)
+  expect(t.some(x => /\(inferred: no agents ran\)/.test(x))).toBe(true)
+  expect(t.filter(x => x === 'skipped').length).toBe(4) // plan, plan review, review, merge
+  for (const stage of ['plan', 'plan review', 'review', 'merge']) expect(t.some(x => x === `◆ ${stage}`)).toBe(true)
+  expect(t.some(x => x === '✔ build')).toBe(true)
+  expect(t.includes('this session')).toBe(true)
+  expect(t.some(x => /working in this session/.test(x))).toBe(false)
+})
+
+test('an aborted main turn reads stopped before an answer', async ($, on) => {
+  await boot($, on)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  const out = await ($ as any).turn.complete(mainDone('aborted'))
+  expect(out.text).toBe('the reply')
+  const t = await texts($)
+  expect(t.some(x => /stopped before an answer/.test(x))).toBe(true)
+  expect(t.some(x => x === 'stopped')).toBe(true) // sign-off
+  expect(t.some(x => x === '◆ build')).toBe(true)
+  expect(t.some(x => /answered in this session/.test(x))).toBe(false)
+})
+
+test('a follow-up soon after a finished run keeps its diagram', async ($, on) => {
+  await boot($, on)
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  await ($ as any).turn.complete({ turnId: 'a', agentId: 't1', answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
+  expect((await texts($)).some(x => /◆ s1|✔ s1/.test(x))).toBe(true)
+  // the clock steps one second per read: a prompt right after leaves the run alone
+  await ($ as any).prompt.submit({ text: 'and now a follow-up' })
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+})
+
+test('a prompt over two minutes after the last agent ended starts a clean run', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock })
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  await ($ as any).turn.complete({ turnId: 'a', agentId: 't1', answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+  await clock.advance(121_000)
+  await ($ as any).prompt.submit({ text: 'something new' })
+  const t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect(t.includes('▸ something new')).toBe(true)
+  expect(t.some(x => /1 agents|tasks/.test(x))).toBe(false)
+})
+
+test('with agents present the input box shows and the orchestrate run is unchanged', async ($, on) => {
+  await boot($, on)
+  await ($ as any).prompt.submit({ text: 'build the thing' })
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  await ($ as any).prompt.submit({ text: 'a follow-up while it runs' }) // keeps the first line
+  let t = await texts($)
+  expect(t.includes('▸ build the thing')).toBe(true)
+  expect(t.some(x => /follow-up/.test(x))).toBe(false)
+  expect(t.some(x => /dispatching\.* 1 running/.test(x))).toBe(true)
+  expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
+  expect(t.includes('this session')).toBe(false)
+  await ($ as any).turn.complete({ turnId: 'a', agentId: 't1', answer: 'ok\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
+  await ($ as any).turn.complete(mainDone('answer'))
+  t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.includes('skipped')).toBe(true) // merge, once signed off, as before
+  expect(t.filter(x => x === 'skipped').length).toBe(1)
+})
+
+test('an orchestrate verdict with no agents yet shows every stage queued', async ($, on) => {
+  await boot($, on, { route: { stdout: ROUTE_JSON } })
+  await ($ as any).prompt.submit({ text: 'big job' })
+  await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  const t = await texts($)
+  expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
+  expect(t.includes('this session')).toBe(false)
+  for (const stage of ['plan', 'plan review', 'build', 'review', 'merge']) expect(t.some(x => x === `◌ ${stage}`)).toBe(true)
+})
+
+test('the arrows join input, orchestrator, triage, stages and sign-off at every width, inside both boxes', async ($, on) => {
+  await boot($, on)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  await ($ as any).turn.complete(mainDone('answer'))
+  for (const columns of [24, 32, 40, 52, 64, 80, 100, 140]) {
+    const t = await texts($, columns)
+    const art = t.filter(x => /^[\s─│┌┐└┘├┤┬┴┼●▶▼╵╷╶╴]+$/.test(x))
+    expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
+    const arrows = art.filter(x => x.trim() === '▼')
+    expect(arrows.length).toBeGreaterThanOrEqual(4) // input, orchestrator, triage, last stage row -> sign-off (plus the return rails)
+    expect(arrows.filter(x => x.indexOf('▼') === 1).length).toBe(4) // x=1 lies inside every box above and below (all are at least 6 wide)
+    for (const w of ['sign off', 'triage', 'orchestrator', 'build']) expect(t.some(x => x.includes(w))).toBe(true)
+  }
+})
+
+test('the redraw timer keeps running with no agent, once', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock })
+  const head = async () => (await texts($)).find(x => /main · orchestrator/.test(x)) as string
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(await head()).toBe('⠋ main · orchestrator')
+  await clock.advance(1000) // four pulses although no agent ever ran
+  expect(await head()).toBe('⠼ main · orchestrator')
+  await ($ as any).prompt.submit({ text: 'again' }) // a second prompt must not start a second timer
+  await clock.advance(1000)
+  expect(await head()).toBe('⠇ main · orchestrator') // tick 8, not 12 (⠹)
+  await ($ as any).turn.complete(mainDone('answer'))
+  await clock.advance(1000)
+  expect((await texts($)).some(x => /0 agents · 0 tokens · 0:02/.test(x))).toBe(true) // ended: the time stands still, counted from the first prompt
+})
+
+const done = (id: string) => ({ turnId: 'a', agentId: id, answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
+
+test('a first spawn long after the old run keeps the input box and the verdict the new prompt came with', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock, route: { stdout: ROUTE_JSON } })
+  await $.agent.spawn(spawnImpl('t1', 's1'))
+  await ($ as any).turn.complete(done('t1'))
+  await clock.advance(60_000) // inside two minutes: the diagram stays and the prompt starts its work
+  await ($ as any).prompt.submit({ text: 'the next big job' })
+  await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  await clock.advance(70_000) // now 3 minutes past the old run's last agent
+  await $.agent.spawn(spawnImpl('t2', 's2'))
+  const t = await texts($)
+  expect(t.includes('▸ the next big job')).toBe(true)
+  expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+  expect(t.some(x => /s1/.test(x))).toBe(false) // the old agents are gone
+  expect(t.some(x => /s2/.test(x))).toBe(true)
+})
+
+test('a second prompt while solo work runs keeps the verdict and the start time', async ($, on) => {
+  const clock = mock.clock(on, { now: 500_000 })
+  await boot($, on, { clock, route: { stdout: ROUTE_JSON } })
+  await ($ as any).prompt.submit({ text: 'first line' })
+  await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  await clock.advance(30_000)
+  await ($ as any).prompt.submit({ text: 'and one more thing' })
+  const t = await texts($)
+  expect(t.includes('▸ first line')).toBe(true)
+  expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+  expect(t.some(x => /0:3\d/.test(x))).toBe(true) // the clock was not restarted
+})
+
+const NAME = 'mcp__orchestration-dashboard__route'
+const bootRoute = async ($: any, on: any) => {
+  const registered: any[] = []
+  on('tool.register', (_: unknown, e: any) => (registered.push(e), { value: { tool: NAME } }))
+  await boot($, on)
+  return registered
+}
+const VERDICT = { mode: 'orchestrate', reason: 'four independent slices', filesToTouch: 12, linesToChange: 340, independentSlices: 4, risky: true, code: true }
+
+test('the route tool is registered undeferred and its call is shown in the pane', async ($, on) => {
+  const registered = await bootRoute($, on)
+  expect(registered.length).toBe(1)
+  expect(registered[0].name).toBe('route')
+  expect(registered[0].isDeferred).toBe(false)
+  expect(registered[0].inputSchema.required).toEqual(['mode', 'reason'])
+  const out = await ($ as any).tool.call({ tool: NAME, ...VERDICT })
+  expect(out.result).toBe('route recorded: orchestrate')
+  const t = await texts($)
+  expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+  expect(t.some(x => /four independent slices/.test(x))).toBe(true)
+  expect(t.some(x => /files 12 · lines 340 · slices 4/.test(x))).toBe(true)
+  expect(t.some(x => /risky yes · code yes/.test(x))).toBe(true)
+})
+
+test('route input that is not valid, or from a sub-agent, is ignored with a result', async ($, on) => {
+  await bootRoute($, on)
+  const call = ($ as any).tool.call
+  for (const bad of [{ mode: 'nonsense', reason: 'x' }, { mode: 'plain' }, { mode: 'plain', reason: 5 }, { input: 'junk' }]) {
+    const out = await call({ tool: NAME, ...bad })
+    expect(out.deny).toBeUndefined()
+    expect(String(out.result)).toMatch(/^ignored: /)
+  }
+  const sub = await call({ tool: NAME, agentId: 'a1', ...VERDICT })
+  expect(sub.result).toBe('ignored: only the main session records a route')
+  expect((await texts($)).some(x => /triage/.test(x))).toBe(false)
 })
