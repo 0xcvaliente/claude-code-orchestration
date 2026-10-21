@@ -232,7 +232,7 @@ export async function executeRun(run, ctx) {
   const sdkOut = join(outDir, "sdk"); // the SDK arm writes its run directory here (bench/lib/sdk.mjs)
   const c = ctx.commandFor
     ? ctx.commandFor(run, prompt, repo)
-    : command(run.arm, prompt, repo, ctx.root, { outDir: sdkOut, testCmd: meta.test_cmd, budgetTokens: run.budget_tokens });
+    : command(run.arm, prompt, repo, ctx.root, { outDir: sdkOut, testCmd: meta.sdk_test_cmd ?? meta.test_cmd, budgetTokens: run.budget_tokens });
   const graded = Array.isArray(meta.graded_paths) && meta.graded_paths.length ? meta.graded_paths : ["."];
   // An arm whose result is not in the working tree mid-run (SDK) has no snapshots; the row says so and analyze skips its timeline.
   const every = arm.snapshots === false ? 0 : Number(meta.snapshot_every_s) || 0;
