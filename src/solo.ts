@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
 import { LIMITS } from "./config.js";
 import { sh } from "./git.js";
@@ -48,6 +49,8 @@ export async function solo(opts: SoloOptions): Promise<SoloReport> {
     const r = await opts.run({
       role: "solo",
       cwd: opts.repo,
+      task: opts.task,
+      auditFile: join(run.dir, "judge-audit.jsonl"),
       prompt:
         `Task:\n${opts.task}\n\n` +
         (opts.testCmd ? `Before you finish, run \`${opts.testCmd}\` and fix any failure.\n` : "") +
@@ -78,6 +81,8 @@ export async function solo(opts: SoloOptions): Promise<SoloReport> {
     const v = await opts.run({
       role: "verifier",
       cwd: opts.repo,
+      task: opts.task,
+      auditFile: join(run.dir, "judge-audit.jsonl"),
       schema: VERDICT_SCHEMA,
       prompt:
         `Goal:\n${opts.task}\n\nThe change is uncommitted in the working tree. Review it with \`git diff HEAD\`, and read any ` +

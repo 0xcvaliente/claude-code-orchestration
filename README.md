@@ -13,7 +13,7 @@ It runs two ways with the same roles: as a TypeScript pipeline on the Claude Age
 
 - [Benchmark: orchestrator vs plain sessions](#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked) · [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
 - [The pipeline](#the-pipeline) · [Choosing a route](#choosing-a-route-triage) · [Two ways to run it](#two-ways-to-run-it)
-- [Resilience](#resilience-retry-resume-replan) · [Safety and limits](#safety-and-limits)
+- [Resilience](#resilience-retry-resume-replan) · [Bash judge](#bash-judge-sdk-workers) · [Safety and limits](#safety-and-limits)
 - [Reference](#reference) · [Repository layout](#repository-layout) · [Development](#development)
 
 ## Benchmark: orchestrator vs plain sessions, built-in subagents blocked
@@ -165,13 +165,14 @@ runs/<id>/
   plan.json          questions and slices
   findings.md        what the explorers found
   journal.json       state after every slice, for --resume
+  judge-audit.jsonl  one line per Bash judge decision (see Bash judge)
   telemetry.jsonl    tokens, turns and model per worker
   report.json        slice results, merged and conflicted branches, tokens by role
   worktrees/         kept only for failed slices, or with --keep-worktrees
 runs/routes.jsonl    one line per triage decision
 ```
 
-Branches `orch/<id>/<slice>` hold each slice and `orch/<id>/result` holds the merge. Nothing is ever pushed.
+Branches `orch/<id>/<slice>` hold each slice and `orch/<id>/result` holds the merge. The pipeline itself never pushes; a worker's `git push` runs only if the Bash judge approves it (see [Bash judge](#bash-judge-sdk-workers)).
 
 ## Choosing a route (triage)
 
@@ -276,13 +277,44 @@ After changing anything under `.claude/` or `dashboard/`, run `npm run build-plu
 ## Resilience: retry, resume, replan
 
 - **Transient errors** (`src/retry.ts`): a rate limit, overload, 5xx or dropped stream is retried up to twice with exponential backoff (2s, 8s) on the same request. It is not counted as a task failure and its tokens are added up. A turn cap, our own 15-minute timeout or a refusal is never retried.
-- **Resume**: every pipeline run writes `runs/<id>/journal.json` after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Token counts in the report cover the resumed session only.
+- **Resume**: every pipeline run writes `runs/<id>/journal.json` after each slice. `npm start -- --repo . --resume <id>` skips planning and passed slices, restarts failed ones from scratch (old worktree and branch removed) and re-merges the result branch. An unknown id is an error, not a fresh run. Pass `--task` again if workers may need to push or delete recursively: the Bash judge takes its authority only from the task given on that invocation, never from `journal.json`. Token counts in the report cover the resumed session only.
 - **Replan**: `--replans N` (0 to 3, default 0). When a pass leaves failed slices, the planner sees what finished and what failed and plans only the missing work; a new slice may depend on a finished one. Replaced slices stay in the report as `replaced` and their branches are never merged. It stops when the planner offers nothing usable.
 - **Token caps are opt-in.** There is no default budget. Runs are bounded by turn caps, worker timeouts, and retry and slice limits. Set `--budget TOKENS` (SDK, exact) or `ORCH_BUDGET_TOKENS` (native, approximate) to add a cap; token use is always reported either way.
 
+## Bash judge (SDK workers)
+
+SDK workers with the `Bash` tool (`solo`, `writer`, `verifier`) used to run under a static deny list in `dontAsk` mode, which refused pushes and deletes the user had asked for. Now a `PreToolUse` hook (`src/judge.ts`, wired in `src/agent.ts`) reads each Bash command and sorts it into one of three classes. The decision, in the user's words: git is always allowed "as long as the opus recommends it", `rm -rf` is judged by opus with a narrow hard floor, and the user's original request is the authority for deletions, so opus does not make the user repeat what they already commanded. The native path (`.claude/settings.json`, `scripts/orchestrate.sh`, the native agents) is unchanged.
+
+| Class | Commands | What happens |
+|---|---|---|
+| `deny` (the hard floor) | `sudo`/`doas`; `su`/`pkexec`/`runuser` as a command; `rm -r` in any form that is not one plain `rm -r[f] <literal paths>` command, or whose target is `/`, `~`, `..`, `.git`, the whole working folder or outside it; `find -delete`; shells fed unseen scripts; config or environment that runs programs; anything the tokenizer cannot read with confidence | Denied at once; the judge is never asked |
+| `judge` | `git push`, `git remote`, and the alias or config routes to them (over-inclusive); one plain `rm -r[f] <paths>` | Opus decides against the user's original request (the only authority; the worker's brief is context, never an authority) and git facts |
+| `pass` | Everything else, including `rm file`, `rm -f file`, `git commit -m "push the new feature"` and `grep -r "su" src` | Untouched |
+
+Safe defaults, without the request asking: a push of the task's own feature branch (no force, no delete) and deleting build, cache and temp folders. The request must ask explicitly (for deletes, plainly imply) for a push to `main`/`master`, any force or deleting push, a remote added, removed or re-pointed, deleting tracked source, paths with uncommitted changes, or large folders. If only the brief asks, the denial is "the request does not ask for this (a brief is not an authority)"; the judge's own refusals of a recursive `rm` start with `needs the user's confirmation:`; floor denials, the judge-off denial and the blank-request denial carry their own reason text (see [docs/bash-judge.md](docs/bash-judge.md#5-what-a-refusal-looks-like-to-a-worker) for the list). Git aliases or config that hide a push, and anything unsure, are denied. The judge sees the branch, `HEAD`, remotes, `git status` and, for each `rm` target, its size, tracked files, uncommitted changes and whether git ignores it. It has no tools and loads no settings; its answer must be one strict JSON object. A worker that is refused is told to report the reason and not try another way.
+
+**Fail closed.** A command is denied when the tokenizer cannot read it, the answer is empty, not JSON or malformed, the judge throws or exceeds 60 s (the hook allows 90 s), the command is missing or not a string, the judge is off, the user's request is blank, or an `rm` target is a symlink or resolves outside the working folder. A deny rule beats a hook allow in the SDK, so `Bash(sudo*)` stays as a second layer.
+
+**Resume.** The judge's authority is only the `--task` passed on this invocation, never `journal.json` (workers can edit it). `--resume` without `--task` refuses pushes and recursive deletes; pass the task again. A warning is logged if it differs from the journal's.
+
+| Variable | Meaning |
+|---|---|
+| `ORCH_JUDGE` | `off`, `0` or `false`: no judge; push, remotes, `sudo` and `rm -rf` are denied by rule as before. Default on |
+| `ORCH_MODEL_JUDGE` | Judge model, default `claude-opus-5-5` |
+| `ORCH_JUDGE_AUDIT` | Audit file when the run sets none. Precedence: the run's `<run dir>/judge-audit.jsonl`, then this, then `runs/judge-audit.jsonl` (git-ignored) |
+| `ORCH_SANDBOX` | `on`: OS sandbox for Bash roles (opt-in) |
+| `ORCH_SANDBOX_DOMAINS` | Comma-separated domains the sandbox allows |
+
+The audit log has one JSON line per judged decision (command, decision, reason, model, tokens, a hash of the request, never the request). Judge tokens are not counted in a worker's tokens. Each judged command adds seconds, not a worker turn.
+
+**Sandbox status.** `scripts/sandbox-smoke.mjs` ran once, on macOS: a write inside the working folder worked and a write to a marker in the home folder was blocked with `operation not permitted`. Not tested: Linux, reads, network, a write into the temp directory, the Edit and Write tools.
+
+**Limits.** Best-effort defence in depth, not a security boundary; a model can judge wrong. See [Safety and limits](#safety-and-limits) for what it misses and over-blocks. Development history (2026-10-22, not a guarantee): four adversarial review rounds by separate opus reviewers (the first three failed it, the fourth passed against a stated bar), and floor rules removed one at a time to check that tests fail; the judge call is faked in the tests, so what opus actually decides is unmeasured. In this repo `.claude/settings.json` denies `git remote*`, `sudo*` and `rm -rf`, and workers load project settings, so there a deny rule beats a judge approval; in a repo without such rules the judge decides. Everything, with example commands for each class, the prompt, the cache, the audit fields and how to change the policy, is in [docs/bash-judge.md](docs/bash-judge.md).
+
 ## Safety and limits
 
-- Neither path pushes to a remote. SDK workers deny `git push`, `git remote`, `sudo` and `rm -rf` (`UNSAFE_BASH`); `orchestrate.sh` passes the same list to every headless native run as `--disallowedTools`, which beats any allow rule; and the agents are told never to push. Project settings deny the same list except `git push` (`policy.test.ts` keeps them in step), so an interactive session in this repo can push when its permission mode allows: default mode asks you first.
+- Pushes and deletes. The **native** path is unchanged: `orchestrate.sh` passes `UNSAFE_BASH` (`git push`, `git remote`, `sudo` and the `rm -rf` spellings) to every headless run as `--disallowedTools`, which beats any allow rule; the agents are told never to push; and project settings deny the same list except `git push` (`policy.test.ts` keeps them in step), so an interactive session in this repo can push when its permission mode allows: default mode asks you first. **SDK workers** no longer deny push, remotes or recursive `rm` by rule: `sudo` is denied by rule and by the guard, and the other commands go through the [Bash judge](#bash-judge-sdk-workers), which with `ORCH_JUDGE=off` goes back to the old denial.
+- The Bash judge is best-effort defence in depth, not a sandbox, and an LLM judge can be wrong. It does not see scripts (`./deploy.sh`, `bash x.sh`), interpreter strings (`python -c`, `perl -e`, `node -e`), `git clean -fdx`, `shred`, `unlink`, `rmdir`, `mv x /dev/null`, truncation, `dd of=`, `gh pr create`, `ssh host cmd`, `make` targets, existing git aliases, variables set in an earlier call, or git pointed at planted config (`GIT_DIR`, `HOME=... git`, `git -C`). It also misses `su`, `pkexec` and `runuser` after shell keywords or unlisted wrappers (`if true; then su root; fi`, `exec -a foo su`), which need a password a headless worker lacks. It over-blocks on purpose: `echo rm -rf x`, `grep rm -r src`, `nice rm file`, `ls r*`, `ls s*`, `ls p*` and `rm *.o` are denied. It does not cover the Edit and Write tools. Full list: [docs/bash-judge.md](docs/bash-judge.md#11-limits).
 - Worktrees isolate git state, not the filesystem: a worker with Bash can still write outside its worktree. Run in a container or VM for untrusted repos.
 - The deny lists guard against mistakes, not malice. Native headless mode allows `Bash(npm *)` and `Bash(node *)`, and `Bash(python3 *)` or `Bash(python *)` when the test runner is Python, which can run any code, including a push.
 - SDK workers branch from `HEAD`; uncommitted changes are not visible to them. Native isolated workers (code in git only) branch from the remote default branch unless `worktree.baseRef` is `"head"`; either way they only see committed work, so the integrator commits a checkpoint (only the paths the orchestrator names) before a parallel wave.
@@ -299,7 +331,7 @@ After changing anything under `.claude/` or `dashboard/`, run `npm run build-plu
 
 | Flag | Meaning |
 |---|---|
-| `--repo DIR`, `--task TEXT` | The git repo and what to do (`--task` is not needed with `--resume`) |
+| `--repo DIR`, `--task TEXT` | The git repo and what to do (`--task` is not needed with `--resume`, but without it the Bash judge refuses pushes and recursive deletes: pass it again) |
 | `--mode auto\|plain\|reviewed\|orchestrate` | Route. `auto` (default) lets triage decide; anything else skips triage |
 | `--no-escalate` | Do not rerun a failed plain or reviewed run through the pipeline |
 | `--test-cmd CMD` | The acceptance command, run by the harness after each worker |
@@ -330,6 +362,11 @@ Invalid numbers exit 2; a failed plan exits 1.
 | `ORCH_GATE_ISOLATED` | `verify.sh` | Test gate for agents in `.claude/worktrees/`: `warn` (default: run tests, log, never block), `block` or `skip` |
 | `ORCH_MODEL` | `orchestrate.sh` | Passes `--model` (for example `sonnet` or `opus`), used for plain-model baselines |
 | `ORCH_EXTRA_ALLOWED_TOOLS` | `orchestrate.sh`, `auto.sh` | Extra permission rules, one per line, appended to the default allowlist (`ORCH_ALLOWED_TOOLS` replaces it). `auto.sh` adds `WebSearch` and `WebFetch` when the task changes no code (the triage fact `code`; with no facts, when the folder is neither a git work tree nor has a test runner) |
+| `ORCH_JUDGE` | SDK | `off`, `0` or `false` turns the Bash judge off: SDK workers deny push, remotes, `sudo` and `rm -rf` by rule again. Default on |
+| `ORCH_MODEL_JUDGE` | SDK | The Bash judge's model (default `claude-opus-5-5`) |
+| `ORCH_JUDGE_AUDIT` | SDK | Audit file for the judge when the run sets none (default `runs/judge-audit.jsonl`; a normal run writes `runs/<id>/judge-audit.jsonl`) |
+| `ORCH_SANDBOX` | SDK | `on` runs Bash roles inside the SDK's OS sandbox (opt-in; smoke-tested on macOS only) |
+| `ORCH_SANDBOX_DOMAINS` | SDK | Comma-separated network domains the sandbox allows, for example `github.com` for a judge-approved push |
 | `ORCH_NO_NUDGE` | plugin hook | Silence the session nudge |
 | `ORCH_HOME` | `/route` skill | Where this repo lives (default `~/claude-code-orchestration`) |
 
@@ -364,6 +401,7 @@ src/
                                   verify, merge, replan, resume
   agent.ts, retry.ts, verdict.ts  one worker per query(), transient retry,
                                   reviewer verdict schema
+  judge.ts                        the Bash guard and opus judge for SDK workers
   config.ts                       roles, limits, triage thresholds (source of
                                   truth)
   cli.ts, route.ts                entry points
@@ -382,9 +420,10 @@ dist/plugin/, dist/dashboard/     the built plugin, and the dashboard mod alone 
 dashboard/                        the live pane (register.tsx, types, test), source for both builds
 statusline/                       statusline.sh, the status line script (installed by scripts/install-statusline.sh)
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
-                                  test-dashboard.mjs, report.mjs
+                                  test-dashboard.mjs, report.mjs,
+                                  sandbox-smoke.mjs
 bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
-docs/                             benchmarks.md, native-mode.md, diagrams/ (incl. the
+docs/                             benchmarks.md, native-mode.md, bash-judge.md, diagrams/ (incl. the
                                   original architecture diagram, orchestration.html)
 .github/workflows/ci.yml          CI: npm run check
 ```
