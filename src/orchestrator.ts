@@ -182,6 +182,11 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const run = new Run(opts.resume ?? newRunId(), opts.outRoot);
   const journal = opts.resume ? readJournal(run.dir) : undefined;
   const task = journal?.task ?? opts.task;
+  // The judge's authority is only what the user typed on this invocation, never the journal: journal.json sits in the
+  // run folder, above every worktree, so a worker could rewrite it. A resume with no task passed gives the judge an
+  // empty request, which makes it refuse pushes and recursive deletes (pass the task again to allow them).
+  const judgeTask = opts.task ?? "";
+  if (journal && judgeTask && judgeTask !== journal.task) log("warning: the task passed differs from the journal's; the judge uses the one passed");
   const base = journal?.base ?? (await headRef(opts.repo));
   const report: Report = {
     runId: run.id, base, slices: [], merged: [], conflicted: [], replans: 0, resumed: Boolean(journal),
@@ -262,7 +267,7 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
 
   // 4-6. Write (isolated worktree) -> cheap gate -> independent verify -> retry with feedback
   const ctx: SliceContext = {
-    run: opts.run, state: run, repo: opts.repo, base, task, findings, maxRetries, budget,
+    run: opts.run, state: run, repo: opts.repo, base, task, judgeTask, findings, maxRetries, budget,
     setupCmd: opts.setupCmd, testCmd: opts.testCmd, resumed: Boolean(journal), finished, log,
   };
   /** One slice's crash (a git error, say) fails that slice only; the other slices and the report survive. */

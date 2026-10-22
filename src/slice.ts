@@ -23,6 +23,11 @@ export interface SliceContext {
   repo: string;
   base: string;
   task: string;
+  /**
+   * The user's request as given on THIS invocation, for the judge only (AgentRequest.task). Never read back from disk:
+   * workers can edit journal.json. Empty on a resume with no task passed, so the judge refuses pushes and deletes.
+   */
+  judgeTask: string;
   findings: string;
   maxRetries: number;
   /** Token cap; unset means no cap. */
@@ -38,7 +43,7 @@ export interface SliceContext {
 
 /** Write (isolated worktree) -> cheap gate -> independent verify -> retry with feedback. May throw on git errors. */
 export async function runSlice(ctx: SliceContext, slice: Slice): Promise<SliceResult> {
-  const { run: runAgent, state: run, repo, base, task, findings, maxRetries, budget, finished, log } = ctx;
+  const { run: runAgent, state: run, repo, base, task, judgeTask, findings, maxRetries, budget, finished, log } = ctx;
   const dir = join(run.dir, "worktrees", slice.id);
   const branch = `orch/${run.id}/${slice.id}`;
   const res: SliceResult = { id: slice.id, branch, status: "failed", attempts: 0, issues: [] };
@@ -84,6 +89,8 @@ export async function runSlice(ctx: SliceContext, slice: Slice): Promise<SliceRe
     const w = await runAgent({
       role: "writer",
       cwd: dir,
+      task: judgeTask,
+      auditFile: join(run.dir, "judge-audit.jsonl"),
       prompt:
         `Overall task:\n${task}\n\nYour slice (${slice.id}):\nGoal: ${slice.goal}\n` +
         `Files likely involved: ${slice.files.join(", ") || "unspecified"}\nAcceptance: ${slice.acceptance}\n\n` +
@@ -114,6 +121,8 @@ export async function runSlice(ctx: SliceContext, slice: Slice): Promise<SliceRe
     const v = await runAgent({
       role: "verifier",
       cwd: dir,
+      task: judgeTask,
+      auditFile: join(run.dir, "judge-audit.jsonl"),
       schema: VERDICT_SCHEMA,
       prompt:
         `Goal: ${slice.goal}\nAcceptance: ${slice.acceptance}\n\n` +

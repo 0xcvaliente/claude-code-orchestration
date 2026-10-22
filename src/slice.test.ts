@@ -44,7 +44,7 @@ async function ctxFor(run: RunAgent, over: Partial<SliceContext> = {}) {
   const logs: string[] = [];
   const ctx: SliceContext = {
     run, state: new Run("r1", mkdtempSync(join(tmpdir(), "slice-out-"))), repo, base: await headRef(repo),
-    task: "t", findings: "", maxRetries: 2, resumed: false, finished: new Map(), log: (l) => logs.push(l), ...over,
+    task: "t", judgeTask: "t", findings: "", maxRetries: 2, resumed: false, finished: new Map(), log: (l) => logs.push(l), ...over,
   };
   return { ctx, logs };
 }
@@ -75,6 +75,18 @@ test("a failing setup command fails the slice before any writer runs", async () 
   assert.match(r.issues[0]!, /^setup failed \(exit 3\): .*nope/s);
   assert.equal(calls.length, 0);
   assert.ok(logs[0]!.startsWith("alpha: setup failed (exit 3)"));
+});
+
+test("writer and verifier get the user's original task and a judge audit file in the run folder", async () => {
+  const { run, calls } = fake();
+  const { ctx } = await ctxFor(run, { task: "journal task", judgeTask: "ORIGINAL USER TASK" });
+  await runSlice(ctx, slice);
+
+  assert.deepEqual(calls.map((c) => c.role), ["writer", "verifier"]);
+  for (const c of calls) {
+    assert.equal(c.task, "ORIGINAL USER TASK");
+    assert.equal(c.auditFile, join(ctx.state.dir, "judge-audit.jsonl"));
+  }
 });
 
 test("passes on the first attempt", async () => {
