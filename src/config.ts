@@ -1,4 +1,5 @@
 // Role tiers and limits. Model IDs are overridable per role: ORCH_MODEL_PLANNER, etc.
+import { judgeEnabled } from "./judge.js";
 
 export type Role = "planner" | "explorer" | "writer" | "verifier" | "triager" | "solo";
 
@@ -10,8 +11,6 @@ export interface RoleConfig {
   disallowedTools: string[];
   system: string;
 }
-
-const env = (key: string, fallback: string) => process.env[key] || fallback;
 
 // Never let a worker publish or escalate; the orchestrator owns git history.
 // `git * push*` also catches `git -C dir push` and `git -c k=v push`.
@@ -31,74 +30,95 @@ export const DENIED_AGENTS = [
   "Agent(general-purpose)", "Agent(claude)", "Agent(Explore)", "Agent(Plan)",
   "Agent(claude-code-guide)", "Agent(statusline-setup)",
 ];
+// Workers with Bash: pushing, remote changes and recursive deletion need the task to ask for them, and a reviewer model
+// checks them first (judge.ts). The refusal must be reported, not worked around.
+const SHELL_RULES =
+  "Push, change remotes or delete recursively only when the task asks for it; such commands are checked by a reviewer " +
+  "model before they run and may be refused with a reason. If one is refused, do not retry a different way: report the " +
+  "refusal and its reason in your answer. ";
 const READ_ONLY = ["Read", "Glob", "Grep"];
 
-export const ROLES: Record<Role, RoleConfig> = {
-  triager: {
-    model: env("ORCH_MODEL_TRIAGER", "claude-sonnet-5-5"),
-    effort: "low",
-    maxTurns: 12,
-    tools: READ_ONLY,
-    disallowedTools: [],
-    system:
-      "You size tasks (code, research, writing, analysis or operations) so the orchestrator can choose between a plain session and a multi-agent pipeline. " +
-      "You only read the folder; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
-  },
-  solo: {
-    model: env("ORCH_MODEL_SOLO", "claude-sonnet-5-5"),
-    effort: "medium",
-    maxTurns: 60,
-    tools: [...READ_ONLY, "Edit", "Write", "Bash"],
-    disallowedTools: UNSAFE_BASH,
-    system:
-      "You do the whole task yourself in this repository, as one plain session. Make focused changes, run the project's tests, " +
-      "and fix failures. Leave your changes uncommitted in the working tree; never run git commit, push, or branch commands. " +
-      "When finished, reply with a short summary and the command you ran to check the work.",
-  },
-  planner: {
-    model: env("ORCH_MODEL_PLANNER", "claude-opus-5-5"),
-    effort: "high",
-    maxTurns: 20,
-    tools: READ_ONLY,
-    disallowedTools: [],
-    system:
-      "You are the planner in an orchestrated workflow. You only read the repository; you never edit it. " +
-      "Answer with the requested JSON and nothing else.",
-  },
-  explorer: {
-    model: env("ORCH_MODEL_EXPLORER", "claude-haiku-5-5"),
-    effort: "low",
-    maxTurns: 15,
-    tools: READ_ONLY,
-    disallowedTools: [],
-    system:
-      "You are a read-only explorer. Answer the question with concrete file paths and line references. " +
-      "Reply in at most 250 words. Do not paste large code blocks.",
-  },
-  writer: {
-    model: env("ORCH_MODEL_WRITER", "claude-sonnet-5-5"),
-    effort: "medium",
-    maxTurns: 40,
-    tools: [...READ_ONLY, "Edit", "Write", "Bash"],
-    disallowedTools: UNSAFE_BASH,
-    system:
-      "You implement exactly one slice of a larger task inside your own git worktree. " +
-      "Touch only the files your slice needs. Do not run git commit, push, or branch commands; the orchestrator commits. " +
-      "When finished, reply with a two-sentence summary of what you changed.",
-  },
-  verifier: {
-    model: env("ORCH_MODEL_VERIFIER", "claude-sonnet-5-5"),
-    effort: "medium",
-    maxTurns: 25,
-    tools: [...READ_ONLY, "Bash"],
-    disallowedTools: UNSAFE_BASH,
-    system:
-      "You are an independent reviewer with fresh context. You did not write this code. " +
-      "Check the diff against the goal and acceptance criteria, run the project's tests if you can find them, " +
-      "and look for bugs, missing cases, and unrelated changes. Never modify files. " +
-      "Pass only if the acceptance criteria are met.",
-  },
-};
+// SDK pipeline with the judge on (the default): git push, remote changes and recursive rm are no longer denied by rule;
+// the PreToolUse hook (judge.ts `bashGuard`, wired in agent.ts) lets an opus judge decide. sudo stays denied by rule as a
+// second layer (a deny rule beats a hook allow). With ORCH_JUDGE=off the roles keep UNSAFE_BASH exactly. Not in any drift
+// test: the native path (UNSAFE_BASH, settings.json, orchestrate.sh) does not change.
+export const SDK_DENIED_BASH = ["Bash(sudo*)"];
+
+/** The role table; the judge on/off decision and the ORCH_MODEL_* overrides are read from `env` (a seam for tests). */
+export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, RoleConfig> {
+  const model = (key: string, fallback: string) => env[key] || fallback;
+  const bashDenied = judgeEnabled(env) ? SDK_DENIED_BASH : UNSAFE_BASH;
+  return {
+    triager: {
+      model: model("ORCH_MODEL_TRIAGER", "claude-sonnet-5-5"),
+      effort: "low",
+      maxTurns: 12,
+      tools: READ_ONLY,
+      disallowedTools: [],
+      system:
+        "You size tasks (code, research, writing, analysis or operations) so the orchestrator can choose between a plain session and a multi-agent pipeline. " +
+        "You only read the folder; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
+    },
+    solo: {
+      model: model("ORCH_MODEL_SOLO", "claude-sonnet-5-5"),
+      effort: "medium",
+      maxTurns: 60,
+      tools: [...READ_ONLY, "Edit", "Write", "Bash"],
+      disallowedTools: bashDenied,
+      system:
+        "You do the whole task yourself in this repository, as one plain session. Make focused changes, run the project's tests, " +
+        "and fix failures. Leave your changes uncommitted in the working tree; never run git commit or branch commands. " +
+        SHELL_RULES +
+        "When finished, reply with a short summary and the command you ran to check the work.",
+    },
+    planner: {
+      model: model("ORCH_MODEL_PLANNER", "claude-opus-5-5"),
+      effort: "high",
+      maxTurns: 20,
+      tools: READ_ONLY,
+      disallowedTools: [],
+      system:
+        "You are the planner in an orchestrated workflow. You only read the repository; you never edit it. " +
+        "Answer with the requested JSON and nothing else.",
+    },
+    explorer: {
+      model: model("ORCH_MODEL_EXPLORER", "claude-haiku-5-5"),
+      effort: "low",
+      maxTurns: 15,
+      tools: READ_ONLY,
+      disallowedTools: [],
+      system:
+        "You are a read-only explorer. Answer the question with concrete file paths and line references. " +
+        "Reply in at most 250 words. Do not paste large code blocks.",
+    },
+    writer: {
+      model: model("ORCH_MODEL_WRITER", "claude-sonnet-5-5"),
+      effort: "medium",
+      maxTurns: 40,
+      tools: [...READ_ONLY, "Edit", "Write", "Bash"],
+      disallowedTools: bashDenied,
+      system:
+        "You implement exactly one slice of a larger task inside your own git worktree. " +
+        "Touch only the files your slice needs. Do not run git commit or branch commands; the orchestrator commits. " +
+        SHELL_RULES +
+        "When finished, reply with a two-sentence summary of what you changed.",
+    },
+    verifier: {
+      model: model("ORCH_MODEL_VERIFIER", "claude-sonnet-5-5"),
+      effort: "medium",
+      maxTurns: 25,
+      tools: [...READ_ONLY, "Bash"],
+      disallowedTools: bashDenied,
+      system:
+        "You are an independent reviewer with fresh context. You did not write this code. " +
+        "Check the diff against the goal and acceptance criteria, run the project's tests if you can find them, " +
+        "and look for bugs, missing cases, and unrelated changes. Never modify files. " +
+        "Pass only if the acceptance criteria are met.",
+    },
+  };
+}
+
+export const ROLES = rolesFor();
 
 /**
  * When the pipeline pays for itself. The benchmark in docs/benchmarks.md (2 runs per cell, direction only) found no
