@@ -57,7 +57,7 @@ test("router off: identical output to before (no stdout, exit 0, no route log) f
   const dir = project();
   try {
     const brief = "SOURCES: scanned.pdf, table.pdf\nREAD: judge\nRISKY: yes\nWhat does it say?";
-    for (const env of [{}, { ORCH_READ_ROUTER: "off" }, { ORCH_READ_ROUTER: "1" }]) {
+    for (const env of /** @type {Record<string, string>[]} */ ([{}, { ORCH_READ_ROUTER: "off" }, { ORCH_READ_ROUTER: "1" }])) {
       for (const type of ["researcher", "orchestration:researcher", "reviewer"]) {
         const r = launch(dir, { subagent_type: type, prompt: brief }, env);
         assert.equal(r.status, 0);
