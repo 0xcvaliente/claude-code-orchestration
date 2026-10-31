@@ -69,7 +69,10 @@ test("settings: ORCH_GAP_MIN is an integer 0-100 (else 80); ORCH_STALL_GATE is o
 test("gap cutoff: a fail counts only with a gap at or above the cutoff; below it counts as a pass with low_confidence_fail", () => {
   const below = once("STATUS: fail\nGAP: 79 maybe an edge case");
   assert.deepEqual([below.reviews[0]?.status, below.reviews[0]?.counted, below.reviews[0]?.lowConfidence], ["fail", "pass", true]);
-  assert.deepEqual([below.passed, below.final, below.countedFails], [true, true, 0]);
+  // Changed for f1-run-split: low_confidence_fail is a doubt signal, so the counted pass is not final until an opus pass.
+  assert.deepEqual([below.passed, below.final, below.countedFails], [true, false, 0]);
+  const confirmed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 79 maybe an edge case"), ...review(3, "a", "STATUS: pass", { model: "opus" })], "a");
+  assert.deepEqual([confirmed.passed, confirmed.final], [true, true], "the opus pass makes it final");
   assert.deepEqual(below.signals, ["low_confidence_fail"]);
   assert.deepEqual(doubtSignals(below), ["low_confidence_fail"], "the opus escalation applies");
   assert.deepEqual(doubtSignals(below, { ORCH_ESCALATION: "off" }), []);
