@@ -262,3 +262,143 @@ test("router logs hold parsed fields only: no brief, prompt or file text", { ski
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- quote-check.mjs ----
+
+/** A researcher transcript: the brief, then the final report (as text, or as a SubagentHandback message). */
+function transcript(/** @type {string} */ dir, /** @type {string} */ report, handback = false) {
+  const f = join(dir, `t-${Math.random().toString(36).slice(2)}.jsonl`);
+  const last = handback ? { type: "tool_use", name: "SubagentHandback", input: { message: report } } : { type: "text", text: report };
+  const lines = [
+    { type: "user", message: { content: "SOURCES: notes.md\nQ" } },
+    { type: "assistant", message: { content: [{ type: "text", text: "QUOTE: notes.md:1 | not the final report" }] } },
+    { type: "assistant", message: { content: handback ? [{ type: "text", text: "Here it is." }, last] : [last] } },
+  ];
+  writeFileSync(f, lines.map((l) => JSON.stringify(l)).join("\n"));
+  return f;
+}
+/** @param {string} dir @param {string} report @param {{ agent?: string, type?: string, env?: Record<string, string>, handback?: boolean, last?: string }} [o] */
+function stop(dir, report, o = {}) {
+  return run(
+    dir,
+    "quote-check.mjs",
+    {
+      session_id: "s1",
+      hook_event_name: "SubagentStop",
+      agent_id: o.agent ?? "r1",
+      agent_type: o.type ?? "researcher",
+      agent_transcript_path: report === "" ? join(dir, "missing.jsonl") : transcript(dir, report, o.handback),
+      ...(o.last !== undefined ? { last_assistant_message: o.last } : {}),
+    },
+    o.env ?? {},
+  );
+}
+/** @param {string} dir */
+function notes(dir) {
+  writeFileSync(join(dir, "notes.md"), "# Notes\n\nThe parser **never throws** on bad input.\nIt returns  empty\nfields instead.\n\nThe cache is keyed by path, size and mtime.\n");
+}
+
+test("quote check: verified quotes in text, markdown, PDF and docx sources pass and are counted", { skip: POPPLER }, () => {
+  const dir = project();
+  try {
+    notes(dir);
+    mkdirSync(join(dir, ".claude", "state"), { recursive: true });
+    writeFileSync(join(dir, ".claude", "state", "journal-launches.jsonl"), `${JSON.stringify({ ts: "t", session_id: "s1", agent_id: "r1", agent_type: "researcher", slice: "facts" })}\n`);
+    const report = [
+      "STATUS: pass",
+      "QUOTE: notes.md:3 | \"The parser never throws on bad input.\"",
+      "- QUOTE: `notes.md:4-5` | it returns empty fields INSTEAD",
+      `QUOTE: ${join(dir, "notes.md")}#L7 | The cache is keyed by path ... and mtime.`,
+      "QUOTE: text.pdf p.1 | supplier survey regional in while flat board extend to sites",
+      "QUOTE: doc.docx | Output rose in every quarter & costs stayed flat.",
+      "QUOTE: table.pdf, p. 2 | quarter stayed the to pilot",
+      "OPEN: none",
+    ].join("\n");
+    const r = stop(dir, report);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    const [e] = logOf(dir, "quotes.jsonl");
+    assert.deepEqual({ agent_id: e.agent_id, slice: e.slice, total: e.total, verified: e.verified, unverified: e.unverified, unverifiable: e.unverifiable, blocked: e.blocked }, { agent_id: "r1", slice: "facts", total: 6, verified: 6, unverified: 0, unverifiable: 0, blocked: false });
+    // The PDF and docx conversions land in the read router's cache.
+    assert.ok(existsSync(join(dir, ".claude", "state", "read-cache")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: an unverified quote blocks the researcher once, then the next stop passes", { skip: POPPLER }, () => {
+  const dir = project();
+  try {
+    notes(dir);
+    const report = "STATUS: pass\nQUOTE: notes.md:3 | The parser always throws.\nQUOTE: text.pdf p.2 | the moon is made of cheese\nQUOTE: notes.md:7 | keyed by path, size and mtime\nOPEN: none";
+    const first = stop(dir, report, { handback: true });
+    assert.equal(first.status, 2);
+    assert.match(first.stderr, /2 of your QUOTE lines were not found/);
+    assert.match(first.stderr, /- notes\.md:3\n- text\.pdf p\.2\n/);
+    assert.match(first.stderr, /drop that QUOTE and list its claim under OPEN/);
+    const second = stop(dir, report, { handback: true });
+    assert.equal(second.status, 0, "the second stop always passes");
+    assert.equal(stop(dir, report, { agent: "r2" }).status, 2, "another researcher is blocked on its own first stop");
+    const log = logOf(dir, "quotes.jsonl");
+    assert.deepEqual(log.map((e) => [e.agent_id, e.verified, e.unverified, e.blocked]), [["r1", 1, 2, true], ["r1", 1, 2, false], ["r2", 1, 2, true]]);
+    assert.deepEqual(log[0].unverified_paths, [join(dir, "notes.md"), join(dir, "text.pdf")]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: URLs, scans, images, missing and unreadable files are unverifiable and never block", { skip: POPPLER }, () => {
+  const dir = project();
+  try {
+    copyFileSync(fx("chart.png"), join(dir, "chart.png"));
+    const report = [
+      "STATUS: pass",
+      "QUOTE: https://example.com/spec.html | anything at all",
+      "QUOTE: scanned.pdf p.1 | Total revenue 42",
+      "QUOTE: chart.png | Q3 peak",
+      "QUOTE: nowhere/missing.md:4 | invented",
+      "QUOTE: .claude | a directory",
+    ].join("\n");
+    const r = stop(dir, report);
+    assert.equal(r.status, 0);
+    const [e] = logOf(dir, "quotes.jsonl");
+    assert.deepEqual([e.total, e.verified, e.unverified, e.unverifiable, e.blocked], [5, 0, 0, 5, false]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: off switch, other agents, no quotes and malformed input", () => {
+  const dir = project();
+  try {
+    notes(dir);
+    const bad = "STATUS: pass\nQUOTE: notes.md:1 | not in the file";
+    const off = stop(dir, bad, { env: { ORCH_QUOTE_CHECK: "off" } });
+    assert.equal(off.status, 0);
+    assert.equal(off.stderr, "");
+    assert.equal(stop(dir, bad, { type: "reviewer" }).status, 0, "only researchers are checked");
+    assert.equal(stop(dir, bad, { type: "orchestration:researcher", agent: "p1" }).status, 2, "the plugin's researcher is checked");
+    assert.equal(stop(dir, "", { agent: "r9", last: "STATUS: pass\nQUOTE: notes.md | never in it" }).status, 2, "last_assistant_message when the transcript is missing");
+    assert.equal(stop(dir, "STATUS: pass\nOPEN: none", { agent: "r3" }).status, 0);
+    for (const p of ["not json", "null", "[]", "42", JSON.stringify({ agent_type: "researcher", agent_transcript_path: 5, last_assistant_message: 7 })]) {
+      assert.equal(run(dir, "quote-check.mjs", p).status, 0, p);
+    }
+    const log = logOf(dir, "quotes.jsonl");
+    assert.deepEqual(log.map((e) => [e.agent_id, e.total]), [["p1", 1], ["r9", 1], ["r3", 0], [null, 0]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: the log holds counts and paths only, never quote, reply or file text", () => {
+  const dir = project();
+  try {
+    notes(dir);
+    stop(dir, "STATUS: pass\nQUOTE: notes.md:3 | ZEBRA invented sentence\nQUOTE: notes.md:3 | the parser never throws\nOPEN: GIRAFFE");
+    const raw = readFileSync(join(dir, ".claude", "state", "quotes.jsonl"), "utf8");
+    for (const s of ["ZEBRA", "GIRAFFE", "never throws", "STATUS", "QUOTE", "notes.md:3"]) assert.ok(!raw.includes(s), s);
+    assert.deepEqual(Object.keys(JSON.parse(raw)).sort(), ["agent_id", "blocked", "session_id", "slice", "total", "ts", "unverifiable", "unverified", "unverified_paths", "verified"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
