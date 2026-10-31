@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { workflowRunsIn } from "./lib/run-exec.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -28,6 +28,17 @@ test("workflowRunsIn: lists wf_*.json of sessions started in the repo, empty whe
     writeFileSync(join(sess, "wf_a.json"), "{}");
     writeFileSync(join(sess, "scripts", "x-wf_a.js"), "");
     assert.deepEqual(workflowRunsIn(repo, projects), ["wf_a", "wf_b"]);
+    // A retry reusing the repo path: a stale wf from the first attempt (old mtime, present before launch) is not reported.
+    const stale = join(projects, realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), "sess-0", "workflows");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, "wf_old.json"), "{}");
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(stale, "wf_old.json"), old, old);
+    const before = new Set(workflowRunsIn(repo, projects));
+    const t0 = Date.now() - 1000;
+    assert.deepEqual(workflowRunsIn(repo, projects, { since: t0 }), ["wf_a", "wf_b"]);
+    writeFileSync(join(stale, "wf_new.json"), "{}");
+    assert.deepEqual(workflowRunsIn(repo, projects, { since: t0, exclude: before }), ["wf_new"]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

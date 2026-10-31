@@ -1,7 +1,7 @@
 // File-system and process side of bench/run.mjs: task loading, run repos, isolation checks, launching one run
 // with snapshots and a hard deadline, and collecting its outputs into runs/bench/<campaign>/<run_id>/.
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, cpSync, renameSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, cpSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { cp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -239,6 +239,7 @@ export async function executeRun(run, ctx) {
   const every = arm.snapshots === false ? 0 : Number(meta.snapshot_every_s) || 0;
   if (arm.snapshots === false) row.snapshots = "none";
   row.started_at = start.toISOString();
+  const wfBefore = arm.recordWorkflow ? new Set(workflowRunsIn(repo, ctx.projectsDir)) : null; // left by an earlier attempt
   const t0 = Date.now();
   const r = await launch({
     ...c, env: runEnv(run.arm, meta, run), stdoutFile: join(outDir, "stdout.txt"), stderrFile: join(outDir, "stderr.txt"),
@@ -254,15 +255,16 @@ export async function executeRun(run, ctx) {
   const sdk = arm.launcher === "sdk" ? finalizeSdkRun({ runRepo: repo, outDir: sdkOut, runOutDir: outDir, stderrFile: join(outDir, "stderr.txt"), exitCode: r.exitCode }) : null;
   await collect(repo, outDir, graded, initSha, row);
   if (sdk) Object.assign(row, { results: sdk.results, sdk: sdk.sdk });
-  if (arm.recordWorkflow) row.workflow_runs = workflowRunsIn(repo, ctx.projectsDir);
+  if (arm.recordWorkflow) row.workflow_runs = workflowRunsIn(repo, ctx.projectsDir, { since: t0, exclude: wfBefore });
   classifyRow(row);
   return row;
 }
 
 // Ids of the Workflow tool runs Claude Code recorded for sessions started in repo (N-UC, W-mix: whether a workflow really ran).
 // Claude Code writes <projects>/<cwd with every non-alphanumeric character as "-">/<session>/workflows/wf_*.json even with
-// --no-session-persistence (seen on 2.1.314). An empty list means no workflow was launched.
-export function workflowRunsIn(repo, projectsDir = join(homedir(), ".claude", "projects")) {
+// --no-session-persistence (seen on 2.1.314). An empty list means no workflow was launched. A requeued or resumed run reuses
+// the repo path, so pass `since` (ms; only files modified at or after it) and `exclude` (ids present before the launch).
+export function workflowRunsIn(repo, projectsDir = join(homedir(), ".claude", "projects"), { since = 0, exclude = new Set() } = {}) {
   let real = repo;
   try {
     real = realpathSync(repo);
@@ -276,7 +278,11 @@ export function workflowRunsIn(repo, projectsDir = join(homedir(), ".claude", "p
     if (!s.isDirectory()) continue;
     const wf = join(dir, s.name, "workflows");
     if (!existsSync(wf)) continue;
-    for (const f of readdirSync(wf)) if (/^wf_.*\.json$/.test(f)) ids.push(f.slice(0, -5));
+    for (const f of readdirSync(wf)) {
+      if (!/^wf_.*\.json$/.test(f) || exclude.has(f.slice(0, -5))) continue;
+      if (since && statSync(join(wf, f)).mtimeMs < since) continue;
+      ids.push(f.slice(0, -5));
+    }
   }
   return ids.sort();
 }
