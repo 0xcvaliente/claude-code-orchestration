@@ -79,6 +79,11 @@
       "type": "string",
       "title": "Test gate in worktrees",
       "description": "Test gate in isolated worktrees: warn (default), block or skip (ORCH_GATE_ISOLATED)."
+    },
+    "skill_hints": {
+      "type": "string",
+      "title": "Skill hints",
+      "description": "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."
     }
   }
 }
