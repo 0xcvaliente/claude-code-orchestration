@@ -45,11 +45,22 @@
 // appended to the prompt. In those two cases only, the hook prints {permissionDecision: "allow", updatedInput}: the
 // only allow any hook returns (a permissions.deny rule still wins). Every router decision goes to reads-route.jsonl
 // in the state dir with parsed fields only (tier, models, short reason codes, counts, paths; never brief or file text).
+//
+// Skill hints. On unless ORCH_SKILL_HINTS=off (or the plugin option SKILL_HINTS=off). For a launch of this plugin's own
+// implementer (only when this check allows it with reason ok or light_path, never a *_gave_up or other allow),
+// researcher or reviewer (bare or orchestration:-prefixed; never the integrator, a built-in, fork or another plugin's
+// agent), it appends one block to the prompt: the intro line, then one bullet per pick (skill name and a reason code;
+// no descriptions or URLs) from skill-hint.mjs's skillHints over skill-catalog.mjs's installed skills (cached in the
+// state dir). Both modules load with a dynamic import; a failure means no hints. A block in which any line would parse
+// as a brief or reply line is dropped. The appended text goes out in the same allow with updatedInput as the read
+// router's (one updatedInput carries both); the model is never changed by a hint. Researcher and reviewer launches still
+// write no plan-check.jsonl record. Each hint decision goes to skills.jsonl in the state dir (role, slice, names, reason
+// codes, counts; never brief or skill text).
 import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { agentModel, normalizeFiles, parseHeader, stallGateOn } from "./brief.mjs";
+import { agentModel, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -65,6 +76,9 @@ const ROUTE_LOG = "reads-route.jsonl";
 const ROUTER_BUDGET_MS = 15_000; // under the hook timeout the wiring slice sets; profiling past it skips routing
 /** @type {Record<string, number>} */
 const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
+// Skill hints go only to this plugin's own workers: the project's copy or the plugin's namespaced one.
+const HINTED_TYPES = new Set(["implementer", "orchestration:implementer", "researcher", "orchestration:researcher", "reviewer", "orchestration:reviewer"]);
+const SKILL_LOG = "skills.jsonl";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -85,17 +99,118 @@ const h = parseHeader(prompt);
 // The scripted workflow fixes the order in code and plans its own slices, so its briefs say so and skip this check.
 if (h.workflow) process.exit(0);
 const builtin = !type.includes(":") && BUILTINS.has(type || "general-purpose");
+// The hint modules, loaded only for a launch that may get hints; any failure (a missing file, a syntax error) is none.
+/** @type {{ skillCatalog: Function, skillHints: Function, hintBlock: Function } | null} */
+let hintMods = null;
+if (HINTED_TYPES.has(type) && hintsOn(process.env) && typeof tool.prompt === "string") {
+  try {
+    const [cat, hint] = await Promise.all([import("./skill-catalog.mjs"), import("./skill-hint.mjs")]);
+    if (typeof cat.skillCatalog === "function" && typeof hint.skillHints === "function" && typeof hint.hintBlock === "function") {
+      hintMods = { skillCatalog: cat.skillCatalog, skillHints: hint.skillHints, hintBlock: hint.hintBlock };
+    }
+  } catch {
+    hintMods = null;
+  }
+}
 if (role === "implementer") {
   if (typeof tool.prompt !== "string") process.exit(0);
 } else if (!builtin || process.env.ORCH_ALLOW_BUILTINS === "1") {
-  // No check above blocks this launch. The read router may rewrite it, but only for our own researcher.
-  if (!builtin && ROUTED_TYPES.has(type) && routerOn(process.env) && typeof tool.prompt === "string") routeRead();
+  // No check above blocks this launch. The read router may rewrite it, but only for our own researcher; skill hints
+  // only for our own researcher and reviewer. Both changes go out in one updatedInput.
+  let routed = null;
+  if (!builtin && ROUTED_TYPES.has(type) && routerOn(process.env) && typeof tool.prompt === "string") {
+    try {
+      routed = routeRead();
+    } catch {
+      routed = null; // an unexpected error leaves the launch as it was
+    }
+  }
+  const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
+  if (routed || block) {
+    const raised = !!routed?.raised;
+    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}` });
+  }
   process.exit(0);
 }
 
 /** ORCH_READ_ROUTER: the router runs only on "on" (any case). @param {Record<string, string | undefined>} env */
 function routerOn(env) {
   return String(env.ORCH_READ_ROUTER ?? "").trim().toLowerCase() === "on";
+}
+
+/** ORCH_SKILL_HINTS (else the plugin option): hints run unless "off" (any case). @param {Record<string, string | undefined>} env */
+function hintsOn(env) {
+  return String(env.ORCH_SKILL_HINTS ?? env.CLAUDE_PLUGIN_OPTION_SKILL_HINTS ?? "").trim().toLowerCase() !== "off";
+}
+
+/** Print the allow with updatedInput (the only allow any hook returns). @param {Record<string, unknown>} updatedInput */
+function allowWith(updatedInput) {
+  try {
+    writeSync(1, JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } }));
+  } catch {
+    // a closed stdout leaves the launch as it was
+  }
+}
+
+/** True when any line of `text` parses as a brief or reply line. @param {string} text */
+function briefShaped(text) {
+  const hd = parseHeader(text);
+  const rp = parseReply(text);
+  return (
+    !!hd.slice || hd.files.length > 0 || hd.depends.length > 0 || !!hd.path || hd.risky || hd.checks.length > 0 || !!hd.focus || hd.workflow ||
+    hd.sources.length > 0 || !!hd.read || !!hd.kind || hd.validate || hd.skills.length > 0 ||
+    rp.status !== null || rp.open.length > 0 || Object.keys(rp.answers).length > 0 || rp.gaps.length > 0 || rp.quotes.length > 0 ||
+    text.split("\n").some((l) => /^\s*PLAN REVIEW\b/.test(l))
+  );
+}
+
+/**
+ * The skill hint block for this launch ("" for none), logged to skills.jsonl with parsed fields only. Never throws.
+ * @returns {string}
+ */
+function skillHintText() {
+  if (!hintMods) return "";
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  /** @param {Record<string, unknown>} rec */
+  const log = (rec) => {
+    try {
+      ensureStateDir();
+      appendFileSync(join(stateDir, SKILL_LOG), `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_type: type, role, slice: h.slice, ...rec })}\n`);
+    } catch {
+      // logging must never change the decision
+    }
+  };
+  try {
+    const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
+    let cacheDir = null;
+    try {
+      ensureStateDir();
+      cacheDir = stateDir;
+    } catch {
+      // no state dir: scan without a cache
+    }
+    const catalog = hintMods.skillCatalog({ env: process.env, projectDir: dir, cacheDir });
+    const list = Array.isArray(catalog) ? catalog : [];
+    const picks = hintMods.skillHints({ role, header: h, brief: prompt, catalog: list });
+    const safe = Array.isArray(picks) ? picks.filter((p) => p && typeof p.name === "string" && typeof p.reason === "string") : [];
+    const names = safe.map((p) => p.name);
+    const reasons = safe.map((p) => p.reason);
+    const counts = { picks: safe.length, catalog: list.length, explicit: h.skills.length, not_found: reasons.filter((r) => r === "explicit_not_found").length };
+    const block = safe.length ? String(hintMods.hintBlock(safe) ?? "") : "";
+    if (!block) {
+      log({ decision: "none", names: [], reasons: [], ...counts });
+      return "";
+    }
+    if (briefShaped(block)) {
+      log({ decision: "dropped", reason: "brief_line", names, reasons, ...counts });
+      return "";
+    }
+    log({ decision: "hint", names, reasons, ...counts });
+    return block;
+  } catch {
+    log({ decision: "skip", reason: "hint_error" });
+    return "";
+  }
 }
 
 /**
@@ -135,8 +250,9 @@ function reasonCodes(r, hd) {
 
 /**
  * The read router: profile the brief's SOURCES, then raise the model and/or point the researcher at cached text
- * conversions. Prints the allow with updatedInput only when it changes something; always exits 0.
- * @returns {never}
+ * conversions. Returns what to change (the caller prints the one allow with updatedInput), or null when it changes
+ * nothing; never exits and never throws past its own catch.
+ * @returns {{ raised: boolean, tier: 'haiku' | 'sonnet' | 'opus', note: string } | null}
  */
 function routeRead() {
   const env = process.env;
@@ -152,7 +268,7 @@ function routeRead() {
   };
   if (!h.sources.length) {
     log({ decision: "skip", reason: "no_sources" });
-    process.exit(0);
+    return null;
   }
   const dir = env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
   const isUrl = (/** @type {string} */ s) => /^https?:\/\//i.test(s);
@@ -202,7 +318,7 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
   }
   if (!r) {
     log({ decision: "skip", reason: failure, files: sources.length, paths });
-    process.exit(0);
+    return null;
   }
 
   const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
@@ -220,7 +336,7 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
   if (rank === null) {
     // inherit, no model anywhere, or an id it cannot rank: routing could lower the model, so the launch stays as it is
     log({ decision: "skip", reason: "model_unranked", tier, model: effective ?? null, model_source: source, files: sources.length, paths });
-    process.exit(0);
+    return null;
   }
   const raised = (TIER_RANK[tier] ?? 0) > rank;
 
@@ -254,14 +370,8 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
     conversions: converted.length,
     hard_pages: hardPages,
   });
-  if (!changed) process.exit(0);
-  const updatedInput = { ...tool, ...(raised ? { model: tier } : {}), prompt: `${prompt}${note}` };
-  try {
-    writeSync(1, JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } }));
-  } catch {
-    // a closed stdout leaves the launch as it was
-  }
-  process.exit(0);
+  if (!changed) return null;
+  return { raised, tier, note };
 }
 const sessionId = typeof input.session_id === "string" ? input.session_id : "";
 const { slice, files, depends } = h;
@@ -332,6 +442,11 @@ function decide(decision, reason, message) {
       // a closed stream must not change the decision
     }
     process.exit(2);
+  }
+  // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
+  if (decision === "allow" && (reason === "ok" || reason === "light_path") && HINTED_TYPES.has(type) && role === "implementer") {
+    const block = skillHintText();
+    if (block) allowWith({ ...tool, prompt: `${prompt}${block}` });
   }
   process.exit(0);
 }
