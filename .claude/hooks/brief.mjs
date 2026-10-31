@@ -464,12 +464,19 @@ export function foldRuns(records, opts = {}) {
       byAgent.has(g.agent_id) &&
       (g.session_id === undefined || g.session_id === byAgent.get(g.agent_id)?.session_id),
   );
-  // One timeline; at equal times a launch comes before a stop, a stop before a gate.
+  // One timeline. A foreground agent's SubagentStop (and its test-gate record) is logged before its PostToolUse
+  // launch record, so a stop or gate whose agent_id has a launch is placed at max(own ts, launch ts): never before its
+  // launch. At equal times a launch comes first; stops and gates keep their own ts order (then stop before gate).
+  /** @param {any} r */
+  const effective = (r) => {
+    const launch = typeof r.agent_id === "string" ? byAgent.get(r.agent_id) : undefined;
+    return launch ? Math.max(time(r.ts), time(launch.ts)) : time(r.ts);
+  };
   const events = [
-    ...launches.map((r, i) => ({ kind: 0, i, r })),
-    ...stops.map((r, i) => ({ kind: 1, i, r })),
-    ...gates.map((r, i) => ({ kind: 2, i, r })),
-  ].sort((a, b) => time(a.r.ts) - time(b.r.ts) || a.kind - b.kind || a.i - b.i);
+    ...launches.map((r, i) => ({ kind: 0, i, r, own: time(r.ts), at: time(r.ts) })),
+    ...stops.map((r, i) => ({ kind: 1, i, r, own: time(r.ts), at: effective(r) })),
+    ...gates.map((r, i) => ({ kind: 2, i, r, own: time(r.ts), at: effective(r) })),
+  ].sort((a, b) => a.at - b.at || Number(a.kind !== 0) - Number(b.kind !== 0) || a.own - b.own || a.kind - b.kind || a.i - b.i);
 
   /** @type {Run[]} */
   const runs = [];
@@ -490,8 +497,7 @@ export function foldRuns(records, opts = {}) {
   /** @param {string} slice */
   const runWith = (slice) => (slice ? runs.findLast((r) => slice in r.slices) : undefined);
 
-  for (const { kind, r } of events) {
-    const ts = time(r.ts);
+  for (const { kind, r, at: ts } of events) {
     const role = bare(r.agent_type ?? r.role);
     if (kind === 0) {
       // Staleness is judged at a launch: a stale run no longer counts as open, so a light launch opens a new run.
