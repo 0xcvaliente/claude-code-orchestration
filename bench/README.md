@@ -127,7 +127,7 @@ Result (campaign `runs/bench/compare-040-20261031T1722`):
 What it does and does not show:
 
 - Direction only. One k2 run per arm and two d2-docs runs per arm decide nothing under the verdict rules (n < 2 is inconclusive; with one or two tasks the clustered SE is null or meaningless).
-- The router was not exercised. Every d2-docs run took the light path: the orchestrator sent the work to one implementer and launched no researcher, so the read router never fired and H14 is untested. The token differences between the three d2 arms are therefore not a router effect. The router was checked separately by a live run, in which a researcher brief naming a scanned PDF was raised from haiku to sonnet and telemetry recorded `claude-sonnet-5-5`.
+- The router was not exercised. Every d2-docs run took the light path: the orchestrator ran it as a single light-path slice (some runs with 2 to 4 implementer launches, retries of that slice) and launched no researcher, so the read router never fired and H14 is untested. The token differences between the three d2 arms are therefore not a router effect. The router was checked separately by a live run, in which a researcher brief naming a scanned PDF was raised from haiku to sonnet and telemetry recorded `claude-sonnet-5-5`.
 - No per-role tokens. Headless runs use `--no-session-persistence`, so they keep no subagent transcripts and telemetry v2's per-agent token fields are empty; H14's "reading tokens" cannot be read from these runs.
 - H15–H17 need journal counts (slices failed for good, retries, stalls) that this page does not report; the k2 pair changes everything between 0.3.0 and 0.4.0 at once.
 
