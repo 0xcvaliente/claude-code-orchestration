@@ -92,10 +92,11 @@ Ids are upper-cased. The first line for an id decides, except that a later `fail
 
 ## Run model
 
-A run belongs to one session. `foldRuns(events, { now, staleMin })` derives runs from that session's launches and stops in order.
+A run belongs to one session. It is computed only from the log records below (no hook logs a raw prompt or reply): `foldRuns({ launches, stops, gates }, { now, staleMin, sessionId })` merges the three files into one timeline by `ts` (at equal times a launch comes before a stop, a stop before a gate).
 
-- **Open.** A PLAN REVIEW launch without `REPLAN` opens a planned run and closes any run open in the session. A light-path implementer launch (`PATH: light`) opens a light run when no run is open. A PLAN REVIEW with `REPLAN` extends the open run with its slices and constraints (with no run open it opens one). Other implementer launches join the open run; with none open they are not tracked. A new user prompt does not close a run.
-- **Final slice.** A slice is final when its latest review (after its latest implementer launch) passed, or failed for good: its latest review failed after 3 implementer launches of that slice in the run (`MAX_RETRIES` 2). A review with no STATUS is neither.
+- **Open.** A PLAN REVIEW launch record (reviewer, `isPlanReview`) without `replan` opens a planned run and closes any run open in the session. A light-path implementer launch (`path: "light"`) opens a light run when no run is open. A PLAN REVIEW with `replan` extends the open run with its `plan.slices` and `plan.constraints` (with no run open it opens one). Other implementer launches join the open run; with none open they are not tracked. Launches with `workflow: true` are skipped. A new user prompt does not close a run.
+- **Attempts.** A retry may be a fresh implementer launch or a `SendMessage` resume of the same agent, which makes no launch. So attempts of a slice are counted from its implementer stop records (slice joined by `agent_id`), fresh launches and resumes alike. Stops with no review of the slice between them count as one attempt (a test-gate block makes the agent stop again).
+- **Final slice.** A slice is final when its latest review (a reviewer stop after the slice's latest implementer launch or stop) passed, or failed for good: its latest review failed after 3 implementer attempts in the run (`MAX_RETRIES` 2). A review with no STATUS is neither.
 - **Closed run.** A planned run closes when every planned slice is final; a light run closes when its slice is final.
 - **Stale run.** A run is stale when no launch or stop happened in it for `ORCH_RUN_STALE_MIN` minutes (default 30). The plan check treats a stale run as closed (so a light launch opens a new run); the review gate keeps gating its unreviewed slices. A stop that arrives later (a long worker) still lands in the latest run that has its slice.
 
@@ -113,22 +114,30 @@ A slice needs a passing opus review after its latest implementer launch when any
 | `retry` | the slice already had a failed review |
 | `read_answer` | its latest passing review answered a constraint with `(read)` |
 | `open_items` | its latest passing review has a non-empty OPEN |
-| `tests_failed_isolated` | the test gate logged `tests_failed_isolated` for its latest implementer |
+| `tests_failed_isolated` | a test-gate record `tests_failed_isolated` (joined by `agent_id`) belongs to its latest attempt: it is later than the review the attempt followed |
 
 `ORCH_ESCALATION=off` disables the signals; `ORCH_ESCALATION=always` requires an opus review for every slice (signal `always`).
 
 ## Log records
 
-Journal entries (`journal.jsonl`) keep `ts`, `session_id`, `slice`, `role`, `status`, `agent_id` and add:
+Hooks log parsed fields only, never brief or reply text. Readers accept older records that lack the new fields (they fold to empty values).
+
+**Launch record** (`journal-launches.jsonl`, written by `journal.mjs` at PostToolUse on `Agent|Task` for every launch of an implementer, reviewer, researcher or integrator; built by `launchRecord(tool_input, { ts, sessionId, agentId, projectDir, pluginRoot })`):
 
 | Field | Value |
 |---|---|
-| `run` | the run id (`foldRuns` numbers runs 1, 2, ... in session order) |
-| `checks` | `CHECKS` ids of the brief |
-| `answers` | `parseReply(...).answers` of a reviewer's reply |
-| `open` | `parseReply(...).open` |
-| `model` | the reviewer's model (see Reviewer model), or `null` |
-| `risky` | `RISKY: yes` on the brief |
+| `ts`, `session_id` | as today |
+| `agent_id` | from the tool response when present (a background launch returns `agentId`; a foreground result may carry it only in its text, as `journal.mjs`'s `agentIdOf` reads it), else `null` |
+| `agent_type` | bare role (`implementer`, not `orchestration:implementer`); older records have `role` |
+| `slice` | `sliceOfBrief`: `plan` for a PLAN REVIEW brief, else the SLICE id, else `null` (as today) |
+| `files`, `depends`, `path`, `risky`, `checks`, `focus`, `workflow` | `parseHeader` |
+| `model` | `agentModel` (see Reviewer model) |
+| `isPlanReview`, `replan` | `parsePlan` |
+| `plan` | PLAN REVIEW briefs only: `{ constraints, slices }` from `parsePlan` |
+
+**Stop record** (`journal.jsonl` at SubagentStop; `stopRecord({ ts, sessionId, agentId, role, slice, reply, status, run })`): `ts`, `session_id`, `agent_id`, `role` (bare; readers also accept `agent_type`), `slice` (from the launch record with the same `agent_id`, or through `journal-pending.jsonl` when the stop arrives before its launch, as `journal.mjs` does today), `status` (`parseStatus` of the final report), `answers`, `open` (`parseReply`), `run` (the id `foldRuns` gives the run at write time: runs are numbered 1, 2, ... in session order). A resumed agent keeps its `agent_id`, so its stops join the same launch. A reviewer stop may also carry `model`; otherwise the model comes from its launch record.
+
+**Test-gate record** (`gates.jsonl` from `verify.sh`, `gate: "test"`): carries `session_id` and `agent_id`, and no slice. The slice is resolved at read time by joining `agent_id` to a launch record; a record whose `session_id` differs from that launch's is ignored. `verify.sh` logs `agent_id` but not `session_id` today (verify.sh:45); slice A1 adds it. A record without `session_id` still counts through the join.
 
 New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opus_review_required`, `builtin_agent_in_run`, each with a `<reason>_gave_up` form logged when the gate lets the launch or reply through after 2 blocks (the loop guard).
 
@@ -142,8 +151,10 @@ New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opu
 | `isPlanReview(text)` / `sliceOfBrief(text)` | the PLAN REVIEW marker / journal slice key (`plan`, the SLICE id, or `null`) |
 | `normalizeFiles(files, baseDir)` | absolute paths: relative against `baseDir`, trailing slashes stripped, duplicates dropped |
 | `isOpusModel(model)`, `modelFromAgentFile(text)`, `agentModel(toolInput, dirs)` | reviewer model rules |
-| `foldRuns(events, opts)`, `currentReviews(slice)` | runs and slice states; reviews after the latest launch |
+| `launchRecord(toolInput, ctx)`, `stopRecord(ctx)` | the log records above |
+| `foldRuns({ launches, stops, gates }, { now, staleMin, sessionId })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`) |
+| `currentReviews(slice)` | reviews after the slice's latest implementer launch or stop |
 | `doubtSignals(slice, env)`, `hasOpusPass(slice)` | escalation |
 | `staleMinutes(env)`, `escalationMode(env)`, `MAX_RETRIES`, `RUN_STALE_MIN_DEFAULT` | settings |
 
-`foldRuns` events: `{ ts, phase: 'launch', role, prompt, model? }`, `{ ts, phase: 'stop', role, slice, reply?, status?, model? }` and `{ ts, phase: 'gate', slice, reason }`. Parity: `parseHeader` reads `SLICE`, `FILES` and `DEPENDS` as `plan-check.mjs` logs them, and `sliceOfBrief` keys a brief as `journal.mjs` does (`src/brief.test.mjs` runs both hooks to check). One difference: `journal.mjs` finds no slice in ``SLICE: `s1` `` (an id in backticks); `parseHeader` reads `s1`, as `plan-check.mjs` does.
+Parity: `parseHeader` reads `SLICE`, `FILES` and `DEPENDS` as `plan-check.mjs` logs them, and `sliceOfBrief` keys a brief as `journal.mjs` does (`src/brief.test.mjs` runs both hooks to check). One difference: `journal.mjs` finds no slice in ``SLICE: `s1` `` (an id in backticks); `parseHeader` reads `s1`, as `plan-check.mjs` does.
