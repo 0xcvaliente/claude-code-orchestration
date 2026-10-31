@@ -33,7 +33,7 @@ Any brief (implementer, reviewer, researcher) may carry these header lines. All 
 SOURCES: docs/research.md, https://example.com/spec.html   (paths or URLs the worker should read)
 READ: extract                                              (lookup, extract or judge: how the sources are read)
 KIND: bugfix                                               (the kind of work; only bugfix will have behaviour)
-VALIDATE: gaps                                             (ask the reviewer to rate each gap it reports)
+VALIDATE: gaps                                             (a validation review: re-check the listed gaps against the diff, keep only those that stand)
 ```
 
 | Line | Field | Parse |
@@ -139,7 +139,7 @@ A run belongs to one session. It is computed only from the log records below (no
 Each review in a slice state keeps the reviewer's own `status` and adds a counted status, `counted`, which is what slice finality, `doubtSignals`, `hasOpusPass` and the gates use (`countedStatus(review)`).
 
 - **Gap cutoff.** `ORCH_GAP_MIN` is an integer from 0 to 100, default 80; any other value (empty, negative, above 100, a decimal, text) is 80. A review with STATUS fail counts as a fail when its stop record has any of: a gap with confidence at or above the cutoff; a gap with a null confidence (counted as 100, as the workflow does); an answer with verdict fail; or no gaps at all (an old-style reply, or a record from before 0.4.0 without `gaps`). Otherwise, a fail whose gaps are all below the cutoff counts as a pass and sets `lowConfidence`; it adds the doubt signal `low_confidence_fail`, so the opus escalation applies (an opus reviewer's low-confidence fail counts as an opus pass). `ORCH_GAP_MIN=0` makes every fail count: the 0.3.0 behaviour. A pass stays a pass and a reply without STATUS stays `null`, whatever its gaps.
-- **VALIDATE supersede.** A review whose launch record has `validate: true` (`VALIDATE: gaps` in the reviewer's brief) supersedes the earlier reviews of the same slice made since the slice's latest implementer launch or stop: they get `superseded: true` and `counted: null`, so they count neither as a pass nor as a fail (no `retry` signal, no part of a stall). Reviews of an earlier attempt are not touched.
+- **VALIDATE supersede.** `VALIDATE: gaps` marks a validation review: the reviewer re-checks the gaps an earlier review of the attempt listed against the diff and reports only the ones that stand. A review whose launch record has `validate: true` (that line in the reviewer's brief) supersedes the earlier reviews of the same slice made since the slice's latest implementer launch or stop: they get `superseded: true` and `counted: null`, so they count neither as a pass nor as a fail (no `retry` signal, no part of a stall). Reviews of an earlier attempt are not touched.
 - **Keys.** A counted fail keeps `keys`: the gap keys of its gaps at or above the cutoff (null confidence included), deduplicated. Every other review has `keys: []`.
 
 ### Stall (0.4.0)
