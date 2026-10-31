@@ -604,6 +604,9 @@ test("run model: only a review after the latest implementer launch or stop count
   f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), implStop(5, "impl-a-1")), { now: T0 + 6 * 60000 });
   assert.equal(f.open?.slices.a?.final, false, "resumed after its pass");
   f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), ...attempt(4, "b", "pass")), { now: T0 + 7 * 60000 });
+  // Changed for f1-run-split: b is RISKY, so its sonnet pass is not final and the run stays open until an opus pass.
+  assert.deepEqual([f.open?.id, f.open?.slices.a?.final, f.open?.slices.b?.passed, f.open?.slices.b?.final], [1, true, true, false]);
+  f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), ...attempt(4, "b", "pass"), ...review(8, "b", "STATUS: pass", "opus")), { now: T0 + 9 * 60000 });
   assert.deepEqual([f.runs[0]?.closed, f.open], [true, null]);
   f = foldRuns(R(impl(0, "fix", "PATH: light"), implStop(1, "impl-fix-0"), ...review(2, "fix", "looks fine")), { now: T0 + 3 * 60000 });
   assert.equal(f.open?.slices.fix?.final, false, "a review with no STATUS line is not a pass");
@@ -718,7 +721,13 @@ test("foreground order: stops and gates logged before their launch count after i
     { now: T0 + 7 * 60000 },
   );
   assert.deepEqual([f.runs[0]?.slices.a?.attempts, f.runs[0]?.slices.b?.attempts], [1, 1]);
-  assert.deepEqual([f.runs[0]?.slices.a?.passed, f.runs[0]?.slices.b?.passed, f.runs[0]?.closed], [true, true, true]);
+  // Changed for f1-run-split: b is RISKY, so both passes leave the run open until b has an opus pass.
+  assert.deepEqual([f.runs[0]?.slices.a?.passed, f.runs[0]?.slices.b?.passed, f.runs[0]?.closed], [true, true, false]);
+  f = foldRuns(
+    R(planLaunch(0), impl(1, "a", "", "BG"), implStop(2, "FG"), impl(2.5, "b", "", "FG"), implStop(3, "BG"), ...review(4, "a", "STATUS: pass"), ...fgAttempt(5, "b", "pass").slice(2), ...review(8, "b", "STATUS: pass", "opus")),
+    { now: T0 + 9 * 60000 },
+  );
+  assert.deepEqual([f.runs[0]?.slices.b?.final, f.runs[0]?.closed], [true, true]);
   // A stop whose launch never appears keeps its own time (here: no run has its slice, so it is not tracked).
   assert.equal(foldRuns(R({ stop: stopRecord({ ts: at(1), sessionId: "s1", agentId: "ghost", role: "implementer", slice: "z" }) }), { now: T0 }).runs.length, 0);
 });
