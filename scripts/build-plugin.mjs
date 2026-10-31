@@ -69,8 +69,9 @@ const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROO
 // The judge refuses on a crash or timeout (onFailure "block"); a missing node exits 0, so it never blocks every command.
 /** @param {string} script */
 const failClosed = (script) => `sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node "$0" "$@"' "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}" --plugin`;
-// Matchers mirror .claude/settings.json; verify.sh and quote-check take the namespaced agent type, disjoint from the
-// project's ^implementer$ and ^researcher$, so a plugin agent's stop is never seen by both copies.
+// Matchers mirror .claude/settings.json. verify.sh takes the namespaced implementer, disjoint from the project's
+// ^implementer$ (no duplicate() check). quote-check's project matcher (^|:)researcher$ covers both researcher types,
+// so the plugin copy exits on duplicate() where the project registers it, and checks plugin researchers elsewhere.
 const hooks = {
   hooks: {
     SessionStart: [
@@ -78,7 +79,7 @@ const hooks = {
       { matcher: "compact", hooks: [{ type: "command", command: run("compact-context.mjs") }] },
     ],
     PreToolUse: [
-      { matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs"), timeout: 30 }] },
+      { matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs"), timeout: 60 }] },
       { matcher: "Bash", hooks: [{ type: "command", command: run("researcher-guard.mjs") }] },
       { matcher: "WebFetch", hooks: [{ type: "command", command: run("egress-guard.mjs") }] },
     ],

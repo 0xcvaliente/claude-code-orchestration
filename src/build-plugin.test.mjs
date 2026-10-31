@@ -134,22 +134,37 @@ test("0.4.0 hooks are registered with the same matchers in the project settings 
   for (const [event, script, matcher] of shared) {
     for (const h of [project, plugin]) assert.equal(entry(h, String(event), String(script))?.matcher, matcher, `${event} ${script}`);
   }
-  // SubagentStop gates with an agent matcher: project and plugin matchers are disjoint, so no agent's stop reaches both.
-  for (const [script, role] of [["verify.sh", "implementer"], ["quote-check.mjs", "researcher"]]) {
-    const p = new RegExp(entry(project, "SubagentStop", String(script)).matcher);
-    const q = new RegExp(entry(plugin, "SubagentStop", String(script)).matcher);
-    assert.ok(p.test(String(role)) && !p.test(`orchestration:${role}`), `project ${script}`);
-    assert.ok(q.test(`orchestration:${role}`) && !q.test(String(role)), `plugin ${script}`);
-    for (const other of ["reviewer", "orchestration:reviewer"]) assert.ok(!p.test(other) && !q.test(other));
+  // verify.sh has no duplicate() check: its project and plugin matchers are disjoint, so no stop reaches both.
+  const vp = new RegExp(entry(project, "SubagentStop", "verify.sh").matcher);
+  const vq = new RegExp(entry(plugin, "SubagentStop", "verify.sh").matcher);
+  assert.ok(vp.test("implementer") && !vp.test("orchestration:implementer"), "project verify.sh");
+  assert.ok(vq.test("orchestration:implementer") && !vq.test("implementer"), "plugin verify.sh");
+  // quote-check exits on duplicate() in the plugin, so the project copy must cover both researcher types itself.
+  const qp = new RegExp(entry(project, "SubagentStop", "quote-check.mjs").matcher);
+  const qq = new RegExp(entry(plugin, "SubagentStop", "quote-check.mjs").matcher);
+  assert.equal(qp.source, "(^|:)researcher$");
+  assert.ok(qq.test("orchestration:researcher") && !qq.test("researcher"), "plugin quote-check");
+  for (const other of ["reviewer", "orchestration:reviewer"]) {
+    for (const m of [vp, vq, qp, qq]) assert.ok(!m.test(other), `${m} skips ${other}`);
   }
+  for (const m of [qp, qq]) assert.ok(!m.test("implementer") && !m.test("orchestration:implementer"), `${m} skips implementers`);
+  const quoteCheck = readFileSync(join(root, ".claude", "hooks", "quote-check.mjs"), "utf8");
+  assert.ok(quoteCheck.includes('if (duplicate("quote-check.mjs")) process.exit(0);'), "the plugin copy steps aside");
   const files = ["read-log", "researcher-guard", "egress-guard", "compact-context", "quote-check", "file-profile", "bugfix-check"];
   for (const f of files) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", `${f}.mjs`)), `${f}.mjs ships`);
+});
+
+test("the project quote-check matcher matches both the bare and the plugin researcher", () => {
+  const m = new RegExp(entry(read(".claude/settings.json"), "SubagentStop", "quote-check.mjs").matcher);
+  assert.ok(m.test("researcher"), "researcher");
+  assert.ok(m.test("orchestration:researcher"), "orchestration:researcher");
+  assert.ok(!m.test("not-researcher") && !m.test("researcher2"));
 });
 
 test("explicit timeouts, and only the judge fails closed", () => {
   for (const h of [read(".claude/settings.json"), read("dist/plugin/hooks/hooks.json")]) {
     assert.equal(entry(h, "SubagentStop", "verify.sh").hooks[0].timeout, 900);
-    assert.equal(entry(h, "PreToolUse", "plan-check.mjs").hooks[0].timeout, 30);
+    assert.equal(entry(h, "PreToolUse", "plan-check.mjs").hooks[0].timeout, 60);
     const judge = entry(h, "PreToolUse", "judge-hook.mjs").hooks;
     assert.equal(judge.length, 1, "the judge has an entry of its own");
     assert.deepEqual([judge[0].onFailure, judge[0].timeout], ["block", 120]);
