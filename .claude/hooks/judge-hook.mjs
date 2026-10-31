@@ -11,22 +11,20 @@
 //   Anything else (a refusal, a timeout, a missing CLI, an unreadable answer, no recorded request): deny.
 // - Malformed hook input: exit 0, no decision. Every floor or judged decision goes to gates.jsonl in the state dir.
 // Settings: ORCH_JUDGE_CLAUDE_BIN (the claude binary, default `claude`), ORCH_JUDGE_MODEL (default opus),
-// ORCH_JUDGE_TIMEOUT_MS (default 60000; the hook's own timeout in settings must stay above it).
-import { spawn } from "node:child_process";
+// ORCH_JUDGE_TIMEOUT_MS (default 40000, clamped to 45000 so the hook always decides before Claude Code kills it).
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NO_REQUEST_REASON, decide, nativePrompt, parseCliOutput } from "./judge-core.mjs";
+import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "./judge-core.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 if ((process.env.ORCH_JUDGE ?? "").trim().toLowerCase() !== "native") process.exit(0);
 if (process.env.ORCH_JUDGE_INNER === "1") process.exit(0); // the judge's own claude -p run
 if (duplicate("judge-hook.mjs")) process.exit(0); // the project's own copy judges this command
 
-const timeoutMs = (() => {
-  const n = Number.parseInt(process.env.ORCH_JUDGE_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(n) && n > 0 ? n : 60_000;
-})();
+// Never above 45 s: Claude Code kills a hook at its timeout (60 s by default) and the command then runs.
+const timeoutMs = judgeTimeoutMs(process.env.ORCH_JUDGE_TIMEOUT_MS);
 
 /** @type {any} */
 let input;
@@ -78,7 +76,27 @@ function requests() {
     });
 }
 
-/** One `claude -p` call. @param {string} prompt @returns {Promise<{ stdout: string } | { error: string }>} */
+/**
+ * Read-only git facts for the prompt (branch, remotes), 2 s each; nothing on any failure.
+ * @param {string} cwd
+ * @returns {string[]}
+ */
+function gitFacts(cwd) {
+  /** @param {string[]} args */
+  const git = (args) => {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+      return r.status === 0 ? String(r.stdout).trim() : "";
+    } catch {
+      return "";
+    }
+  };
+  const branch = git(["branch", "--show-current"]);
+  const remotes = git(["remote", "-v"]).split("\n").slice(0, 10).join("\n");
+  return [...(branch ? [`git branch: ${branch}`] : []), ...(remotes ? [`git remote -v:\n${remotes}`] : [])];
+}
+
+/** One `claude -p` call. @param {string} prompt @returns {Promise<{ stdout: string } | { error: string, timeout?: boolean }>} */
 function askClaude(prompt) {
   return new Promise((done) => {
     const bin = process.env.ORCH_JUDGE_CLAUDE_BIN || "claude";
@@ -100,7 +118,7 @@ function askClaude(prompt) {
     let timer;
     /** @type {import("node:child_process").ChildProcess | undefined} */
     let child;
-    /** @param {{ stdout: string } | { error: string }} result */
+    /** @param {{ stdout: string } | { error: string, timeout?: boolean }} result */
     const finish = (result) => {
       if (finished) return;
       finished = true;
@@ -123,7 +141,7 @@ function askClaude(prompt) {
       finish({ error: `could not start ${bin} (${err instanceof Error ? err.message : String(err)})` });
       return;
     }
-    timer = setTimeout(() => finish({ error: `timed out after ${timeoutMs} ms` }), timeoutMs);
+    timer = setTimeout(() => finish({ error: `judge_timeout: timed out after ${timeoutMs} ms`, timeout: true }), timeoutMs);
     child.on("error", (/** @type {NodeJS.ErrnoException} */ err) =>
       finish({ error: err.code === "ENOENT" ? `claude CLI not found (${bin})` : `claude CLI failed (${err.message})` }),
     );
@@ -142,10 +160,19 @@ try {
   const d = decide(command, cwd);
   if (d.action === "none") process.exit(0);
   if (d.action === "floor") deny(`always blocked: ${d.reason}`);
+  /** @type {string[]} */
+  const facts = [];
+  if (d.kind === "rm") {
+    // As the SDK judge: a symlinked, out-of-tree or unresolvable target is denied without a model call.
+    const t = checkRmTargets(d.targets, cwd);
+    if ("reason" in t) deny(`always blocked: ${t.reason}`);
+    facts.push(`real target paths: ${JSON.stringify(t.resolved)}`);
+  }
   const asked = requests();
   if (!asked.length) deny(NO_REQUEST_REASON);
-  const answer = await askClaude(nativePrompt(d.kind, command, asked, { cwd, targets: d.targets }));
-  if ("error" in answer) deny(`judge failed (${answer.error}): denied`);
+  facts.push(...gitFacts(cwd));
+  const answer = await askClaude(nativePrompt(d.kind, command, asked, { cwd, targets: d.targets, facts }));
+  if ("error" in answer) deny(answer.timeout ? `${answer.error}: denied` : `judge failed (${answer.error}): denied`);
   const verdict = parseCliOutput(answer.stdout);
   if ("error" in verdict) deny(`judge answer rejected (${verdict.error}): denied`);
   if (verdict.decision !== "allow") deny(`judge refused: ${verdict.reason}`);

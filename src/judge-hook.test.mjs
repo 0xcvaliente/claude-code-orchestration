@@ -3,12 +3,12 @@
 // agrees with src/judge.ts on the corpus and on every string in src/judge.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyDetail as coreClassify, decide, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
+import { checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as sdkClassify } from "./judge.js"; // tsx resolves it to judge.ts
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -36,7 +36,7 @@ else if (mode === "two") result('{"decision":"allow","reason":"a"} {"decision":"
 else if (mode === "error") process.stdout.write(JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true }));
 else if (mode === "garbage") process.stdout.write("not json at all");
 else if (mode === "exit1") process.exit(1);
-else if (mode === "timeout") setTimeout(() => result('{"decision":"allow","reason":"late"}'), 30000);
+else if (mode === "timeout") setTimeout(() => result('{"decision":"allow","reason":"late"}'), 90000);
 `,
 );
 chmodSync(STUB, 0o755);
@@ -51,12 +51,37 @@ const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !
 const env = (/** @type {Record<string, string | undefined>} */ extra = {}) => ({ ...baseEnv, CLAUDE_PROJECT_DIR: project, CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"), ORCH_JUDGE_CLAUDE_BIN: STUB, STUB_LOG: stubLog, ...extra });
 const ON = { ORCH_JUDGE: "native" };
 
+// The working folder of every Bash call: build/ and src/legacy/ inside, linked -> ../outside (a symlinked folder).
+const work = join(scratch, "work");
+for (const d of ["build", "src/legacy"]) mkdirSync(join(work, d), { recursive: true });
+mkdirSync(join(scratch, "outside", "sub"), { recursive: true });
+symlinkSync(join(scratch, "outside"), join(work, "linked"));
+
+// The clamp test needs 45 s of wall time, so it starts now (own project and stub log) and runs beside the other tests.
+const clampProject = join(scratch, "clamp-project");
+mkdirSync(clampProject, { recursive: true });
+const clampEnv = { ...ON, CLAUDE_PROJECT_DIR: clampProject, STUB_LOG: join(scratch, "clamp-stub.jsonl") };
+run(CAPTURE, { session_id: "clamp", prompt: "push feature/login to origin" }, clampEnv);
+const clampStart = Date.now();
+// stdin, stdout and stderr are files, not pipes: a pipe is fed only when this process's event loop runs, and the
+// sibling tests block it with spawnSync, which would delay the hook's input by tens of seconds.
+const clampFile = (/** @type {string} */ name) => join(scratch, `clamp-${name}`);
+writeFileSync(clampFile("in"), JSON.stringify({ session_id: "clamp", tool_name: "Bash", tool_input: { command: "git push origin feature/login" }, cwd: work }));
+/** @type {Promise<{ code: number | null, stdout: string, stderr: string, ms: number }>} */
+const clampRun = new Promise((done) => {
+  const fds = [openSync(clampFile("in"), "r"), openSync(clampFile("out"), "w"), openSync(clampFile("err"), "w")];
+  /** @type {import("node:child_process").ChildProcess} */
+  const child = spawn(process.execPath, [HOOK], { env: env({ ...clampEnv, STUB_MODE: "timeout", ORCH_JUDGE_TIMEOUT_MS: "120000" }), stdio: /** @type {import("node:child_process").StdioOptions} */ (fds) });
+  for (const fd of fds) closeSync(fd);
+  child.on("close", (code) => done({ code, stdout: readFileSync(clampFile("out"), "utf8"), stderr: readFileSync(clampFile("err"), "utf8"), ms: Date.now() - clampStart }));
+});
+
 /** @param {string} script @param {unknown} input @param {Record<string, string | undefined>} [extra] @param {string[]} [args] */
 function run(script, input, extra = {}, args = []) {
   const r = spawnSync(process.execPath, [script, ...args], { input: typeof input === "string" ? input : JSON.stringify(input), env: env(extra), encoding: "utf8", timeout: 20000 });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
-const bash = (/** @type {string} */ command, session = "s1", more = {}) => ({ session_id: session, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: corpus.cwd, ...more });
+const bash = (/** @type {string} */ command, session = "s1", more = {}) => ({ session_id: session, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, cwd: work, ...more });
 const stubCalls = () => (existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const readLog = (/** @type {string} */ name) => (existsSync(join(stateDir, name)) ? readFileSync(join(stateDir, name), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 const judgeLog = (/** @type {string} */ session) => readLog("gates.jsonl").filter((g) => g.gate === "judge" && g.session_id === session);
@@ -186,7 +211,7 @@ test("fail closed: refusal, garbage, prose, two objects, CLI error, exit code, t
     ["two", {}, /2 JSON objects/],
     ["error", {}, /reported an error/],
     ["exit1", {}, /exited with code 1/],
-    ["timeout", { ORCH_JUDGE_TIMEOUT_MS: "400" }, /timed out after 400 ms/],
+    ["timeout", { ORCH_JUDGE_TIMEOUT_MS: "400" }, /judge_timeout: timed out after 400 ms/],
     ["approve", { ORCH_JUDGE_CLAUDE_BIN: join(scratch, "no-such-claude") }, /claude CLI not found/],
   ];
   for (const [mode, extra, why] of modes) {
@@ -255,6 +280,39 @@ test("core: prompt quotes the command as data under a nonce, and CLI output pars
   assert.ok("error" in parseCliOutput(ok('[{"decision":"allow","reason":"a"}]')));
   assert.ok("error" in parseCliOutput(JSON.stringify({ subtype: "error_during_execution", result: '{"decision":"allow","reason":"a"}' })));
   assert.equal(decide("ls", "/w").action, "none");
+  assert.ok(nativePrompt("git", "git push", ["push"], { nonce: "n2", facts: ["git branch: feat"] }).includes("git branch: feat\nFACTS_n2>>>"));
+});
+
+test("timeout clamp: default 40 s, never above 45 s, so the hook decides before Claude Code's 60 s kill", async () => {
+  assert.equal(judgeTimeoutMs(undefined), 40000);
+  assert.equal(judgeTimeoutMs("abc"), 40000);
+  assert.equal(judgeTimeoutMs("0"), 40000);
+  assert.equal(judgeTimeoutMs("400"), 400);
+  assert.equal(judgeTimeoutMs("120000"), 45000);
+  const r = await clampRun; // ORCH_JUDGE_TIMEOUT_MS=120000, the stub answers after 90 s
+  assert.equal(r.code, 2, r.stderr);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /judge_timeout: timed out after 45000 ms/);
+  const rec = readFileSync(join(clampProject, ".claude", "state", "gates.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+  assert.equal(rec.decision, "deny");
+  assert.match(rec.reason, /judge_timeout/);
+  // Timed by the hook's own log record: the parent's close event can arrive late while sibling tests block on spawnSync.
+  const decidedMs = Date.parse(rec.ts) - clampStart;
+  assert.ok(decidedMs >= 44000 && decidedMs < 60000, `decided after ${decidedMs} ms (close seen after ${r.ms} ms)`);
+});
+
+test("rm targets: symlinked, through a symlink, outside or unresolvable are denied without a model call; a plain dir is judged", () => {
+  assert.match(/** @type {any} */ (checkRmTargets(["linked"], work)).reason, /is a symlink/);
+  assert.match(/** @type {any} */ (checkRmTargets(["linked/sub"], work)).reason, /outside the working folder/);
+  assert.match(/** @type {any} */ (checkRmTargets(["build"], join(scratch, "missing"))).reason, /cannot be resolved/);
+  assert.match(/** @type {any} */ (checkRmTargets(["nope/deeper"], work)).reason, /cannot be resolved/);
+  const ok = /** @type {any} */ (checkRmTargets(["build", "src/legacy", "not-yet"], work));
+  assert.equal(ok.resolved.length, 3);
+  reset();
+  capture("rmfs", "delete the build folder");
+  const r = run(HOOK, bash("rm -r build", "rmfs"), { ...ON, STUB_MODE: "approve" });
+  assert.equal(r.code, 0);
+  assert.ok(stubCalls()[0].stdin.includes("real target paths"));
 });
 
 test("parity: judge-core's floor and classification agree with src/judge.ts", () => {
