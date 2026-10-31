@@ -51,10 +51,10 @@ test('the pane follows an implementer from start to its STATUS line', async ($, 
   expect(await ui.find({ type: 'Text', text: /[┐┘┤├]/ })).toBeTruthy() // routed edge into s2
   expect(await ui.find({ type: 'Text', text: /opus · orchestrator/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /sign off/ })).toBeTruthy()
-  // stage cells, one glyph each: build = s1 passed, s2 running, s9 (a ghost) queued; review has no reviewer yet for s1 and s2
+  // stage cells, one glyph each: build = s1 passed, s2 running, s9 (a ghost) queued; no reviewer started, so no review box is drawn
   const cells = (await ui.findAll({ type: 'Text' })).map(x => x.text ?? '').join('|')
   expect(/\|✔\|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\|◌\|/.test(cells)).toBe(true)
-  expect(/\|◌\|◌\|/.test(cells)).toBe(true)
+  expect((await ui.findAll({ type: 'Text' })).some(x => /^[●✔✖◆◌] review$/.test(x.text ?? ''))).toBe(false)
   expect(/▰▱|▱▰/.test(cells.split('|').filter(x => x.length > 3 && /^[▰▱]+$/.test(x)).join(''))).toBe(false) // no proportional stage bar left
   await ui.unmount()
 
@@ -156,7 +156,7 @@ test('a verdict without facts shows its reason; with no verdict the mode is infe
   expect(t.some(x => /small change, one reviewer/.test(x))).toBe(true)
 })
 
-test('with no verdict the pane infers the mode and shows all six stages at every width', async ($, on) => {
+test('with no verdict the pane infers the mode and draws only the stages it used (triage, build, review) at every width', async ($, on) => {
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
@@ -172,11 +172,13 @@ test('with no verdict the pane infers the mode and shows all six stages at every
     const t = await texts($, columns)
     expect(t.some(x => /triage · reviewed/.test(x))).toBe(true)
     expect(t.some(x => /\(inferred/.test(x))).toBe(true)
-    for (const stage of ['triage', 'plan', 'plan review', 'build', 'review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(true)
+    for (const stage of ['triage', 'build', 'review']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(true)
+    for (const stage of ['plan', 'plan review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(false)
+    expect(t.includes('skipped')).toBe(false)
     const art = t.filter(x => /^[\s─│┌┐└┘├┤┬┴┼●▶▼╵╷╶╴]+$/.test(x))
     expect(art.length).toBeGreaterThan(0)
     expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
-    if (columns < 100) expect(art.some(x => x.includes('▼') && x.trim() === '▼')).toBe(true) // the return rail between rows
+    if (columns < 40) expect(art.some(x => x.includes('▼') && x.trim() === '▼')).toBe(true) // the return rail between rows
   }
 })
 
@@ -252,7 +254,7 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   const IMPL = 'orchestration:implementer'
   const REV = 'orchestration:reviewer'
 
-  // while an agent runs the plan stage is already done (the orchestrator planned) but merge is not "skipped" yet
+  // while an agent runs the plan stage is already done (the orchestrator planned); merge is not drawn until an integrator starts
   await spawn('a', 'bad', 'none', IMPL)
   let t = await texts($, 100)
   expect(t.includes('orchestrator')).toBe(true)
@@ -280,8 +282,8 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   expect(t.some(x => /^◆ bad /.test(x))).toBe(true) // the fixed slice is done, not failed
   expect(t.some(x => /^[✔●] plan$/.test(x) || /^✔ plan$/.test(x))).toBe(true)
   expect(t.includes('orchestrator')).toBe(true)
-  expect(t.some(x => /^◆ merge$/.test(x))).toBe(true)
-  expect(t.includes('skipped')).toBe(true)
+  expect(t.some(x => /^[●✔✖◆◌] merge$/.test(x))).toBe(false) // no integrator ran: no merge box, and no "skipped" word
+  expect(t.includes('skipped')).toBe(false)
 
   // with every failure fixed (the reviewer of "other" failed, "other2" depends on it and passed) the orchestrator box says so
   await spawn('d', 'other2', 'other', IMPL)
@@ -346,7 +348,7 @@ test('a slash command, a meta prompt and a blank prompt neither open the pane no
   expect((await texts($)).some(x => /No orchestration agents yet/.test(x))).toBe(true)
 })
 
-test('work with no agents reads answered once the main turn ends: plain, skipped stages, this session', async ($, on) => {
+test('work with no agents reads answered once the main turn ends: plain, only triage and the build drawn, this session', async ($, on) => {
   await boot($, on)
   await ($ as any).prompt.submit({ text: PROMPT })
   let t = await texts($)
@@ -357,8 +359,8 @@ test('work with no agents reads answered once the main turn ends: plain, skipped
   expect(t.filter(x => /answered in this session/.test(x)).length).toBe(2) // orchestrator box and sign-off
   expect(t.some(x => /triage · plain/.test(x))).toBe(true)
   expect(t.some(x => /\(inferred: no agents ran\)/.test(x))).toBe(true)
-  expect(t.filter(x => x === 'skipped').length).toBe(4) // plan, plan review, review, merge
-  for (const stage of ['plan', 'plan review', 'review', 'merge']) expect(t.some(x => x === `◆ ${stage}`)).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
+  for (const stage of ['plan', 'plan review', 'review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌] /.test(x))).toBe(false) // the stages plain does not use are never drawn
   expect(t.some(x => x === '✔ build')).toBe(true)
   expect(t.includes('this session')).toBe(true)
   expect(t.some(x => /working in this session/.test(x))).toBe(false)
@@ -418,11 +420,11 @@ test('with agents present the input box shows and the orchestrate run is unchang
   await ($ as any).turn.complete(mainDone('answer'))
   t = await texts($)
   expect(t.some(x => /all agents passed/.test(x))).toBe(true)
-  expect(t.includes('skipped')).toBe(true) // merge, once signed off, as before
-  expect(t.filter(x => x === 'skipped').length).toBe(1)
+  expect(t.includes('skipped')).toBe(false) // no integrator ran: merge is not drawn at all
+  expect(t.some(x => /^[●✔✖◆◌] merge$/.test(x))).toBe(false)
 })
 
-test('an orchestrate verdict with no agents yet shows every stage queued', async ($, on) => {
+test('an orchestrate verdict with no agents yet draws only triage and the dim plan box as next', async ($, on) => {
   await boot($, on, { route: { stdout: ROUTE_JSON } })
   await ($ as any).prompt.submit({ text: 'big job' })
   await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -430,7 +432,9 @@ test('an orchestrate verdict with no agents yet shows every stage queued', async
   expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
   expect(t.includes('skipped')).toBe(false)
   expect(t.includes('this session')).toBe(false)
-  for (const stage of ['plan', 'plan review', 'build', 'review', 'merge']) expect(t.some(x => x === `◌ ${stage}`)).toBe(true)
+  expect(t.includes('◌ plan')).toBe(true)
+  expect(t.includes('next')).toBe(true) // the entry stage waits, dim
+  for (const stage of ['plan review', 'build', 'review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌] /.test(x))).toBe(false)
 })
 
 test('the arrows join input, orchestrator, triage, stages and sign-off at every width, inside both boxes', async ($, on) => {
@@ -540,7 +544,7 @@ const ROUTES = ['plain', 'reviewed', 'orchestrate'] as const
 const ART = /^[\s─│┌┐└┘├┤┬┴┼●▶▼╵╷╶╴]+$/
 // The same layout as the pane, worked out again here from the widths alone.
 const tElbow = (a: number, b: number) => (a === b ? `${' '.repeat(a)}│` : b > a ? `${' '.repeat(a)}└${'─'.repeat(b - a - 1)}┐` : `${' '.repeat(b)}┌${'─'.repeat(a - b - 1)}┘`)
-const geom = (width: number, mode: (typeof ROUTES)[number]) => {
+const geom = (width: number, mode: (typeof ROUTES)[number], entryAt = 1) => {
   const boxW = Math.min(width - 1, 46)
   const side = width >= 44
   const rw = Math.floor((boxW - 4) / 3)
@@ -553,7 +557,7 @@ const geom = (width: number, mode: (typeof ROUTES)[number]) => {
   const lastX = (cols - 1) * (pw + 3) + first
   const k = ROUTES.indexOf(mode)
   const sx = side ? (rc[k] as number) : 1
-  const entry = width < 16 ? 0 : mode === 'orchestrate' ? 1 : 3
+  const entry = width < 16 ? 0 : entryAt // the entry stage's place among the drawn boxes: right after triage unless an earlier stage is drawn
   const left = (entry % cols) * (pw + 3)
   const lane = Math.floor(entry / cols) >= 1
   const ex = left + pw - 2
@@ -569,7 +573,7 @@ const failed = (id: string) => ({ turnId: 'a', agentId: id, answer: 'broke\nSTAT
 const verdict = (mode: string) => ({ stdout: JSON.stringify({ mode, reason: `${mode} chosen`, facts: { filesToTouch: 2, linesToChange: 40, independentSlices: 1, risky: true, code: true } }) })
 const REVIEWER = 'orchestration:reviewer'
 
-type Scene = { name: string; mode: (typeof ROUTES)[number]; word: string; flow: boolean; build: ($: any, on: any) => Promise<void> }
+type Scene = { name: string; mode: (typeof ROUTES)[number]; word: string; flow: boolean; drawn: string[]; build: ($: any, on: any) => Promise<void> }
 const recorded = async ($: any, on: any, mode: string, solo?: boolean) => {
   await boot($, on, { route: verdict(mode) })
   if (solo) return
@@ -577,14 +581,14 @@ const recorded = async ($: any, on: any, mode: string, solo?: boolean) => {
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
 }
 const SCENES: Scene[] = [
-  { name: 'plain answered, inferred', mode: 'plain', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('answer')) } },
-  { name: 'plain stopped, inferred', mode: 'plain', word: 'stopped', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('aborted')) } },
-  { name: 'plain chosen, nothing run yet', mode: 'plain', word: 'chosen', flow: false, build: async ($, on) => { await recorded($, on, 'plain', true); await $.tool.call({ tool: 'Bash', command: ROUTE_CMD }) } },
-  { name: 'reviewed recorded, finished', mode: 'reviewed', word: 'passed', flow: false, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)); await $.turn.complete(done('r1')); await $.turn.complete(mainDone('answer')) } },
-  { name: 'reviewed recorded, running', mode: 'reviewed', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)) } },
-  { name: 'orchestrate recorded, running', mode: 'orchestrate', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')) } },
-  { name: 'orchestrate recorded, failed', mode: 'orchestrate', word: 'failed', flow: false, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(failed('t1')); await $.turn.complete(mainDone('answer')) } },
-  { name: 'orchestrate inferred, finished', mode: 'orchestrate', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(done('t1')) } },
+  { name: 'plain answered, inferred', drawn: ['triage','build'], mode: 'plain', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('answer')) } },
+  { name: 'plain stopped, inferred', drawn: ['triage','build'], mode: 'plain', word: 'stopped', flow: false, build: async ($, on) => { await boot($, on); await $.prompt.submit({ text: PROMPT }); await $.turn.complete(mainDone('aborted')) } },
+  { name: 'plain chosen, nothing run yet', drawn: ['triage','build'], mode: 'plain', word: 'chosen', flow: false, build: async ($, on) => { await recorded($, on, 'plain', true); await $.tool.call({ tool: 'Bash', command: ROUTE_CMD }) } },
+  { name: 'reviewed recorded, finished', drawn: ['triage','build','review'], mode: 'reviewed', word: 'passed', flow: false, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)); await $.turn.complete(done('r1')); await $.turn.complete(mainDone('answer')) } },
+  { name: 'reviewed recorded, running', drawn: ['triage','build','review'], mode: 'reviewed', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'reviewed'); await $.agent.spawn(spawnImpl('r1', 's1', REVIEWER)) } },
+  { name: 'orchestrate recorded, running', drawn: ['triage','plan','build'], mode: 'orchestrate', word: 'running', flow: true, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')) } },
+  { name: 'orchestrate recorded, failed', drawn: ['triage','plan','build'], mode: 'orchestrate', word: 'failed', flow: false, build: async ($, on) => { await recorded($, on, 'orchestrate'); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(failed('t1')); await $.turn.complete(mainDone('answer')) } },
+  { name: 'orchestrate inferred, finished', drawn: ['triage','plan','build'], mode: 'orchestrate', word: 'passed', flow: false, build: async ($, on) => { await boot($, on); await $.agent.spawn(spawnImpl('t1', 's1')); await $.turn.complete(done('t1')) } },
 ]
 const WIDTHS = [24, 32, 36, 40, 43, 44, 47, 52, 60, 64, 80, 99, 100, 140]
 
@@ -633,12 +637,11 @@ for (const sc of SCENES) {
         expect(g.ex).toBeGreaterThanOrEqual(g.left + 1)
         expect(g.ex).toBeLessThanOrEqual(g.left + g.pw - 2)
       }
-      if (sc.mode === 'orchestrate' || columns >= 100) {
-        // no lane: orchestrate enters plan in the first row, and one row holds all six stages from 100 columns
-        const asPlain = geom(columns, 'plain')
-        if (asPlain.lane || columns < 100) expect(t.includes(asPlain.beside[2] as string)).toBe(false)
-      }
-      for (const stage of ['triage', 'plan', 'plan review', 'build', 'review', 'merge']) expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(true)
+      // no lane: the entry stage is the second drawn box, in the first row
+      const lanePlain = geom(columns, 'plain', 3)
+      if (lanePlain.lane) expect(t.includes(lanePlain.beside[2] as string)).toBe(false)
+      for (const stage of ['triage', 'plan', 'plan review', 'build', 'review', 'merge'])
+        expect(t.some(x => x.endsWith(` ${stage}`) && /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(sc.drawn.includes(stage)) // a box only for a stage that was used
       const art = t.filter(x => ART.test(x))
       expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
     }
@@ -762,12 +765,12 @@ test('the scroll hint counts the fork, the route boxes, the link and the lane', 
   // plain at 100: 40 + 3 + 4 + 3 link rows - 2 = 48
   expect(await hint(100, 47)).toBe(true)
   expect(await hint(100, 48)).toBe(false)
-  // at 60 the stages wrap (two rows of 5 and a 3-row rail = 13) and the lane adds a rail row: 26 + 5 + 4 + 13 + 3 + 4 + 3 - 2 + 1 = 57
-  expect(await hint(60, 56)).toBe(true)
-  expect(await hint(60, 57)).toBe(false)
-  // stacked at 36: three stage rows (15 + 6 = 21), the fork is 2 rows, the arrow, the 4-row chosen box, the link 3 and the lane 1: 26 + 5 + 4 + 21 + 7 + 3 - 2 + 1 = 65
-  expect(await hint(36, 64)).toBe(true)
-  expect(await hint(36, 65)).toBe(false)
+  // only triage and the build are drawn, so one stage row at every width (no wrap, no lane): at 60 the count is the same, 48
+  expect(await hint(60, 47)).toBe(true)
+  expect(await hint(60, 48)).toBe(false)
+  // stacked at 36: the fork is 2 rows, the arrow, the 4-row chosen box (7), the link 3: 26 + 5 + 4 + 5 + 7 + 3 - 2 = 48
+  expect(await hint(36, 47)).toBe(true)
+  expect(await hint(36, 48)).toBe(false)
 })
 
 const finish = ($: any, agentId: string, answer: string) =>
@@ -847,13 +850,14 @@ test('between two waves the orchestrator reads dispatching, the sign-off waits a
   expect(t.some(x => /◌ s9/.test(x))).toBe(true) // the queued card stays
 })
 
-test('after the main turn completes the run is signed off: merge skipped, passed counted', async ($, on) => {
+test('after the main turn completes the run is signed off: no merge box, passed counted', async ($, on) => {
   await wave($, on)
   await $.turn.complete(mainDone('answer'))
   const t = await texts($)
   expect(t.some(x => /all agents passed/.test(x))).toBe(true)
   expect(t.some(x => /1 passed · 0 failed/.test(x))).toBe(true)
-  expect(t.includes('skipped')).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
+  expect(t.some(x => /^[●✔✖◆◌] merge$/.test(x))).toBe(false)
   expect(t.some(x => /dispatching/.test(x))).toBe(false)
 })
 
@@ -897,7 +901,8 @@ test('stale work (no turn.complete, last agent over ten minutes ago) is signed o
 const mountLive = ($: any) => $.ui.mount({ ...PANE, surface: 'terminal' })
 const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => x.text ?? '') as string[]
 
-test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', async ($, on) => {
+// ~2400 timer redraws of the live pane take about 5 s on a loaded machine, so the default 5 s limit is too tight
+test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', { timeoutMs: 15000 }, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   const ui = await mountLive($)
@@ -907,14 +912,13 @@ test('stale work: the timer draws a last redraw when it stops, so the open pane 
   for (let i = 0; i < 12; i++) await clock.advance(1000) // the pulse that finds it stale draws once more
   const t = await liveTexts(ui)
   expect(t.some(x => /dispatching|waiting for agents/.test(x))).toBe(false)
-  expect(t.includes('skipped')).toBe(true)
+  expect(t.includes('skipped')).toBe(false)
   expect(t.some(x => /1 passed · 0 failed/.test(x))).toBe(true)
   const head = t.find(x => /main · orchestrator/.test(x))
   await clock.advance(2000) // and the timer is gone: nothing redraws any more
   expect((await liveTexts(ui)).find(x => /main · orchestrator/.test(x))).toBe(head)
   await ui.unmount()
 })
-
 test('the timer ticks while work is open with no agents and stops, after a last redraw, at the main turn.complete', async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock })
@@ -959,4 +963,625 @@ test('with a recorded verdict, a spawn over two minutes after the last agent whi
   await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', 'orchestration:implementer')
   const t = await texts($)
   expect(t.some(x => /s1/.test(x)) && t.some(x => /s2/.test(x)) && t.includes(`▸ ${PROMPT.split('\n')[0]}`) && t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+})
+
+// ---- retries: a failed attempt, the attempt that follows it, and the loops back ----
+const IMPL = 'orchestration:implementer'
+const REVQ = 'orchestration:reviewer'
+const INTEG = 'orchestration:integrator'
+const brief = (slice: string, deps = 'none') => `SLICE: ${slice}\nFILES: a.py\nDEPENDS: ${deps}`
+const PLAN_REVIEW = 'PLAN REVIEW\nSLICE: plan\nFOCUS: gaps'
+const colorOf = async (ui: any, re: RegExp) => ((await ui.findAll({ type: 'Text' })).find((x: any) => re.test(x.text ?? '')) as any)?.props?.color as string | undefined
+const colorsOf = async (ui: any, re: RegExp) => ((await ui.findAll({ type: 'Text' })).filter((x: any) => re.test(x.text ?? '')) as any[]).map(x => x.props?.color as string)
+const LART = /^[\s─│┌┐└┘├┤┬┴┼●▶▼▲↻╵╷╶╴]+$/
+const FAIL = 'broke\nSTATUS: fail'
+const PASS = 'ok\nSTATUS: pass'
+
+// s1 built, its reviewer failed, a new implementer takes s1 again
+const retried = async ($: any, on: any) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAPS:\n- off by one')
+  await spawnWith($, 'b2', brief('s1'), IMPL)
+}
+
+test('a retry is its own card: attempt k/n, a red-to-amber retry connector, and the dependent hangs off the latest attempt', async ($, on) => {
+  await retried($, on)
+  await spawnWith($, 'c1', brief('s2', 's1'), IMPL)
+  const ui = await mountLive($)
+  let t = await liveTexts(ui)
+  expect(t.some(x => /s1 ↻2/.test(x) && /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(x))).toBe(true) // the retry card runs
+  expect(t.includes('attempt 1/2')).toBe(true)
+  expect(t.includes('attempt 2/2')).toBe(true)
+  expect(t.includes('◀ retry of s1')).toBe(true)
+  expect(t.some(x => /◀ s1 ↻2/.test(x))).toBe(true) // s2 waits for the latest attempt
+  expect(t.some(x => LART.test(x) && x.includes('↻'))).toBe(true) // the retry connector carries its marker
+  expect(await colorOf(ui, /^[\s─│┌┐└┘├┤┬┴┼●▶▼↻]*↻[\s─▶]*$/)).toBe('warning') // amber while the attempt runs
+  expect(await colorOf(ui, /^◀ retry of s1$/)).toBe('warning')
+  await ui.unmount()
+  // the retry attempt fails: red
+  await finish($, 'b2', FAIL)
+  const red = await mountLive($)
+  expect(await colorOf(red, /^[\s─│┌┐└┘├┤┬┴┼●▶▼↻]*↻[\s─▶]*$/)).toBe('error')
+  expect(await colorOf(red, /^◀ retry of s1$/)).toBe('error')
+  await red.unmount()
+  // a third attempt passes: green on its connector
+  await spawnWith($, 'b3', brief('s1'), IMPL)
+  await finish($, 'b3', PASS)
+  const green = await mountLive($)
+  t = await liveTexts(green)
+  expect(t.includes('attempt 3/3')).toBe(true)
+  expect(t.some(x => /^◆ s1 ↻3 /.test(x))).toBe(true)
+  expect((await colorsOf(green, /^◀ retry of s1$/)).includes('success')).toBe(true)
+  await green.unmount()
+  // the tasks table has one row per attempt
+  const rows = await texts($, 100)
+  for (const id of ['s1', 's1 ↻2', 's1 ↻3']) expect(rows.some(x => x.startsWith('◆ ' + id + ' ') || x.startsWith('✖ ' + id + ' ') || x.startsWith('✔ ' + id + ' '))).toBe(true)
+})
+
+test('a resume that fires agent.spawn again with the same id is a new attempt; only the latest record takes the report', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', FAIL)
+  await spawnWith($, 'b1', brief('s1'), IMPL) // same agent id, spawned again
+  let t = await texts($)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1 ↻2 /.test(x))).toBe(true)
+  expect(t.includes('attempt 2/2')).toBe(true)
+  expect(t.some(x => /^✖ s1 /.test(x))).toBe(true) // the first run keeps its failure while the second runs
+  await finish($, 'b1', PASS)
+  t = await texts($)
+  expect(t.some(x => /↳ fixed by s1 ↻2/.test(x))).toBe(true)
+  expect(t.some(x => /^✔ s1 ↻2 /.test(x) || /^◆ s1 ↻2 /.test(x))).toBe(true)
+})
+
+test('a resume that fires only turn.complete for an ended record keeps the old run and adds a new one', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', FAIL)
+  await finish($, 'b1', PASS) // the resumed run ends: no spawn came
+  const t = await texts($)
+  expect(t.includes('attempt 1/2') && t.includes('attempt 2/2')).toBe(true)
+  expect(t.some(x => /↳ fixed by s1 ↻2/.test(x))).toBe(true)
+  expect(t.some(x => /^\S s1 ↻2 /.test(x))).toBe(true)
+  expect(t.some(x => /retry 2 of s1/.test(x))).toBe(true) // and the log says so
+})
+
+test('counts: a failed attempt followed by a passing one is fixed; a failing retry leaves both failed', async ($, on) => {
+  await retried($, on)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', 'STATUS: pass\nGAPS: none')
+  let t = await texts($)
+  expect(t.some(x => /↳ fixed by s1 ↻2/.test(x))).toBe(true)
+  expect(t.some(x => /passed · 1 fixed on the way/.test(x))).toBe(true)
+  expect(t.some(x => /3 passed · 0 failed · 1 fixed/.test(x))).toBe(true)
+  expect(t.some(x => /^◆ s1 /.test(x))).toBe(true) // the failed attempt reads done, not failed
+})
+
+test('counts: when the retry fails too, both attempts stay failed', async ($, on) => {
+  await retried($, on)
+  await finish($, 'b2', FAIL)
+  const t = await texts($)
+  expect(t.some(x => /signed off with 2 failed/.test(x))).toBe(true)
+  expect(t.some(x => /↳ fixed by/.test(x))).toBe(false)
+})
+
+test('new plan: slices that began after the first failure are tagged; retries of an old slice are not', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', FAIL)
+  await spawnWith($, 'b2', brief('s1'), IMPL)
+  await spawnWith($, 'n1', brief('s9'), IMPL)
+  const t = await texts($)
+  expect(t.filter(x => x.includes('✚ new')).length).toBe(1)
+  expect(t.includes('✚ new')).toBe(true) // s9 only
+  expect(t.includes('attempt 2/2')).toBe(true) // the retry carries no tag
+  expect(t.includes('attempt 1/2')).toBe(true)
+})
+
+test('session log: "retry k of X" on a retry spawn and "re-plan" on a plan review that follows a failed one', async ($, on) => {
+  await retried($, on)
+  await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
+  await finish($, 'p1', FAIL)
+  await spawnWith($, 'p2', PLAN_REVIEW, REVQ)
+  const t = await texts($)
+  expect(t.some(x => /▶ retry 2 of s1/.test(x))).toBe(true)
+  expect(t.some(x => /▶ re-plan · plan review started/.test(x))).toBe(true)
+  expect(t.filter(x => /▶ re-plan/.test(x)).length).toBe(1) // the first plan review is a plain start
+})
+
+test('stage loops: re-plan, retry and rebuild appear when their condition is met and take the later attempt\'s colour', async ($, on) => {
+  await boot($, on)
+  // a failed plan review with no later one: nothing is drawn
+  await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
+  await finish($, 'p1', FAIL)
+  let t = await texts($)
+  expect(t.some(x => /↻/.test(x))).toBe(false)
+  // a failed integrator with no later build, and a slice-less failure: nothing either
+  await spawnWith($, 'x1', 'build something', IMPL) // no SLICE line
+  await finish($, 'x1', FAIL)
+  await spawnWith($, 'm1', 'MERGE branches', INTEG)
+  await finish($, 'm1', FAIL)
+  t = await texts($)
+  expect(t.some(x => /re-plan|retry|rebuild/.test(x) && /↻/.test(x))).toBe(false)
+  expect(t.some(x => /^[\s─│┌┐└┘▲]+$/.test(x) && x.includes('▲'))).toBe(false)
+
+  // a later plan review runs: re-plan, amber; it passes: green; the next fails: red
+  await spawnWith($, 'p2', PLAN_REVIEW, REVQ)
+  let ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ re-plan/)).toBe('warning')
+  const rows = (await liveTexts(ui)).filter(x => LART.test(x) && x.includes('▲'))
+  expect(rows.length).toBeGreaterThan(0)
+  await ui.unmount()
+  await finish($, 'p2', PASS)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ re-plan/)).toBe('success')
+  await ui.unmount()
+  await spawnWith($, 'p3', PLAN_REVIEW, REVQ)
+  await finish($, 'p3', FAIL)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ re-plan/)).toBe('error')
+  await ui.unmount()
+
+  // a build after the failed integrator: rebuild, amber then green
+  await spawnWith($, 'n1', brief('s5'), IMPL)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ rebuild/)).toBe('warning')
+  await ui.unmount()
+  await finish($, 'n1', PASS)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ rebuild/)).toBe('success')
+  await ui.unmount()
+
+  // a retried slice: retry 1 (the loop is drawn between the review and build boxes, so a reviewer has started)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', FAIL)
+  await spawnWith($, 'q1', 'SLICE: s1', REVQ)
+  await finish($, 'q1', FAIL)
+  await spawnWith($, 'b2', brief('s1'), IMPL)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ retry 1 *$/)).toBe('warning')
+  await ui.unmount()
+  await finish($, 'b2', FAIL)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ retry 1 *$/)).toBe('error')
+  await ui.unmount()
+  await spawnWith($, 'b3', brief('s1'), IMPL)
+  await finish($, 'b3', PASS)
+  ui = await mountLive($)
+  expect(await colorOf(ui, /^ *↻ retry 1 *$/)).toBe('success')
+  await ui.unmount()
+})
+
+test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
+  await finish($, 'p1', FAIL)
+  await spawnWith($, 'p2', PLAN_REVIEW, REVQ)
+  await finish($, 'p2', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', FAIL)
+  await spawnWith($, 'b2', brief('s1'), IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'c1', brief('s2', 's1'), IMPL)
+  await spawnWith($, 'm1', 'MERGE', INTEG)
+  await finish($, 'm1', FAIL)
+  await spawnWith($, 'd1', brief('s3'), IMPL)
+  for (const columns of [24, 32, 36, 39, 40, 52, 60, 64, 80, 99, 100, 140]) {
+    const t = await texts($, columns)
+    const art = t.filter(x => LART.test(x))
+    expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
+    for (const word of ['re-plan', 'retry 1', 'rebuild']) expect(t.some(x => x.includes(`↻ ${word}`))).toBe(true)
+    expect(t.some(x => /^[✔✖◆⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●] s1 ↻2 /.test(x))).toBe(true) // its row in the tasks table
+    for (const word of ['sign off', 'tasks']) expect(t.some(x => x.includes(word))).toBe(true)
+    // the loop labels sit inside the pane too
+    expect(Math.max(...t.filter(x => /^ *↻ (re-plan|retry|rebuild)/.test(x)).map(x => x.length))).toBeLessThanOrEqual(columns)
+    if (columns >= 100) expect(art.some(x => x.includes('▲') && x.includes('│'))).toBe(true) // the same-row loop connector
+  }
+})
+
+// ---- the active path, stages that spawn on use, and the per-card slice connectors ----
+const ARROW = /^(●─▶|─●▶|──▶)$/
+const BOX = /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] (triage|plan review|plan|build|review|merge)$/
+const arrowsOf = async (ui: any) => ((await ui.findAll({ type: 'Text' })).filter((x: any) => ARROW.test(x.text ?? '')) as any[]).map(x => ({ text: x.text as string, color: x.props?.color as string }))
+const clocked = async ($: any, on: any, route?: unknown) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock, ...(route ? { route } : {}) })
+  return clock
+}
+
+test('active path: the arrows up to the furthest running stage are amber and carry the dot, the ones past it are grey', async ($, on) => {
+  const clock = await clocked($, on)
+  await $.prompt.submit({ text: PROMPT })
+  await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'p2', PLAN_REVIEW, REVQ) // a second plan review runs after the build: the furthest active stage is plan review
+  let ui = await mountLive($)
+  let a = await arrowsOf(ui)
+  // drawn: triage, plan, plan review, build -> arrows into plan, plan review (amber) and into build (grey)
+  expect(a.map(x => x.color)).toEqual(['warning', 'warning', 'subtle'])
+  expect(a.map(x => x.text)).toEqual(['●─▶', '●─▶', '──▶']) // the dot only on the live arrows
+  expect(await colorOf(ui, /^ *│$/)).toBeTruthy()
+  await ui.unmount()
+  await clock.advance(250)
+  ui = await mountLive($)
+  a = await arrowsOf(ui)
+  expect(a.map(x => x.text)).toEqual(['─●▶', '─●▶', '──▶']) // and it moves
+  await ui.unmount()
+  // the plan review ends and so does the turn: nothing runs, no dot anywhere, the final state in colour
+  await finish($, 'p2', PASS)
+  await $.turn.complete(mainDone('answer'))
+  ui = await mountLive($)
+  a = await arrowsOf(ui)
+  expect(a.map(x => x.color)).toEqual(['success', 'success', 'success'])
+  expect(a.every(x => x.text === '──▶')).toBe(true)
+  expect((await liveTexts(ui)).some(x => x.includes('●'))).toBe(false)
+  await ui.unmount()
+  await clock.advance(250)
+  expect((await texts($, 100)).some(x => x.includes('●'))).toBe(false)
+})
+
+test('active path: an arrow into a failed stage is red once nothing runs', async ($, on) => {
+  await boot($, on)
+  await $.prompt.submit({ text: PROMPT })
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', FAIL)
+  await $.turn.complete(mainDone('answer'))
+  const ui = await mountLive($)
+  expect((await arrowsOf(ui)).map(x => x.color)).toEqual(['success', 'error']) // into plan (done by the orchestrator), into the failed build
+  expect((await liveTexts(ui)).some(x => x.includes('●') || x === 'skipped')).toBe(false)
+  await ui.unmount()
+})
+
+test('active path: the main session working in a plain run lights the link and the arrow into build; it goes out when the turn ends', async ($, on) => {
+  const clock = await clocked($, on, verdict('plain'))
+  await $.prompt.submit({ text: PROMPT })
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  let ui = await mountLive($)
+  const a = await arrowsOf(ui)
+  expect(a.map(x => x.color)).toEqual(['warning']) // triage -> build, the session builds
+  expect(a[0]!.text).toBe('●─▶')
+  const g = geom(100, 'plain')
+  expect((await colorsOf(ui, /^ *└[─┐]*┐$| *[│▼]$|●/)).includes('warning')).toBe(true)
+  expect(await colorOf(ui, /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] build$/)).toBe('warning')
+  await ui.unmount()
+  expect(g.link.length).toBe(3)
+  await clock.advance(250)
+  await $.turn.complete(mainDone('answer'))
+  ui = await mountLive($)
+  expect((await arrowsOf(ui)).map(x => [x.text, x.color])).toEqual([['──▶', 'success']])
+  expect((await liveTexts(ui)).some(x => x.includes('●'))).toBe(false)
+  await ui.unmount()
+})
+
+test('active path: the loop-back carries the dot backward while a retry runs, and the retry card and its connector still render', async ($, on) => {
+  const clock = await clocked($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAPS:\n- off by one')
+  await spawnWith($, 'b2', brief('s1'), IMPL) // the retry runs: the loop review -> build is live
+  // 100 columns: six per row, 14 wide; drawn triage, plan, build, review -> the loop leaves review (x 58) and enters build (x 41)
+  const fx = 3 * 17 + 7
+  const tx = 2 * 17 + 7
+  const rows = [`${' '.repeat(tx)}▲${' '.repeat(fx - tx - 1)}│`, `${' '.repeat(tx)}└${'─'.repeat(fx - tx - 1)}┘`]
+  const path: [number, number][] = [[0, fx]]
+  for (let x = fx; x >= tx; x--) path.push([1, x])
+  path.push([0, tx])
+  const seen: string[] = []
+  let sawMarker = false
+  for (let f = 0; f < 5; f++) {
+    const ui = await mountLive($)
+    const t = await liveTexts(ui)
+    const [r, x] = path[f % path.length] as [number, number]
+    const expected = rows.map((row, i) => (i === r ? `${row.slice(0, x)}●${row.slice(x + 1)}` : row))
+    for (const row of expected) expect(t.some(y => y.trimEnd() === row)).toBe(true)
+    seen.push(`${r},${x}`)
+    expect(await colorOf(ui, /^ *↻ retry 1/)).toBe('warning') // the loop is lit amber
+    // the arrows into plan and build are live (amber), the one into review past the furthest active stage (grey)
+    expect((await arrowsOf(ui)).map(y => y.color)).toEqual(['warning', 'warning', 'subtle'])
+    // regression: the retry card and its connector
+    expect(t.some(y => /s1 ↻2/.test(y) && /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /.test(y))).toBe(true)
+    sawMarker ||= t.some(y => LART.test(y) && y.includes('↻')) // the dot can sit on the marker for a frame
+    await ui.unmount()
+    await clock.advance(250)
+  }
+  expect(sawMarker).toBe(true)
+  expect(new Set(seen).size).toBe(5) // from the later stage, down and along the line toward the earlier one
+  // the retry ends and the turn too: no dot on the loop any more
+  await finish($, 'b2', PASS)
+  const idle = await mountLive($)
+  expect((await liveTexts(idle)).some(y => LART.test(y) && y.includes('▲') && y.includes('●'))).toBe(false)
+  expect(await colorOf(idle, /^ *↻ retry 1/)).toBe('success')
+  await idle.unmount()
+})
+
+test('spawn on use: before a mode is known only triage shows; a stage appears with its first agent', async ($, on) => {
+  await boot($, on, { route: verdict('orchestrate') })
+  await $.prompt.submit({ text: PROMPT })
+  const boxes = async () => (await texts($, 100)).filter(x => BOX.test(x)).map(x => x.slice(2))
+  expect(await boxes()).toEqual(['triage']) // sizing: no mode
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  expect(await boxes()).toEqual(['triage', 'plan']) // the route's entry as the dim next box
+  let t = await texts($, 100)
+  expect(t.includes('next')).toBe(true)
+  expect(t.some(x => /^◌ plan$/.test(x))).toBe(true)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  expect(await boxes()).toEqual(['triage', 'plan', 'build'])
+  expect((await texts($, 100)).includes('next')).toBe(false)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  expect(await boxes()).toEqual(['triage', 'plan', 'build', 'review'])
+  await finish($, 'b1', PASS)
+  await finish($, 'r1', PASS)
+  await spawnWith($, 'm1', 'MERGE', INTEG)
+  expect(await boxes()).toEqual(['triage', 'plan', 'build', 'review', 'merge'])
+  await finish($, 'm1', PASS)
+  await $.turn.complete(mainDone('answer'))
+  t = await texts($, 100)
+  expect(t.includes('skipped')).toBe(false)
+})
+
+test('spawn on use: plain and reviewed draw the build as the session\'s own work and skip the rest', async ($, on) => {
+  await boot($, on, { route: verdict('reviewed') })
+  await $.prompt.submit({ text: PROMPT })
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  const boxes = async () => (await texts($, 100)).filter(x => BOX.test(x)).map(x => x.slice(2))
+  expect(await boxes()).toEqual(['triage', 'build'])
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  expect(await boxes()).toEqual(['triage', 'build', 'review'])
+  expect((await texts($, 100)).includes('this session')).toBe(true)
+  expect((await texts($, 100)).includes('skipped')).toBe(false)
+})
+
+test('slice diagram: trunk forks, bus stubs, the bus and the connector under a short layer take each card\'s colour; the trunk dot stops at the lowest running card', async ($, on) => {
+  const clock = await clocked($, on)
+  await spawnWith($, 'a1', brief('s1'), IMPL)
+  await finish($, 'a1', PASS)
+  await spawnWith($, 'a2', brief('s2'), IMPL) // running, independent of s1
+  await spawnWith($, 'a3', brief('s3', 's1'), IMPL) // depends on s1 (layer 1)
+  await finish($, 'a3', FAIL)
+  const ui = await mountLive($)
+  const t = await liveTexts(ui)
+  expect(t.some(x => /^◆ s1 /.test(x))).toBe(true)
+  // layer 0 [s1, s2]: the fork into s1 is green (passed), the last one into s2 amber (running)
+  expect(await colorOf(ui, /^ ├▶$/)).toBe('success')
+  expect(await colorsOf(ui, /^ └▶$/)).toContain('warning')
+  // the connector under the shorter layer 1 (s3, failed) is red, and the bus: the stub of s2 amber, of s3 red, the rest of it the best colour
+  expect(await colorsOf(ui, /^ {5,}│$/)).toContain('error')
+  expect(await colorsOf(ui, /^┘$/)).toEqual(['error'])
+  expect((await colorsOf(ui, /└[─┬]+$/)).includes('warning')).toBe(true)
+  await ui.unmount()
+  // the trunk dot: layer 0 is s1 and s2 (running, the last fork): the dot visits rail rows above that fork only, never a fork row
+  const rowsSeen = new Set<number>()
+  let lowest = -1
+  let fork = -1
+  for (let f = 0; f < 12; f++) {
+    const u = await mountLive($)
+    const trunk = (await liveTexts(u)).filter(x => /^ [│●] $|^ [├└]▶$/.test(x))
+    lowest = trunk.indexOf(' └▶')
+    fork = trunk.indexOf(' ├▶')
+    trunk.forEach((x, i) => x === ' ● ' && rowsSeen.add(i))
+    await u.unmount()
+    await clock.advance(250)
+  }
+  expect(lowest).toBeGreaterThan(fork)
+  expect([...rowsSeen].every(r => r < lowest && r !== fork)).toBe(true)
+  expect(Math.max(...rowsSeen)).toBe(lowest - 1) // it reaches the row above the running card and no further
+  expect(rowsSeen.size).toBeGreaterThan(2)
+})
+
+test('slice diagram: a running first card ends the trunk dot above its own fork; later cards get none', async ($, on) => {
+  const clock = await clocked($, on)
+  await spawnWith($, 'a2', brief('s2'), IMPL) // first card, running
+  await spawnWith($, 'a1', brief('s1'), IMPL)
+  await finish($, 'a1', PASS)
+  const rowsSeen = new Set<number>()
+  for (let f = 0; f < 8; f++) {
+    const u = await mountLive($)
+    const trunk = (await liveTexts(u)).filter(x => /^ [│●] $|^ [├└]▶$/.test(x))
+    trunk.forEach((x, i) => x === ' ● ' && rowsSeen.add(i))
+    await u.unmount()
+    await clock.advance(250)
+  }
+  expect([...rowsSeen].every(r => r < 2)).toBe(true) // the running card's fork is on row 2
+  expect(rowsSeen.size).toBe(2)
+})
+
+test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', async ($, on) => {
+  await boot($, on, { route: verdict('orchestrate') })
+  await $.prompt.submit({ text: PROMPT })
+  const WIDE = [24, 28, 32, 36, 39, 40, 44, 52, 60, 64, 80, 99, 100, 120, 140]
+  const check = async (want: string[]) => {
+    for (const columns of WIDE) {
+      const t = await texts($, columns)
+      expect(t.filter(x => BOX.test(x)).map(x => x.slice(2))).toEqual(want)
+      expect(t.includes('skipped')).toBe(false)
+      const art = t.filter(x => LART.test(x))
+      expect(art.length).toBeGreaterThan(0)
+      expect(Math.max(...art.map(x => x.length))).toBeLessThanOrEqual(columns)
+      expect(t.some(x => x.includes('sign off'))).toBe(true)
+    }
+  }
+  await check(['triage']) // 1
+  await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
+  await check(['triage', 'plan']) // 2
+  await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
+  await check(['triage', 'plan', 'plan review']) // 3
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await check(['triage', 'plan', 'plan review', 'build']) // 4
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await check(['triage', 'plan', 'plan review', 'build', 'review']) // 5
+  await spawnWith($, 'm1', 'MERGE', INTEG)
+  await check(['triage', 'plan', 'plan review', 'build', 'review', 'merge']) // 6
+  await finish($, 'p1', PASS)
+  await finish($, 'b1', PASS)
+  await finish($, 'r1', PASS)
+  await finish($, 'm1', PASS)
+  await $.turn.complete(mainDone('answer'))
+  await check(['triage', 'plan', 'plan review', 'build', 'review', 'merge'])
+})
+
+// ---- progress through the orchestrator's plan, and what the session used ----
+const PLANNED = [
+  'PLAN REVIEW',
+  'SLICE: plan',
+  'Task: add the plan bar',
+  '- **SLICE:** s1 — shared types',
+  'FILES: types.ts',
+  'DEPENDS: none',
+  'SLICE: s2',
+  'FILES: api.ts',
+  'DEPENDS: s1',
+  'GOAL: the handler',
+  'SLICE: s3',
+  'GOAL: docs',
+  'SLICE: s1',
+  'GOAL: not this one: s1 has its goal',
+].join('\n')
+const barOf = (t: string[]) => t.filter(x => /^━+$/.test(x))
+
+test('progress: the PLAN REVIEW brief lists the planned slices; each moves along as its attempts run, pass and fail', async ($, on) => {
+  await boot($, on)
+  expect((await texts($)).some(x => x.startsWith('progress'))).toBe(false) // no plan, no slices: no bar
+  await spawnWith($, 'p1', PLANNED, REVQ)
+  let t = await texts($)
+  expect(t.includes('progress · 0/3 slices · 0%')).toBe(true)
+  // in plan order, with their goals; "plan" (the review's own SLICE line) is not a slice, and a repeated slice keeps its first goal
+  const steps = t.filter(x => /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s\d/.test(x))
+  expect(steps.slice(0, 3)).toEqual(['◌ s1 · shared types', '◌ s2 · the handler', '◌ s3 · docs'])
+  expect(barOf(t).join('')).toBe('━'.repeat(40))
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await spawnWith($, 'b2', brief('s2', 's1'), IMPL)
+  await spawnWith($, 'b3', brief('s3'), IMPL)
+  await finish($, 'b3', FAIL)
+  const ui = await mountLive($)
+  t = await liveTexts(ui)
+  expect(t.includes('progress · 1/3 slices · 33% · 1 running · 1 failed')).toBe(true)
+  // the bar: one third per slice, in plan order: s1 passed, s2 runs, s3 failed
+  const runs = ((await ui.findAll({ type: 'Text' })) as any[]).filter(x => /^━+$/.test(x.text ?? '')).map(x => [x.text.length, x.props?.color])
+  expect(runs).toEqual([[14, 'success'], [13, 'warning'], [13, 'error']])
+  await ui.unmount()
+  // a retry of s3 passes its review: the slice is done; a slice outside the plan joins the bar at the end
+  await spawnWith($, 'b4', brief('s3'), IMPL)
+  await finish($, 'b4', PASS)
+  await spawnWith($, 'r4', 'SLICE: s3', REVQ)
+  await finish($, 'r4', PASS)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'b5', brief('s4'), IMPL)
+  t = await texts($)
+  expect(t.includes('progress · 3/4 slices · 75% · 1 running')).toBe(true)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s4$/.test(x))).toBe(true)
+  expect(t.includes('◆ s2 · the handler')).toBe(true) // built, not reviewed yet: counted done, drawn as the cards draw it
+})
+
+test('progress: a re-plan that names slices replaces the plan, one that names none keeps it, and a new run drops it', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await boot($, on, { clock })
+  await spawnWith($, 'p1', PLANNED, REVQ)
+  await finish($, 'p1', FAIL)
+  await spawnWith($, 'p2', 'PLAN REVIEW\nSLICE: plan\nthe same plan, fixed', REVQ)
+  expect((await texts($)).includes('progress · 0/3 slices · 0%')).toBe(true)
+  await finish($, 'p2', FAIL)
+  await spawnWith($, 'p3', 'PLAN REVIEW\n* SLICE: `a1` | one\n* SLICE: a2: two', REVQ)
+  let t = await texts($)
+  expect(t.includes('progress · 0/2 slices · 0%')).toBe(true)
+  expect(t.includes('◌ a1 · one')).toBe(true)
+  expect(t.includes('◌ a2 · two')).toBe(true)
+  await finish($, 'p3', PASS)
+  await clock.advance(130_000) // nothing runs and no prompt is open: the next spawn starts a new run
+  await spawnWith($, 'b1', brief('z1'), IMPL)
+  t = await texts($)
+  expect(t.includes('progress · 0/1 slices · 0% · 1 running')).toBe(true)
+  expect(t.some(x => /a1|a2/.test(x))).toBe(false)
+})
+
+test('progress: at every width the bar fits and the plan lines are cut, not wrapped; more than 8 slices end in +N more', async ($, on) => {
+  await boot($, on)
+  const many = ['PLAN REVIEW', ...Array.from({ length: 10 }, (_, i) => `SLICE: s${i + 1}\nGOAL: ${'a long goal '.repeat(6)}`)].join('\n')
+  await spawnWith($, 'p1', many, REVQ)
+  for (const columns of [16, 24, 32, 44, 64, 100, 140]) {
+    const t = await texts($, columns)
+    expect(barOf(t).join('').length).toBe(Math.max(10, Math.min(columns - 2, 40)))
+    expect(t.filter(x => /^◌ s\d+/.test(x)).length).toBe(8)
+    expect(t.includes('+2 more')).toBe(true)
+  }
+  const tall = await texts($, 100, 200)
+  expect(tall.some(x => /scroll/.test(x))).toBe(false)
+  const short = await texts($, 100, 40)
+  expect(short.some(x => /scroll/.test(x))).toBe(true) // the bar and its lines count toward the scroll hint
+})
+
+// Core answers: Write is denied, a read of broken.ts errors, every other call runs. Registered before boot starts the session.
+const coreUse = (on: any) => {
+  on('tool.call', (_: unknown, e: any) => (e.tool === 'Write' ? { deny: 'no' } : e.file_path === '/r/broken.ts' ? { result: 'x', isError: true } : { result: 'ok', text: 'ok' }))
+  on('skill.prompt', (_: unknown, e: any) => ({ text: e.text }))
+}
+const usedOf = (t: string[]) => {
+  const at = t.indexOf('used in this session')
+  return at < 0 ? [] : t.slice(at + 1)
+}
+
+test('used in this session: skills, connectors, agents, tools and files, from calls that ran; a new run keeps it', async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  coreUse(on)
+  await boot($, on, { clock })
+  expect((await texts($)).includes('used in this session')).toBe(false) // nothing used yet
+  const s = $ as any
+  await s.skill.prompt({ skill: 'orchestration:route', text: 'size it', frontmatter: {}, source: 'plugin' })
+  await s.skill.prompt({ skill: 'orchestration:route', text: 'again', frontmatter: {}, source: 'plugin' })
+  await s.skill.prompt({ skill: 'plugin-authoring', text: 'x', frontmatter: {}, source: 'built-in' })
+  await s.tool.call({ tool: 'Read', file_path: '/r/a.ts' })
+  await s.tool.call({ tool: 'Read', file_path: '/r/b.ts' })
+  await s.tool.call({ tool: 'Edit', file_path: '/r/a.ts', old_string: 'x', new_string: 'y' }) // read, then changed: counted as edited only
+  await s.tool.call({ tool: 'Write', file_path: '/r/denied.ts', content: 'x' }) // denied: not used
+  await s.tool.call({ tool: 'Read', file_path: '/r/broken.ts' }) // an error: not used
+  await s.tool.call({ tool: 'Bash', command: 'ls' })
+  await s.tool.call({ tool: 'Bash', command: 'pwd' })
+  await s.tool.call({ tool: 'mcp__claude_ai_Google_Drive__search_files', query: 'q' })
+  await s.tool.call({ tool: 'mcp__notion__notion-search', query: 'q' })
+  await s.tool.call({ tool: 'Skill', skill: 'x' }) // counted by skill.prompt, not as a tool
+  await spawnWith($, 'e1', 'look around', 'Explore') // any agent type is listed, not only the four roles
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await s.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'b1' }) // an agent's tools count too
+  await s.tool.call({ tool: NAME, ...VERDICT }) // the pane's own route tool is a connector too
+  const want = [
+    'skills     ', 'orchestration:route · plugin-authoring',
+    'connectors ', 'Google Drive · notion · orchestration-dashboard',
+    'agents     ', 'Explore 1 · implementer 1',
+    'tools      ', 'Read 2 · Bash 2 · Edit 1 · Grep 1', // broken.ts errored, so two reads ran
+    'edited     ', 'a.ts',
+    'read       ', '1 file',
+  ]
+  expect(usedOf(await texts($))).toEqual(want)
+  // a new run drops the diagram and the plan, not what the session used
+  await finish($, 'b1', PASS)
+  await clock.advance(130_000)
+  await spawnWith($, 'b2', brief('s9'), IMPL)
+  const t = await texts($)
+  expect(t.some(x => /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1$/.test(x))).toBe(false)
+  expect(usedOf(t).slice(4, 6)).toEqual(['agents     ', 'implementer 2 · Explore 1'])
+})
+
+test('used in this session: on a narrow pane a row keeps as many names as fit and ends in +N', async ($, on) => {
+  coreUse(on)
+  await boot($, on)
+  for (const f of ['alpha.ts', 'beta.ts', 'gamma.ts', 'delta.ts', 'epsilon.ts']) await ($ as any).tool.call({ tool: 'Edit', file_path: `/r/${f}`, old_string: 'a', new_string: 'b' })
+  for (const columns of [24, 32, 44, 100]) {
+    const rows = usedOf(await texts($, columns))
+    const edited = rows[rows.indexOf('edited     ') + 1] as string
+    expect(edited.startsWith('epsilon.ts')).toBe(true) // the latest first
+    expect(11 + edited.length).toBeLessThanOrEqual(Math.max(columns - 1, 11 + 'epsilon.ts · +4'.length))
+    if (columns < 44) expect(/\+\d$/.test(edited)).toBe(true)
+  }
+  expect(usedOf(await texts($, 100))).toContain('epsilon.ts · delta.ts · gamma.ts · beta.ts · alpha.ts')
 })

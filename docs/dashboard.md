@@ -8,7 +8,7 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 - It also opens when the first orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of an `npm run route` Bash call in the main session).
 - `/orchestration` opens it focused, so the arrow keys work at once.
 - A pane nobody asked for seats only from 144 columns. On a narrower terminal a toast (shown once per run) says to type `/orchestration`.
-- What starts a new run (the old agents, log, verdict and input are dropped; `newRun`):
+- What starts a new run (the old agents, log, verdict, input and plan are dropped; what the session used is kept; `newRun`):
   - A prompt you type while no agent runs and the main session is not still working on an earlier prompt: it starts a new run at once, however soon after the last agent ended (new input is new work; `newRun` with `force`).
   - A first agent when nothing runs, the list already holds agents and the last agent ended 2 minutes or more earlier (`newRun` runs on a spawn only when the agent list is not empty, so with no agent yet an earlier input and verdict are not dropped; a typed prompt does reset).
   - Not counted as work: notifications and peer messages (see the `NOT_THE_PERSON` origins above) neither start a run nor open the pane.
@@ -24,9 +24,24 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 ## Sections, top to bottom
 
 1. **Model legend.** One coloured square per model in use.
-2. **Input box.** The first non-blank line of the prompt (cut to 120 characters), shown from the submit, with or without agents.
-3. **Orchestrator box.** The orchestrator's model, a state line (dispatching with the count of running agents, also "0 running" between two waves while the main turn works, signed off with N failed, passed with N fixed on the way, or all agents passed), and the agent count, total tokens and elapsed time. With no agents the state line reads "working in this session" while the main turn runs, then "answered in this session", or "stopped before an answer" when the main turn ended with a reason other than an answer.
-4. **Triage box.** Shows the mode (plain, reviewed or orchestrate). Three sources:
+2. **Progress.** Drawn once the run has a slice: a heading `progress · <done>/<total> slices · <percent>%` (with `· N running` and `· N failed` when there are any), a bar and one line per slice.
+   - The slices are the plan's, in plan order: every `SLICE:` line of the latest `PLAN REVIEW` brief that names one (`planOf`), except the review's own `SLICE: plan`. A slice's goal is the rest of its `SLICE:` line, else the first `GOAL:` line under it. A slice named twice keeps its first goal. Markdown bullets, bold and backticks around the id are accepted, and a trailing `:` on the id is dropped. A later plan review that names slices replaces the plan (a re-plan); one that names none keeps it. A new run drops it.
+   - Then any slice that started outside the plan (a slice with no plan review, the light path, or one added later), in the order the diagram knows it, including a queued dependency while the run is going.
+   - Each slice is counted at its latest attempt, with the card states: done once its review passed, or once it was built with no reviewer (`◆`), or when a later slice made its failure good. Queued until an agent of it starts.
+   - The bar is 40 cells, or the pane width less 2 (at least 10), shared evenly by the slices in plan order: done green, running amber (pulsing), failed red, still to do grey. It is drawn in `━`, so it is never taken for flow-line art.
+   - Up to 8 slice lines (`<glyph> <id> · <goal>`, cut to the width), then `+N more`.
+   - The orchestrator is told to write each planned slice in the PLAN REVIEW brief as the `SLICE:`, `FILES:`, `DEPENDS:` and `GOAL:` lines its brief will start with (`.claude/agents/orchestrator.md` step 2a, the route skill and the SessionStart nudge). Without them the bar still follows the slices as they start, but the total grows as they do.
+
+   ```text
+   progress · 1/3 slices · 33% · 1 running · 1 failed
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   ✔ s1 · shared types
+   ⠋ s2 · the handler
+   ✖ s3 · docs
+   ```
+3. **Input box.** The first non-blank line of the prompt (cut to 120 characters), shown from the submit, with or without agents.
+4. **Orchestrator box.** The orchestrator's model, a state line (dispatching with the count of running agents, also "0 running" between two waves while the main turn works, signed off with N failed, passed with N fixed on the way, or all agents passed), and the agent count, total tokens and elapsed time. With no agents the state line reads "working in this session" while the main turn runs, then "answered in this session", or "stopped before an answer" when the main turn ended with a reason other than an answer.
+5. **Triage box.** Shows the mode (plain, reviewed or orchestrate). Three sources:
    - A recorded route verdict, from the `route` tool or from a captured `npm run route`: the mode, the facts (files, lines, slices, risky, code) and the reason. The Bash capture takes any main-session Bash call that matches `npm run route` (also `npm run --silent route`); the orchestrator agent cannot use it because its tool list has no Bash (`.claude/agents/orchestrator.md`), not because of the code.
    - Otherwise, with agents, the mode is inferred from the agents (an implementer, integrator or plan review means orchestrate; a reviewer alone means reviewed; any other agent means orchestrate) and the box says "(inferred from the agents)". Nothing in the code forces it, but under the orchestrator the triage is inferred: its tool list has neither Bash nor the `route` tool, so no verdict is recorded there.
    - With no agents and no verdict, the box reads "sizing…" while the main turn runs, then the mode "plain" with "(inferred: no agents ran)".
@@ -53,25 +68,58 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
           └──────────────────────────────────────────────────┐
                                                              ▼
    ```
-5. **Pipeline stages.** Six boxes: triage, plan, plan review, build, review, merge. Each has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). A link from the active route box enters the first stage the route uses: plan for orchestrate, build for plain and reviewed. While the run works, a dot moves along it; the link is amber while work runs, otherwise the status colour once the run is signed off, grey before that. From 100 columns build is in the first row and the link drops straight onto it. Below 100 columns the stage row wraps and build is in the second row, so the link runs down a lane at the right edge of the first row and turns into the build box. Under 16 columns the link goes to the triage box (stage 0) instead. Arrows join the boxes, with a dot moving along the arrow into a running stage. Between rows a return rail runs from the last box back to the first of the next row. The orchestrator plans itself, so the plan stage turns done (marked "orchestrator") once a plan review or a build has started. Merge reads "skipped" once the run is signed off with no integrator having run. Stages the mode does not use read "skipped" (plain: plan, plan review, review, merge; reviewed: plan, plan review, merge), and build reads "this session" while the main session does the work.
-6. **Slice diagram.** One card per slice, in columns by dependency layer (a slice sits right of everything it waits for).
-   - A rail on the left forks an arrowhead into every card of the first layer.
+6. **Pipeline stages.** A box is drawn only once its stage is used; up to six: triage, plan, plan review, build, review, merge. Triage is always drawn. The stage the route enters shows dim ("next") once a mode is known. Every other stage appears once an agent of it started, or once the main session does its work: build reads "this session" while the main session builds in plain or reviewed, and plan turns done (marked "orchestrator") once a plan review or a build has started, because the orchestrator plans itself. A stage the run does not use is not drawn at all (nothing reads "skipped"); a stage that is not in the mode's usual path but has agents is still drawn. Each box has a glyph, one coloured cell per task (the most recent that fit, then `+N`; dim dots when empty), and a line with done/total and the model families (the triage box shows the mode). A link from the active route box enters the first stage the route uses: plan for orchestrate, build for plain and reviewed. The stage row holds up to 6 boxes from 100 columns, 3 from 40, 2 below that, counted over the drawn boxes, so the layout shifts as boxes appear. When the entry stage lands in the second row, the link runs down a lane at the right edge of the first row and turns into the box. Under 16 columns the link goes to the triage box (stage 0) instead. Arrows join the drawn boxes, and between rows a return rail runs from the last box back to the first of the next row. Loop-back connectors under the stage row show retries (see "Loop-back connectors" below).
+
+   **Arrows follow active work.** The active stages are those with a running agent, and build while the main session works in plain or reviewed (a running retry or re-plan also makes its target stage active). With the main turn working and nothing running, the furthest stage used so far is active.
+   - The route link and the stage arrows and rails, from the entry stage up to the furthest active stage, are amber with a dot moving along them. Arrows past it are grey.
+   - With nothing live (idle or signed off) there is no dot: each arrow takes its stage's final colour, green for passed or done, red for failed, grey otherwise.
+   - A running retry or re-plan lights its loop-back amber and bold; on one stage row the dot runs backward along it. A loop across rows gets no dot, only the bold amber. A loop is drawn only when both of its ends are drawn.
+7. **Slice diagram.** One card per slice, in columns by dependency layer (a slice sits right of everything it waits for).
+   - A rail on the left forks an arrowhead into every card of the first layer. The rail, forks and down connectors are coloured per card (amber running, red failed, green passed, grey queued); the dot runs only down to the lowest running card.
    - Routed box-drawing lines join each layer to the next, entering the target's middle with an arrowhead.
    - A dot travels along the edges whose target is running.
-   - A bus under the diagram joins the final slices (those nothing depends on) into one arrow to the sign-off box.
+   - A retry is its own card (see "Attempts" below).
+   - A bus under the diagram joins the final slices (those nothing depends on) into one arrow to the sign-off box. Each stub has its card's colour; the bus and its arrow take the best of them, in the order running > failed > passed > queued.
    - A card shows the state glyph, slice id and time; build and review chips; the running agent's latest tool, else the token count or "queued"; and a `◀` line per dependency (up to 3, then "+N more"), green once satisfied. A dependency not yet launched appears as a queued card while the run is going; once nothing runs and the main turn has ended those cards are left out (`nodesOf` with `ghosts` false), and the `◀` line stays, grey.
-7. **Sign-off box.** "waiting for agents" until the run is signed off (see "Sign-off" below), then the passed, failed and fixed counts. With no agents it reads "waiting for the reply", then "answered in this session" or "stopped". A failure counts as fixed (grey `◆`, "fixed by <slice>" in the tasks table) when a later slice that depends on the failed slice started after it ended and passed, or, for an agent with no slice (a plan review), when a later slice-less agent with the same role and label passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
-8. **Tasks table.** One row per slice (or per agent without a slice): glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading (plain or in bold) is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
-9. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
-10. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too.
+
+   **Attempts.** A card is one attempt of a slice (`nodesOf`). A new attempt starts when a non-reviewer agent of the slice starts at or after the end of a failed agent of that slice; reviewers stay in the attempt they review. The first attempt keeps the slice id; later ones are `X ↻2`, `X ↻3`.
+   - Each retry sits in the layer right of the attempt before it and is joined to it by a retry connector, with a `↻` next to the arrowhead. The connector is amber while the retry runs, green once it passed and red while it failed or is unresolved (`retryTone`).
+   - A slice that depends on a retried slice waits for its latest attempt and connects from it; its `◀` line names the slice.
+   - A card of a retried slice carries a line `attempt k/n`, and a `◀ retry of X` line first among the `◀` lines (same colour as the retry connector). The `◀` lines show up to 3, then "+N more".
+   - A first attempt that starts at or after the first failure end in the run (any agent) carries `✚ new` on that line: a slice added by a re-plan.
+   - A resumed agent is a new attempt too. An `agent.spawn` for an id that already has a record adds a new record, and a turn that completes for a record that already ended adds a new record (its start is the old end, or the latest end of another agent of the slice if later); the old record stays as history. Tool updates and completions go to the latest still-running record of an id, else the latest. Because the new record starts after the failed one ended, it becomes a retry attempt.
+8. **Sign-off box.** "waiting for agents" until the run is signed off (see "Sign-off" below), then the passed, failed and fixed counts. With no agents it reads "waiting for the reply", then "answered in this session" or "stopped". A failure counts as fixed (grey `◆`, "fixed by <card>" in the tasks table, e.g. "fixed by X ↻2") when a later attempt of the same slice passed, or else a later slice that depends on the failed slice started after it ended and passed, or, for an agent with no slice (a plan review), when a later slice-less agent with the same role and label passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
+9. **Tasks table.** One row per attempt of a slice (the first keeps the slice id, a retry is `X ↻2`), or per agent without a slice: glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading (plain or in bold) is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
+10. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
+11. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too. A started agent that opens a retry attempt is logged as `retry k of X · <label> started …`; a plan review that starts after a failed one ended is logged as `re-plan · …`. A resumed run that fires no spawn event logs its start entry when its turn completes.
+12. **Used in this session.** What the whole session used, like the Claude desktop app's list, one row per kind with as many names as fit and then `+N`. It is kept across runs (a new run does not reset it) and drawn once anything was used, also before any agent.
+    - `skills`: skills expanded for the model (`skill.prompt`: a `/name` command, the Skill tool, or a worker's preloaded skill), in first-use order.
+    - `connectors`: MCP servers whose tools ran, named from the tool name (`mcp__claude_ai_Google_Drive__search_files` is "Google Drive"; the `claude_ai_` and `plugin_` prefixes go, underscores become spaces). The pane's own `route` tool counts.
+    - `agents`: agents started, by bare type and count, any type (not only the four roles).
+    - `tools`: built-in tools by count, most used first. The Agent and Skill tools are left out (they are the agents and skills rows), and so are MCP tools (connectors).
+    - `edited`: base names of files Edit, Write or NotebookEdit changed, the latest first. `read`: how many other files Read read; a file read and then changed counts only as edited.
+    - A call counts once it ran: a denied call or one that returned an error is left out. Calls of the main session and of every agent count.
+
+## Loop-back connectors
+
+Under the stage row (`loops` in `register.tsx`) a connector is drawn for each of these, only while its condition holds:
+
+| Label | From, to | Condition | Colour |
+| --- | --- | --- | --- |
+| `↻ re-plan` | plan review to plan | a plan review started after a failed plan review ended | the latest such review: amber running, green passed, red failed |
+| `↻ retry N` | review to build | N slices have more than one attempt | amber if any latest attempt runs, green if all passed or done, otherwise red |
+| `↻ rebuild` | merge to build | an integrator failed and an implementer started after it ended | the implementers started after it: amber if any runs, green if all passed, otherwise red |
+
+- A connector is drawn only when both of its boxes are drawn. When both are in the same stage row, it takes 3 rows: a `▲` over the target, a `└──┘` line and the label. When they are in different rows (fewer boxes per row on a narrow pane), it is one line, "<label> (back to <stage>)", under the row of its source stage, bold amber while live but with no dot. Lines are cut to the row width.
+- Their rows count toward whether the pane needs the scroll hint.
 
 ## Sign-off
 
-- With a typed prompt (the run has a `work` line): signed off only when no agent runs and the main turn has ended (`signed`, `workOpen`). Between two waves of agents the orchestrator box reads "dispatching… 0 running", the sign-off box "waiting for agents", `merge` is not "skipped" and queued ghost cards stay.
+- With a typed prompt (the run has a `work` line): signed off only when no agent runs and the main turn has ended (`signed`, `workOpen`). Between two waves of agents the orchestrator box reads "dispatching… 0 running", the sign-off box "waiting for agents", queued ghost cards stay.
 - With no typed prompt (agents without one, or background agents that wake the main session): signed off as soon as no agent runs. A flicker to signed off between waves can remain; this is a known limit.
 - If the main turn never reports its end and the last agent ended more than 10 minutes ago (`STALE_MS`), the work counts as ended: the pane redraws once more and shows signed off. A turn that is truly busy for over 10 minutes after the last agent ended is treated the same, and a spawn after that starts a clean run.
 
-A run with no agents (research or simple work that stays in the main session) shows the input box, the orchestrator box, the triage box, the stage boxes and the sign-off box; the tasks table, usage bar and slice diagram need agents. Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, triage to the route boxes, the chosen route to its first stage, and the stages to the slice diagram or the sign-off box.
+A run with no agents (research or simple work that stays in the main session) shows the input box, the orchestrator box, the triage box, the stage boxes drawn so far (triage, the dim entry stage and build as "this session") and the sign-off box; the tasks table, usage bar and slice diagram need agents. Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, triage to the route boxes, the chosen route to its first stage, and the stages to the slice diagram or the sign-off box. While the main turn works, the link and the arrows up to the active stage (build in plain or reviewed, the entry stage plan in orchestrate) are amber with a moving dot.
 
 ## Glyphs and colours
 
@@ -82,8 +130,11 @@ A run with no agents (research or simple work that stays in the main session) sh
 | `✖` | failed | red |
 | `◆` | finished with no STATUS line | grey |
 | `◌` | queued | grey |
+| `━` | the progress bar, one share per slice | green done, amber running, red failed, grey to do |
 | `◉` | the route triage chose | status colour |
 | `○` | a route not taken (or still being sized) | dim |
+| `↻` | a retry connector, a retry card's connector, a loop-back label | amber running, green passed, red failed |
+| `✚ new` | a slice added by a re-plan (on the card's attempt line) | dim |
 
 Flow lines are amber while work moves through them, green once what feeds them is done, grey before that. Models are coloured by family: opus magenta, sonnet yellow, haiku cyan, fable green, others white. Triage modes: plain grey, reviewed yellow, orchestrate cyan. A card is outlined with a double border for 2 seconds after an agent finishes.
 
@@ -92,6 +143,8 @@ Flow lines are amber while work moves through them, green once what feeds them i
 - The `SLICE:`, `FILES:` and `DEPENDS:` lines of each agent brief (matched on any line, with the multiline flag) give a slice's id, its file count and its dependencies. A brief that starts with `PLAN REVIEW` (only this one must be at the start) is labelled "plan review" and belongs to the plan review stage, whatever `SLICE:` line it also carries: it is never a slice card.
 - The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the report (its last `STATUS: pass` or `STATUS: fail`; none means done), the token usage and the end time. Tool calls give a running agent's latest tool.
 - The route verdict comes from the `route` tool, or from the result of a main-loop `npm run route` call.
+- The plan comes from the `SLICE:` and `GOAL:` lines of the latest `PLAN REVIEW` brief that names a slice (see Progress above).
+- "Used in this session" comes from `skill.prompt`, `agent.spawn` and every `tool.call` (after it ran, from its result).
 - The input box and the no-agent states come from `prompt.submit` and the main thread's `turn.complete` (reason `answer` is answered; any other reason is stopped).
 
 ## The route tool
@@ -114,5 +167,8 @@ Flow lines are amber while work moves through them, green once what feeds them i
 - Claude Code reports no live token count for a running agent, so a task's tokens appear when the agent finishes.
 - The orchestrator's own tokens are not counted.
 - A dependency that skips a layer shows only as a `◀` line on its card, not as a drawn edge.
+- Attempts are told apart by timing: a non-reviewer agent starting at or after a failed agent's end. A retry that starts while the failed agent is still running joins that card.
 - Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and draw nothing.
+- The progress total is the plan's only when the PLAN REVIEW brief lists the slices as `SLICE:` lines; free-form plans fall back to the slices seen so far.
+- "Used in this session" keeps the last 300 skills, connectors and files of each list, and shows file base names, so two files with the same name show twice.
 - The stacked bar is at most 40 cells wide and at least 10, and each model with tokens needs one cell. It would overflow only with more such models than cells, which in practice means a very large number of distinct models.
