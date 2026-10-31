@@ -1,0 +1,7 @@
+Reviewed the toml slice.
+
+STATUS: pass
+C1: pass (cmd) npm test -> 42 pass, 0 fail
+C2: pass (read) package.json:12
+C3: pass (cmd) node -e "parse('')" → {}
+OPEN: none

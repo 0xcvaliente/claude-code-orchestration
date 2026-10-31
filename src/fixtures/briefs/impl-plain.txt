@@ -1,0 +1,6 @@
+SLICE: toml
+FILES: toolkit/toml.py, ./tests/test_toml.py
+DEPENDS: none
+
+GOAL: parse TOML tables.
+Acceptance: pytest -q passes.

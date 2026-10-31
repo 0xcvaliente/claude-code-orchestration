@@ -1,0 +1,4 @@
+STATUS: pass
+C1: pass (cmd) npm test -> ok
+STATUS: fail
+C1: fail the test runner skipped brief.test.mjs

@@ -1,0 +1,606 @@
+{
+  "empty.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-light.txt": {
+    "header": {
+      "slice": "fix-typo",
+      "files": [
+        "README.md"
+      ],
+      "depends": [],
+      "path": "light",
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-malformed.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-old-style.txt": {
+    "header": {
+      "slice": "s1",
+      "files": [
+        "app.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-plain.txt": {
+    "header": {
+      "slice": "toml",
+      "files": [
+        "toolkit/toml.py",
+        "tests/test_toml.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-risky-checks.txt": {
+    "header": {
+      "slice": "auth",
+      "files": [
+        "src/auth.ts",
+        "src/session/"
+      ],
+      "depends": [
+        "A0",
+        "A1"
+      ],
+      "path": null,
+      "risky": true,
+      "checks": [
+        "C1",
+        "C3"
+      ],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "impl-workflow.txt": {
+    "header": {
+      "slice": "s2",
+      "files": [
+        "lib/a.js"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": true
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "plan-constraints.txt": {
+    "header": {
+      "slice": "toml",
+      "files": [
+        "toolkit/toml.py",
+        "tests/test_toml.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": true,
+      "checks": [
+        "C1",
+        "C2"
+      ],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": true,
+      "replan": null,
+      "constraints": {
+        "C1": "parsing never throws on malformed input",
+        "C2": "no new dependencies",
+        "C3": "old briefs still parse"
+      },
+      "slices": [
+        {
+          "slice": "toml",
+          "files": [
+            "toolkit/toml.py",
+            "tests/test_toml.py"
+          ],
+          "depends": [],
+          "goal": "TOML reader",
+          "risky": false,
+          "checks": [
+            "C1",
+            "C2"
+          ]
+        },
+        {
+          "slice": "csv",
+          "files": [
+            "toolkit/csv.py"
+          ],
+          "depends": [
+            "toml"
+          ],
+          "goal": "CSV reader",
+          "risky": true,
+          "checks": [
+            "C3"
+          ]
+        }
+      ]
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "plan-not-first.txt": {
+    "header": {
+      "slice": "plan",
+      "files": [
+        "a.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "plan-old-style.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": true,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "plan-replan.txt": {
+    "header": {
+      "slice": "csv-lite",
+      "files": [
+        "toolkit/csv_lite.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [
+        "C4"
+      ],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": true,
+      "replan": 2,
+      "constraints": {
+        "C4": "keep the old CSV API"
+      },
+      "slices": [
+        {
+          "slice": "csv-lite",
+          "files": [
+            "toolkit/csv_lite.py"
+          ],
+          "depends": [],
+          "goal": "minimal CSV reader",
+          "risky": false,
+          "checks": [
+            "C4"
+          ]
+        }
+      ]
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "reply-blockquote-then-pass.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [
+        "the CSV header case is untested"
+      ],
+      "answers": {}
+    }
+  },
+  "reply-blockquoted.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "reply-fail.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "fail",
+      "open": [
+        "confirm the limit with the user",
+        "C3 not checked: no fixture for old briefs"
+      ],
+      "answers": {
+        "C1": {
+          "verdict": "fail",
+          "mode": null,
+          "detail": "parse('[') throws SyntaxError"
+        },
+        "C2": {
+          "verdict": "pass",
+          "mode": "read",
+          "detail": "https://example.com/spec#deps"
+        }
+      }
+    }
+  },
+  "reply-no-status.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "reply-old-style.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [],
+      "answers": {}
+    }
+  },
+  "reply-pass-answers.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [],
+      "answers": {
+        "C1": {
+          "verdict": "pass",
+          "mode": "cmd",
+          "detail": "npm test -> 42 pass, 0 fail"
+        },
+        "C2": {
+          "verdict": "pass",
+          "mode": "read",
+          "detail": "package.json:12"
+        },
+        "C3": {
+          "verdict": "pass",
+          "mode": "cmd",
+          "detail": "node -e \"parse('')\" -> {}"
+        }
+      }
+    }
+  },
+  "reply-template.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [
+        "unresolved items"
+      ],
+      "answers": {}
+    }
+  },
+  "reply-two-status.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "fail",
+      "open": [],
+      "answers": {
+        "C1": {
+          "verdict": "fail",
+          "mode": null,
+          "detail": "the test runner skipped brief.test.mjs"
+        }
+      }
+    }
+  },
+  "reviewer-brief-old.txt": {
+    "header": {
+      "slice": "toml",
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  },
+  "reviewer-brief.txt": {
+    "header": {
+      "slice": "toml",
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [
+        "C1",
+        "C2"
+      ],
+      "focus": "the error path on malformed input",
+      "workflow": false
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {}
+    }
+  }
+}
