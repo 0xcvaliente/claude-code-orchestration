@@ -48,7 +48,7 @@ const GENERIC = new Set(["code", "review", "design", "web", "best", "practices",
 // Keys that, as the first part of a name, would make a hint line parse as a brief or reply line.
 const BRIEF_KEYS = new Set([
   "slice", "files", "depends", "path", "risky", "checks", "focus", "sources", "read", "kind", "validate", "skills", "goal",
-  "replan", "constraints", "status", "open", "gap", "quote", "orchestration", "plan",
+  "replan", "constraints", "status", "open", "gap", "quote",
 ]);
 const NAME_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/;
 
@@ -75,6 +75,8 @@ const affirmed = (s) =>
 export function safeName(n) {
   if (typeof n !== "string" || n.length > 100 || !NAME_RE.test(n)) return false;
   const first = (n.split(":")[0] ?? "").toLowerCase();
+  // ORCHESTRATION: counts only as "ORCHESTRATION: workflow" (the scripted workflow's marker).
+  if (first === "orchestration" && /^orchestration:workflow\b/i.test(n)) return false;
   return !BRIEF_KEYS.has(first) && !/^c\d+$/.test(first);
 }
 
