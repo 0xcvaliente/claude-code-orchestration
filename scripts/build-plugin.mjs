@@ -76,7 +76,7 @@ cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));
 writeFileSync(join(dash, "hooks", "hooks.json"), `${JSON.stringify({ modules: ["./register.tsx"] }, null, 2)}\n`);
 writeFileSync(
   join(dash, ".claude-plugin", "plugin.json"),
-  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: a flow diagram of the slices, tokens per task, what each reported, and a session log.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts" }, null, 2)}\n`,
+  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts" }, null, 2)}\n`,
 );
 if (check) {
   const stale = ["plugin", "dashboard"].flatMap((name) => {
