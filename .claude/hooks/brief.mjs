@@ -542,8 +542,11 @@ export function stopRecord(ctx) {
 /**
  * @typedef {{
  *   ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[],
- *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[]
+ *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[],
+ *   implAt: number | null
  * }} Review
+ * implAt: the slice's latest implementer launch or stop when the review arrived (its attempt): two reviews with
+ * different implAt have an implementer attempt between them.
  * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
  * must answer. counted: the status for slice finality and gating (docs/brief-grammar.md, "Review counting"): a fail whose
  * gaps are all below ORCH_GAP_MIN (and with no failed answer) counts as a pass and sets lowConfidence; a review
@@ -561,8 +564,8 @@ export function stopRecord(ctx) {
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
  * files: the slice's FILES in the plan (PLAN REVIEW and REPLAN entries, merged), [] when it was not planned.
- * countedFails: reviews whose counted status is fail. stalled: not final, its last two counted reviews are fails that
- * share a key (stallKeys) and no REPLAN plan review started in the run after the second (stalledAt, its time); the
+ * countedFails: reviews whose counted status is fail. stalled: not final, its last two counted reviews are fails of
+ * different implementer attempts that share a key (stallKeys) and no REPLAN plan review started in the run after the second (stalledAt, its time); the
  * fold reports it whatever ORCH_STALL_GATE says, the gates read the switch. signals: doubtSignals with the fold's env.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
@@ -809,7 +812,7 @@ export function foldRuns(records, opts = {}) {
           prev.counted = null;
         }
       }
-      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate });
+      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt });
       s.reviewedSince = true;
     }
     settle(s);
@@ -830,8 +833,14 @@ function finish(run, s, env) {
   s.stalled = false;
   s.stalledAt = null;
   s.stallKeys = [];
-  const [a, b] = counted.slice(-2);
-  if (!s.final && counted.length >= 2 && a && b && countedStatus(a) === "fail" && countedStatus(b) === "fail") {
+  // A retry that failed on the same gap again. b: the latest counted review; a: the latest counted review of an
+  // earlier implementer attempt. Both fail and every counted review between them fails (no pass between); two reviews
+  // of one attempt (a second opinion) never stall on their own.
+  const b = counted.at(-1);
+  const ai = b ? counted.findLastIndex((r) => r.implAt !== b.implAt) : -1;
+  const a = ai >= 0 ? counted[ai] : undefined;
+  const between = counted.slice(ai + 1);
+  if (!s.final && a && b && countedStatus(a) === "fail" && between.every((r) => countedStatus(r) === "fail")) {
     const shared = b.keys.filter((k) => a.keys.includes(k));
     if (shared.length && !run.replans.some((t) => t > b.ts)) {
       s.stalled = true;
