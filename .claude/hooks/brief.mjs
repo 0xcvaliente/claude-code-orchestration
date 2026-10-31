@@ -2,6 +2,7 @@
 // Spec: docs/brief-grammar.md. Imported by the hooks, by tests from a temp copy and possibly from a checkout, so it
 // has no side effects at import, uses Node built-ins only, and no parser throws: malformed or empty input gives
 // empty or null fields. Functions that read files (agentModel) catch every error and return null.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -17,6 +18,12 @@ const STATUS_RE = /^[\s*_#`]*STATUS[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?
 const OPEN_RE = /^[\s*_#`-]*OPEN[\s*_`]*:[\s*_`]*(.*)$/i;
 const ANSWER_RE = /^[\s*_#`-]*(C\d+)[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?![\s*_`]*(?:or|\/|\|)[\s*_`]*(?:pass|fail)\b)[\s*_`]*(.*)$/i;
 const NOTHING = new Set(["", "none", "-", "n/a", "nothing"]);
+// GAP and QUOTE are reply lines too: list and emphasis characters may come before the key, a blockquote never.
+const GAP_RE = /^[\s*_#`-]*GAP[\s*_`]*:[\s*_`]*(.*)$/i;
+const QUOTE_RE = /^[\s*_#`-]*QUOTE[\s*_`]*:[\s*_`]*(.*)$/i;
+const READ_MODES = new Set(["lookup", "extract", "judge"]);
+/** At most this many URLs come back from briefUrls. */
+const MAX_URLS = 50;
 
 /** @param {unknown} text @returns {string} */
 const str = (text) => (typeof text === "string" ? text : "");
@@ -68,6 +75,13 @@ function checkIds(v) {
 const yes = (v) => /^\**[ \t]*yes\b/i.test(v ?? "");
 
 /**
+ * The first word of a value, lower-cased, without quotes, backticks, asterisks, underscores or trailing punctuation
+ * ("Bugfix: x" gives "bugfix"); "" when none.
+ * @param {string | undefined} v
+ */
+const word = (v) => ((v ?? "").replace(/[`'"*_]/g, "").trim().split(/\s+/)[0] ?? "").replace(/[.,;:!?]+$/, "").toLowerCase();
+
+/**
  * @typedef {{
  *   slice: string | null,
  *   files: string[],
@@ -76,13 +90,19 @@ const yes = (v) => /^\**[ \t]*yes\b/i.test(v ?? "");
  *   risky: boolean,
  *   checks: string[],
  *   focus: string | null,
- *   workflow: boolean
+ *   workflow: boolean,
+ *   sources: string[],
+ *   read: 'lookup' | 'extract' | 'judge' | null,
+ *   kind: string | null,
+ *   validate: boolean
  * }} Header
  */
 
 /**
- * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS and the
- * scripted workflow's ORCHESTRATION: workflow marker. Missing lines give null, [] or false.
+ * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS, the scripted
+ * workflow's ORCHESTRATION: workflow marker, and the optional SOURCES (a list, read like FILES), READ (lookup, extract
+ * or judge, else null), KIND (its first word, lower-cased) and VALIDATE (true only for "gaps"). Missing lines give
+ * null, [] or false.
  * @param {unknown} text @returns {Header}
  */
 export function parseHeader(text) {
@@ -96,7 +116,41 @@ export function parseHeader(text) {
     checks: checkIds(field(t, "CHECKS")),
     focus: field(t, "FOCUS") || null,
     workflow: new RegExp(`^${PRE}ORCHESTRATION:\\**[ \\t]*workflow\\b`, "im").test(t),
+    sources: list(field(t, "SOURCES")),
+    read: readMode(field(t, "READ")),
+    kind: word(field(t, "KIND")) || null,
+    validate: word(field(t, "VALIDATE")) === "gaps",
   };
+}
+
+/** READ value: lookup, extract or judge (its first word, any case), else null. @param {string | undefined} v @returns {'lookup' | 'extract' | 'judge' | null} */
+function readMode(v) {
+  const w = word(v);
+  return READ_MODES.has(w) ? /** @type {'lookup' | 'extract' | 'judge'} */ (w) : null;
+}
+
+/**
+ * The http(s) URLs in a text: unique, in order of first appearance, at most 50. Trailing punctuation that ends a
+ * sentence or wraps a link (`).,;:'"]>`) is stripped, except a ) or ] that closes one opened inside the URL.
+ * @param {unknown} text @returns {string[]}
+ */
+export function briefUrls(text) {
+  /** @type {string[]} */
+  const out = [];
+  for (const m of str(text).matchAll(/https?:\/\/[^\s<>"'`]+/gi)) {
+    let u = m[0];
+    for (;;) {
+      const last = u.slice(-1);
+      if (!last || !").,;:'\"]>".includes(last)) break;
+      if (last === ")" && u.split("(").length >= u.split(")").length) break;
+      if (last === "]" && u.split("[").length >= u.split("]").length) break;
+      u = u.slice(0, -1);
+    }
+    if (!/^https?:\/\/[^/?#]/i.test(u) || out.includes(u)) continue;
+    out.push(u);
+    if (out.length >= MAX_URLS) break;
+  }
+  return out;
 }
 
 /** The brief starts with PLAN REVIEW (journal.mjs: leading whitespace allowed, case-sensitive). @param {unknown} text */
@@ -190,7 +244,9 @@ export function parseStatus(text) {
 
 /**
  * @typedef {{ verdict: 'pass' | 'fail', mode: 'cmd' | 'read' | null, detail: string }} Answer
- * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer> }} Reply
+ * @typedef {{ confidence: number | null, text: string }} Gap
+ * @typedef {{ locator: string, text: string }} Quote
+ * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer>, gaps: Gap[], quotes: Quote[] }} Reply
  */
 
 /**
@@ -199,12 +255,16 @@ export function parseStatus(text) {
  * an item, or the next KEY: line) are one item each; "none", "-", "n/a", "nothing" and empty mean nothing open.
  * Answers: `C<n>: pass (cmd) <command> -> <result>`, `C<n>: pass (read) <file:line or URL>`, `C<n>: fail <reason>`;
  * "→" is read as "->" (detail keeps "->"). The first line for an id decides unless a later line for it says fail.
+ * Gaps: `GAP: <0-100> <text>` (a trailing % allowed); a missing or out-of-range number gives confidence null and the
+ * whole rest as text; a gap without text and the template `GAP: <0-100> ...` are dropped. Quotes:
+ * `QUOTE: <locator> | <verbatim text>`, one pair of surrounding quotes stripped from the text; a line without the `|`,
+ * the locator or the text is dropped. Blockquoted GAP and QUOTE lines do not count.
  * @param {unknown} text @returns {Reply}
  */
 export function parseReply(text) {
   const all = lines(str(text));
   /** @type {Reply} */
-  const reply = { status: parseStatus(text), open: [], answers: {} };
+  const reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [] };
 
   const at = all.findIndex((l) => OPEN_RE.test(l));
   if (at !== -1) {
@@ -243,7 +303,39 @@ export function parseReply(text) {
     const prev = reply.answers[id];
     if (!prev || (verdict === "fail" && prev.verdict === "pass")) reply.answers[id] = answer;
   }
+
+  for (const l of all) {
+    const g = GAP_RE.exec(l);
+    const gap = g ? gapOf((g[1] ?? "").replace(/[*_`]+$/, "").trim()) : null;
+    if (gap) reply.gaps.push(gap);
+    const q = QUOTE_RE.exec(l);
+    const quote = q ? quoteOf(q[1] ?? "") : null;
+    if (quote) reply.quotes.push(quote);
+  }
   return reply;
+}
+
+/** The value of a GAP line as a gap; null when it has no text or is the template. @param {string} v @returns {Gap | null} */
+function gapOf(v) {
+  if (!v || /^<\s*0\s*-\s*100\s*>/.test(v)) return null;
+  const m = v.match(/^(\d+)[ \t]*%?(?:\s+|$)(.*)$/);
+  const n = m ? Number(m[1]) : NaN;
+  if (!m || !(n >= 0 && n <= 100)) return { confidence: null, text: v };
+  const t = (m[2] ?? "").trim();
+  return t ? { confidence: n, text: t } : null;
+}
+
+/** Surrounding quote pairs a QUOTE text may carry; one pair is stripped. */
+const QUOTE_PAIRS = ['""', "''", "“”", "‘’", "``"];
+
+/** The value of a QUOTE line as a quote; null when it lacks the `|`, the locator or the text. @param {string} v @returns {Quote | null} */
+function quoteOf(v) {
+  const at = v.indexOf("|");
+  if (at === -1) return null;
+  const locator = v.slice(0, at).trim().replace(/^`+|`+$/g, "").trim();
+  let t = v.slice(at + 1).trim();
+  if (t.length >= 2 && QUOTE_PAIRS.includes(`${t[0]}${t.slice(-1)}`)) t = t.slice(1, -1).trim();
+  return locator && t ? { locator, text: t } : null;
 }
 
 /**
@@ -319,18 +411,25 @@ export function escalationMode(env = {}) {
  *   ts: string, session_id: string, agent_id: string | null, agent_type: string,
  *   slice: string | null, files: string[], depends: string[], path: 'light' | null, risky: boolean, checks: string[],
  *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
- *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] }
+ *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] },
+ *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[]
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
- * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. Older records carry only session_id, agent_id, slice, role.
+ * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
+ * (invalid URLs skipped); in `sources` an http(s) entry becomes its host, a path stays as it is. Older records carry only
+ * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls.
  *
+ * @typedef {{ confidence: number | null, key: string }} GapKey
  * @typedef {{
  *   ts: string, session_id: string, agent_id: string | null, role: string, agent_type?: string, slice: string | null,
  *   status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], run?: number | null,
- *   model?: string | null, checks?: string[], risky?: boolean
+ *   model?: string | null, checks?: string[], risky?: boolean,
+ *   gaps?: GapKey[], quotes?: number, files_touched?: string[]
  * }} StopRecord
  * journal.jsonl, one per SubagentStop of a worker. `slice` comes from the launch record with the same agent_id (or the
- * pending path when the stop arrives first). Older records lack answers, open and run.
+ * pending path when the stop arrives first). Older records lack answers, open and run; records before 0.4.0 lack gaps
+ * and quotes. `gaps` holds each GAP's confidence and gapKey, `quotes` the number of QUOTE lines: never their text.
+ * `files_touched` is there only when the caller passed `filesTouched` as an array of strings.
  *
  * @typedef {{ ts: string, gate: string, decision: string, reason: string, agent_type?: string, agent_id?: string, session_id?: string }} GateRecord
  * gates.jsonl. A test-gate record (gate "test", from verify.sh) names no slice: it is joined by agent_id to a launch.
@@ -369,18 +468,45 @@ export function launchRecord(toolInput, ctx = {}) {
     replan: p.replan,
   };
   if (p.isPlanReview) rec.plan = { constraints: p.constraints, slices: p.slices };
+  rec.sources = h.sources.map((s) => (/^https?:\/\//i.test(s) ? (hostOf(s) ?? "") : s)).filter(Boolean);
+  rec.read = h.read;
+  rec.kind = h.kind;
+  rec.validate = h.validate;
+  rec.urls = [...new Set(briefUrls(prompt).map(hostOf).filter((x) => x !== null))];
   return rec;
 }
 
+/** The host (with port) of a URL, or null when it does not parse; records keep hosts, never paths or queries. @param {string} u @returns {string | null} */
+function hostOf(u) {
+  try {
+    return new URL(u).host || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The stop record for a finished worker: STATUS, answers and OPEN from its final report.
- * @param {{ ts?: string, sessionId?: string, agentId?: string | null, role?: string, slice?: string | null, reply?: unknown, status?: 'pass' | 'fail' | null, run?: number | null }} ctx
+ * A short, stable key for a gap's text, so records can match the same gap across replies without storing it: the first
+ * 8 hex characters of the sha1 of the text lower-cased, non-alphanumerics turned to spaces, collapsed, trimmed and cut
+ * to 120 characters.
+ * @param {unknown} text @returns {string}
+ */
+export function gapKey(text) {
+  const norm = str(text).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 120);
+  return createHash("sha1").update(norm).digest("hex").slice(0, 8);
+}
+
+/**
+ * The stop record for a finished worker: STATUS, answers and OPEN from its final report, each GAP's confidence and key,
+ * the QUOTE count, and files_touched when `filesTouched` is an array of strings.
+ * @param {{ ts?: string, sessionId?: string, agentId?: string | null, role?: string, slice?: string | null, reply?: unknown, status?: 'pass' | 'fail' | null, run?: number | null, filesTouched?: unknown }} ctx
  * @returns {StopRecord}
  */
 export function stopRecord(ctx) {
   const c = ctx && typeof ctx === "object" ? ctx : {};
   const r = parseReply(c.reply);
-  return {
+  /** @type {StopRecord} */
+  const rec = {
     ts: c.ts ?? new Date().toISOString(),
     session_id: c.sessionId ?? "",
     agent_id: c.agentId ?? null,
@@ -390,7 +516,12 @@ export function stopRecord(ctx) {
     answers: r.answers,
     open: r.open,
     run: c.run ?? null,
+    gaps: r.gaps.map((g) => ({ confidence: g.confidence, key: gapKey(g.text) })),
+    quotes: r.quotes.length,
   };
+  const ft = c.filesTouched;
+  if (Array.isArray(ft) && ft.every((f) => typeof f === "string")) rec.files_touched = [...ft];
+  return rec;
 }
 
 /**

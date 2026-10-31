@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,10 +12,12 @@ import {
   MAX_RETRIES,
   RUN_STALE_MIN_DEFAULT,
   agentModel,
+  briefUrls,
   currentReviews,
   doubtSignals,
   escalationMode,
   foldRuns,
+  gapKey,
   hasOpusPass,
   isOpusModel,
   isPlanReview,
@@ -66,9 +69,11 @@ test("C1: no parser throws on empty, malformed or non-string input; fields come 
     normalizeFiles(v, "/base");
     agentModel(v, { projectDir: "/nonexistent", pluginRoot: "/nonexistent" });
   }
-  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false });
+  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false });
   assert.deepEqual(parsePlan(null), { isPlanReview: false, replan: null, constraints: {}, slices: [] });
-  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {} });
+  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [] });
+  assert.deepEqual(briefUrls(42), []);
+  assert.equal(gapKey(null), gapKey(""));
   assert.deepEqual(foldRuns(/** @type {any} */ ("nope")), { runs: [], open: null });
   assert.deepEqual(foldRuns(/** @type {any} */ ({ launches: [null, 3, { ts: {} }], stops: "x", gates: [{ gate: "test" }] })), { runs: [], open: null });
   assert.deepEqual(foldRuns(/** @type {any} */ ([null, 3])), { runs: [], open: null });
@@ -172,7 +177,7 @@ test("C3: old-style plans, briefs and replies parse to empty values", () => {
   assert.deepEqual(parsePlan("PLAN REVIEW\nSplit it into a parser and a CLI."), { isPlanReview: true, replan: null, constraints: {}, slices: [] });
   const h = parseHeader("SLICE: s1\nFILES: a.py\nDEPENDS: none\nDo it.");
   assert.deepEqual([h.risky, h.checks, h.focus, h.path], [false, [], null, null]);
-  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {} });
+  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {}, gaps: [], quotes: [] });
 });
 
 test("STATUS: same rule as scripts/auto.sh (src/verify.test.ts cases); no STATUS line is null", () => {
@@ -323,7 +328,7 @@ const attempt = (min, slice, verdict, extra = "") => [impl(min, slice, extra), i
 
 test("launch and stop records carry parsed fields, never the brief or reply text", () => {
   const l = launchRecord({ subagent_type: "orchestration:implementer", prompt: "SLICE: a\nFILES: a.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C2\nsecret body text" }, { ts: "t", sessionId: "s", agentId: "x1" });
-  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null });
+  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null, sources: [], read: null, kind: null, validate: false, urls: [] });
   assert.doesNotMatch(JSON.stringify(l), /secret body text/);
   const p = launchRecord({ subagent_type: "reviewer", model: "opus", prompt: PLAN }, { ts: "t" });
   assert.equal(p.slice, "plan");
@@ -333,9 +338,178 @@ test("launch and stop records carry parsed fields, never the brief or reply text
   assert.deepEqual(p.plan?.slices.map((s) => s.slice), ["a", "b"]);
   assert.equal(p.agent_id, null);
   const s = stopRecord({ ts: "t", sessionId: "s", agentId: "r1", role: "orchestration:reviewer", slice: "a", reply: "STATUS: pass\nC1: pass (read) a.py:1\nOPEN: none\nquoted secret" });
-  assert.deepEqual(s, { ts: "t", session_id: "s", agent_id: "r1", role: "reviewer", slice: "a", status: "pass", answers: { C1: { verdict: "pass", mode: "read", detail: "a.py:1" } }, open: [], run: null });
+  assert.deepEqual(s, { ts: "t", session_id: "s", agent_id: "r1", role: "reviewer", slice: "a", status: "pass", answers: { C1: { verdict: "pass", mode: "read", detail: "a.py:1" } }, open: [], run: null, gaps: [], quotes: 0 });
   assert.equal(stopRecord(/** @type {any} */ (null)).status, null);
   assert.equal(launchRecord(undefined).agent_type, "");
+});
+
+// ---- 0.4.0 lines: SOURCES, READ, KIND, VALIDATE in briefs; GAP and QUOTE in replies; briefUrls; their record fields ----
+
+test("header: SOURCES is a list like FILES; READ, KIND and VALIDATE take their first word", () => {
+  const h = parseHeader("SLICE: r\nSOURCES: docs/a.md, https://x.org/p?q=1 , `b.pdf`, , ./c.md, none\nREAD: JUDGE the claims\nKIND: BugFix: crash\nVALIDATE: Gaps");
+  assert.deepEqual(h.sources, ["docs/a.md", "https://x.org/p?q=1", "b.pdf", "c.md"]);
+  assert.equal(h.read, "judge");
+  assert.equal(h.kind, "bugfix");
+  assert.equal(h.validate, true);
+  for (const v of ["lookup", "Extract", "**judge**", "lookup."]) assert.notEqual(parseHeader(`READ: ${v}`).read, null, v);
+  for (const v of ["skim", "judgement", "look up", ""]) assert.equal(parseHeader(`READ: ${v}`).read, null, v);
+  for (const v of ["yes", "true", "gaps-only", "gap", ""]) assert.equal(parseHeader(`VALIDATE: ${v}`).validate, false, v);
+  assert.equal(parseHeader("- **VALIDATE:** GAPS").validate, true);
+  assert.equal(parseHeader("KIND:").kind, null);
+  assert.equal(parseHeader("> KIND: `Feature` work").kind, "feature");
+  assert.deepEqual(parseHeader("SOURCES: none").sources, []);
+  assert.equal(parseHeader("Text with READ: judge mid-line").read, null, "a key in mid-line does not count");
+});
+
+test("C3: old-style briefs and replies parse as before, with the new fields empty", () => {
+  const brief = "SLICE: s1\nFILES: app.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C1\nBody: see https://example.com.";
+  const h = parseHeader(brief);
+  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false });
+  const r = parseReply("STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none");
+  assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [] });
+  assert.equal(parseStatus("STATUS: pass\nGAP: 90 something"), "pass", "a GAP line does not change the status");
+});
+
+test("reply: GAP lines give confidence and text; malformed numbers give null; quotes and templates do not count", () => {
+  const r = parseReply(
+    [
+      "STATUS: pass",
+      "GAP: 80 no test for X",
+      "- GAP: 35% unclear error",
+      "* **GAP:** 100 % edge case**",
+      "GAP: 0 trivial",
+      "GAP: 101 too high",
+      "GAP: -5 negative",
+      "GAP: 7.5 decimal",
+      "GAP: no number",
+      "GAP: 60",
+      "GAP:",
+      "GAP: <0-100> <text>",
+      "> GAP: 90 quoted",
+      "said GAP: 10 mid-line",
+    ].join("\n"),
+  );
+  assert.deepEqual(r.gaps, [
+    { confidence: 80, text: "no test for X" },
+    { confidence: 35, text: "unclear error" },
+    { confidence: 100, text: "edge case" },
+    { confidence: 0, text: "trivial" },
+    { confidence: null, text: "101 too high" },
+    { confidence: null, text: "-5 negative" },
+    { confidence: null, text: "7.5 decimal" },
+    { confidence: null, text: "no number" },
+  ]);
+  assert.equal(r.status, "pass");
+});
+
+test("reply: QUOTE lines give locator and verbatim text; one pair of quotes stripped; malformed lines dropped", () => {
+  const r = parseReply(
+    [
+      'QUOTE: docs/a.md:12 | "never throws"',
+      "- QUOTE: paper.pdf p.4 | 'single'",
+      "QUOTE: `src/x.ts` | a | b",
+      'QUOTE: notes.md | ""nested""',
+      "QUOTE: b.md | “curly”",
+      'QUOTE: c.md | "unbalanced',
+      "QUOTE: no pipe",
+      "QUOTE: | no locator",
+      "QUOTE: a.md |   ",
+      "> QUOTE: a.md:1 | quoted",
+    ].join("\n"),
+  );
+  assert.deepEqual(r.quotes, [
+    { locator: "docs/a.md:12", text: "never throws" },
+    { locator: "paper.pdf p.4", text: "single" },
+    { locator: "src/x.ts", text: "a | b" },
+    { locator: "notes.md", text: '"nested"' },
+    { locator: "b.md", text: "curly" },
+    { locator: "c.md", text: '"unbalanced' },
+  ]);
+});
+
+test("briefUrls: unique http(s) URLs in order, trailing punctuation stripped, balanced parens kept, at most 50", () => {
+  const text = [
+    "See https://a.example/x, then (https://b.example/y). Also https://a.example/x again.",
+    "Markdown [t](https://c.example/z) and <https://d.example/w> and 'https://e.example/q?a=1&b=2'.",
+    "Wiki https://en.wikipedia.org/wiki/Foo_(bar) and [https://f.example/r]; HTTP://G.example/S: ftp://no.example",
+    "Not URLs: http:// and https://?x and mailto:a@b.c",
+  ].join("\n");
+  assert.deepEqual(briefUrls(text), [
+    "https://a.example/x",
+    "https://b.example/y",
+    "https://c.example/z",
+    "https://d.example/w",
+    "https://e.example/q?a=1&b=2",
+    "https://en.wikipedia.org/wiki/Foo_(bar)",
+    "https://f.example/r",
+    "HTTP://G.example/S",
+  ]);
+  const many = Array.from({ length: 60 }, (_, i) => `https://h${i}.example/`).join(" ");
+  const got = briefUrls(many);
+  assert.equal(got.length, 50);
+  assert.equal(got[49], "https://h49.example/");
+  assert.deepEqual(briefUrls("no links here"), []);
+});
+
+test("launch record: sources, read, kind, validate and urls; stop record: gap keys, quote count, files_touched; never their text", () => {
+  const prompt = "SLICE: r\nFILES: out.md\nDEPENDS: none\nSOURCES: docs/a.md, https://x.example/doc\nREAD: extract\nKIND: research\nVALIDATE: gaps\nsecret body https://y.example/p.";
+  const l = launchRecord({ subagent_type: "orchestration:researcher", prompt }, { ts: "t", sessionId: "s", agentId: "a1" });
+  assert.deepEqual(
+    { sources: l.sources, read: l.read, kind: l.kind, validate: l.validate, urls: l.urls },
+    { sources: ["docs/a.md", "x.example"], read: "extract", kind: "research", validate: true, urls: ["x.example", "y.example"] },
+  );
+  assert.doesNotMatch(JSON.stringify(l), /secret body/);
+  // hosts only in the record: no path, query or fragment; parseHeader keeps the full SOURCES text for hooks that read the brief
+  const q = "SLICE: q\nSOURCES: https://api.example.com:8443/v1?token=SECRET1#frag, notes/b.md, http://x.example/a?k=SECRET2\nSee https://api.example.com:8443/other?token=SECRET3 and https://z.example/p?q=SECRET4 and https://x.example/again.";
+  const lq = launchRecord({ subagent_type: "researcher", prompt: q }, { ts: "t" });
+  assert.deepEqual(lq.sources, ["api.example.com:8443", "notes/b.md", "x.example"]);
+  assert.deepEqual(lq.urls, ["api.example.com:8443", "x.example", "z.example"]);
+  assert.doesNotMatch(JSON.stringify(lq), /SECRET|token|\/v1|frag/);
+  assert.deepEqual(parseHeader(q).sources, ["https://api.example.com:8443/v1?token=SECRET1#frag", "notes/b.md", "http://x.example/a?k=SECRET2"]);
+  assert.deepEqual(briefUrls("https://z.example/p?q=1"), ["https://z.example/p?q=1"], "briefUrls still returns full URLs");
+  assert.deepEqual(launchRecord({ prompt: "SOURCES: https://[bad\nhttps://[bad" }).urls, [], "an invalid URL is skipped");
+
+  const reply = "STATUS: pass\nGAP: 80 No test for the empty-input path!\nGAP: unnumbered secret gap\nQUOTE: a.md:1 | secret quoted text\nQUOTE: b.md | other\nOPEN: none";
+  const s = stopRecord({ ts: "t", sessionId: "s", agentId: "r1", role: "reviewer", slice: "a", reply, filesTouched: ["a.md", "src/b.ts"] });
+  const key = (/** @type {string} */ t) => createHash("sha1").update(t).digest("hex").slice(0, 8);
+  assert.deepEqual(s.gaps, [
+    { confidence: 80, key: key("no test for the empty input path") },
+    { confidence: null, key: key("unnumbered secret gap") },
+  ]);
+  assert.equal(s.quotes, 2);
+  assert.deepEqual(s.files_touched, ["a.md", "src/b.ts"]);
+  const json = JSON.stringify(s);
+  assert.doesNotMatch(json, /secret|empty-input|quoted text|other/i, "no gap or quote text in the record");
+  assert.match(String(s.gaps?.[0]?.key), /^[0-9a-f]{8}$/);
+
+  assert.equal(gapKey("No test for the EMPTY-input path!!"), gapKey("  no test, for the empty input path "));
+  assert.equal(gapKey("x".repeat(120) + "tail one"), gapKey("x".repeat(120) + "tail two"), "only the first 120 normalised characters count");
+  assert.notEqual(gapKey("gap one"), gapKey("gap two"));
+
+  for (const ft of [undefined, null, "a.md", [1, "a.md"], { 0: "a.md" }]) {
+    const r = stopRecord({ ts: "t", reply: "STATUS: pass", filesTouched: ft });
+    assert.equal("files_touched" in r, false, JSON.stringify(ft));
+  }
+  assert.deepEqual(stopRecord({ ts: "t", reply: "STATUS: pass", filesTouched: [] }).files_touched, []);
+  const plain = stopRecord({ ts: "t", reply: "STATUS: pass" });
+  assert.deepEqual({ gaps: plain.gaps, quotes: plain.quotes }, { gaps: [], quotes: 0 });
+});
+
+test("C3: runs fold the same with or without the 0.4.0 record fields", () => {
+  const strip = (/** @type {Item[]} */ items) =>
+    items.map((it) => {
+      if ("launch" in it && it.launch) {
+        const { sources, read, kind, validate, urls, ...rest } = /** @type {any} */ (it.launch);
+        return { launch: rest };
+      }
+      if ("stop" in it && it.stop) {
+        const { gaps, quotes, files_touched, ...rest } = /** @type {any} */ (it.stop);
+        return { stop: rest };
+      }
+      return it;
+    });
+  const items = [planLaunch(0), ...attempt(1, "a", "pass", "SOURCES: x.md\nREAD: judge\nKIND: bugfix\nVALIDATE: gaps"), ...attempt(5, "b", "fail"), ...review(9, "b", "STATUS: pass\nGAP: 70 a doubt\nQUOTE: b.py:1 | x\nOPEN: none")];
+  assert.deepEqual(foldRuns(R(...strip(items)), { now: T0 }), foldRuns(R(...items), { now: T0 }));
 });
 
 test("C3: old journal records (no parsed fields, no answers) fold without errors", () => {
