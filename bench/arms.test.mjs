@@ -242,3 +242,22 @@ test("plugin-launch.sh: --plugin-dir first, orchestrate.sh arguments with the pr
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("d3-reader arms: plain sonnet main session, .claude/ copied, session persistence on, per-arm model and router", () => {
+  const m = { test_cmd: "python3 tools/check.py" };
+  for (const a of ["reader-haiku", "reader-sonnet", "reader-routed"]) {
+    const env = runEnv(a, m, run, { PATH: "/bin" });
+    assert.equal(env.ORCH_AGENT, "none");
+    assert.equal(env.ORCH_MODEL, "sonnet");
+    assert.equal(env.ORCH_SESSION_PERSISTENCE, "1");
+    assert.equal(ARMS[a].copyClaude, true);
+    assert.equal(command(a, "task", "/tmp/repo", root).args[0], join(root, "scripts", "orchestrate.sh"));
+  }
+  assert.equal(runEnv("reader-haiku", m, run, { ORCH_READ_ROUTER: "on" }).ORCH_READ_ROUTER, undefined); // inherited ORCH_* stripped
+  assert.equal(envAdditions("reader-haiku", m, run).CLAUDE_CODE_SUBAGENT_MODEL, undefined);
+  assert.equal(envAdditions("reader-sonnet", m, run).CLAUDE_CODE_SUBAGENT_MODEL_FORCE, "1");
+  assert.equal(envAdditions("reader-sonnet", m, run).CLAUDE_CODE_SUBAGENT_MODEL, "sonnet");
+  assert.equal(envAdditions("reader-sonnet", m, run).ORCH_READ_ROUTER, undefined);
+  assert.equal(envAdditions("reader-routed", m, run).ORCH_READ_ROUTER, "on");
+  assert.equal(envAdditions("reader-routed", m, run).CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
+});

@@ -1,0 +1,14 @@
+[
+  { "name": "q1 Porto date", "file": "answers.json", "from": "\"2023-03-09\"", "to": "\"2022-12-12\"" },
+  { "name": "q2 last year's headcount", "file": "answers.json", "from": "\"q2\": 186", "to": "\"q2\": 171" },
+  { "name": "q3 wrong tier", "file": "answers.json", "from": "3.85", "to": "4.25" },
+  { "name": "q4 KX-220 row", "file": "answers.json", "from": "\"q4\": 9.1", "to": "\"q4\": 4.25" },
+  { "name": "q5 serial misread", "file": "answers.json", "from": "\"IC-58213-Q\"", "to": "\"IC-58218-O\"" },
+  { "name": "q6 licence misread", "file": "answers.json", "from": "\"q6\": 7731", "to": "\"q6\": 7781" },
+  { "name": "q7 next gridline", "file": "answers.json", "from": "\"q7\": 47", "to": "\"q7\": 50" },
+  { "name": "q8 second-highest bar", "file": "answers.json", "from": "\"Highlands\"", "to": "\"Metro\"" },
+  { "name": "q9 gross instead of net", "file": "answers.json", "from": "18058.45", "to": "15703" },
+  { "name": "q10 VAT instead of discount", "file": "answers.json", "from": "1256.24", "to": "3611.69" },
+  { "name": "q11 general notice period", "file": "answers.json", "from": "\"q11\": 45", "to": "\"q11\": 30" },
+  { "name": "q12 standard interval only", "file": "answers.json", "from": "\"q12\": 450", "to": "\"q12\": 750" }
+]
