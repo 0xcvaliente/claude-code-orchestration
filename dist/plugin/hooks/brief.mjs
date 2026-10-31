@@ -639,14 +639,21 @@ function countReview(status, gaps, answers, gapMin) {
   return { counted, lowConfidence: low, keys };
 }
 
-/** @param {SliceState} s */
-function settle(s) {
+/**
+ * Slice finality during the fold (docs/brief-grammar.md, "Final slice"). Final: failed for good (the latest review
+ * counts as a fail after 1 + MAX_RETRIES attempts), or the latest review counts as a pass and the escalation rule is
+ * met: no doubt signal (doubtSignals with the fold's env: none when ORCH_ESCALATION is off, "always" when it is always)
+ * or a passing opus review after the latest implementer launch or stop. So a counted pass that still needs its opus
+ * review keeps the slice, and its run, open. passed stays the latest counted status alone (the gates read it).
+ * @param {SliceState} s @param {Record<string, string | undefined>} env
+ */
+function settle(s, env) {
   const latest = currentReviews(s).at(-1);
   const counted = latest ? countedStatus(latest) : null;
+  s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
   s.passed = counted === "pass";
   s.gaveUp = counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
-  s.final = s.passed || s.gaveUp;
-  s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
+  s.final = s.gaveUp || (s.passed && (hasOpusPass(s) || doubtSignals(s, env).length === 0));
 }
 
 /**
@@ -793,7 +800,7 @@ export function foldRuns(records, opts = {}) {
         s.risky = s.risky || r.risky === true;
         s.checks = [...new Set([...s.checks, ...strings(r.checks)])];
         open.lastAt = ts;
-        settle(s);
+        settle(s, env);
         continue;
       }
       if (open) open.lastAt = Math.max(open.lastAt, ts);
@@ -840,7 +847,7 @@ export function foldRuns(records, opts = {}) {
       s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt });
       s.reviewedSince = true;
     }
-    settle(s);
+    settle(s, env);
     closeIfDone(run);
   }
   if (cur && !cur.closed && idle(cur, now)) cur.stale = true;

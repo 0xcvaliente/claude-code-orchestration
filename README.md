@@ -143,7 +143,7 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 **Loop guards.** Most gates block twice per reason and scope, then let the launch or reply through and log `<reason>_gave_up` (or `max_blocks_reached`); the review gate's give-up carries a `systemMessage` saying the work is unverified. `file_overlap` and `dependency_cycle` block every time, the guards deny every time, and the quote check blocks once.
 
-**Run scope.** A run belongs to one session. It opens at a `PLAN REVIEW` launch, or at a light-path implementer launch; a `PLAN REVIEW` with `REPLAN:` extends it; it closes when every slice is final. A new user prompt does not close it. After `ORCH_RUN_STALE_MIN` minutes (default 30) with nothing running, the plan check treats it as closed, while the review gate still gates its unreviewed slices. `foldRuns` in `.claude/hooks/brief.mjs` computes all of this from the log records alone.
+**Run scope.** A run belongs to one session. It opens at a `PLAN REVIEW` launch, or at a light-path implementer launch; a `PLAN REVIEW` with `REPLAN:` extends it; it closes when every slice is final. A slice is final when it failed for good (its latest review failed after 3 implementer attempts), or when its latest review passed and the escalation rule is met: no doubt signal, or a passing opus review after its latest attempt. A sonnet pass that still needs its opus review keeps the run open, so that review and any further launch of the slice join the same run instead of opening a new one ([docs/brief-grammar.md, Final slice](docs/brief-grammar.md#run-model)). A new user prompt does not close it. After `ORCH_RUN_STALE_MIN` minutes (default 30) with nothing running, the plan check treats it as closed, while the review gate still gates its unreviewed slices. A run waiting for an opus review that never comes, for example after the review gate gave up on it (`opus_review_required_gave_up`), stays open until it goes stale. Until then a new light task is blocked with `light_path_multi` and an unplanned implementer with `not_in_plan`, each at most twice. `foldRuns` in `.claude/hooks/brief.mjs` computes all of this from the log records alone.
 
 ### What 0.4.0 adds to the gates
 
@@ -169,14 +169,14 @@ The test gate skips the tests only in a git work tree when every changed path is
 
 `plan-check.mjs` is the only hook that ever returns an allow. For two features it rewrites a launch with `permissionDecision: "allow"` and `updatedInput` (which takes effect only with allow or ask, and ask cannot be answered headless), combined into one `updatedInput` when both apply. It does so only for this plugin's or project's implementer (when its own checks allow the launch), researcher and reviewer: never for the integrator, a built-in, fork or a launch it blocks. A `permissions.deny` rule still wins.
 
-- **Read router (opt-in, `ORCH_READ_ROUTER=on`).** For a researcher brief that names `SOURCES:`, it profiles each file with local tools (poppler, unzip, no model call) and picks the cheapest adequate tier: a PDF with a good text layer is haiku; scans, tables, multi-column pages or figures make it sonnet; a 50-page or longer PDF with `READ: judge` is one read on opus. The launch's model is raised to the tier, never lowered. Text conversions are cached under the state dir and listed in the brief. It was checked once live (a scanned PDF raised a researcher from haiku to sonnet) and has not been measured on a benchmark; it stays off until H14 is.
+- **Read router (opt-in, `ORCH_READ_ROUTER=on`).** For a researcher brief that names `SOURCES:`, it profiles each file with local tools (poppler, unzip, no model call) and picks the cheapest adequate tier: a PDF with a good text layer is haiku; scans, tables, multi-column pages or figures make it sonnet; a 50-page or longer PDF with `READ: judge` is one read on opus. The launch's model is raised to the tier, never lowered. Text conversions are cached under the state dir and listed in the brief. It was checked once live (a scanned PDF raised a researcher from haiku to sonnet) and benchmarked once on `d3-reader` ([route-040](#read-router-benchmark-route-040)): direction only, with the model raise and the converted-text notes confounded. It stays off until H14 is decided.
 - **Skill suggestions (on by default, `ORCH_SKILL_HINTS=off` to drop).** The plan check appends one block naming at most 3 installed skills (1 for a reviewer), names and reason codes only, picked from the brief's `SKILLS:` names, the file types in FILES or SOURCES, the role and the goal's words. Installed skills are found on disk: `~/.claude/skills` (synced skills as `anthropic-skills:<name>`), the project's `.claude/skills` and enabled plugins' skills. A worker loads what fits with the Skill tool and reports a skipped suggestion in one line of its report, not under OPEN, because a non-empty OPEN is a doubt signal.
 
-Workflow agents get neither: they make no Agent tool call, so they never reach the plan check.
+Workflow agents get neither: they make no Agent tool call, so they never reach the plan check. A live probe showed that a mod's `agent.spawn` hook runs under `claude -p`, fires for workflow agents, and can rewrite a workflow agent's model and prompt. Mod code can read files with `$.fs.read`, run scripts with `$.process.run` and import its own files, but cannot import `node:` modules or files outside the plugin. So routing workflow researchers there is feasible, but not built ([docs/data/live-checks-workflow.md](docs/data/live-checks-workflow.md)).
 
 ## Telemetry and the read log
 
-- **Telemetry v2.** At SubagentStop `telemetry.mjs` reads the agent's transcript and records `tokens` (input, output, cache read, cache write), `turns`, `models` and `max_turns_hit`: numbers and model names only. Headless runs pass `--no-session-persistence` and keep no subagent transcripts, so these fields are empty there, benchmark runs included.
+- **Telemetry v2.** At SubagentStop `telemetry.mjs` reads the agent's transcript and records `tokens` (input, output, cache read, cache write), `turns`, `models` and `max_turns_hit`: numbers and model names only. Headless runs pass `--no-session-persistence` by default and keep no subagent transcripts, so these fields are empty there. `ORCH_SESSION_PERSISTENCE=1` drops that flag, so headless runs (`npm run native`, `npm run auto`, the bench) write transcripts and the fields fill in ([docs/data/live-checks-telemetry.md](docs/data/live-checks-telemetry.md)). The cost is a session transcript under `~/.claude/projects/` per run.
 - **File trail.** The journal's implementer stop record carries `files_touched`, taken from tool calls (plus git in an isolated worktree), never from the reply.
 - **Read log.** `read-log.mjs` (PostToolUse on `Read|WebFetch`) writes one line per call to `reads.jsonl`: path, extension, size, pages and kind, or the host only for WebFetch. Never content.
 - `npm run report -- /path/to/repo` renders the logs as `report.html` beside them, with a table per role (tokens by kind, turns, models, max-turn hits) and reads by kind and role.
@@ -271,6 +271,20 @@ Claude Code already runs subagents in the background, scripts multi-agent workfl
 
 All campaigns are headless, coding or document tasks only, with 1 or 2 runs per setup: they show direction, not measurements. Verdict rules are in [bench/HYPOTHESES.md](bench/HYPOTHESES.md); the harness is in [bench/README.md](bench/README.md).
 
+### Read router benchmark (route-040)
+
+`d3-reader` asks twelve questions over seven documents (text PDF, PDF table, scan, chart, xlsx formulas, docx table, 60-page PDF). A plain sonnet session launches one researcher per question, so the read router runs on every launch. There are 2 runs per arm at an 8-minute cap, seed 41, Claude Code 2.1.316, plugin 0.4.0, 2026-10-31. The six runs took about 2 minutes, against a 20-minute worst-case estimate. All 6 are valid (12 researcher launches each, and 12 route decisions per routed run). Full write-up: [docs/benchmark-route-040.md](docs/benchmark-route-040.md).
+
+| Arm | n | Score (median; min, max) | Hard q3 to q11 (median) | Researcher tokens (median) | Total tokens (median) |
+|---|---|---|---|---|---|
+| `reader-routed` (router on) | 2 | 91.67% (83.33, 100) | 88.89% | 631,628.5 | 983,822 |
+| `reader-sonnet` (all researchers sonnet) | 2 | 79.16% (75, 83.33) | 72.22% | 1,150,728 | 1,478,819.5 |
+| `reader-haiku` (shipped) | 2 | 75% (75, 75) | 66.67% | 1,137,805 | 1,396,404 |
+
+- The router raised 9 of 12 researchers to sonnet in each routed run. The three pre-registered predictions are each direction consistent: accuracy within a margin of sonnet, fewer researcher tokens than sonnet, and better than haiku on the hard kinds.
+- Model and notes are confounded. Every arm answered the text, table, scan, chart and long-PDF questions right in every run, haiku included. The whole difference sits in the xlsx and docx questions, which unrouted researchers cannot open, while routed researchers got the converted text and sonnet together. The pattern suggests that the notes did more than the model.
+- Status: direction only (n = 2, one task). H14 is not called supported.
+
 ### Comparison run for 0.4.0 (compare-040)
 
 One `k2-stdlib-toolkit-xl` run per arm at a 10-minute cap, and two `d2-docs` runs per arm (seven questions over text, PDF, scan, xlsx and chart files) at a 6-minute cap. Claude Code 2.1.316, plugin 0.4.0, 2026-10-31. The eight runs took about 8 minutes of wall time against a 30-minute budget; every run exited on its own before its cap. Full write-up: [docs/benchmark-compare-040.md](docs/benchmark-compare-040.md).
@@ -347,15 +361,15 @@ On these tasks the pipeline did not raise correctness; what it adds is the gates
 
 The full list, with the evidence for each, is in [docs/native-mode.md](docs/native-mode.md#known-limitations).
 
-- The benchmarks are small (1 or 2 runs per setup, few tasks) and show direction only. The read router, the gap cutoff with validation, the opus third attempt and the stall gate are unmeasured: compare-040 never exercised them (H14 to H17 untested).
-- The read router is opt-in and was checked by one live run. Its log can show `hard_pages: 0` next to a `pdf_hard_pages` reason code. Workflow researchers are not routed, and workflow agents get no skill suggestions (the `agent.spawn` route for them was not probed).
+- The benchmarks are small (1 or 2 runs per setup, few tasks) and show direction only. The gap cutoff with validation, the opus third attempt and the stall gate are unmeasured: compare-040 never exercised them (H15 to H17 untested). The read router has one direction-only benchmark ([route-040](#read-router-benchmark-route-040)).
+- The read router is opt-in. It was checked by one live run and benchmarked once on `d3-reader` ([docs/benchmark-route-040.md](docs/benchmark-route-040.md)): direction only, n = 2, one task, with the model raise and the converted-text notes confounded. Its log can show `hard_pages: 0` next to a `pdf_hard_pages` reason code. Workflow researchers are not routed, and workflow agents get no skill suggestions. A probe showed that a mod's `agent.spawn` hook could do both under `claude -p`, but it is not implemented ([docs/data/live-checks-workflow.md](docs/data/live-checks-workflow.md)).
 - Validation before a retry and opus on the third attempt are orchestrator prompt rules; no hook enforces them. The workflow enforces them in code.
 - The stall gate is native-only, and the workflow does not treat a failing review whose gaps are all below the cutoff as a doubt signal.
 - The test baseline's `allow` mode is heuristic (runner output cannot be parsed completely), which is why `inform` is the default.
 - The quote check trusts any file whose real path is inside the read cache, and it cannot check a value read from a scan.
 - The egress guard reads planned files from the shared tree, so hosts in a file that exists only on an isolated branch are denied (it fails safe). The guards are not a boundary.
 - The skill catalog does not see plugins loaded with `--plugin-dir` or skills bundled with Claude Code; explicit `SKILLS:` names for them still reach the worker, marked as not found.
-- Headless runs keep no subagent transcripts, so telemetry v2's token, turn and model fields are empty there.
+- Headless runs keep no subagent transcripts by default, so telemetry v2's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set.
 - No WorktreeCreate hook ships; `worktree.baseRef: "head"` is the way to start worktrees from the local HEAD. Settings load from the folder a session started in.
 - A long-lived agent-team teammate listed as running keeps the review gate deferring. `file_overlap` and `dependency_cycle` block with no give-up.
 - The eval suite (`npm run eval`) has not been smoke-run.
@@ -421,6 +435,7 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_ALLOWED_TOOLS`, `ORCH_EXTRA_ALLOWED_TOOLS` | `orchestrate.sh`, `auto.sh` | Replace, or append to, the headless tool allowlist, one rule per line. `auto.sh` adds `WebSearch` and `WebFetch` when the task changes no code |
 | `ORCH_AGENT`, `ORCH_AGENT_PREFIX` | `orchestrate.sh` | Agent to run (`none` is a plain session); `orchestration:` always runs the plugin's agents |
 | `ORCH_ADD_DIR`, `ORCH_ADVISOR`, `ORCH_DRY_RUN` | `orchestrate.sh` | Extra readable dir, experimental advisor model, print arguments and exit |
+| `ORCH_SESSION_PERSISTENCE` | `orchestrate.sh` (so also `auto.sh` and `npm run native`) | `1` omits `--no-session-persistence`, so session and subagent transcripts are written and telemetry v2 records per-agent tokens, turns and models. Unset (default): no transcripts, those fields empty |
 | `ORCH_MODEL` | `orchestrate.sh` | Passes `--model`, for plain-model baselines |
 | `ORCH_BASE_TIMEOUT_S` | `bugfix-check.mjs` | Time limit of a test-baseline base run, default 300 |
 | `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | The read router's profiling budget, default 15000 |
