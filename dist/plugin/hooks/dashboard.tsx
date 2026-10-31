@@ -48,6 +48,9 @@ const checkIds = (v: string | undefined) => [...new Set(((v ?? '').match(/\bC\d+
 const yes = (v: string | undefined) => /^\**[ \t]*yes\b/i.test(v ?? '')
 // The first word, lower-cased, without quotes, backticks, asterisks, underscores or trailing punctuation (KIND, READ, VALIDATE).
 const word = (v: string | undefined) => ((v ?? '').replace(/[`'"*_]/g, '').trim().split(/\s+/)[0] ?? '').replace(/[.,;:!?]+$/, '').toLowerCase()
+// SKILLS: names read like FILES, only skill names (an optional `ns:` prefix, at most 100 characters), deduplicated, at most 8.
+const SKILL_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/
+const skillNames = (v: string | undefined) => [...new Set(listOf(v).filter(s => s.length <= 100 && SKILL_RE.test(s)))].slice(0, 8)
 
 export type ReadMode = 'lookup' | 'extract' | 'judge'
 export type Header = {
@@ -63,6 +66,7 @@ export type Header = {
   read: ReadMode | null
   kind: string | null
   validate: boolean
+  skills: string[]
 }
 export const parseHeader = (text: unknown): Header => {
   const t = str(text)
@@ -79,6 +83,7 @@ export const parseHeader = (text: unknown): Header => {
     read: READ_MODES.has(word(field(t, 'READ'))) ? (word(field(t, 'READ')) as ReadMode) : null,
     kind: word(field(t, 'KIND')) || null,
     validate: word(field(t, 'VALIDATE')) === 'gaps',
+    skills: skillNames(field(t, 'SKILLS')),
   }
 }
 // The brief starts with PLAN REVIEW (leading whitespace allowed, upper case), not any later line.
