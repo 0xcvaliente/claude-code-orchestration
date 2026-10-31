@@ -17,7 +17,7 @@
 //                         run (no_plan_review_gave_up). A session whose log has a plan reviewer stop but no launch
 //                         records (older journal.mjs) counts as reviewed, as before.
 //   replan_required       the open run's slice is stalled: its last two counted failed reviews share a gap key at or
-//                         above ORCH_GAP_MIN and no REPLAN plan review started since (docs/brief-grammar.md,
+//                         above ORCH_GAP_MIN and no REPLAN plan review finished since (docs/brief-grammar.md,
 //                         "Stall"). Counted per slice since the stall began. ORCH_STALL_GATE=off turns it off.
 //   not_in_plan           in a planned run whose plan has parseable slice lines: the SLICE must be planned (or added
 //                         by a REPLAN) and its FILES a subset of the planned FILES (normalizeFiles against the project
@@ -181,7 +181,7 @@ if (!reviewed && !light) {
 }
 
 // Stall gate: the slice's last two counted failed reviews share a gap at or above ORCH_GAP_MIN and no REPLAN plan
-// review started since (brief.mjs foldRuns sets `stalled`). Blocks counted since the stall began.
+// review finished since (brief.mjs foldRuns sets `stalled`). Blocks counted since the stall began.
 const st = open?.slices[slice];
 if (open && st?.stalled && stallGateOn(process.env)) {
   const since = st.stalledAt ?? -Infinity;
