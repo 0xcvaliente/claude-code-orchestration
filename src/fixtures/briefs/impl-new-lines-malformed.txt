@@ -1,0 +1,8 @@
+SLICE: odd
+FILES: a.py
+DEPENDS: none
+SOURCES: none
+READ: skim everything
+KIND:
+VALIDATE: yes
+Body text with http:// and https:// and no host.
