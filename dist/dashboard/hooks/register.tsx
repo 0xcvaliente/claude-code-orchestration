@@ -710,7 +710,10 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
     ...(pass?.open?.length ? ['open_items'] : []),
     ...(current.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
   ]
-  const final = latest?.status === 'pass' || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
+  // Final (brief.mjs settle): failed for good, or the latest review passed and the escalation rule is met: an opus pass after the latest attempt or
+  // no doubt signal. The pane cannot read ORCH_ESCALATION, so it uses the default (signals on, opus only when one fired).
+  const opusPass = current.some(r => r.status === 'pass' && family(r.model) === 'opus')
+  const final = (latest?.status === 'pass' && (opusPass || signals.length === 0)) || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
   // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
   // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one.
   const implAt = (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
@@ -727,7 +730,7 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
     stalled: !final && shared.length > 0 && !replanned,
     risky,
     signals,
-    opusPass: current.some(r => r.status === 'pass' && family(r.model) === 'opus'),
+    opusPass,
     checks: [...new Set([...(planned?.checks ?? []), ...mine.flatMap(a => a.checks ?? [])])],
     answers: latest?.answers ?? {},
   }
