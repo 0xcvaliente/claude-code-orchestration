@@ -1,6 +1,6 @@
 // 0.4.0 review gate: the gap cutoff (ORCH_GAP_MIN), VALIDATE: gaps supersede and the stall gate (ORCH_STALL_GATE),
 // in the fold (brief.mjs foldRuns) and through the real hooks (telemetry.mjs, journal.mjs, review-gate.mjs,
-// plan-check.mjs). Spec: docs/brief-grammar.md, "Gap cutoff", "VALIDATE supersede" and "Stall gate".
+// plan-check.mjs). Spec: docs/brief-grammar.md, "Review counting", "Stall" and "Stall gate and gap cutoff in the gates".
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
