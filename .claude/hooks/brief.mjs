@@ -312,62 +312,165 @@ export function escalationMode(env = {}) {
   return v === "off" || v === "always" ? v : "auto";
 }
 
+// ---- Log records. The run model is computed from what the hooks log, never from raw prompts. ----
+
 /**
  * @typedef {{
- *   ts: string | number,
- *   phase: 'launch' | 'stop' | 'gate',
- *   role?: string,
- *   prompt?: string,
- *   reply?: string,
- *   slice?: string | null,
- *   status?: 'pass' | 'fail' | null,
- *   model?: string | null,
- *   reason?: string
- * }} RunEvent
- * One session's events in order. launch: an Agent launch with its brief (`prompt`), plus `model` for a reviewer.
- * stop: a worker finished, with its final report (`reply`) or an already parsed `status`; `slice` from its launch.
- * gate: a test-gate entry (`reason`, e.g. tests_failed_isolated) for `slice`.
+ *   ts: string, session_id: string, agent_id: string | null, agent_type: string,
+ *   slice: string | null, files: string[], depends: string[], path: 'light' | null, risky: boolean, checks: string[],
+ *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
+ *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] }
+ * }} LaunchRecord
+ * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
+ * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. Older records carry only session_id, agent_id, slice, role.
  *
+ * @typedef {{
+ *   ts: string, session_id: string, agent_id: string | null, role: string, agent_type?: string, slice: string | null,
+ *   status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], run?: number | null,
+ *   model?: string | null, checks?: string[], risky?: boolean
+ * }} StopRecord
+ * journal.jsonl, one per SubagentStop of a worker. `slice` comes from the launch record with the same agent_id (or the
+ * pending path when the stop arrives first). Older records lack answers, open and run.
+ *
+ * @typedef {{ ts: string, gate: string, decision: string, reason: string, agent_type?: string, agent_id?: string, session_id?: string }} GateRecord
+ * gates.jsonl. A test-gate record (gate "test", from verify.sh) names no slice: it is joined by agent_id to a launch.
+ */
+
+/** @param {unknown} t */
+const bare = (t) => String(t ?? "").split(":").pop() ?? "";
+
+/**
+ * The launch record for an Agent launch: the parsed brief, never its text.
+ * @param {unknown} toolInput tool_input of the Agent call
+ * @param {{ ts?: string, sessionId?: string, agentId?: string | null, projectDir?: string | null, pluginRoot?: string | null }} [ctx]
+ * @returns {LaunchRecord}
+ */
+export function launchRecord(toolInput, ctx = {}) {
+  const ti = /** @type {Record<string, unknown>} */ (toolInput && typeof toolInput === "object" ? toolInput : {});
+  const prompt = str(ti.prompt);
+  const h = parseHeader(prompt);
+  const p = parsePlan(prompt);
+  /** @type {LaunchRecord} */
+  const rec = {
+    ts: ctx.ts ?? new Date().toISOString(),
+    session_id: ctx.sessionId ?? "",
+    agent_id: ctx.agentId ?? null,
+    agent_type: bare(ti.subagent_type),
+    slice: sliceOfBrief(prompt),
+    files: h.files,
+    depends: h.depends,
+    path: h.path,
+    risky: h.risky,
+    checks: h.checks,
+    focus: h.focus,
+    workflow: h.workflow,
+    model: agentModel(ti, { projectDir: ctx.projectDir, pluginRoot: ctx.pluginRoot }),
+    isPlanReview: p.isPlanReview,
+    replan: p.replan,
+  };
+  if (p.isPlanReview) rec.plan = { constraints: p.constraints, slices: p.slices };
+  return rec;
+}
+
+/**
+ * The stop record for a finished worker: STATUS, answers and OPEN from its final report.
+ * @param {{ ts?: string, sessionId?: string, agentId?: string | null, role?: string, slice?: string | null, reply?: unknown, status?: 'pass' | 'fail' | null, run?: number | null }} ctx
+ * @returns {StopRecord}
+ */
+export function stopRecord(ctx) {
+  const c = ctx && typeof ctx === "object" ? ctx : {};
+  const r = parseReply(c.reply);
+  return {
+    ts: c.ts ?? new Date().toISOString(),
+    session_id: c.sessionId ?? "",
+    agent_id: c.agentId ?? null,
+    role: bare(c.role),
+    slice: c.slice ?? null,
+    status: c.status !== undefined ? c.status : r.status,
+    answers: r.answers,
+    open: r.open,
+    run: c.run ?? null,
+  };
+}
+
+/**
  * @typedef {{ ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null }} Review
  * @typedef {{
- *   slice: string, planned: boolean, risky: boolean, checks: string[], launches: number, lastLaunchAt: number | null,
- *   reviews: Review[], isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean
+ *   slice: string, planned: boolean, risky: boolean, checks: string[],
+ *   launches: number, attempts: number, lastImplAt: number | null, reviews: Review[],
+ *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
+ *   attemptFrom: number, testGates: number[], reviewedSince: boolean
  * }} SliceState
+ * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
+ * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
+ * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
  *   constraints: Record<string, string>, planned: string[], slices: Record<string, SliceState>
  * }} Run
+ * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[] }} Records
  */
 
-/** @param {string | number} ts */
-const time = (ts) => (typeof ts === "number" ? ts : Date.parse(ts) || 0);
-/** @param {unknown} t */
-const bare = (t) => String(t ?? "").split(":").pop() ?? "";
+/** @param {unknown} ts */
+const time = (ts) => (typeof ts === "number" ? ts : Date.parse(String(ts ?? "")) || 0);
+/** @param {unknown} v @returns {any[]} */
+const arr = (v) => (Array.isArray(v) ? v.filter((x) => x && typeof x === "object") : []);
+/** @param {unknown} v @returns {string[]} */
+const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
 
 /** @param {string} slice @param {boolean} planned @returns {SliceState} */
-const newSlice = (slice, planned) => ({ slice, planned, risky: false, checks: [], launches: 0, lastLaunchAt: null, reviews: [], isolatedTestFailure: false, final: false, passed: false, gaveUp: false });
+const newSlice = (slice, planned) => ({
+  slice, planned, risky: false, checks: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
+  isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
+});
 
-/** Reviews after the slice's latest implementer launch. @param {SliceState} s */
-export const currentReviews = (s) => s.reviews.filter((r) => s.lastLaunchAt === null || r.ts >= s.lastLaunchAt);
+/** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
+export const currentReviews = (s) => s.reviews.filter((r) => s.lastImplAt === null || r.ts > s.lastImplAt);
 
 /** @param {SliceState} s */
 function settle(s) {
   const latest = currentReviews(s).at(-1);
   s.passed = latest?.status === "pass";
-  s.gaveUp = latest?.status === "fail" && s.launches >= 1 + MAX_RETRIES;
+  s.gaveUp = latest?.status === "fail" && s.attempts >= 1 + MAX_RETRIES;
   s.final = s.passed || s.gaveUp;
+  s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
 }
 
 /**
- * Folds one session's events into runs (docs/brief-grammar.md, "Run model"). A run opens at a PLAN REVIEW launch
- * without REPLAN (closing any open run) or at a PATH: light implementer launch with no run open; a PLAN REVIEW with
- * REPLAN extends the open run (or opens one). Launches outside any run are not tracked. `now` decides staleness.
- * @param {RunEvent[]} events @param {{ now?: number, staleMin?: number }} [opts]
+ * Folds one session's log records into runs (docs/brief-grammar.md, "Run model"). Records of other sessions are
+ * dropped when `sessionId` is given. A gate record counts when its agent_id joins a launch and its session_id (when it
+ * has one) is that launch's. A run opens at a PLAN REVIEW launch without REPLAN (closing any open run) or at a PATH: light implementer
+ * launch with no run open; a PLAN REVIEW with REPLAN extends the open run (or opens one). Launches outside any run are
+ * not tracked. `now` decides staleness at the end; a launch decides it on the way.
+ * @param {Records} records @param {{ now?: number, staleMin?: number, sessionId?: string }} [opts]
  * @returns {{ runs: Run[], open: Run | null }}
  */
-export function foldRuns(events, opts = {}) {
+export function foldRuns(records, opts = {}) {
+  const rec = /** @type {Records} */ (records && typeof records === "object" ? records : {});
   const staleMs = (opts.staleMin ?? RUN_STALE_MIN_DEFAULT) * 60000;
   const now = opts.now ?? Date.now();
+  const sid = opts.sessionId;
+  const mine = (/** @type {any} */ r) => sid === undefined || r.session_id === sid;
+  const launches = arr(rec.launches).filter(mine);
+  /** @type {Map<string, any>} */
+  const byAgent = new Map();
+  for (const l of launches) if (typeof l.agent_id === "string" && l.agent_id) byAgent.set(l.agent_id, l);
+  const stops = arr(rec.stops).filter(mine);
+  const gates = arr(rec.gates).filter(
+    (g) =>
+      g.gate === "test" &&
+      g.reason === "tests_failed_isolated" &&
+      typeof g.agent_id === "string" &&
+      byAgent.has(g.agent_id) &&
+      (g.session_id === undefined || g.session_id === byAgent.get(g.agent_id)?.session_id),
+  );
+  // One timeline; at equal times a launch comes before a stop, a stop before a gate.
+  const events = [
+    ...launches.map((r, i) => ({ kind: 0, i, r })),
+    ...stops.map((r, i) => ({ kind: 1, i, r })),
+    ...gates.map((r, i) => ({ kind: 2, i, r })),
+  ].sort((a, b) => time(a.r.ts) - time(b.r.ts) || a.kind - b.kind || a.i - b.i);
+
   /** @type {Run[]} */
   const runs = [];
   /** @type {Run | null} the latest run; it is open while neither closed nor stale */
@@ -384,45 +487,47 @@ export function foldRuns(events, opts = {}) {
     const ids = run.kind === "planned" ? run.planned : Object.keys(run.slices);
     if (ids.length && ids.every((id) => run.slices[id]?.final)) run.closed = true;
   };
+  /** @param {string} slice */
+  const runWith = (slice) => (slice ? runs.findLast((r) => slice in r.slices) : undefined);
 
-  for (const e of Array.isArray(events) ? events : []) {
-    if (!e || typeof e !== "object") continue;
-    const ts = time(e.ts);
-    const role = bare(e.role);
-    if (e.phase === "launch") {
+  for (const { kind, r } of events) {
+    const ts = time(r.ts);
+    const role = bare(r.agent_type ?? r.role);
+    if (kind === 0) {
       // Staleness is judged at a launch: a stale run no longer counts as open, so a light launch opens a new run.
       if (cur && !cur.closed && ts - cur.lastAt > staleMs) cur.stale = true;
       /** @type {Run | null} */
       let open = cur && !cur.closed && !cur.stale ? cur : null;
-      if (role === "reviewer" && isPlanReview(e.prompt)) {
-        const plan = parsePlan(e.prompt);
-        if (plan.replan === null || !open) {
+      if (role === "reviewer" && (r.isPlanReview === true || r.slice === "plan")) {
+        const replan = typeof r.replan === "number" ? r.replan : null;
+        if (replan === null || !open) {
           if (open) open.closed = true;
           open = cur = openRun("planned", ts);
         }
         open.kind = "planned";
         open.lastAt = ts;
-        Object.assign(open.constraints, plan.constraints);
-        for (const p of plan.slices) {
+        const plan = r.plan && typeof r.plan === "object" ? r.plan : {};
+        if (plan.constraints && typeof plan.constraints === "object") Object.assign(open.constraints, plan.constraints);
+        for (const p of arr(plan.slices)) {
+          if (typeof p.slice !== "string" || !p.slice) continue;
           if (!open.planned.includes(p.slice)) open.planned.push(p.slice);
           const s = (open.slices[p.slice] ??= newSlice(p.slice, true));
           s.planned = true;
-          s.risky = s.risky || p.risky;
-          s.checks = [...new Set([...s.checks, ...p.checks])];
+          s.risky = s.risky || p.risky === true;
+          s.checks = [...new Set([...s.checks, ...strings(p.checks)])];
         }
         continue;
       }
       if (role === "implementer") {
-        const h = parseHeader(e.prompt);
-        if (h.workflow || !h.slice) continue;
-        if (!open && h.path === "light") open = cur = openRun("light", ts);
+        const slice = typeof r.slice === "string" && r.slice !== "plan" ? r.slice : null;
+        if (r.workflow === true || !slice) continue;
+        if (!open && r.path === "light") open = cur = openRun("light", ts);
         if (!open) continue;
-        const s = (open.slices[h.slice] ??= newSlice(h.slice, false));
+        const s = (open.slices[slice] ??= newSlice(slice, false));
         s.launches += 1;
-        s.lastLaunchAt = ts;
-        s.isolatedTestFailure = false;
-        s.risky = s.risky || h.risky;
-        s.checks = [...new Set([...s.checks, ...h.checks])];
+        s.lastImplAt = ts;
+        s.risky = s.risky || r.risky === true;
+        s.checks = [...new Set([...s.checks, ...strings(r.checks)])];
         open.lastAt = ts;
         settle(s);
         continue;
@@ -430,22 +535,30 @@ export function foldRuns(events, opts = {}) {
       if (open) open.lastAt = Math.max(open.lastAt, ts);
       continue;
     }
-    // A stop or gate entry belongs to the latest run that has its slice (a long worker may outlive staleness),
-    // else to the latest run.
-    const slice = e.slice ?? "";
-    const run = (slice ? runs.findLast((r) => slice in r.slices) : undefined) ?? cur;
+    const launch = typeof r.agent_id === "string" ? byAgent.get(r.agent_id) : undefined;
+    const slice = String((kind === 2 ? launch?.slice : (r.slice ?? launch?.slice)) ?? "");
+    const run = runWith(slice) ?? cur;
     if (!run) continue;
-    run.lastAt = Math.max(run.lastAt, ts);
+    if (kind === 1) run.lastAt = Math.max(run.lastAt, ts);
     const s = slice ? run.slices[slice] : undefined;
     if (!s) continue;
-    if (e.phase === "gate" && e.reason === "tests_failed_isolated" && (s.lastLaunchAt === null || ts >= s.lastLaunchAt)) {
-      s.isolatedTestFailure = true;
-    } else if (e.phase === "stop" && role === "reviewer") {
-      const r = parseReply(e.reply);
-      s.reviews.push({ ts, status: e.status !== undefined ? e.status : r.status, answers: r.answers, open: r.open, model: e.model ?? null });
-      settle(s);
-      closeIfDone(run);
+    if (kind === 2) {
+      s.testGates.push(ts);
+    } else if (role === "implementer") {
+      if (s.attempts === 0 || s.reviewedSince) {
+        s.attempts += 1;
+        s.attemptFrom = s.reviews.at(-1)?.ts ?? -Infinity;
+        s.reviewedSince = false;
+      }
+      s.lastImplAt = Math.max(s.lastImplAt ?? ts, ts);
+    } else if (role === "reviewer") {
+      const status = r.status === "pass" || r.status === "fail" ? r.status : null;
+      const model = typeof r.model === "string" ? r.model : typeof launch?.model === "string" ? launch.model : null;
+      s.reviews.push({ ts, status, answers: r.answers && typeof r.answers === "object" ? r.answers : {}, open: Array.isArray(r.open) ? r.open : [], model });
+      s.reviewedSince = true;
     }
+    settle(s);
+    closeIfDone(run);
   }
   if (cur && !cur.closed && now - cur.lastAt > staleMs) cur.stale = true;
   return { runs, open: cur && !cur.closed && !cur.stale ? cur : null };
@@ -454,7 +567,7 @@ export function foldRuns(events, opts = {}) {
 /**
  * Doubt signals for a slice: why it needs a passing opus review after its latest implementer. Empty when ORCH_ESCALATION
  * is off; ["always"] when it is always. Signals: risky, retry (an earlier failed review), read_answer and open_items
- * (in its latest passing review), tests_failed_isolated (for its latest implementer).
+ * (in its latest passing review), tests_failed_isolated (for its latest implementer attempt).
  * @param {SliceState} s @param {Record<string, string | undefined>} [env] @returns {string[]}
  */
 export function doubtSignals(s, env = {}) {
@@ -465,7 +578,7 @@ export function doubtSignals(s, env = {}) {
   if (s.risky) signals.push("risky");
   if (s.reviews.some((r) => r.status === "fail")) signals.push("retry");
   const pass = currentReviews(s).filter((r) => r.status === "pass").at(-1);
-  if (pass && Object.values(pass.answers).some((a) => a.mode === "read")) signals.push("read_answer");
+  if (pass && Object.values(pass.answers).some((a) => a?.mode === "read")) signals.push("read_answer");
   if (pass && pass.open.length) signals.push("open_items");
   if (s.isolatedTestFailure) signals.push("tests_failed_isolated");
   return signals;
