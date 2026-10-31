@@ -244,7 +244,7 @@ test("workers load listed skills with the Skill tool and ignore ones that do not
   for (const file of [IMPLEMENTER, RESEARCHER, REVIEWER]) {
     const text = read(file);
     assert.match(text, /load each skill named in the brief's `SKILLS:` line or in the plan check's suggested-skills block with the Skill tool/, `${file} loads listed skills`);
-    assert.match(text, /does not fit[^.]*ignore it and say so under OPEN/, `${file} ignores a skill that does not fit and says so`);
+    assert.match(text, /does not fit[^.]*ignore it and say so in one line of your report, not under OPEN/, `${file} ignores a skill that does not fit and says so outside OPEN`);
   }
   assert.match(read(REVIEWER), /review skill only to sharpen the review, never to change files/);
   assert.match(read(RESEARCHER), /you still change nothing/);
