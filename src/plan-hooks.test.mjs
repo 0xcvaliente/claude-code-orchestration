@@ -14,8 +14,7 @@ function project({ reviewed = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "plan-hooks-"));
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
-  copyFileSync(join(root, ".claude", "hooks", "state.mjs"), join(hooks, "state.mjs"));
-  for (const h of ["plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   if (reviewed) {
     mkdirSync(join(dir, ".claude", "state"), { recursive: true });
     const plan = (/** @type {string} */ session) => JSON.stringify({ ts: "t", session_id: session, slice: "plan", role: "reviewer", status: "pass", agent_id: "r0" });
@@ -211,6 +210,151 @@ test("plan check: a workflow brief is not checked, and an unreadable log still r
     mkdirSync(join(dir, ".claude", "state", "plan-check.jsonl"), { recursive: true }); // reading it as a file throws
     assert.equal(launch(dir, "SLICE: a\nFILES: x.py\nDEPENDS: none\nPATH: light").status, 0);
     assert.equal(existsSync(join(dir, ".claude", "state", "plan-check.lock")), false, "lock released");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Checks scoped to a run (runs come from journal.mjs's launch and stop records, folded by brief.mjs). ----
+/** A background agent through journal.mjs: its launch record, then (unless `running`) its stop. */
+function agents(/** @type {string} */ dir, session = "s1") {
+  let n = 0;
+  /** @param {string} type @param {string} prompt @param {string | null} reply */
+  const agent = (type, prompt, reply = "STATUS: pass") => {
+    const id = `ag${++n}`;
+    run(dir, "journal.mjs", { hook_event_name: "PostToolUse", session_id: session, tool_name: "Agent", tool_input: { subagent_type: type, prompt }, tool_response: { status: "async_launched", agentId: id } });
+    if (reply !== null) run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: session, agent_id: id, agent_type: type, last_assistant_message: reply });
+    return id;
+  };
+  return {
+    agent,
+    /** @param {string} text */
+    plan: (/** @type {string} */ text, /** @type {string | null} */ reply = "STATUS: pass") => agent("orchestration:reviewer", text, reply),
+    /** Launch through plan-check, and on allow record the launch, its stop and a passing review. @param {string} prompt */
+    slice(prompt, reply = "STATUS: pass") {
+      const r = launch(dir, prompt, "orchestration:implementer", session);
+      if (r.status === 0) {
+        const id = /** @type {string} */ (prompt.match(/SLICE: (\S+)/)?.[1]);
+        agent("orchestration:implementer", prompt);
+        agent("orchestration:reviewer", `SLICE: ${id}`, reply);
+      }
+      return r;
+    },
+  };
+}
+/** @param {string} dir */
+const lastCheck = (dir) => readFileSync(join(dir, ".claude", "state", "plan-check.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+const PLAN2 = "PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: src/, lib/*.py\nDEPENDS: none\nGOAL: b";
+
+test("plan check: ownership is per run, so a later run may reuse a file an earlier run's slice owned", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nTask: one");
+    assert.equal(s.slice("SLICE: a\nFILES: shared.py\nDEPENDS: none").status, 0);
+    assert.equal(launch(dir, "SLICE: b\nFILES: shared.py\nDEPENDS: none").status, 2, "same run: still an overlap");
+    s.plan("PLAN REVIEW\nTask: two"); // a new plan review opens run 2 and closes run 1
+    assert.equal(launch(dir, "SLICE: b\nFILES: shared.py\nDEPENDS: none").status, 0, "run 2 does not see run 1's owners");
+    assert.equal(lastCheck(dir).run, "2");
+    // A light slice after the run closed opens the next run: its files are free too, and a retry keeps them.
+    const light = "SLICE: fix\nFILES: shared.py\nDEPENDS: none\nPATH: light";
+    s.plan("PLAN REVIEW\nSLICE: c\nFILES: c.py\nDEPENDS: none\nGOAL: c"); // run 3
+    assert.equal(s.slice("SLICE: c\nFILES: c.py\nDEPENDS: none").status, 0, "run 3 closes when c passes");
+    const r = launch(dir, light);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual([lastCheck(dir).reason, lastCheck(dir).run], ["light_path", "4"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plan check: the plan review is per run; a new PLAN REVIEW's implementers wait for its own reviewer", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nTask: one");
+    assert.equal(launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none").status, 0);
+    s.plan("PLAN REVIEW\nTask: two", null); // run 2, its reviewer still running
+    const r = launch(dir, "SLICE: b\nFILES: b.py\nDEPENDS: none");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /no plan review has finished in this run/);
+    // missing_lines counts per run too: two blocks, a give-up, then a new run blocks again.
+    assert.equal(launch(dir, "Goal: x").status, 2);
+    assert.equal(launch(dir, "Goal: x").status, 2);
+    assert.equal(launch(dir, "Goal: x").status, 0);
+    assert.equal(lastCheck(dir).reason, "missing_lines_gave_up");
+    s.plan("PLAN REVIEW\nTask: three");
+    assert.equal(launch(dir, "Goal: x").status, 2, "run 3 has its own loop guard");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plan check: not_in_plan when a planned run's slice or files are not in the plan; REPLAN adds them; old plans skip (logged)", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const s = agents(dir);
+    s.plan(PLAN2);
+    let r = launch(dir, "SLICE: c\nFILES: c.py\nDEPENDS: none");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /slice c is not in the plan of run 1 \(planned: a, b\).*REPLAN/);
+    r = launch(dir, "SLICE: a\nFILES: ./a.py, extra.py\nDEPENDS: none");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /FILES outside its planned FILES: extra\.py/);
+    assert.equal(lastCheck(dir).reason, "not_in_plan");
+    assert.equal(launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none").status, 0);
+    assert.equal(launch(dir, "SLICE: b\nFILES: src/x/y.ts, src, lib/util.py\nDEPENDS: none").status, 0, "a planned folder and a planned glob cover what is under them");
+    assert.equal(launch(dir, "SLICE: b\nFILES: `" + join(dir, "src", "abs.ts") + "`\nDEPENDS: none").status, 0, "absolute paths normalize against the project dir");
+    // Loop guard: twice per slice, then through as not_in_plan_gave_up (other checks still run).
+    assert.equal(launch(dir, "SLICE: c\nFILES: c.py\nDEPENDS: none").status, 2);
+    r = launch(dir, "SLICE: c\nFILES: c.py\nDEPENDS: none");
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual([lastCheck(dir).reason, lastCheck(dir).gave_up], ["not_in_plan_gave_up", ["not_in_plan_gave_up"]]);
+    r = launch(dir, "SLICE: c\nFILES: a.py\nDEPENDS: none");
+    assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], "a slice that gave up on the plan still may not take another slice's file");
+    // REPLAN adds slice e to the open run.
+    s.plan("PLAN REVIEW\nREPLAN: 1\nSLICE: e\nFILES: e.py\nDEPENDS: a\nGOAL: e");
+    assert.equal(launch(dir, "SLICE: e\nFILES: e.py\nDEPENDS: a").status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const old = project({ reviewed: false });
+  try {
+    agents(old).plan("PLAN REVIEW\nTask: a plan in prose, no slice lines");
+    assert.equal(launch(old, "SLICE: z\nFILES: z.py\nDEPENDS: none").status, 0);
+    assert.deepEqual([lastCheck(old).reason, lastCheck(old).skips], ["ok", ["not_in_plan:no_plan_slices"]]);
+    assert.equal(launch(old, "SLICE: l\nFILES: l.py\nDEPENDS: none\nPATH: light", "implementer", "s9").status, 0);
+    assert.deepEqual(lastCheck(old).skips, ["not_in_plan:no_planned_run"]);
+  } finally {
+    rmSync(old, { recursive: true, force: true });
+  }
+});
+
+test("plan check: while a run is open, built-in and fork agents are blocked (builtin_agent_in_run), twice per type, never plugin or project agents", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const builtin = (/** @type {string | undefined} */ type, env = {}) =>
+      spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs")], {
+        input: JSON.stringify({ session_id: "s1", tool_name: "Agent", tool_input: { ...(type === undefined ? {} : { subagent_type: type }), prompt: "Look around." } }),
+        env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ORCH_ALLOW_BUILTINS: "", ORCH_RUN_STALE_MIN: "", ...env },
+        encoding: "utf8",
+      });
+    assert.equal(builtin("general-purpose").status, 0, "no run open: not this hook's business");
+    assert.equal(lastCheck(dir).reason, "builtin_outside_run");
+    agents(dir).plan(PLAN2);
+    for (const t of ["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup", "fork", undefined]) {
+      const r = builtin(t);
+      assert.equal(r.status, 2, String(t));
+      assert.match(r.stderr, /run 1 is open.*built-in or a fork.*ORCH_ALLOW_BUILTINS=1/);
+      assert.equal(lastCheck(dir).reason, "builtin_agent_in_run");
+    }
+    for (const t of ["orchestration:researcher", "my-project-agent", "acme:Explore", "reviewer"]) assert.equal(builtin(t).status, 0, t);
+    assert.equal(builtin("Explore").status, 2, "second block for Explore");
+    assert.equal(builtin("Explore").status, 0, "then the loop guard lets it through");
+    assert.equal(lastCheck(dir).reason, "builtin_agent_in_run_gave_up");
+    assert.equal(builtin("Plan", { ORCH_ALLOW_BUILTINS: "1" }).status, 0);
+    assert.equal(builtin("Plan", { ORCH_RUN_STALE_MIN: "0.00001" }).status, 0, "a stale run is not open");
+    assert.equal(builtin("Plan").status, 2, "Plan still has one block left");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
