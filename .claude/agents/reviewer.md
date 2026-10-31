@@ -3,7 +3,7 @@ name: reviewer
 description: Independent fresh-context review of a finished slice or result against its goal and acceptance check. Reports correctness gaps only. Never modifies files.
 model: sonnet
 effort: medium
-maxTurns: 25
+maxTurns: 40
 tools: Read, Grep, Glob, Bash, WebSearch, WebFetch
 skills:
   - orchestration-conventions

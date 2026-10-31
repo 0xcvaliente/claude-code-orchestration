@@ -1,5 +1,7 @@
 // Role tiers and limits. Model IDs are overridable per role: ORCH_MODEL_PLANNER, etc.
 import { judgeEnabled } from "./judge.js";
+// Read-router thresholds live with the zero-model file profiler (a hook, so it runs without tsx).
+export { READ_TIERS } from "../.claude/hooks/file-profile.mjs";
 
 export type Role = "planner" | "explorer" | "writer" | "verifier" | "triager" | "solo";
 
@@ -124,7 +126,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
     writer: {
       model: model("ORCH_MODEL_WRITER", "claude-sonnet-5-5"),
       effort: "medium",
-      maxTurns: 40,
+      maxTurns: 80,
       tools: [...READ_ONLY, "Edit", "Write", "Bash"],
       disallowedTools: bashDenied,
       system:
@@ -136,7 +138,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
     verifier: {
       model: model("ORCH_MODEL_VERIFIER", "claude-sonnet-5-5"),
       effort: "medium",
-      maxTurns: 25,
+      maxTurns: 40,
       tools: [...READ_ONLY, "Bash"],
       disallowedTools: bashDenied,
       system:
