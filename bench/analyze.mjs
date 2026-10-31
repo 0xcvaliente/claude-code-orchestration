@@ -24,7 +24,7 @@ export const TASK_META = {
   "h3-sql-engine": { tier: "large", shape: "monolithic" },
   "k2-stdlib-toolkit-xl": { tier: "large", shape: "splittable" },
 };
-export const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
+export const CELLS = ["main", "cap6", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 const CLAIMS = new Set(["success", "partial", "failure", "unclear", "none"]);
 export const EXCLUDED_REASONS = new Set(["rate_limited", "error"]);
 const BOOT_ITERATIONS = 10_000;
