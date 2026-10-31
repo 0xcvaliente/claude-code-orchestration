@@ -316,3 +316,42 @@ test("briefs with CHECKS lines are still skipped by plan-check.mjs", async () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("replan: slices that depend on a slice that failed for good, directly or transitively, are reported failed and never run", async () => {
+  const r = await run({
+    args: { maxRetries: 1 },
+    slices: [slice("a"), slice("b")],
+    replan: { slices: [slice("x", { dependsOn: ["a"] }), slice("y", { dependsOn: ["x"] }), slice("z", { dependsOn: ["b"] })] },
+    verdict: (l) => (l.startsWith("review:a") ? { pass: false, gaps: ["broken"], evidence: "", answers: [], open: "" } : answered([])),
+  });
+  const l = labels(r.calls);
+  assert.ok(!l.some((x) => /^build:[xy]#/.test(x)), "x and y are never built, not even by the cycle fallback");
+  assert.ok(l.includes("build:z#1"));
+  assert.ok(!r.logs.some((m) => /dependency cycle/.test(m)));
+  const byId = Object.fromEntries(r.result.slices.map((/** @type {any} */ s) => [s.id, s]));
+  assert.deepEqual(byId.x.gaps, ["depends on failed a"]);
+  assert.deepEqual(byId.y.gaps, ["depends on failed x"]);
+  assert.equal(byId.x.status, "failed");
+  assert.equal(byId.a.status, "replanned", "z still replaces part of the work");
+  assert.equal(byId.z.status, "passed");
+  assert.equal(r.result.failed, 2);
+  // Every replanned slice blocked: the failed slice stays failed and nothing else runs.
+  const blocked = await run({ args: { maxRetries: 1 }, slices: [slice("a")], replan: { slices: [slice("x", { dependsOn: ["a"] })] }, verdict: () => ({ pass: false, gaps: ["g"], evidence: "", answers: [], open: "" }) });
+  assert.ok(!labels(blocked.calls).includes("build:x#1"));
+  assert.deepEqual(blocked.result.slices.map((/** @type {any} */ s) => [s.id, s.status]), [["a", "failed"], ["x", "failed"]]);
+});
+
+test("args.skip: unknown ids are ignored and logged; a slice whose dependency is not skipped runs again; skipped slices count as passed", async () => {
+  const plan = { constraints: [], slices: [slice("a"), slice("b", { dependsOn: ["a"] }), slice("c")] };
+  const r = await run({ args: { plan, skip: ["b", "c", "nope"] } });
+  const l = labels(r.calls);
+  assert.ok(r.logs.some((m) => /ignoring ids not in the plan: nope/.test(m)));
+  assert.ok(r.logs.some((m) => /running again[^\n]*: b/.test(m)));
+  assert.deepEqual(l, ["build:a#1", "review:a#1", "build:b#1", "review:b#1"], "c is skipped; b runs again because a is not skipped");
+  assert.deepEqual(r.result.slices.map((/** @type {any} */ s) => [s.id, s.status]), [["c", "skipped"], ["a", "passed"], ["b", "passed"]]);
+  assert.equal(r.result.passed, 3, "skipped slices count as passed");
+  // Skipping a and b together skips both.
+  const both = await run({ args: { plan, skip: ["a", "b"] } });
+  assert.deepEqual(labels(both.calls), ["build:c#1", "review:c#1"]);
+  assert.equal(both.result.passed, 3);
+});
