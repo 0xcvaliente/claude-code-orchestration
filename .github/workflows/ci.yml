@@ -24,5 +24,8 @@ jobs:
         run: |
           git config --global user.name "ci"
           git config --global user.email "ci@example.com"
+      # The file profiler's PDF tests (src/file-profile.test.mjs) need poppler; they skip without it.
+      - name: Install poppler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
       - run: npm ci
       - run: npm run check
