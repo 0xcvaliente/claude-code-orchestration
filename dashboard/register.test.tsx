@@ -1708,6 +1708,27 @@ test('run: a light-path launch opens a run that a prompt keeps until its slice i
   expect((await texts($)).some(x => /fx/.test(x))).toBe(false)
 })
 
+test('run: a pass that still needs an opus review keeps the run open; the opus pass closes it (brief.mjs settle)', async ($, on) => {
+  await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
+  const s = $ as any
+  await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: fx', REVQ)
+  await finish($, 'r1', FAIL)
+  await spawnWith($, 'b2', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: fx', REVQ)
+  await finish($, 'r2', PASS)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'and?' }) // a retry and a sonnet pass: not final until an opus pass, so the run stays
+  expect((await texts($)).some(x => /^\S fx /.test(x))).toBe(true)
+  await spawnWith($, 'o1', 'SLICE: fx', REVQ)
+  await finish($, 'o1', PASS)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'new thing' }) // the opus pass makes the slice final: the run is closed
+  expect((await texts($)).some(x => /fx/.test(x))).toBe(false)
+})
+
 test('run: REPLAN extends the open run and marks the progress bar; the agents stay', async ($, on) => {
   await boot($, on)
   await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
