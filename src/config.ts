@@ -23,13 +23,43 @@ export const UNSAFE_BASH = [
   ...PUSH_BASH, "Bash(git remote*)", "Bash(git * remote*)",
   "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
 ];
-// Claude Code's six built-in subagents. This repo ships its own researcher, implementer, reviewer and integrator, so the
-// built-ins are blocked: they are in permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and
-// scripts/orchestrate.sh sets CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS for headless runs. SDK workers have no Agent tool.
+// Claude Code's six built-in subagents (general-purpose, claude, Explore, Plan, claude-code-guide, statusline-setup)
+// plus fork subagents (`Agent(fork)`: on by default since Claude Code v2.1.302, a fork inherits the whole conversation
+// and every tool). This repo ships its own researcher, implementer, reviewer and integrator, so these are blocked: they
+// are in permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and scripts/orchestrate.sh sets
+// CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 and CLAUDE_CODE_FORK_SUBAGENT=0 for headless runs. SDK workers have no Agent
+// tool.
 export const DENIED_AGENTS = [
   "Agent(general-purpose)", "Agent(claude)", "Agent(Explore)", "Agent(Plan)",
-  "Agent(claude-code-guide)", "Agent(statusline-setup)",
+  "Agent(claude-code-guide)", "Agent(statusline-setup)", "Agent(fork)",
 ];
+
+// Tool policy of the native agents: the `tools:` and `disallowedTools:` frontmatter lines of .claude/agents/<name>.md,
+// kept in step by src/sync-agents.ts (`npm run check-agents` fails on drift, `npm run sync-agents` fixes it). A key left
+// out here means the agent file must not have that line. The implementer inherits every tool except Agent, so it cannot
+// nest subagents (Claude Code already removes the Workflow tool from every subagent). These are the role boundaries:
+// never loosen a list without a reason.
+export interface ToolPolicy {
+  tools?: string[];
+  disallowedTools?: string[];
+}
+export type NativeAgent = "orchestrator" | "researcher" | "implementer" | "reviewer" | "integrator";
+export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
+  orchestrator: { tools: ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob"] },
+  researcher: {
+    tools: [
+      "Read", "Grep", "Glob",
+      "Bash(git log*)", "Bash(git ls-files*)", "Bash(git rev-list*)", "Bash(git rev-parse*)", "Bash(git status*)",
+      "Bash(git show*)", "Bash(git branch --show-current)",
+      "Bash(git -C * log*)", "Bash(git -C * ls-files*)", "Bash(git -C * rev-list*)", "Bash(git -C * rev-parse*)",
+      "Bash(git -C * status*)", "Bash(git -C * show*)", "Bash(git -C * branch --show-current)",
+      "Bash(wc*)", "Bash(ls*)", "Bash(du*)", "WebSearch", "WebFetch",
+    ],
+  },
+  implementer: { disallowedTools: ["Agent"] },
+  reviewer: { tools: ["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"] },
+  integrator: { tools: ["Read", "Grep", "Glob", "Bash"] },
+};
 // Workers with Bash: pushing, remote changes and recursive deletion need the task to ask for them, and a reviewer model
 // checks them first (judge.ts). The refusal must be reported, not worked around.
 const SHELL_RULES =
