@@ -1,0 +1,5 @@
+SLICE: s1
+FILES: app.py
+DEPENDS: none
+
+Build the app. The plan said RISKY tasks need care; this line is body text.

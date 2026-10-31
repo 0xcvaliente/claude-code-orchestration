@@ -1,0 +1,4 @@
+PLAN REVIEW
+
+Plan: 1) write the parser in parser.py, 2) wire it into cli.py.
+Check that the two parts do not overlap.

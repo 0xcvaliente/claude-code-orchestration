@@ -1,0 +1,3 @@
+> STATUS: fail
+STATUS: pass
+OPEN: the CSV header case is untested

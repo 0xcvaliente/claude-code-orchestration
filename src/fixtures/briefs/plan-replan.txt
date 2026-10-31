@@ -1,0 +1,10 @@
+PLAN REVIEW
+REPLAN: 2
+The csv slice failed for good; this adds a smaller one.
+CONSTRAINTS:
+- C4: keep the old CSV API
+SLICE: csv-lite
+FILES: toolkit/csv_lite.py
+DEPENDS: none
+GOAL: minimal CSV reader
+CHECKS: C4
