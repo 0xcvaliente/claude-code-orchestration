@@ -69,7 +69,7 @@ test("C1: no parser throws on empty, malformed or non-string input; fields come 
     normalizeFiles(v, "/base");
     agentModel(v, { projectDir: "/nonexistent", pluginRoot: "/nonexistent" });
   }
-  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false });
+  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
   assert.deepEqual(parsePlan(null), { isPlanReview: false, replan: null, constraints: {}, slices: [] });
   assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [] });
   assert.deepEqual(briefUrls(42), []);
@@ -328,7 +328,7 @@ const attempt = (min, slice, verdict, extra = "") => [impl(min, slice, extra), i
 
 test("launch and stop records carry parsed fields, never the brief or reply text", () => {
   const l = launchRecord({ subagent_type: "orchestration:implementer", prompt: "SLICE: a\nFILES: a.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C2\nsecret body text" }, { ts: "t", sessionId: "s", agentId: "x1" });
-  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null, sources: [], read: null, kind: null, validate: false, urls: [] });
+  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null, sources: [], read: null, kind: null, validate: false, urls: [], skills: [] });
   assert.doesNotMatch(JSON.stringify(l), /secret body text/);
   const p = launchRecord({ subagent_type: "reviewer", model: "opus", prompt: PLAN }, { ts: "t" });
   assert.equal(p.slice, "plan");
@@ -361,10 +361,24 @@ test("header: SOURCES is a list like FILES; READ, KIND and VALIDATE take their f
   assert.equal(parseHeader("Text with READ: judge mid-line").read, null, "a key in mid-line does not count");
 });
 
+test("header: SKILLS is a list of skill names, namespaced or not, deduplicated, at most 8; launch record keeps the names only", () => {
+  assert.deepEqual(parseHeader("SKILLS: anthropic-skills:docx, orchestration:route , `tdd`, tdd, , none").skills, ["anthropic-skills:docx", "orchestration:route", "tdd"]);
+  assert.deepEqual(parseHeader("- **SKILLS:** a, b, c, d, e, f, g, h, i, j").skills, ["a", "b", "c", "d", "e", "f", "g", "h"]);
+  assert.deepEqual(parseHeader("SKILLS: use the docx skill, :x, x:, docx").skills, ["docx"], "phrases and broken namespaces are dropped");
+  assert.deepEqual(parseHeader("SKILLS: " + "x".repeat(101) + ", ok").skills, ["ok"]);
+  assert.deepEqual(parseHeader("SKILLS:").skills, []);
+  assert.deepEqual(parseHeader("SKILLS: none").skills, []);
+  assert.deepEqual(parseHeader("Text with SKILLS: docx mid-line").skills, [], "a key in mid-line does not count");
+  const l = launchRecord({ subagent_type: "implementer", prompt: "SLICE: a\nFILES: a.md\nDEPENDS: none\nSKILLS: anthropic-skills:pdf, write the secret memo\nsecret body" }, { ts: "t" });
+  assert.deepEqual(l.skills, ["anthropic-skills:pdf"]);
+  assert.doesNotMatch(JSON.stringify(l), /secret/);
+  assert.deepEqual(launchRecord({ subagent_type: "implementer", prompt: "SLICE: a\nFILES: a.md" }).skills, []);
+});
+
 test("C3: old-style briefs and replies parse as before, with the new fields empty", () => {
   const brief = "SLICE: s1\nFILES: app.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C1\nBody: see https://example.com.";
   const h = parseHeader(brief);
-  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false });
+  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
   const r = parseReply("STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none");
   assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [] });
   assert.equal(parseStatus("STATUS: pass\nGAP: 90 something"), "pass", "a GAP line does not change the status");
@@ -499,7 +513,7 @@ test("C3: runs fold the same with or without the 0.4.0 record fields", () => {
   const strip = (/** @type {Item[]} */ items) =>
     items.map((it) => {
       if ("launch" in it && it.launch) {
-        const { sources, read, kind, validate, urls, ...rest } = /** @type {any} */ (it.launch);
+        const { sources, read, kind, validate, urls, skills, ...rest } = /** @type {any} */ (it.launch);
         return { launch: rest };
       }
       if ("stop" in it && it.stop) {
@@ -508,7 +522,7 @@ test("C3: runs fold the same with or without the 0.4.0 record fields", () => {
       }
       return it;
     });
-  const items = [planLaunch(0), ...attempt(1, "a", "pass", "SOURCES: x.md\nREAD: judge\nKIND: bugfix\nVALIDATE: gaps"), ...attempt(5, "b", "fail"), ...review(9, "b", "STATUS: pass\nGAP: 70 a doubt\nQUOTE: b.py:1 | x\nOPEN: none")];
+  const items = [planLaunch(0), ...attempt(1, "a", "pass", "SOURCES: x.md\nREAD: judge\nKIND: bugfix\nVALIDATE: gaps\nSKILLS: anthropic-skills:docx"), ...attempt(5, "b", "fail"), ...review(9, "b", "STATUS: pass\nGAP: 70 a doubt\nQUOTE: b.py:1 | x\nOPEN: none")];
   assert.deepEqual(foldRuns(R(...strip(items)), { now: T0 }), foldRuns(R(...items), { now: T0 }));
 });
 

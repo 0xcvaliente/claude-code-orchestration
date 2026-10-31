@@ -1,0 +1,4 @@
+SLICE: many
+FILES: a.md
+DEPENDS: none
+- **SKILLS:** , docx, none, docx, use the pdf skill please, a:b:c, :bad, bad:, s1, s2, s3, s4, s5, s6, s7, s8
