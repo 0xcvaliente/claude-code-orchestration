@@ -4,6 +4,7 @@ description: Does exactly one scoped slice from a written brief (code, documents
 model: sonnet
 effort: medium
 maxTurns: 40
+disallowedTools: Agent
 skills:
   - orchestration-conventions
 ---
