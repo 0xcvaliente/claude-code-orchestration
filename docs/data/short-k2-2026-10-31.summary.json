@@ -1,0 +1,566 @@
+{
+  "generated_at": "2026-10-31T05:54:08.098Z",
+  "campaigns": [
+    {
+      "dir": "./runs/bench/short-k2-2026-10-31",
+      "manifest": {
+        "campaign": "short-k2-2026-10-31",
+        "matrix": {
+          "name": "short-k2",
+          "seed": 11,
+          "groups": [
+            {
+              "tasks": [
+                "k2-stdlib-toolkit-xl"
+              ],
+              "arms": [
+                "O-mix",
+                "N-UC",
+                "W-mix"
+              ],
+              "cells": [
+                {
+                  "id": "cap10",
+                  "cap_min": 10
+                }
+              ],
+              "reps": 1
+            }
+          ]
+        },
+        "seed": 11,
+        "repo_sha": "b193fdf37b9ab52a95edfa990e03f84e6f8e15b4",
+        "claude_version": "2.1.314 (Claude Code)",
+        "plugin_version": "0.3.0",
+        "node_version": "v26.13.0",
+        "python3_version": "Python 3.15.2",
+        "sqlite3_version": "3.54.0 2026-04-09 12:25:13 8fa8248e303219400c646a885e36dfc52eae33d83f4412e3f369b2be5373aapl (64-bit)",
+        "started_at": "2026-10-31T05:43:20.652Z",
+        "disabled_plugins": [
+          "orchestration@claude-code-orchestration"
+        ],
+        "tasks_dir": "./bench/tasks",
+        "repos_dir": "~/orch-bench/short-k2-2026-10-31"
+      },
+      "rows": 3,
+      "runs": 3,
+      "grades": 14
+    }
+  ],
+  "counts": {
+    "runs": 3,
+    "included": 3,
+    "excluded": 0,
+    "rate_limited": 0,
+    "error": 0,
+    "retries": 0,
+    "retries_by_reason": {}
+  },
+  "retries": [],
+  "runs": [
+    {
+      "run_id": "k2-stdlib-toolkit-xl__O-mix__cap10__r1",
+      "campaign": "short-k2-2026-10-31",
+      "task": "k2-stdlib-toolkit-xl",
+      "tier": "large",
+      "arm": "O-mix",
+      "cell": "cap10",
+      "rep": 1,
+      "cap_min": 10,
+      "budget_tokens": null,
+      "end_reason": "exited",
+      "excluded": false,
+      "exit_code": 0,
+      "error": null,
+      "wall_s": 395.005,
+      "num_turns": 1,
+      "result_docs": 1,
+      "tokens": {
+        "total": 4437108,
+        "by_model": {
+          "opus-5-5": {
+            "input": 132,
+            "output": 26293,
+            "cache_read": 1139636,
+            "cache_write": 106887,
+            "total": 1272948
+          },
+          "sonnet-5-5": {
+            "input": 142,
+            "output": 183336,
+            "cache_read": 2578054,
+            "cache_write": 402628,
+            "total": 3164160
+          }
+        },
+        "output_total": 209629
+      },
+      "score_pct": 99.6,
+      "pass": false,
+      "score_pct_lenient": 99.6,
+      "pass_lenient": false,
+      "passed": 1755,
+      "total": 1762,
+      "timeline": [
+        [
+          120,
+          17.82
+        ],
+        [
+          240,
+          79.74
+        ],
+        [
+          360,
+          99.6
+        ],
+        [
+          395,
+          99.6
+        ]
+      ],
+      "t90_s": 360,
+      "t100_s": null,
+      "auc": 59.35,
+      "has_snapshots": true,
+      "sdk_capped": false,
+      "subagents": {
+        "reviewer": 9,
+        "implementer": 6
+      },
+      "subagent_count": 15,
+      "max_concurrent_subagents": 6,
+      "worktrees": 0,
+      "reviewer_rounds": 9,
+      "subagents_source": "telemetry",
+      "self_delegated": false,
+      "gates": {
+        "review:allow": 15,
+        "test:block": 6,
+        "test:allow": 4
+      },
+      "routes": [],
+      "permission_denials": 0,
+      "claim": "partial",
+      "claim_auto": "partial",
+      "claim_source": "auto",
+      "false_success": false,
+      "files_touched": 12,
+      "outside_graded": []
+    },
+    {
+      "run_id": "k2-stdlib-toolkit-xl__N-UC__cap10__r1",
+      "campaign": "short-k2-2026-10-31",
+      "task": "k2-stdlib-toolkit-xl",
+      "tier": "large",
+      "arm": "N-UC",
+      "cell": "cap10",
+      "rep": 1,
+      "cap_min": 10,
+      "budget_tokens": null,
+      "end_reason": "exited",
+      "excluded": false,
+      "exit_code": 0,
+      "error": null,
+      "wall_s": 428.938,
+      "num_turns": 4,
+      "result_docs": 1,
+      "tokens": {
+        "total": 5650062,
+        "by_model": {
+          "opus-5-5": {
+            "input": 240,
+            "output": 224455,
+            "cache_read": 4829821,
+            "cache_write": 595546,
+            "total": 5650062
+          }
+        },
+        "output_total": 224455
+      },
+      "score_pct": 92.91,
+      "pass": false,
+      "score_pct_lenient": 99.94,
+      "pass_lenient": false,
+      "passed": 1637,
+      "total": 1762,
+      "timeline": [
+        [
+          120,
+          27.75
+        ],
+        [
+          240,
+          83.83
+        ],
+        [
+          360,
+          92.91
+        ],
+        [
+          429,
+          92.91
+        ]
+      ],
+      "t90_s": 360,
+      "t100_s": null,
+      "auc": 59.48,
+      "has_snapshots": true,
+      "sdk_capped": false,
+      "subagents": {},
+      "subagent_count": 0,
+      "max_concurrent_subagents": null,
+      "worktrees": 0,
+      "reviewer_rounds": 0,
+      "subagents_source": "subagent_stats",
+      "self_delegated": false,
+      "gates": {},
+      "routes": [],
+      "permission_denials": 0,
+      "claim": "partial",
+      "claim_auto": "partial",
+      "claim_source": "auto",
+      "false_success": false,
+      "files_touched": 12,
+      "outside_graded": []
+    },
+    {
+      "run_id": "k2-stdlib-toolkit-xl__W-mix__cap10__r1",
+      "campaign": "short-k2-2026-10-31",
+      "task": "k2-stdlib-toolkit-xl",
+      "tier": "large",
+      "arm": "W-mix",
+      "cell": "cap10",
+      "rep": 1,
+      "cap_min": 10,
+      "budget_tokens": null,
+      "end_reason": "deadline",
+      "excluded": false,
+      "exit_code": null,
+      "error": null,
+      "wall_s": 602.36,
+      "num_turns": 0,
+      "result_docs": 0,
+      "tokens": {
+        "total": 0,
+        "by_model": {},
+        "output_total": 0
+      },
+      "score_pct": 66.91,
+      "pass": false,
+      "score_pct_lenient": 91.54,
+      "pass_lenient": false,
+      "passed": 1179,
+      "total": 1762,
+      "timeline": [
+        [
+          120,
+          0
+        ],
+        [
+          240,
+          0
+        ],
+        [
+          360,
+          51.19
+        ],
+        [
+          480,
+          66.91
+        ],
+        [
+          600,
+          66.91
+        ],
+        [
+          602,
+          66.91
+        ]
+      ],
+      "t90_s": null,
+      "t100_s": null,
+      "auc": 23.62,
+      "has_snapshots": true,
+      "sdk_capped": false,
+      "subagents": {
+        "workflow-subagent": 3,
+        "researcher": 4,
+        "integrator": 3,
+        "implementer": 10,
+        "reviewer": 7
+      },
+      "subagent_count": 27,
+      "max_concurrent_subagents": 6,
+      "worktrees": 10,
+      "reviewer_rounds": 7,
+      "subagents_source": "telemetry",
+      "self_delegated": false,
+      "gates": {
+        "review:allow": 2,
+        "test:warn": 8
+      },
+      "routes": [],
+      "permission_denials": 0,
+      "claim": "none",
+      "claim_auto": "none",
+      "claim_source": "auto",
+      "false_success": false,
+      "files_touched": 12,
+      "outside_graded": []
+    }
+  ],
+  "excluded": [],
+  "cells": [
+    {
+      "task": "k2-stdlib-toolkit-xl",
+      "arm": "O-mix",
+      "cell": "cap10",
+      "n": 1,
+      "direction_only": true,
+      "graded": 1,
+      "pass_rate": 0,
+      "score_median_lenient": 99.6,
+      "score_median": 99.6,
+      "score_mean": 99.6,
+      "score_iqr": [
+        99.6,
+        99.6
+      ],
+      "score_min": 99.6,
+      "score_max": 99.6,
+      "tokens_median": 4437108,
+      "tokens_iqr": [
+        4437108,
+        4437108
+      ],
+      "output_tokens_median": 209629,
+      "wall_median_s": 395.01,
+      "t100_median_s": null,
+      "reached_100": 0,
+      "auc_median": 59.35,
+      "false_success": 0,
+      "deadline": 0,
+      "errors": 0,
+      "rate_limited": 0,
+      "retries": 0
+    },
+    {
+      "task": "k2-stdlib-toolkit-xl",
+      "arm": "N-UC",
+      "cell": "cap10",
+      "n": 1,
+      "direction_only": true,
+      "graded": 1,
+      "pass_rate": 0,
+      "score_median_lenient": 99.94,
+      "score_median": 92.91,
+      "score_mean": 92.91,
+      "score_iqr": [
+        92.91,
+        92.91
+      ],
+      "score_min": 92.91,
+      "score_max": 92.91,
+      "tokens_median": 5650062,
+      "tokens_iqr": [
+        5650062,
+        5650062
+      ],
+      "output_tokens_median": 224455,
+      "wall_median_s": 428.94,
+      "t100_median_s": null,
+      "reached_100": 0,
+      "auc_median": 59.48,
+      "false_success": 0,
+      "deadline": 0,
+      "errors": 0,
+      "rate_limited": 0,
+      "retries": 0
+    },
+    {
+      "task": "k2-stdlib-toolkit-xl",
+      "arm": "W-mix",
+      "cell": "cap10",
+      "n": 1,
+      "direction_only": true,
+      "graded": 1,
+      "pass_rate": 0,
+      "score_median_lenient": 91.54,
+      "score_median": 66.91,
+      "score_mean": 66.91,
+      "score_iqr": [
+        66.91,
+        66.91
+      ],
+      "score_min": 66.91,
+      "score_max": 66.91,
+      "tokens_median": 0,
+      "tokens_iqr": [
+        0,
+        0
+      ],
+      "output_tokens_median": 0,
+      "wall_median_s": 602.36,
+      "t100_median_s": null,
+      "reached_100": 0,
+      "auc_median": 23.62,
+      "false_success": 0,
+      "deadline": 1,
+      "errors": 0,
+      "rate_limited": 0,
+      "retries": 0
+    }
+  ],
+  "comparisons": [],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "statement": "On k2-stdlib-toolkit-xl (main), O-mix and O-O each reach a final score within 5 points of P-O with lower median wall time.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "P_O": null,
+        "O_mix": null,
+        "O_O": null
+      },
+      "note": "missing cells or n < 2"
+    },
+    {
+      "id": "H2",
+      "statement": "On small tasks (t1, t2), O-mix uses at least 1.5x the median tokens of P-S and O-O at least 1.5x P-O, with no pass-rate gain.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "t1-parallel O-mix/P-S": {
+          "n_a": 0,
+          "n_b": 0
+        },
+        "t1-parallel O-O/P-O": {
+          "n_a": 0,
+          "n_b": 0
+        },
+        "t2-single O-mix/P-S": {
+          "n_a": 0,
+          "n_b": 0
+        },
+        "t2-single O-O/P-O": {
+          "n_a": 0,
+          "n_b": 0
+        }
+      },
+      "note": "missing cells or n < 2"
+    },
+    {
+      "id": "H4",
+      "statement": "Pooled over main-cell runs, the false-success rate of O-mix+O-O is lower than that of P-S+P-O.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "orchestrated": {
+          "false_success": 0,
+          "n": 0,
+          "rate": null
+        },
+        "plain": {
+          "false_success": 0,
+          "n": 0,
+          "rate": null
+        }
+      },
+      "note": "n < 2 in a group"
+    },
+    {
+      "id": "H5",
+      "statement": "Efficiency (mean score pct per million median tokens): AUTO is within 10% of the best arm on at least two-thirds of the tasks with data.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "t1-parallel": {
+          "evaluable": false
+        },
+        "t2-single": {
+          "evaluable": false
+        },
+        "h1-query-engine": {
+          "evaluable": false
+        },
+        "h2-scheduler": {
+          "evaluable": false
+        },
+        "k1-stdlib-toolkit": {
+          "evaluable": false
+        },
+        "h3-sql-engine": {
+          "evaluable": false
+        },
+        "k2-stdlib-toolkit-xl": {
+          "evaluable": false
+        },
+        "c1-unit-registry": {
+          "evaluable": false
+        },
+        "d1-handbook": {
+          "evaluable": false
+        },
+        "tasks_within": 0,
+        "tasks_evaluable": 0,
+        "tasks_needed": 0
+      },
+      "note": "no task with AUTO and another arm at n >= 2"
+    },
+    {
+      "id": "H6",
+      "statement": "O-O vs P-O (orchestration alone): O-O scores at least as high as P-O on every large task.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "t1-parallel": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "t2-single": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "h1-query-engine": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "h2-scheduler": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "k1-stdlib-toolkit": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "h3-sql-engine": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "k2-stdlib-toolkit-xl": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "c1-unit-registry": {
+          "n_oo": 0,
+          "n_po": 0
+        },
+        "d1-handbook": {
+          "n_oo": 0,
+          "n_po": 0
+        }
+      },
+      "note": "a large task lacks O-O or P-O at n >= 2"
+    },
+    {
+      "id": "H7",
+      "statement": "On k2-stdlib-toolkit-xl, the O-mix minus P-O score difference grows from cap10 to main to cap60; at the two budget cells P-O scores at least as high as O-mix.",
+      "verdict": "inconclusive",
+      "evidence": {
+        "k2-stdlib-toolkit-xl": {
+          "o_mix_minus_p_o": {},
+          "grows": false,
+          "budgets": {}
+        }
+      },
+      "note": "missing sweep cells or n < 2"
+    }
+  ]
+}

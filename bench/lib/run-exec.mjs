@@ -262,7 +262,8 @@ export async function executeRun(run, ctx) {
 
 // Ids of the Workflow tool runs Claude Code recorded for sessions started in repo (N-UC, W-mix: whether a workflow really ran).
 // Claude Code writes <projects>/<cwd with every non-alphanumeric character as "-">/<session>/workflows/wf_*.json even with
-// --no-session-persistence (seen on 2.1.314). An empty list means no workflow was launched. A requeued or resumed run reuses
+// --no-session-persistence (seen on 2.1.314) when a workflow finishes; a workflow cut off earlier (deadline kill) is found by its
+// <session>/workflows/scripts/<name>-wf_<id>.js and <session>/subagents/workflows/wf_<id>/. An empty list means no workflow was launched. A requeued or resumed run reuses
 // the repo path, so pass `since` (ms; only files modified at or after it) and `exclude` (ids present before the launch).
 export function workflowRunsIn(repo, projectsDir = join(homedir(), ".claude", "projects"), { since = 0, exclude = new Set() } = {}) {
   let real = repo;
@@ -273,18 +274,33 @@ export function workflowRunsIn(repo, projectsDir = join(homedir(), ".claude", "p
   }
   const dir = join(projectsDir, real.replace(/[^A-Za-z0-9]/g, "-"));
   if (!existsSync(dir)) return [];
-  const ids = [];
+  const ids = new Set();
+  const consider = (id, path) => {
+    if (ids.has(id) || exclude.has(id)) return;
+    if (since && statSync(path).mtimeMs < since) return;
+    ids.add(id);
+  };
   for (const s of readdirSync(dir, { withFileTypes: true })) {
     if (!s.isDirectory()) continue;
     const wf = join(dir, s.name, "workflows");
-    if (!existsSync(wf)) continue;
-    for (const f of readdirSync(wf)) {
-      if (!/^wf_.*\.json$/.test(f) || exclude.has(f.slice(0, -5))) continue;
-      if (since && statSync(join(wf, f)).mtimeMs < since) continue;
-      ids.push(f.slice(0, -5));
+    if (existsSync(wf)) {
+      for (const f of readdirSync(wf)) if (/^wf_.*\.json$/.test(f)) consider(f.slice(0, -5), join(wf, f));
+      // A run killed mid-workflow has no wf_*.json yet; its script (<name>-wf_<id>.js) is already written.
+      const scripts = join(wf, "scripts");
+      if (existsSync(scripts)) {
+        for (const f of readdirSync(scripts)) {
+          const m = f.match(/wf_[^.]+/);
+          if (m) consider(m[0], join(scripts, f));
+        }
+      }
+    }
+    // ... and so is the folder holding its agents' transcripts.
+    const sub = join(dir, s.name, "subagents", "workflows");
+    if (existsSync(sub)) {
+      for (const f of readdirSync(sub, { withFileTypes: true })) if (f.isDirectory() && /^wf_/.test(f.name)) consider(f.name, join(sub, f.name));
     }
   }
-  return ids.sort();
+  return [...ids].sort();
 }
 
 // Post-run classification: rate limit, then expired login, then the zero-token guard (a fast exit with no model usage).

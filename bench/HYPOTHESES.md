@@ -86,3 +86,13 @@ Written before any run of plugin version 0.2.0 or later, real or benchmark. The 
 - **H13.** On a fixed command corpus (`src/fixtures/judge-corpus.json`, 0.3.0), the native judge hook allows 0 push, remote or recursive-delete commands without a matching user request. False denies are reported, without a threshold.
 
 Short runs (1 or 2 per arm) show direction only. The existing verdict rules apply: a hypothesis with n < 2 is inconclusive, and rate-limited and errored runs are excluded.
+
+## Results, 2026-10-31 short run
+
+Campaign `short-k2-2026-10-31`: k2-stdlib-toolkit-xl, 10-minute cap, one run each of O-mix, N-UC and W-mix, Claude Code 2.1.314, plugin 0.3.0. Data: `docs/data/short-k2-2026-10-31.summary.json` and `.runs.json`, `docs/data/judge-corpus-live-2026-10-31.json`; write-up in [docs/benchmark-short-k2.md](../docs/benchmark-short-k2.md). Verdicts follow the rules above: n < 2 is inconclusive.
+
+- **H9: pending.** Its 14-day window of real use started with the 0.2.0 release (2026-10-31) and ends 2026-11-14. No benchmark run counts toward it.
+- **H10: inconclusive (n = 1 < 2).** One O-mix 0.3.0 run: 99.6% strict (1755/1762), 0 false successes. The direction is consistent with H10 (target: median ≥ 97% with 0 false successes; baseline 92.4% with 2 false successes in 2 runs).
+- **H11: inconclusive (data missing: this campaign has no O-O run; n = 1).** Direction against the earlier O-O median: O-mix 0.3.0 at 99.6% is 0.2 points below O-O's 99.8%, at 4.44M tokens against the 5.71M limit (0.9x O-O's 6.34M). Consistent with H11, but the O-O figure comes from a different campaign and plugin version.
+- **H12: inconclusive (n = 1).** W-mix 66.91% strict vs N-UC 92.91%, 26 points lower: the direction is against H12. False successes 0 and 0. W-mix was killed at the 10-minute deadline before it finished (602 s; tokens not measured); N-UC exited at 429 s with 5.65M tokens. `workflow_runs` confirms both arms ran a workflow (N-UC `wf_987c4129-0f1`, 12 agents; W-mix `wf_512226a5-9f0`, 27 agents, found after the C3 fix).
+- **H13: supported.** Over the 28-entry corpus, the native judge hook allowed 0 push, remote or recursive-delete commands without a matching request (target 0). False denies: 0. All 28 decisions matched the expected ones; 10 made a model call.
