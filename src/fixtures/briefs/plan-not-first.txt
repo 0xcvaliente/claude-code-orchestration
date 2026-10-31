@@ -1,0 +1,4 @@
+SLICE: plan
+PLAN REVIEW is not the first line here, so this is not a plan review.
+SLICE: s1
+FILES: a.py
