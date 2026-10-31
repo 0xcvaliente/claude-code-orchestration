@@ -141,7 +141,7 @@ Hooks log parsed fields only, never brief or reply text. Readers accept older re
 
 **Ordering.** A foreground agent's SubagentStop, and the test-gate record written at that stop, are logged before its PostToolUse launch record (journal.mjs:10). So a stop or gate record whose `agent_id` matches a launch record is placed at its effective time, `max(own ts, launch ts)`: never before its launch. Every launch, stop and gate record is ordered by that time. At equal times the launch comes first, and the stops and gates keep the order of their own `ts` (a stop before a gate at equal `ts`). The effective time is also the time the record counts at (review times, run activity, staleness). A record whose launch never appears keeps its own `ts` and today's handling.
 
-New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opus_review_required`, `builtin_agent_in_run`, each with a `<reason>_gave_up` form logged when the gate lets the launch or reply through after 2 blocks (the loop guard).
+New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opus_review_required`, `builtin_agent_in_run`. Every one except `agents_running` has a `<reason>_gave_up` form, logged when the gate lets the launch or reply through after 2 blocks (the loop guard). `agents_running` is an allow and is never counted as a block, so it never gives up and has no `_gave_up` form.
 
 ## Gates (slice A1)
 

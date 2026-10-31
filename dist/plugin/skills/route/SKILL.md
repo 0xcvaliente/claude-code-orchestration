@@ -44,6 +44,8 @@ Size the task before doing it.
      - Work that changes no code: slices run in the shared folder with no worktrees, no integrator and no commits. Slices with disjoint output files may run in parallel in one message without isolation; slices that depend on each other run one after another.
      - Every deliverable is reviewed. If you write the answer yourself from the researchers' findings, no implementer runs and the Stop gate never fires, so send the draft and its sources to `orchestration:reviewer` before replying (a second `orchestration:reviewer` with model "opus" when the answer is risky), and fix or flag what it reports.
 
+     Fixed-order option: the gated workflow `/orchestration:orchestrate` (project copy: `/orchestrate`) runs the orchestrate route with its order fixed in code (plan with a constraints ledger, build, review with opus escalation, one replan, integrate). Only the user starts it: suggest it when a fixed order helps, never start it unasked.
+
      For an unattended run use `claude -p --agent orchestration:orchestrator`.
 
 3. If the user disagrees with the route, follow their choice. The thresholds live in `src/config.ts` (`TRIAGE`) in the orchestration repo.

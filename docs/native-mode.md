@@ -125,9 +125,36 @@ Two live runs ended the same way: both implementers wrote code but could not run
 - **`cd` plus `git` is refused.** Claude Code prompts for `cd` into another directory followed by `git` (git could run that directory's hooks), and `dontAsk` turns a prompt into a denial whatever the allow rules say. Agents are now told to use `git -C <dir>` and `npm --prefix <dir>`, and reviewers examine the integrated result in the project directory.
 - The macOS `/var` vs `/private/var` symlink was a wrong first guess; the failure reproduced under `~/orch-test`.
 
-## Scripted flow (workflow)
+## Scripted flow: the gated workflow (0.3.0)
 
-`.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt: plan, explore (`researcher`), build (`implementer`, isolated when code slices run in parallel in git), review (`reviewer`, plus an opus reviewer on risky slices), integrate (`integrator`, isolated code branches only). Ask Claude for it explicitly, for example "run the orchestrate workflow with task ...". It takes `args.code` (default `true`: the task changes code) and `baseRefHead`. With `code: true`, a wave of several slices runs isolated, after a checkpoint commit, only when `baseRefHead: true` (pass it only for a git repository whose `worktree.baseRef` is `"head"`); otherwise its slices run one after another in the shared tree, as do dependent slices, because worktrees only see committed work. Code outside git therefore runs one slice at a time. With `code: false` (research, writing, analysis, operations) there are no worktrees, checkpoint or integrator and nobody commits; the slices of a wave run at the same time in the shared folder, because their output files are disjoint and none is code, and the reviewer checks each slice's output against its checklist, not `git diff`. Order is advisory in the native session (the orchestrator once reviewed a branch before running the integrator, against its prompt); the workflow removes that freedom.
+`.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt. The plugin ships it (`dist/plugin/workflows/orchestrate.js`) as `/orchestration:orchestrate`; in this repo, or a repo with a copy of `.claude/`, it is `/orchestrate`. The person starts it: Claude Code runs a workflow only on the person's explicit request ([workflows](https://code.claude.com/docs/en/workflows.md)), so the route skill, the nudge and the orchestrator may suggest it but never start it unasked. Example: `/orchestration:orchestrate {"task":"...","code":true,"baseRefHead":true}`.
+
+What it does:
+
+- **Plan**: a planner returns a CONSTRAINTS ledger (the task's hard rules as `C<n>` ids) and at most `maxSlices` (default 6) slices with disjoint files, each with the ids it can break.
+- **Explore**: researchers in parallel.
+- **Build and review**: per slice, an implementer, then a fresh reviewer that answers each checked id; up to `maxRetries` (default 2) retries with the reviewer's gaps. A RISKY slice gets a default and an opus reviewer at once; for other slices a passing review with a doubt signal (a `(read)` answer, a non-empty OPEN) or after a retry goes to one opus reviewer, whose verdict decides.
+- **Replan**: one pass. Slices that failed for good go back to the planner, which plans only the missing work; a replanned slice that depends on a failed slice is not run.
+- **Integrate**: the integrator merges isolated code branches (code in git only).
+
+Arguments: `task` (required); `code` (default `true`: the task changes code); `baseRefHead` (pass `true` only for a git repository whose `worktree.baseRef` is `"head"`); `plan` and `skip` (resume); `maxSlices`, `maxRetries`. With `code: true`, a wave of several slices runs isolated, after a checkpoint commit, only when `baseRefHead: true`; otherwise its slices run one after another in the shared tree, as do dependent slices, because worktrees only see committed work. Code outside git therefore runs one slice at a time. With `code: false` there are no worktrees, checkpoint or integrator and nobody commits; the slices of a wave run at the same time in the shared folder, and the reviewer checks each slice's output against its checklist, not `git diff`.
+
+**Resume in a new session.** A workflow run resumes only within its session ([workflows](https://code.claude.com/docs/en/workflows.md)). The script logs its plan once as `plan: <JSON>` (and `plan after replan: <JSON>` after a replan); pass that JSON back as `args.plan` and the ids of the slices that passed as `args.skip`. A given plan skips Plan and Explore; skipped slices count as finished.
+
+**Plugin agent names.** In a plugin workflow, `agentType` must be namespaced (`orchestration:<role>`): a probe showed a bare name is "not found" ([live checks, addendum](data/live-checks-2026-10-31.md#addendum-probes-for-030-claude-code-21314)). `npm run build-plugin` rewrites every `agentType: '<role>'` to `orchestration:<role>`. The project copy keeps bare names, which its agents report to the hooks (Check C).
+
+**Gates.** The agents' SubagentStart and SubagentStop reach the test gate and the review gate; the plan check and the PostToolUse journal never see them, because the script makes no Agent tool call (Check A). Implementer briefs start with `ORCHESTRATION: workflow`, which the plan check and the run model skip. `src/workflow.test.mjs` runs the script against a stubbed runtime. Order is advisory in the native session (the orchestrator once reviewed a branch before running the integrator, against its prompt); the workflow removes that freedom.
+
+## Native Bash judge hook (0.3.0, opt-in)
+
+`ORCH_JUDGE=native` turns on two hooks, in the project copy and the plugin: `prompt-capture.mjs` (UserPromptSubmit) records what the person types to `prompts.jsonl` in the state dir, and `judge-hook.mjs` (PreToolUse on `Bash`) judges commands. Unset, both do nothing and nothing is captured. The hook is deny-only: it exits 2 to refuse or exits 0 with no output, never allows or asks, so it cannot loosen a permission rule or mode.
+
+- Floor, no model call: the `sudo`/`su` family, catastrophic or non-plain recursive `rm`, commands the tokenizer cannot read, and `rm` targets that are symlinks, resolve outside the working folder or cannot be resolved.
+- Judged: `git push`, git remote changes and a plain recursive `rm`, by one `claude -p --model opus` call with the person's typed prompts of this session as the only authority.
+- Fail closed: a refusal, a timeout, a missing CLI, unreadable output or no recorded prompt denies. `ORCH_JUDGE_TIMEOUT_MS` (default 40000) is capped at 45000, so the hook decides before Claude Code's default 60 s hook timeout would kill it and let the command run.
+- Every floor or judged decision goes to `gates.jsonl`.
+
+Details, prompt and limits: [bash-judge.md, Native hook](bash-judge.md#native-hook-030).
 
 ## Verified in a live run (2026-10-13)
 
@@ -137,7 +164,7 @@ Confirmed: hook payloads carry `session_id`, `agent_type`, `agent_id`, `cwd` and
 
 ## Live checks (2026-10-31)
 
-Run on Claude Code 2.1.314 with `claude -p --setting-sources project --model haiku`, project hooks logging every PreToolUse, PostToolUse, SubagentStart, SubagentStop, Stop and UserPromptSubmit. They are what the 0.2.0 gates rely on.
+Full record: [data/live-checks-2026-10-31.md](data/live-checks-2026-10-31.md), with an addendum of the 0.3.0 probes (plugin workflow agent names, headless workflow start, `ultracode` under `-p`). Run on Claude Code 2.1.314 with `claude -p --setting-sources project --model haiku`, project hooks logging every PreToolUse, PostToolUse, SubagentStart, SubagentStop, Stop and UserPromptSubmit. They are what the 0.2.0 gates rely on.
 
 - **Check A: agents of a Workflow script fire the parent session's hooks.** Each agent fired SubagentStart and SubagentStop, and its own tool calls fired PreToolUse and PostToolUse with its `agent_id`. No PreToolUse or PostToolUse fired for an `Agent` or `Task` tool, because the script launches agents directly: the plan check and the PostToolUse journal never see workflow agents (the plugin's workflow briefs carry `ORCHESTRATION: workflow`, which both skip). The workflow showed in `background_tasks` as `{type: "workflow", status: "running", name, description}`, and the main `Stop` fired while it still ran. An `agent()` call without `agentType` reports `agent_type: "workflow-subagent"`.
 - **Check B: `claude -p` waits for background subagents, not for background shell tasks.** A background subagent that ran a 40-second foreground command kept the process alive (47 s wall time; its file was written). A subagent that put its command in a background Bash task finished at once, and the process exited 16 s after start with the shell task still running; its file never appeared. Headless runs fire an early `Stop` that lists the running tasks, re-enter with a `<task-notification>` UserPromptSubmit under a new `prompt_id`, and fire a final `Stop` with `background_tasks: []`. Only `status: "running"` was seen: a finished task drops out of the list. A SubagentStop can list its own agent as still running. `--output-format json` reports only the last turn.
@@ -152,6 +179,8 @@ So the review gate checks `background_tasks` before treating a `Stop` as the end
 - An `Agent` call without `subagent_type` counts as `general-purpose`, so the plan check blocks it while a run is open (`builtin_agent_in_run`).
 - Settings such as `worktree.baseRef` load from the folder a session started in. A session started in another folder does not see this repo's `.claude/settings.json`: observed in the session that built 0.2.0, whose worktrees started from `origin/main` instead of the local `HEAD`. Start the session in the repository, or set `baseRef` in `~/.claude/settings.json`.
 - The review gate's fallback without `background_tasks` (older Claude Code) pairs SubagentStart and SubagentStop records; a lost SubagentStop defers it only until the start is older than `ORCH_RUN_STALE_MIN`.
+- The eval suite (`npm run eval`, `evals/`) has not been smoke-run: in an isolated worktree a guard read `claude plugin eval` as the shell's `eval` and refused it, so the first run is left to the user. Bounded smoke run: `npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2`.
+- Plugin workflows need a namespaced `agentType` (`orchestration:<role>`); a bare name is not found. The build rewrites it; a workflow added to a plugin by hand must do the same.
 - The dashboard counts a run as stale after 10 minutes with no agent running (`STALE_MS` in `dashboard/register.tsx`), not after `ORCH_RUN_STALE_MIN`, so the pane can start a clean run before the gates call the run stale.
 
 ## Project context
@@ -170,6 +199,6 @@ then, inside `claude`: `/plugin install typescript-lsp@claude-plugins-official`.
 
 ## Plugin build
 
-`npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. The first live plugin run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter, and project permission denies are not part of a plugin.
+`npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. The first live plugin run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter, and project permission denies are not part of a plugin. Since 0.3.0 the build also ships `.claude/workflows/*.js` as plugin workflows (with `agentType` rewritten to `orchestration:<role>`), copies the repo-root `evals/` into the plugin for `claude plugin eval`, and registers `judge-hook.mjs` (PreToolUse, `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`.
 
 `npm run sync-agents` rewrites model, effort and `maxTurns` in the agent files from `src/config.ts`; `npm run check-agents` fails on drift.
