@@ -289,7 +289,7 @@ test("env: ORCH_RUN_STALE_MIN and ORCH_ESCALATION", () => {
 
 // Run model helpers: log records at minutes from a fixed start, in session s1.
 /** @typedef {import("../.claude/hooks/brief.mjs").Records} Records */
-/** @typedef {{ launch?: object, stop?: object, gate?: object }} Item */
+/** @typedef {{ launch?: object, stop?: object, gate?: object, start?: object }} Item */
 const T0 = Date.parse("2026-10-31T10:00:00Z");
 /** @param {number} min */
 const at = (min) => new Date(T0 + min * 60000).toISOString();
@@ -299,6 +299,7 @@ const R = (...items) => ({
   launches: items.flatMap((i) => (i.launch ? [i.launch] : [])),
   stops: items.flatMap((i) => (i.stop ? [i.stop] : [])),
   gates: items.flatMap((i) => (i.gate ? [i.gate] : [])),
+  starts: items.flatMap((i) => (i.start ? [i.start] : [])),
 });
 /** @param {number} min @param {string} [prompt] @returns {Item} */
 const planLaunch = (min, prompt = PLAN) => ({ launch: launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { ts: at(min), sessionId: "s1", agentId: `plan${min}` }) });
@@ -437,6 +438,62 @@ test("run model: a run with no launch or stop for ORCH_RUN_STALE_MIN minutes is 
   assert.equal(f.open?.slices.a?.passed, true);
 });
 
+// Telemetry records (telemetry.jsonl) of an agent starting and stopping: SubagentStart / SubagentStop with agent_id.
+/** @param {number} min @param {string} agentId @param {string} [type] @returns {Item} */
+const started = (min, agentId, type = "orchestration:implementer") => ({ start: { ts: at(min), session_id: "s1", hook_event_name: "SubagentStart", agent_id: agentId, agent_type: type } });
+/** @param {number} min @param {string} agentId @param {string} [type] @returns {Item} */
+const ended = (min, agentId, type = "orchestration:implementer") => ({ start: { ts: at(min), session_id: "s1", hook_event_name: "SubagentStop", agent_id: agentId, agent_type: type } });
+
+test("run model: a run with a running agent (SubagentStart, no stop yet) is never stale; stale after ORCH_RUN_STALE_MIN idle minutes with nothing running", () => {
+  // The A0 reviewer's probe: plan at minute 0; one foreground implementer starts at minute 1; its stop and its launch
+  // record (written at PostToolUse, after the stop) arrive at minute 41.
+  const probe = [planLaunch(0), started(1, "FG")];
+  let f = foldRuns(R(...probe), { now: T0 + 35 * 60000 });
+  assert.equal(f.open?.id, 1, "not stale at minute 35: the implementer is running");
+  assert.deepEqual(f.open?.running, ["FG"]);
+  assert.equal(foldRuns(R(planLaunch(0)), { now: T0 + 35 * 60000 }).open, null, "without the start record the run is stale at minute 35, as before");
+  const done = [...probe, ended(41, "FG"), implStop(41, "FG"), impl(41, "a", "", "FG")];
+  f = foldRuns(R(...done), { now: T0 + 41.5 * 60000 });
+  assert.equal(f.open?.id, 1);
+  assert.deepEqual([f.open?.running, f.open?.slices.a?.attempts], [[], 1]);
+  assert.equal(foldRuns(R(...done), { now: T0 + 70 * 60000 }).open?.id, 1, "29 idle minutes after the stop: still open");
+  f = foldRuns(R(...done), { now: T0 + 72 * 60000 });
+  assert.deepEqual([f.open, f.runs[0]?.stale], [null, true], "31 idle minutes with nothing running: stale");
+  // A launch while an agent runs does not mark the run stale either; a light launch then joins it.
+  f = foldRuns(R(...probe, impl(50, "fix", "PATH: light")), { now: T0 + 51 * 60000 });
+  assert.deepEqual([f.runs.length, f.open?.id, f.open?.slices.fix?.launches], [1, 1, 1]);
+  // The journal stop alone also ends the agent (a stop record with the same agent_id).
+  f = foldRuns(R(...probe, implStop(41, "FG"), impl(41, "a", "", "FG")), { now: T0 + 72 * 60000 });
+  assert.equal(f.open, null);
+  // A resumed agent starts again under its agent_id and keeps the run alive again until its next stop.
+  f = foldRuns(R(...done, started(60, "FG")), { now: T0 + 95 * 60000 });
+  assert.deepEqual([f.open?.id, f.open?.running], [1, ["FG"]]);
+  // A start after the run went idle for longer than the threshold does not revive it, and joins no run.
+  f = foldRuns(R(planLaunch(0), started(40, "late")), { now: T0 + 41 * 60000 });
+  assert.deepEqual([f.open, f.runs[0]?.stale, f.runs[0]?.running], [null, true, []]);
+  // Other sessions' telemetry and records without agent_id are ignored.
+  const other = { start: { ts: at(1), session_id: "s2", hook_event_name: "SubagentStart", agent_id: "X" } };
+  const noId = { start: { ts: at(1), session_id: "s1", hook_event_name: "SubagentStart" } };
+  assert.equal(foldRuns(R(planLaunch(0), other, noId), { now: T0 + 35 * 60000, sessionId: "s1" }).open, null);
+});
+
+test("run model: planReviewed after the PLAN REVIEW's reviewer stops, planned FILES per slice, reviewer CHECKS on each review", () => {
+  const planStop = (/** @type {number} */ min, /** @type {string} */ id) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId: id, role: "reviewer", slice: "plan", reply: "STATUS: pass" }) });
+  let f = foldRuns(R(planLaunch(0)), { now: T0 + 60000 });
+  assert.equal(f.open?.planReviewed, false, "the plan reviewer is still running");
+  f = foldRuns(R(planLaunch(0), planStop(1, "plan0")), { now: T0 + 2 * 60000 });
+  assert.equal(f.open?.planReviewed, true);
+  // A foreground plan reviewer: its stop is logged before its launch record and still marks the run it opened.
+  f = foldRuns(R(...attempt(0, "fix", "pass", "PATH: light"), planStop(5, "plan6"), planLaunch(6)), { now: T0 + 7 * 60000 });
+  assert.deepEqual([f.runs.length, f.open?.id, f.open?.planReviewed, f.runs[0]?.planReviewed], [2, 2, true, false]);
+  assert.deepEqual(f.open?.slices.a?.files, ["a.py"]);
+  const replan = "PLAN REVIEW\nREPLAN: 1\nSLICE: a\nFILES: a2.py\nSLICE: c\nFILES: c/\nDEPENDS: none";
+  f = foldRuns(R(planLaunch(0), planLaunch(1, replan)), { now: T0 + 2 * 60000 });
+  assert.deepEqual([f.open?.slices.a?.files, f.open?.slices.c?.files, f.open?.slices.b?.files], [["a.py", "a2.py"], ["c/"], ["b.py"]]);
+  f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass")), { now: T0 + 4 * 60000 });
+  assert.deepEqual(f.open?.slices.a?.reviews.map((r) => r.checks), [["C1"]], "from the reviewer's launch record");
+});
+
 // A foreground agent's SubagentStop (and its test-gate record) is logged before its PostToolUse launch record.
 /** @param {number} min @param {string} slice @param {string} verdict @param {string} [extra] @returns {Item[]} */
 const fgAttempt = (min, slice, verdict, extra = "") => {
@@ -521,7 +578,7 @@ test("parity: parseHeader matches plan-check.mjs, sliceOfBrief matches journal.m
     const state = join(dir, ".claude", "state");
     mkdirSync(hooks, { recursive: true });
     mkdirSync(state, { recursive: true });
-    for (const h of ["state.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+    for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
     const briefs = [
       "SLICE: toml\nFILES: toolkit/toml.py, ./tests/test_toml.py\nDEPENDS: none",
       "- **SLICE:** auth extra\n- FILES: `src/auth.ts`, 'src/session/'\n- DEPENDS: A0, A1",

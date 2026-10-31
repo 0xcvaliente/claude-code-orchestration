@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 // SubagentStart / SubagentStop logger: appends one JSON line per event to telemetry.jsonl in the state dir
 // (state.mjs: .claude/state for the project copy, a per-user dir for the plugin copy).
-// Also records the worker's STATUS (pass/fail) from its final report, for review-gate.mjs.
+// Also records the worker's STATUS (pass/fail) from its final report, for review-gate.mjs. SubagentStart records
+// (ts, session_id, agent_id, agent_type) tell run.mjs and review-gate.mjs which agents are still running.
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseStatus } from "./brief.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const chunks = [];
@@ -18,13 +20,10 @@ try {
 }
 
 // Status comes only from the worker's final report, never from the whole payload (it may echo the brief).
-// Line-anchored; the format template "STATUS: pass or fail" does not match.
+// brief.mjs parseStatus: any STATUS: fail line fails, else the first STATUS line decides; blockquoted lines and the
+// format template "STATUS: pass or fail" do not count. No status line is undefined (the field is left out).
 /** @param {unknown} text */
-function statusOf(text) {
-  if (typeof text !== "string") return undefined;
-  const found = [...text.matchAll(/^[ \t>*_`-]*STATUS:\**[ \t]*(pass|fail)\b(?![ \t]+or\b)/gim)];
-  return found.length ? /** @type {string} */ (/** @type {RegExpMatchArray} */ (found[found.length - 1])[1]).toLowerCase() : undefined;
-}
+const statusOf = (text) => parseStatus(text) ?? undefined;
 
 // Final report from the subagent transcript: the last assistant text block or SubagentHandback message.
 /** @param {string} path */

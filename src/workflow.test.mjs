@@ -174,7 +174,7 @@ function hookProject() {
   const dir = mkdtempSync(join(tmpdir(), "workflow-hooks-"));
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
-  for (const h of ["state.mjs", "plan-check.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   return dir;
 }
 /** @param {string} dir @param {string} prompt */

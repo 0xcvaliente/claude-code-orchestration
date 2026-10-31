@@ -337,3 +337,259 @@ test("test gate: a clean tree, a folder outside git and an explicit ORCH_TEST_CM
   assert.equal(testGate(dir, { ORCH_TEST_CMD: "exit 0" }, "a2").status, 0);
   assert.equal(lastGateEntry(dir).reason, "tests_passed");
 });
+
+// ---- Review gate per slice of a run, through the real telemetry.mjs and journal.mjs (headless: no transcripts). ----
+// Every agent is launched in the background: SubagentStart, then the PostToolUse launch record, later its SubagentStop.
+const PLAN = "PLAN REVIEW\nCONSTRAINTS:\nC1: no throw\nC2: no deps\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a\nCHECKS: C1\nSLICE: b\nFILES: b.py\nDEPENDS: none\nGOAL: b\nRISKY: yes";
+function session(extraEnv: Record<string, string> = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "orch-gate-"));
+  mkdirSync(join(dir, ".claude", "state"), { recursive: true });
+  const env = { ...process.env, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: "", ORCH_ESCALATION: "", ORCH_RUN_STALE_MIN: "", ORCH_ALLOW_BUILTINS: "", ...extraEnv };
+  const run = (name: string, payload: object, more: Record<string, string> = {}) =>
+    spawnSync("node", [hook(name)], { input: JSON.stringify({ session_id: "s1", ...payload }), env: { ...env, ...more }, encoding: "utf8" });
+  let n = 0;
+  const s = {
+    dir,
+    run,
+    /** Launch an agent in the background; returns its agent id. */
+    launch(type: string, prompt: string, model?: string) {
+      const id = `ag${++n}${type.replace(/\W/g, "")}`;
+      run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: id, agent_type: type });
+      run("journal.mjs", { hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { subagent_type: type, prompt, ...(model ? { model } : {}) }, tool_response: { status: "async_launched", agentId: id } });
+      return id;
+    },
+    stop(id: string, type: string, reply: string) {
+      const p = { hook_event_name: "SubagentStop", agent_id: id, agent_type: type, last_assistant_message: reply };
+      run("telemetry.mjs", p);
+      run("journal.mjs", p);
+    },
+    /** One agent from launch to stop. */
+    agent(type: string, prompt: string, reply: string, model?: string) {
+      const id = s.launch(type, prompt, model);
+      s.stop(id, type, reply);
+      return id;
+    },
+    plan(text = PLAN) {
+      s.agent("orchestration:reviewer", text, "STATUS: pass");
+    },
+    impl(slice: string, extra = "") {
+      return s.agent("orchestration:implementer", `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none\n${extra}`, "STATUS: pass");
+    },
+    review(slice: string, reply: string, opts: { model?: string; checks?: string } = {}) {
+      return s.agent("orchestration:reviewer", `SLICE: ${slice}\n${opts.checks ? `CHECKS: ${opts.checks}` : ""}`, reply, opts.model);
+    },
+    gate(input: object = {}, more: Record<string, string> = {}) {
+      return run("review-gate.mjs", input, more);
+    },
+    decisions() {
+      return readFileSync(join(dir, ".claude", "state", "gates.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((g) => g.gate === "review");
+    },
+    last() {
+      return s.decisions().at(-1);
+    },
+  };
+  return s;
+}
+const running = (type: string, status = "running") => ({ id: "t1", type, status, description: "x", ...(type === "subagent" ? { agent_type: "orchestration:reviewer" } : { name: "w" }) });
+
+test("review gate: a reviewer still running defers the reply (agents_running), from background_tasks or, without them, telemetry", () => {
+  const s = session();
+  s.plan();
+  s.impl("a");
+  const rev = s.launch("orchestration:reviewer", "SLICE: a\nCHECKS: C1");
+  for (const t of [running("subagent"), running("workflow", "pending"), running("teammate", "queued")]) {
+    const r = s.gate({ background_tasks: [t] });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual([s.last().decision, s.last().reason, s.last().source], ["allow", "agents_running", "background_tasks"]);
+  }
+  // A shell task, a finished subagent and the final Stop's empty list are not agents running: background_tasks is
+  // authoritative even though telemetry still shows the reviewer's start without a stop.
+  for (const tasks of [[running("shell")], [running("subagent", "completed")]]) {
+    const r = s.gate({ background_tasks: tasks });
+    assert.equal(r.status, 2, JSON.stringify(tasks));
+    assert.equal(s.last().reason, "no_reviewer_after_last_implementer");
+  }
+  assert.equal(s.gate({ background_tasks: [] }).status, 0, "the third time the loop guard lets it out");
+  assert.equal(s.last().reason, "max_blocks_reached");
+  // Without background_tasks: the reviewer's SubagentStart has no SubagentStop yet.
+  assert.equal(s.gate().status, 0);
+  assert.deepEqual([s.last().reason, s.last().source, s.last().agents], ["agents_running", "telemetry", ["reviewer"]]);
+  // A start older than ORCH_RUN_STALE_MIN does not defer (a lost stop must not defer forever): the gate gives up as
+  // usual after its two blocks, and says so.
+  const old = s.gate({}, { ORCH_RUN_STALE_MIN: "0.00001" });
+  assert.equal(old.status, 0);
+  assert.equal(s.last().reason, "max_blocks_reached");
+  assert.match(JSON.parse(old.stdout).systemMessage, /gave up after 2 blocks \(no_reviewer_after_last_implementer\).*slice a.*unverified/);
+  // agents_running was never counted as a block, and the reviewer's pass lets the reply out.
+  s.stop(rev, "orchestration:reviewer", "STATUS: pass\nC1: pass (cmd) npm test -> 3 pass");
+  assert.equal(s.gate().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  assert.deepEqual(s.decisions().filter((d) => d.decision === "block").length, 2);
+});
+
+test("review gate: nothing running and an unreviewed implementer blocks; every slice of the run needs its own review", () => {
+  const s = session();
+  s.plan();
+  s.impl("a");
+  s.impl("b");
+  const r = s.gate({ background_tasks: [] });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /slice a \(run 1\): an implementer finished but no reviewer has run since.*Also: slice b/);
+  // The old rule let this out (a reviewer passed after the last implementer); per slice, b is still unreviewed.
+  s.review("a", "STATUS: pass\nC1: pass (cmd) t -> ok");
+  const b = s.gate();
+  assert.equal(b.status, 2);
+  assert.match(b.stderr, /slice b \(run 1\)/);
+  assert.equal(s.last().slice, "b");
+  s.review("b", "STATUS: fail\nGAPS: x");
+  assert.match(s.gate().stderr, /slice b.*STATUS: fail/);
+  assert.equal(s.last().reason, "last_reviewer_failed");
+  s.review("b", "Looks fine.");
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.last().reason, "last_reviewer_no_status");
+});
+
+test("review gate: STATUS by parseStatus: any fail line fails, a blockquoted STATUS does not count", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.impl("fix", "PATH: light");
+  s.review("fix", "STATUS: pass\nlater:\nSTATUS: fail");
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.last().reason, "last_reviewer_failed");
+  s.review("fix", "> STATUS: fail\nSTATUS: pass");
+  assert.equal(s.gate().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("review gate: constraints_unchecked until the reviewer answers every CHECKS id with pass; no CHECKS skips (logged); gives up after 2 blocks", () => {
+  const s = session();
+  s.plan();
+  s.impl("a");
+  s.review("a", "STATUS: pass\nC1: pass (cmd) npm test -> ok", { checks: "C1, C2" });
+  let r = s.gate();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /slice a \(run 1\): the reviewer passed it without answering C2/);
+  assert.equal(s.last().reason, "constraints_unchecked");
+  s.review("a", "STATUS: pass\nC1: pass (cmd) npm test -> ok\nC2: fail adds a dependency", { checks: "C1, C2" });
+  assert.match(s.gate().stderr, /with C2 answered fail.*last block/);
+  r = s.gate();
+  assert.equal(r.status, 0, "loop guard");
+  assert.equal(s.last().reason, "constraints_unchecked_gave_up");
+  assert.match(JSON.parse(r.stdout).systemMessage, /gave up after 2 blocks \(constraints_unchecked\).*slice a.*unverified/);
+  s.review("a", "STATUS: pass\nC1: pass (cmd) npm test -> ok\nC2: pass (cmd) git diff package.json -> empty", { checks: "C1, C2" });
+  assert.equal(s.gate().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  // A reviewer brief without CHECKS (old style) skips the check with a logged reason.
+  const old = session();
+  old.plan();
+  old.impl("a");
+  old.review("a", "STATUS: pass");
+  assert.equal(old.gate().status, 0);
+  assert.deepEqual([old.last().reason, old.last().skips], ["reviewer_passed", ["constraints_unchecked:a:no_checks"]]);
+});
+
+test("review gate: a doubt signal needs a passing opus review (tool_input model or the agent file); ORCH_ESCALATION off and always", () => {
+  const s = session();
+  s.plan();
+  s.impl("b"); // RISKY: yes in the plan
+  s.review("b", "STATUS: pass", { model: "sonnet" });
+  let r = s.gate();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /slice b \(run 1\) needs a passing review by an opus reviewer.*doubt signals: risky/);
+  assert.equal(s.last().reason, "opus_review_required");
+  assert.equal(s.gate({}, { ORCH_ESCALATION: "off" }).status, 0, "off disables the signals");
+  s.review("b", "STATUS: pass", { model: "opus" });
+  assert.equal(s.gate().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  // A relaunch after the opus pass needs a new one (and a review at all first).
+  s.impl("b");
+  s.review("b", "STATUS: pass");
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.last().reason, "opus_review_required");
+  assert.equal(s.gate().status, 2);
+  r = s.gate();
+  assert.equal(r.status, 0);
+  assert.equal(s.last().reason, "opus_review_required_gave_up");
+  assert.match(JSON.parse(r.stdout).systemMessage, /gave up after 2 blocks \(opus_review_required\)/);
+
+  // The model from the project's agent file when the launch names none.
+  const f = session();
+  mkdirSync(join(f.dir, ".claude", "agents"), { recursive: true });
+  writeFileSync(join(f.dir, ".claude", "agents", "reviewer.md"), "---\nname: reviewer\nmodel: opus\n---\nbody\n");
+  f.plan();
+  f.impl("b");
+  f.review("b", "STATUS: pass");
+  assert.equal(f.gate().status, 0);
+  assert.equal(f.last().reason, "reviewer_passed");
+
+  // always: every slice needs an opus pass, risky or not.
+  const a = session({ ORCH_ESCALATION: "always" });
+  a.plan();
+  a.impl("a");
+  a.review("a", "STATUS: pass\nC1: pass (cmd) t -> ok", { model: "sonnet" });
+  assert.match(a.gate().stderr, /doubt signals: always/);
+  // Retry and open items are signals too.
+  const d = session();
+  d.plan();
+  d.impl("a");
+  d.review("a", "STATUS: fail\nGAPS: x");
+  d.impl("a");
+  d.review("a", "STATUS: pass\nC1: pass (cmd) t -> ok\nOPEN: an edge case");
+  assert.match(d.gate().stderr, /doubt signals: retry, open_items/);
+});
+
+test("review gate: a slice that failed for good does not block, and the systemMessage names it", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  for (let i = 0; i < 3; i++) {
+    s.impl("a");
+    s.review("a", "STATUS: fail\nGAPS: still broken");
+  }
+  const r = s.gate();
+  assert.equal(r.status, 0);
+  assert.deepEqual([s.last().reason, s.last().failed_for_good], ["slice_failed_for_good", ["a"]]);
+  assert.match(JSON.parse(r.stdout).systemMessage, /slice a failed for good.*Report it as failed/);
+  // Another slice of the run still blocks; the failed one is not part of the block.
+  s.impl("b");
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.last().slice, "b");
+});
+
+test("review gate: the loop guard counts blocks per reason since the last implementer", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.impl("a");
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.gate().status, 2);
+  assert.equal(s.gate().status, 0, "two no_reviewer blocks, then it gives up");
+  assert.equal(s.last().reason, "max_blocks_reached");
+  s.review("a", "STATUS: fail");
+  assert.equal(s.gate().status, 2, "a different reason has its own two blocks");
+  assert.equal(s.last().reason, "last_reviewer_failed");
+  s.impl("a");
+  assert.equal(s.gate().status, 2, "a new implementer stop resets the count");
+  assert.equal(s.last().reason, "no_reviewer_after_last_implementer");
+});
+
+test("review gate: an implementer stop with no slice info falls back to the old rule (a reviewer after the last implementer)", () => {
+  const s = session();
+  // A workflow agent: no PreToolUse(Agent) and no launch record, bare agent type, no SLICE line in any record.
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: "wf1", agent_type: "implementer" });
+  s.stop("wf1", "implementer", "STATUS: pass");
+  const r = s.gate();
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^Review gate: an implementer finished but no reviewer has run since/);
+  assert.deepEqual(s.last().skips, ["last_implementer_no_slice"]);
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: "wf2", agent_type: "reviewer" });
+  s.stop("wf2", "reviewer", "STATUS: pass");
+  assert.equal(s.gate().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  assert.equal(spawnSync("node", [hook("review-gate.mjs")], { input: "{", env: { ...process.env, CLAUDE_PROJECT_DIR: s.dir }, encoding: "utf8" }).status, 0, "malformed input exits 0");
+});
+
+test("test gate: log lines carry session_id and agent_id", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-verify-"));
+  const r = spawnSync("bash", [hook("verify.sh")], { input: JSON.stringify({ session_id: "s-9", agent_type: "implementer", agent_id: "a7", cwd: dir }), env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ORCH_TEST_CMD: "exit 0" }, encoding: "utf8" });
+  assert.equal(r.status, 0);
+  const entry = JSON.parse(readFileSync(gateLog(dir), "utf8").trim());
+  assert.deepEqual([entry.session_id, entry.agent_id, entry.reason], ["s-9", "a7", "tests_passed"]);
+});
