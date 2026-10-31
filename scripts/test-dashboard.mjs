@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Runs dashboard/register.test.tsx with `claude plugin test` against a copy of the built mod (dist/dashboard) with the
-// dashboard/ sources laid over it, so it tests the source, not the committed build. `claude plugin validate` runs first.
+// dashboard/ sources laid over it, so it tests the source, not the committed build, plus src/fixtures/briefs for the grammar contract test.
+// `claude plugin validate` runs first.
 // Needs the `claude` CLI; without it the test is skipped (CI runs `npm run check`, which does not include this).
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,6 +18,16 @@ const src = join(process.cwd(), "dashboard");
 cpSync(join(src, "register.tsx"), join(dir, "hooks", "register.tsx"));
 cpSync(join(src, "types", "index.d.ts"), join(dir, "types", "index.d.ts"));
 cpSync(join(src, "register.test.tsx"), join(dir, "hooks", "register.test.tsx"));
+// The brief grammar fixtures and their expected parse (expected.json): the test parses each with the dashboard's own mirror of brief.mjs.
+// A plugin test may import only the plugin's own code files (no node:fs, no .json), so the texts and expected.json are also bundled into one
+// generated module, fixtures.ts.
+const fixtures = join(dir, "fixtures", "briefs");
+cpSync(join(process.cwd(), "src", "fixtures", "briefs"), fixtures, { recursive: true });
+/** @type {Record<string, string>} */
+const texts = {};
+for (const name of readdirSync(fixtures).filter((f) => f.endsWith(".txt"))) texts[name] = readFileSync(join(fixtures, name), "utf8");
+const expected = JSON.parse(readFileSync(join(fixtures, "expected.json"), "utf8"));
+writeFileSync(join(fixtures, "fixtures.ts"), `export default ${JSON.stringify({ texts, expected })}\n`);
 /** @param {number} code @returns {never} */
 const done = (code) => {
   rmSync(dir, { recursive: true, force: true });
