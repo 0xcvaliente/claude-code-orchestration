@@ -1,20 +1,23 @@
 {
-  "title": "Pipeline for code in a git repository: plan, then build each slice behind two gates",
-  "description": "For code in a git repository: Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree, must pass the test gate and a fresh-context reviewer, and goes back to the writer on a failure or gaps. Passing slices are merged into the result branch. Work that changes no code follows the same plan and review steps in your folder.",
-  "width": 860, "height": 730,
+  "title": "Pipeline for code in a git repository: plan, then build each slice behind two gates, with validated retries",
+  "description": "For code in a git repository: Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree and must pass the test gate (a bugfix slice also needs a test that fails before the fix) and a fresh-context reviewer. Failing tests go back to the writer. A review's gaps first go to a fresh reviewer that keeps only the gaps that stand: confirmed gaps start a retry (the second attempt resumes the same writer, the third and last is a fresh writer on Opus); when none stand, the slice moves on to be merged. The same gap in two failed reviews in a row stalls the slice until one replan plans the missing work. Passing slices are merged into the result branch. Validation, the Opus attempt and the stall belong to the native orchestrator (the gated workflow validates and escalates too, without the stall gate); the SDK pipeline sends the gaps straight back. Work that changes no code follows the same plan and review steps in your folder.",
+  "width": 1060, "height": 730,
   "regions": [
     {"id": "r-plan", "label": "Plan", "x": 14, "y": 24, "w": 312, "h": 416},
-    {"id": "r-slice", "label": "Each slice, in parallel", "x": 354, "y": 24, "w": 312, "h": 416}
+    {"id": "r-slice", "label": "Each slice, in parallel", "x": 354, "y": 24, "w": 692, "h": 416}
   ],
   "nodes": [
     {"id": "questions", "label": "Plan questions", "detail": "Opus, read-only", "x": 30, "y": 70, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (planner)"]},
     {"id": "explore", "label": "Explore", "detail": "Haiku, parallel, read-only", "x": 30, "y": 204, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (explorer)"]},
-    {"id": "plan", "label": "Plan slices", "detail": "Up to 6, disjoint files, one acceptance check each", "x": 30, "y": 338, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts:114 maxSlices"]},
+    {"id": "plan", "label": "Plan slices", "detail": "Up to 6, disjoint files, one acceptance check each", "x": 30, "y": 338, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts maxSlices"]},
     {"id": "write", "label": "Write in parallel", "detail": "Sonnet, a worktree each", "x": 370, "y": 70, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (writer)"]},
-    {"id": "test", "label": "Test gate", "detail": "Runs your command; no model", "x": 370, "y": 204, "w": 280, "h": 84, "status": "observed", "sources": ["src/orchestrator.ts", "README.md#the-pipeline"]},
+    {"id": "test", "label": "Test gate", "detail": "Your tests, no model; a bugfix needs a failing test first", "x": 370, "y": 204, "w": 280, "h": 84, "status": "observed", "sources": ["src/orchestrator.ts", ".claude/hooks/verify.sh (KIND: bugfix, bugfix-check.mjs)"]},
     {"id": "verify", "label": "Verify", "detail": "Fresh-context reviewer", "x": 370, "y": 338, "w": 280, "h": 84, "status": "observed", "sources": ["src/config.ts (verifier)"]},
+    {"id": "retry", "label": "Retry", "detail": "2nd: resume the writer; 3rd and last: fresh, on Opus", "x": 720, "y": 70, "w": 300, "h": 84, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6", ".claude/workflows/orchestrate.js (escalateLast)"]},
+    {"id": "validate", "label": "Validate gaps", "detail": "A fresh reviewer keeps the gaps that stand", "x": 720, "y": 338, "w": 300, "h": 84, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6 (VALIDATE: gaps)", ".claude/workflows/orchestrate.js (refute)"]},
     {"id": "integrate", "label": "Integrate", "detail": "Merge passing branches", "x": 370, "y": 480, "w": 280, "h": 84, "status": "observed", "sources": ["src/git.ts", "README.md#the-pipeline"]},
-    {"id": "result", "label": "Result branch", "detail": "orch/<id>/result", "x": 370, "y": 614, "w": 280, "h": 84, "emphasis": true, "status": "observed", "sources": ["README.md#what-a-run-leaves-behind"]}
+    {"id": "result", "label": "Result branch", "detail": "orch/<id>/result", "x": 370, "y": 614, "w": 280, "h": 84, "emphasis": true, "status": "observed", "sources": ["README.md#what-a-run-leaves-behind"]},
+    {"id": "replan", "label": "Replan, once", "detail": "A plan review for the missing work", "x": 720, "y": 614, "w": 300, "h": 84, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6a", ".claude/hooks/plan-check.mjs (replan_required)", ".claude/hooks/review-gate.mjs (replan_required)"]}
   ],
   "edges": [
     {"id": "e-explore", "from": "questions", "to": "explore", "points": [[170,154],[170,204]], "status": "observed"},
@@ -24,8 +27,18 @@
     {"id": "e-pass-test", "from": "test", "to": "verify", "points": [[510,288],[510,338]], "label": "pass", "label_at": [482,298], "label_w": 56, "status": "observed"},
     {"id": "e-pass-verify", "from": "verify", "to": "integrate", "points": [[510,422],[510,480]], "label": "pass", "label_at": [482,436], "label_w": 56, "status": "observed"},
     {"id": "e-result", "from": "integrate", "to": "result", "points": [[510,564],[510,614]], "status": "observed"},
-    {"id": "e-fail", "from": "test", "to": "write", "points": [[650,246],[710,246],[710,140],[650,140]], "style": "dashed", "label": "fail", "label_at": [684,170], "label_w": 52, "status": "observed", "sources": ["README.md: retries carry the failing output"]},
-    {"id": "e-gaps", "from": "verify", "to": "write", "points": [[650,380],[800,380],[800,100],[650,100]], "style": "dashed", "label": "gaps", "label_at": [770,300], "label_w": 60, "status": "observed", "sources": ["README.md: up to 2 retries (--retries)"]}
+    {"id": "e-fail", "from": "test", "to": "write", "points": [[650,246],[685,246],[685,140],[650,140]], "style": "dashed", "label": "fail", "label_at": [659,180], "label_w": 52, "status": "observed", "sources": ["README.md: retries carry the failing output"]},
+    {"id": "e-gaps", "from": "verify", "to": "validate", "points": [[650,380],[720,380]], "style": "dashed", "label": "gaps", "label_at": [655,346], "label_w": 60, "status": "observed"},
+    {"id": "e-confirmed", "from": "validate", "to": "retry", "points": [[870,338],[870,154]], "style": "dashed", "label": "confirmed", "label_at": [822,232], "label_w": 96, "status": "observed"},
+    {"id": "e-retry", "from": "retry", "to": "write", "points": [[720,112],[650,112]], "style": "dashed", "status": "observed"},
+    {"id": "e-none", "from": "validate", "to": "integrate", "points": [[790,422],[790,522],[650,522]], "label": "none stand", "label_at": [664,490], "label_w": 110, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6 (its passing reply is the latest review; the opus review still applies)"]},
+    {"id": "e-stall", "from": "validate", "to": "replan", "points": [[960,422],[960,614]], "style": "dashed", "label": "same gap twice: stall", "label_at": [850,540], "label_w": 196, "status": "observed", "sources": [".claude/rules/agents.md (stall gate, native only)"]}
   ],
-  "notes": ["Retries (dashed) carry the failing output or the reviewer's gaps back to the same slice, up to --retries (default 2).", "The SDK pipeline (npm start) works on code in a git repository only (src/cli.ts). Natively, work that changes no code follows the same plan and review steps in the shared folder, with no worktrees, no integrator and no commits (.claude/agents/orchestrator.md, steps 2 to 5)."]
+  "notes": [
+    "Retries (dashed) carry the failing output, or the confirmed gaps, back to the same slice. A slice gets at most 3 attempts; then it has failed for good.",
+    "Validation, the resume and the Opus third attempt are the native orchestrator's retry flow (.claude/agents/orchestrator.md step 6); the gated workflow validates (refute) and runs its last attempt on Opus (escalateLast) too. The stall and its replan_required block are native only (plan-check.mjs, review-gate.mjs).",
+    "The SDK pipeline (npm start, frozen since 0.3.0) sends the gaps straight back, up to --retries (default 2), with no validation, no Opus attempt and no stall; it replans only with --replans N.",
+    "The bugfix check is native: for a KIND: bugfix slice, verify.sh needs a changed test that fails on the base and passes now (bugfix-check.mjs).",
+    "The SDK pipeline works on code in a git repository only (src/cli.ts). Natively, work that changes no code follows the same plan and review steps in the shared folder, with no worktrees, no integrator and no commits (.claude/agents/orchestrator.md, steps 2 to 5)."
+  ]
 }

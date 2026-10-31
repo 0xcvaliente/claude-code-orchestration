@@ -1,83 +1,159 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 844" width="1080" height="844" role="img" aria-labelledby="gates-dark-title gates-dark-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-<title id="gates-dark-title">Native gates: hooks that block an agent from finishing</title>
-<desc id="gates-dark-desc">The orchestrator sends the plan to a reviewer. When it launches an implementer, plan-check.mjs blocks the launch for overlapping files, a dependency cycle or a missing plan review, and otherwise lets it through. When the implementer tries to finish, verify.sh runs the tests unless there is no test runner or, in a git work tree, only prose changed: on failure it blocks the implementer with the test output; when they pass or are skipped, the report reaches the orchestrator. A reviewer returns STATUS pass or fail, and review-gate.mjs blocks the orchestrator's final reply until a reviewer has passed the last implementer.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 1800" width="1320" height="1800" role="img" aria-labelledby="gates-dark-title gates-dark-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="gates-dark-title">Native gates: the hooks around each worker and the orchestrator&#x27;s final reply</title>
+<desc id="gates-dark-desc">The orchestrator sends the plan to a reviewer, then launches workers. plan-check.mjs (PreToolUse on Agent) blocks an implementer brief with missing lines, a file overlap, a dependency cycle, no plan review or a slice that is not in the plan, and a built-in or fork agent while a run is open; it blocks the implementer of a stalled slice with replan_required. Otherwise it lets the launch through, and for the plugin&#x27;s implementer, researcher and reviewer it may send one updatedInput: the read router raises a researcher&#x27;s model for the tier of its SOURCES files (opt-in, never lower) and the skill hints append up to 3 suggested skills (1 for a reviewer). researcher-guard.mjs denies a researcher&#x27;s Bash command unless it is read-only, and egress-guard.mjs denies a reviewer&#x27;s WebFetch to a host its brief and files do not name. When an implementer stops, verify.sh blocks it with the test output while the tests fail in the shared tree (in an isolated worktree it only warns by default; by default it marks failures that also fail on the base as probably pre-existing; an opt-in allow mode lets it finish when every failure also fails on the base; off skips the base run), and blocks a KIND: bugfix slice that has no test failing on the base. When a researcher stops, quote-check.mjs blocks it once for a quote not found in its source. review-gate.mjs (Stop) defers while agents run and blocks the final reply while an implementer has no later reviewer, the last review failed (a gap of 80 or more or a failed check; lower gaps pass with a doubt signal), an opus review is missing after a doubt signal, a checked constraint is unanswered, or a stalled slice has no replan. The test and review gates and most plan checks let the work through after 2 blocks; file overlap and dependency cycle block every time, the guards deny every time, and quote-check blocks once.</desc>
 <defs>
 <marker id="gates-dark-filled" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M0 0 L12 6 L0 12 Z" fill="#9198a1"/></marker>
 <marker id="gates-dark-open" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="10" markerHeight="10" orient="auto"><path d="M1 1 L11 6 L1 11" fill="none" stroke="#9198a1" stroke-width="1.6"/></marker>
 </defs>
-<rect width="1080" height="844" fill="#0d1117"/>
-<rect x="30" y="234" width="480" height="156" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
-<path d="M30 234 H78 V254 L70 262 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
-<text x="42" y="252" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
-<line x1="30" y1="314" x2="510" y2="314" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
-<rect x="30" y="452" width="660" height="156" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
-<path d="M30 452 H78 V472 L70 480 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
-<text x="42" y="470" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
-<line x1="30" y1="532" x2="690" y2="532" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
-<line x1="90" y1="84" x2="90" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="270" y1="84" x2="270" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="450" y1="84" x2="450" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="630" y1="84" x2="630" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="810" y1="84" x2="810" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<line x1="990" y1="84" x2="990" y2="804" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
-<rect x="10" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="90" y="57" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Orchestrator</text>
-<rect x="190" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="270" y="48" font-size="14" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">plan-check.mjs</text>
-<text x="270" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">PreToolUse hook</text>
-<rect x="370" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="450" y="57" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Implementer</text>
-<rect x="550" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="630" y="48" font-size="14" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">verify.sh</text>
-<text x="630" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">SubagentStop hook</text>
-<rect x="730" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="810" y="57" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Reviewer</text>
-<rect x="910" y="20" width="160" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="990" y="48" font-size="14" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">review-gate.mjs</text>
-<text x="990" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">Stop hook</text>
-<line x1="90" y1="130" x2="808" y2="130" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
-<rect x="314.3" y="105" width="271.4" height="19" rx="3" fill="#0d1117"/>
-<text x="450.0" y="119" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">PLAN REVIEW: task, findings, plan</text>
-<line x1="810" y1="172" x2="92" y2="172" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="341.6" y="147" width="216.8" height="19" rx="3" fill="#0d1117"/>
-<text x="450.0" y="161" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">STATUS: pass or fail, gaps</text>
-<line x1="90" y1="214" x2="268" y2="214" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
-<rect x="75.5" y="189" width="209.0" height="19" rx="3" fill="#0d1117"/>
-<text x="180.0" y="203" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">launch implementer: brief</text>
-<rect x="98" y="241" width="308.4" height="17" rx="3" fill="#0d1117"/>
-<text x="102" y="254" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[overlap, cycle or no plan review]</text>
-<line x1="270" y1="292" x2="92" y2="292" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="91.1" y="267" width="177.8" height="19" rx="3" fill="#0d1117"/>
-<text x="180.0" y="281" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked: fix the plan</text>
-<rect x="98" y="321" width="93.4" height="17" rx="3" fill="#0d1117"/>
-<text x="102" y="334" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[plan ok]</text>
-<line x1="270" y1="370" x2="448" y2="370" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="325.7" y="345" width="68.6" height="19" rx="3" fill="#0d1117"/>
-<text x="360.0" y="359" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed</text>
-<line x1="450" y1="432" x2="628" y2="432" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
-<rect x="474.5" y="407" width="131.0" height="19" rx="3" fill="#0d1117"/>
-<text x="540.0" y="421" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">tries to finish</text>
-<rect x="98" y="457" width="119.2" height="17" rx="3" fill="#0d1117"/>
-<text x="102" y="470" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[tests fail]</text>
-<line x1="630" y1="510" x2="452" y2="510" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="451.1" y="485" width="177.8" height="19" rx="3" fill="#0d1117"/>
-<text x="540.0" y="499" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked + test output</text>
-<rect x="98" y="539" width="213.8" height="17" rx="3" fill="#0d1117"/>
-<text x="102" y="552" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[tests pass or skipped]</text>
-<line x1="630" y1="588" x2="92" y2="588" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="325.7" y="563" width="68.6" height="19" rx="3" fill="#0d1117"/>
-<text x="360.0" y="577" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed</text>
-<line x1="90" y1="648" x2="808" y2="648" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
-<rect x="380.6" y="623" width="138.8" height="19" rx="3" fill="#0d1117"/>
-<text x="450.0" y="637" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">review the slice</text>
-<line x1="810" y1="690" x2="92" y2="690" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="365.0" y="665" width="170.0" height="19" rx="3" fill="#0d1117"/>
-<text x="450.0" y="679" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">STATUS: pass or fail</text>
-<line x1="90" y1="732" x2="988" y2="732" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
-<rect x="490.1" y="707" width="99.8" height="19" rx="3" fill="#0d1117"/>
-<text x="540.0" y="721" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">final reply</text>
-<line x1="990" y1="774" x2="92" y2="774" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
-<rect x="330.2" y="749" width="419.6" height="19" rx="3" fill="#0d1117"/>
-<text x="540.0" y="763" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked until a reviewer passes the last implementer</text>
-<text x="30" y="832" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.</text>
+<rect width="1320" height="1800" fill="#0d1117"/>
+<rect x="30" y="246" width="1270" height="330" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
+<path d="M30 246 H78 V266 L70 274 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
+<text x="42" y="264" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
+<line x1="30" y1="342" x2="1300" y2="342" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="30" y1="420" x2="1300" y2="420" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<rect x="30" y="722" width="1270" height="234" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
+<path d="M30 722 H78 V742 L70 750 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
+<text x="42" y="740" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
+<line x1="30" y1="800" x2="1300" y2="800" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="30" y1="878" x2="1300" y2="878" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<rect x="30" y="1018" width="1270" height="156" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
+<path d="M30 1018 H78 V1038 L70 1046 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
+<text x="42" y="1036" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
+<line x1="30" y1="1096" x2="1300" y2="1096" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<rect x="30" y="1404" width="1270" height="252" rx="4" fill="none" stroke="#656c76" stroke-width="1.5"/>
+<path d="M30 1404 H78 V1424 L70 1432 H30 Z" fill="#0f2a4a" stroke="#656c76" stroke-width="1.5"/>
+<text x="42" y="1422" font-size="13" font-weight="700" fill="#4493f8" text-anchor="start">alt</text>
+<line x1="30" y1="1482" x2="1300" y2="1482" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="30" y1="1578" x2="1300" y2="1578" stroke="#656c76" stroke-width="1.5" stroke-dasharray="5 5"/>
+<line x1="90" y1="96" x2="90" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="280" y1="96" x2="280" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="470" y1="96" x2="470" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="660" y1="96" x2="660" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="850" y1="96" x2="850" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="1040" y1="96" x2="1040" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<line x1="1230" y1="96" x2="1230" y2="1676" stroke="#656c76" stroke-width="1.5" stroke-dasharray="4 6"/>
+<rect x="2" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="90" y="60" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Orchestrator</text>
+<rect x="192" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="280" y="49" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">plan-check.mjs</text>
+<text x="280" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">PreToolUse on Agent</text>
+<rect x="382" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="470" y="49" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Worker</text>
+<text x="470" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">implementer or researcher</text>
+<rect x="572" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="660" y="40" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">verify.sh</text>
+<text x="660" y="58" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">quote-check.mjs</text>
+<text x="660" y="76" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">SubagentStop hooks</text>
+<rect x="762" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="850" y="40" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">researcher-guard.mjs</text>
+<text x="850" y="58" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">egress-guard.mjs</text>
+<text x="850" y="76" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">PreToolUse hooks</text>
+<rect x="952" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="1040" y="60" font-size="15" font-weight="700" fill="#f0f6fc" text-anchor="middle">Reviewer</text>
+<rect x="1142" y="20" width="176" height="76" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="1230" y="49" font-size="13" font-weight="700" fill="#f0f6fc" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">review-gate.mjs</text>
+<text x="1230" y="67" font-size="12" font-weight="400" fill="#9198a1" text-anchor="middle">Stop hook</text>
+<line x1="90" y1="140" x2="1038" y2="140" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="421.5" y="115" width="287.0" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="129" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">PLAN REVIEW: constraints and slices</text>
+<line x1="1040" y1="182" x2="92" y2="182" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="456.6" y="157" width="216.8" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="171" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">STATUS: pass or fail, gaps</text>
+<line x1="90" y1="224" x2="278" y2="224" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="100.0" y="199" width="170.0" height="19" rx="3" fill="#0d1117"/>
+<text x="185.0" y="213" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">launch worker: brief</text>
+<rect x="98" y="257" width="721.2" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="270" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[implementer brief: missing lines, file overlap, dependency cycle, no plan review,</text>
+<rect x="98" y="275" width="712.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="288" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start"> slice or files not in the plan; or a built-in or fork agent while a run is open]</text>
+<line x1="280" y1="322" x2="92" y2="322" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="96.1" y="297" width="177.8" height="19" rx="3" fill="#0d1117"/>
+<text x="185.0" y="311" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked: fix the plan</text>
+<rect x="98" y="353" width="678.2" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="366" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[implementer of a stalled slice: the same gap in two failed reviews in a row]</text>
+<line x1="280" y1="400" x2="92" y2="400" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="119.5" y="375" width="131.0" height="19" rx="3" fill="#0d1117"/>
+<text x="185.0" y="389" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">replan_required</text>
+<rect x="98" y="431" width="583.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="444" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[implementer allowed, or a researcher or reviewer (never blocked)]</text>
+<line x1="280" y1="478" x2="468" y2="478" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="340.7" y="453" width="68.6" height="19" rx="3" fill="#0d1117"/>
+<text x="375.0" y="467" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed</text>
+<rect x="490" y="494" width="798" height="68" rx="4" fill="#151b23" stroke="#656c76" stroke-width="1.2"/>
+<text x="502" y="516" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="start">One updatedInput, only for the plugin&#x27;s implementer, researcher and reviewer:</text>
+<text x="502" y="534" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Read router (opt-in): a researcher with SOURCES gets the model for its files&#x27; tier, raised, never lowered.</text>
+<text x="502" y="552" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Skill hints: up to 3 suggested skills found on disk (1 for a reviewer), appended to the brief.</text>
+<line x1="470" y1="616" x2="848" y2="616" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="586.7" y="591" width="146.6" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="605" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">researcher&#x27;s Bash</text>
+<line x1="850" y1="656" x2="472" y2="656" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="563.3" y="631" width="193.4" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="645" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">denied unless read-only</text>
+<line x1="470" y1="700" x2="658" y2="700" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="491.7" y="675" width="146.6" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="689" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">implementer stops</text>
+<rect x="98" y="733" width="669.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="746" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[tests fail in the shared tree (an isolated worktree only warns by default)]</text>
+<line x1="660" y1="780" x2="472" y2="780" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="476.1" y="755" width="177.8" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="769" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked + test output</text>
+<rect x="98" y="811" width="643.8" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="824" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[tests pass, but a KIND: bugfix slice has no test that fails on the base]</text>
+<line x1="660" y1="858" x2="472" y2="858" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="483.9" y="833" width="162.2" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="847" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked: repro test</text>
+<rect x="98" y="889" width="781.4" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="902" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[tests pass or are skipped; or, in allow mode, every failing test also fails on the base]</text>
+<line x1="660" y1="936" x2="92" y2="936" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="293.9" y="911" width="162.2" height="19" rx="3" fill="#0d1117"/>
+<text x="375.0" y="925" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed: the report</text>
+<line x1="470" y1="996" x2="658" y2="996" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="495.6" y="971" width="138.8" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="985" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">researcher stops</text>
+<rect x="98" y="1029" width="368.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1042" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[a QUOTE line is not found in its source]</text>
+<line x1="660" y1="1076" x2="472" y2="1076" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="511.2" y="1051" width="107.6" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="1065" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked once</text>
+<rect x="98" y="1107" width="394.4" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1120" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[quotes found, or read from a scan or a URL]</text>
+<line x1="660" y1="1154" x2="92" y2="1154" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="293.9" y="1129" width="162.2" height="19" rx="3" fill="#0d1117"/>
+<text x="375.0" y="1143" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed: the report</text>
+<line x1="90" y1="1214" x2="1038" y2="1214" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="495.6" y="1189" width="138.8" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="1203" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">review the slice</text>
+<line x1="1040" y1="1256" x2="852" y2="1256" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="863.9" y="1231" width="162.2" height="19" rx="3" fill="#0d1117"/>
+<text x="945.0" y="1245" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">reviewer&#x27;s WebFetch</text>
+<line x1="850" y1="1298" x2="1038" y2="1298" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="856.1" y="1273" width="177.8" height="19" rx="3" fill="#0d1117"/>
+<text x="945.0" y="1287" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">unlisted host: denied</text>
+<line x1="1040" y1="1340" x2="92" y2="1340" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="421.5" y="1315" width="287.0" height="19" rx="3" fill="#0d1117"/>
+<text x="565.0" y="1329" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">STATUS, GAP lines with a confidence</text>
+<line x1="90" y1="1382" x2="1228" y2="1382" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-filled)"/>
+<rect x="610.1" y="1357" width="99.8" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="1371" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">final reply</text>
+<rect x="98" y="1415" width="368.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1428" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[a subagent or workflow is still running]</text>
+<line x1="1230" y1="1462" x2="92" y2="1462" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="532.1" y="1437" width="255.8" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="1451" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed for now: agents_running</text>
+<rect x="98" y="1493" width="884.6" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1506" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[no reviewer after the last implementer, the last review failed, no opus review after a doubt signal,</text>
+<rect x="98" y="1511" width="678.2" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1524" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start"> a checked constraint left unanswered, or a stalled slice without its replan]</text>
+<line x1="1230" y1="1558" x2="92" y2="1558" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="563.3" y="1533" width="193.4" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="1547" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">blocked with the reason</text>
+<rect x="98" y="1589" width="342.8" height="17" rx="3" fill="#0d1117"/>
+<text x="102" y="1602" font-size="12" font-weight="600" fill="#9198a1" text-anchor="start">[every slice passed its latest review]</text>
+<line x1="1230" y1="1636" x2="92" y2="1636" stroke="#9198a1" stroke-width="2" marker-end="url(#gates-dark-open)" stroke-dasharray="7 5"/>
+<rect x="625.7" y="1611" width="68.6" height="19" rx="3" fill="#0d1117"/>
+<text x="660.0" y="1625" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="middle">allowed</text>
+<text x="30" y="1704" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.</text>
+<text x="30" y="1726" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">A review fails on a failed checked id or a gap of 80 or more; lower gaps pass with a doubt signal.</text>
+<text x="30" y="1748" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">After 2 blocks the test gate, the review gate and most plan checks let the work through; overlap and cycle block every time, the guards always deny, quote-check blocks once.</text>
+<text x="30" y="1770" font-size="12" font-weight="400" fill="#9198a1" text-anchor="start">Test baseline: by default the block marks failures that also fail on the base as probably pre-existing; allow mode (opt-in) lets the implementer finish; off skips the base run.</text>
 </svg>

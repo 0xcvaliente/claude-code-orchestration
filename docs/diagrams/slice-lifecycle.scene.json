@@ -1,28 +1,40 @@
 {
-  "title": "One slice's life: from planned to merged or replaced",
-  "description": "A planned slice is written, then tested unless there are no tests to run (no test command, or only prose changed in a git repository), then reviewed. Failing tests or review gaps send it back to writing. A slice that passes review is merged into the result branch; one that uses up its retries fails and may be replaced by a replan.",
-  "width": 900, "height": 560,
+  "title": "One slice's life: from planned to merged, failed for good or replaced",
+  "description": "A planned slice is written, then tested unless there are no tests to run (no test command, or only prose changed in a git repository), then reviewed. Failing tests, or a bugfix slice without a test that fails before the fix, send it back to writing. A failed review's gaps are validated by a fresh reviewer: confirmed gaps send the slice back to writing for its second attempt (the same writer, resumed) or its third and last (a fresh writer on Opus); when none stand, the slice counts as passed. The same gap in two failed reviews in a row stalls the slice, and a replan replaces it; if the run already had its replan, or three attempts fail, the slice has failed for good. A passed slice is merged into the result branch.",
+  "width": 900, "height": 680,
   "nodes": [
-    {"id": "planned", "label": "Planned", "x": 30, "y": 20, "w": 180, "h": 56, "status": "observed", "sources": ["src/orchestrator.ts"]},
-    {"id": "writing", "label": "Writing", "x": 30, "y": 176, "w": 180, "h": 64, "status": "observed"},
-    {"id": "testing", "label": "Testing", "x": 360, "y": 176, "w": 180, "h": 64, "status": "observed", "sources": ["src/orchestrator.ts:332-339", ".claude/hooks/verify.sh"]},
-    {"id": "reviewing", "label": "Reviewing", "x": 690, "y": 176, "w": 180, "h": 64, "status": "observed"},
-    {"id": "failed", "label": "Failed", "x": 30, "y": 330, "w": 180, "h": 56, "status": "observed"},
-    {"id": "passed", "label": "Passed", "x": 690, "y": 330, "w": 180, "h": 56, "status": "observed"},
-    {"id": "replaced", "label": "Replaced", "x": 30, "y": 474, "w": 180, "h": 56, "status": "observed", "sources": ["README.md#resilience-retry-resume-replan (--replans)"]},
-    {"id": "merged", "label": "Merged", "x": 690, "y": 474, "w": 180, "h": 56, "emphasis": true, "status": "observed"}
+    {"id": "planned", "label": "Planned", "x": 30, "y": 20, "w": 180, "h": 56, "status": "observed", "sources": ["src/orchestrator.ts", ".claude/agents/orchestrator.md step 2"]},
+    {"id": "writing", "label": "Writing", "detail": "Attempt 1, 2 or 3", "x": 30, "y": 176, "w": 180, "h": 80, "status": "observed"},
+    {"id": "testing", "label": "Testing", "detail": "A bugfix needs a failing test first", "x": 360, "y": 176, "w": 180, "h": 80, "status": "observed", "sources": ["src/orchestrator.ts", ".claude/hooks/verify.sh"]},
+    {"id": "reviewing", "label": "Reviewing", "x": 690, "y": 176, "w": 180, "h": 80, "status": "observed"},
+    {"id": "validating", "label": "Validating gaps", "x": 360, "y": 340, "w": 180, "h": 64, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6 (VALIDATE: gaps)"]},
+    {"id": "passed", "label": "Passed", "x": 690, "y": 340, "w": 180, "h": 56, "status": "observed"},
+    {"id": "failed", "label": "Failed for good", "x": 30, "y": 470, "w": 180, "h": 56, "status": "observed", "sources": [".claude/rules/agents.md (slice_failed_for_good)"]},
+    {"id": "stalled", "label": "Stalled", "x": 360, "y": 470, "w": 180, "h": 56, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (replan_required)", ".claude/hooks/review-gate.mjs (replan_required)"]},
+    {"id": "replaced", "label": "Replaced", "x": 30, "y": 600, "w": 180, "h": 56, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6a", "README.md#resilience-retry-resume-replan (--replans)"]},
+    {"id": "merged", "label": "Merged", "x": 690, "y": 600, "w": 180, "h": 56, "emphasis": true, "status": "observed"}
   ],
   "edges": [
     {"id": "t-start", "from": "planned", "to": "writing", "points": [[80,76],[80,176]], "label": "worker starts", "label_at": [15,111], "label_w": 130, "status": "observed"},
-    {"id": "t-done", "from": "writing", "to": "testing", "points": [[210,192],[360,192]], "label": "done", "label_at": [250,158], "label_w": 70, "status": "observed"},
-    {"id": "t-fail", "from": "testing", "to": "writing", "points": [[360,226],[210,226]], "style": "dashed", "label": "tests fail", "label_at": [235,234], "label_w": 110, "status": "observed"},
-    {"id": "t-pass", "from": "testing", "to": "reviewing", "points": [[540,208],[690,208]], "label": "tests pass", "label_at": [560,170], "label_w": 110, "status": "observed"},
-    {"id": "t-no-tests", "from": "writing", "to": "reviewing", "points": [[200,240],[200,290],[740,290],[740,240]], "label": "no tests to run", "label_at": [395,275], "label_w": 146, "status": "observed", "sources": ["src/orchestrator.ts:332-341 (the tests run only when a test command is given)", ".claude/hooks/verify.sh (no_test_command, no_code_changes)"]},
-    {"id": "t-gaps", "from": "reviewing", "to": "writing", "points": [[780,176],[780,126],[160,126],[160,176]], "style": "dashed", "label": "gaps", "label_at": [420,111], "label_w": 60, "status": "observed"},
-    {"id": "t-retries", "from": "writing", "to": "failed", "points": [[120,240],[120,330]], "label": "retries used up", "label_at": [47,268], "label_w": 146, "status": "observed"},
-    {"id": "t-replan", "from": "failed", "to": "replaced", "points": [[120,386],[120,474]], "label": "replanned", "label_at": [72,415], "label_w": 96, "status": "observed"},
-    {"id": "t-review-pass", "from": "reviewing", "to": "passed", "points": [[780,240],[780,330]], "label": "pass", "label_at": [752,268], "label_w": 56, "status": "observed"},
-    {"id": "t-merge", "from": "passed", "to": "merged", "points": [[780,386],[780,474]], "label": "integrated", "label_at": [728,415], "label_w": 104, "status": "observed"}
+    {"id": "t-done", "from": "writing", "to": "testing", "points": [[210,196],[360,196]], "label": "done", "label_at": [250,162], "label_w": 70, "status": "observed"},
+    {"id": "t-fail", "from": "testing", "to": "writing", "points": [[360,236],[210,236]], "style": "dashed", "label": "tests fail", "label_at": [230,244], "label_w": 110, "status": "observed", "sources": [".claude/hooks/verify.sh (tests_failed, bugfix check)"]},
+    {"id": "t-pass", "from": "testing", "to": "reviewing", "points": [[540,216],[690,216]], "label": "tests pass", "label_at": [560,178], "label_w": 110, "status": "observed"},
+    {"id": "t-no-tests", "from": "writing", "to": "reviewing", "points": [[160,176],[160,126],[780,126],[780,176]], "label": "no tests to run", "label_at": [395,111], "label_w": 146, "status": "observed", "sources": ["src/orchestrator.ts (the tests run only when a test command is given)", ".claude/hooks/verify.sh (no_test_command, no_code_changes)"]},
+    {"id": "t-review-fail", "from": "reviewing", "to": "validating", "points": [[720,256],[720,300],[450,300],[450,340]], "style": "dashed", "label": "fail", "label_at": [560,289], "label_w": 56, "status": "observed"},
+    {"id": "t-confirmed", "from": "validating", "to": "writing", "points": [[360,372],[150,372],[150,256]], "style": "dashed", "label": "confirmed: retry", "label_at": [180,361], "label_w": 160, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6 (second attempt: SendMessage resume; third: fresh implementer on opus)"]},
+    {"id": "t-none", "from": "validating", "to": "passed", "points": [[540,372],[690,372]], "label": "none stand", "label_at": [562,340], "label_w": 106, "status": "observed"},
+    {"id": "t-review-pass", "from": "reviewing", "to": "passed", "points": [[780,256],[780,340]], "label": "pass", "label_at": [752,286], "label_w": 56, "status": "observed"},
+    {"id": "t-stall", "from": "validating", "to": "stalled", "points": [[450,404],[450,470]], "label": "same gap twice in a row", "label_at": [462,425], "label_w": 210, "status": "observed", "sources": [".claude/rules/agents.md (stall gate: two consecutive failed reviews share a gap key)"]},
+    {"id": "t-attempts", "from": "writing", "to": "failed", "points": [[80,256],[80,470]], "label": "3 attempts fail", "label_at": [12,410], "label_w": 136, "status": "observed"},
+    {"id": "t-replan-used", "from": "stalled", "to": "failed", "points": [[360,498],[210,498]], "label": "replan used", "label_at": [228,466], "label_w": 114, "status": "observed", "sources": [".claude/agents/orchestrator.md step 6 (if the run already had its replan, the slice has failed for good)"]},
+    {"id": "t-stall-replan", "from": "stalled", "to": "replaced", "points": [[450,526],[450,628],[210,628]], "label": "replanned", "label_at": [270,596], "label_w": 104, "status": "observed"},
+    {"id": "t-replan", "from": "failed", "to": "replaced", "points": [[120,526],[120,600]], "label": "replanned", "label_at": [72,551], "label_w": 96, "status": "observed"},
+    {"id": "t-merge", "from": "passed", "to": "merged", "points": [[780,396],[780,600]], "label": "integrated", "label_at": [728,486], "label_w": 104, "status": "observed"}
   ],
-  "notes": ["Replanning runs only with --replans N; replaced slices are never merged.", "The test step runs only when a test command exists. Natively, verify.sh also skips it, in a git work tree with ORCH_TEST_CMD unset, when every changed path is prose (no_code_changes), and then the slice goes straight to review."]
+  "notes": [
+    "A failed review: a failed checked id or a gap of 80 or more; lower gaps pass with a doubt signal. When no gap stands, the passing validation is the latest review and an Opus review must still pass the slice.",
+    "Validating, the resume and the Opus third attempt are native and workflow steps; the stall (replan_required) is native only. The SDK pipeline sends gaps straight back, up to --retries, and replans only with --replans N.",
+    "A replan runs at most once per run; replaced slices are never merged.",
+    "The test step runs only when a test command exists. Natively, verify.sh also skips it, in a git work tree with ORCH_TEST_CMD unset, when every changed path is prose (no_code_changes), and then the slice goes straight to review. Its bugfix check (KIND: bugfix) needs a test that fails on the base and passes now."
+  ]
 }
