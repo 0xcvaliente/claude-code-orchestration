@@ -1,0 +1,15 @@
+{
+  "name": "route-040",
+  "seed": 41,
+  "parallel_blocks": 1,
+  "expected_wall_min": 20,
+  "note": "Read router benchmark (H14 amendment for d3-reader in bench/HYPOTHESES.md), direction only. d3-reader at an 8-minute cap: a plain sonnet main session launches 12 researchers (one per question) and writes answers.json. Arms reader-haiku, reader-sonnet and reader-routed start together in each block (3 sessions, up to 36 researchers live); 2 reps, so 2 blocks run one after the other (parallel_blocks 1 keeps the researcher count, and so rate-limit risk, bounded). Worst case each block runs to its cap: 2 x (8 min cap + about 1 min of repo setup, isolation check and kill grace) = about 18 min of runs, plus about 1 min of grading (answers.json only) and analysis: about 20 min in total. Runs that finish early shorten it.",
+  "groups": [
+    {
+      "tasks": ["d3-reader"],
+      "arms": ["reader-haiku", "reader-sonnet", "reader-routed"],
+      "cells": [{ "id": "cap8", "cap_min": 8 }],
+      "reps": 2
+    }
+  ]
+}
