@@ -30,6 +30,10 @@ const STATUS_RE = /^[\s*_#`]*STATUS[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?
 const OPEN_RE = /^[\s*_#`-]*OPEN[\s*_`]*:[\s*_`]*(.*)$/i
 const ANSWER_RE = /^[\s*_#`-]*(C\d+)[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?![\s*_`]*(?:or|\/|\|)[\s*_`]*(?:pass|fail)\b)[\s*_`]*(.*)$/i
 const NOTHING = new Set(['', 'none', '-', 'n/a', 'nothing'])
+const GAP_RE = /^[\s*_#`-]*GAP[\s*_`]*:[\s*_`]*(.*)$/i
+const QUOTE_RE = /^[\s*_#`-]*QUOTE[\s*_`]*:[\s*_`]*(.*)$/i
+const READ_MODES = new Set(['lookup', 'extract', 'judge'])
+const QUOTE_PAIRS = ['""', "''", '“”', '‘’', '``']
 const str = (text: unknown) => (typeof text === 'string' ? text : '')
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const field = (text: string, key: string) => text.match(new RegExp(`^${PRE}${esc(key)}:\\**[ \\t]*(.+)$`, 'im'))?.[1]?.trim()
@@ -42,8 +46,24 @@ const listOf = (v: string | undefined) =>
 const sliceId = (v: string | undefined) => (v ?? '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0] || null
 const checkIds = (v: string | undefined) => [...new Set(((v ?? '').match(/\bC\d+\b/gi) ?? []).map(s => s.toUpperCase()))]
 const yes = (v: string | undefined) => /^\**[ \t]*yes\b/i.test(v ?? '')
+// The first word, lower-cased, without quotes, backticks, asterisks, underscores or trailing punctuation (KIND, READ, VALIDATE).
+const word = (v: string | undefined) => ((v ?? '').replace(/[`'"*_]/g, '').trim().split(/\s+/)[0] ?? '').replace(/[.,;:!?]+$/, '').toLowerCase()
 
-export type Header = { slice: string | null; files: string[]; depends: string[]; path: 'light' | null; risky: boolean; checks: string[]; focus: string | null; workflow: boolean }
+export type ReadMode = 'lookup' | 'extract' | 'judge'
+export type Header = {
+  slice: string | null
+  files: string[]
+  depends: string[]
+  path: 'light' | null
+  risky: boolean
+  checks: string[]
+  focus: string | null
+  workflow: boolean
+  sources: string[]
+  read: ReadMode | null
+  kind: string | null
+  validate: boolean
+}
 export const parseHeader = (text: unknown): Header => {
   const t = str(text)
   return {
@@ -55,6 +75,10 @@ export const parseHeader = (text: unknown): Header => {
     checks: checkIds(field(t, 'CHECKS')),
     focus: field(t, 'FOCUS') || null,
     workflow: new RegExp(`^${PRE}ORCHESTRATION:\\**[ \\t]*workflow\\b`, 'im').test(t),
+    sources: listOf(field(t, 'SOURCES')),
+    read: READ_MODES.has(word(field(t, 'READ'))) ? (word(field(t, 'READ')) as ReadMode) : null,
+    kind: word(field(t, 'KIND')) || null,
+    validate: word(field(t, 'VALIDATE')) === 'gaps',
   }
 }
 // The brief starts with PLAN REVIEW (leading whitespace allowed, upper case), not any later line.
@@ -121,12 +145,34 @@ export const parseStatus = (text: unknown): 'pass' | 'fail' | null => {
   if (found.includes('fail')) return 'fail'
   return found[0] === 'pass' ? 'pass' : null
 }
-export type Reply = { status: 'pass' | 'fail' | null; open: string[]; answers: Record<string, Answer> }
-// A worker's reply: STATUS, the OPEN items (its inline value and the list lines right below it) and one answer per checked constraint id
-// (`C1: pass (cmd) <command> -> <result>`, `C1: pass (read) <where>`, `C1: fail <reason>`; the first line for an id decides, a later fail overrides a pass).
+export type Gap = { confidence: number | null; text: string }
+export type Quote = { locator: string; text: string }
+export type Reply = { status: 'pass' | 'fail' | null; open: string[]; answers: Record<string, Answer>; gaps: Gap[]; quotes: Quote[] }
+// A GAP value: `<0-100> <text>` (a trailing % allowed); a missing or out-of-range number gives null and the whole rest as text; no text or the
+// template `<0-100> ...` is no gap.
+const gapOf = (v: string): Gap | null => {
+  if (!v || /^<\s*0\s*-\s*100\s*>/.test(v)) return null
+  const m = v.match(/^(\d+)[ \t]*%?(?:\s+|$)(.*)$/)
+  const n = m ? Number(m[1]) : NaN
+  if (!m || !(n >= 0 && n <= 100)) return { confidence: null, text: v }
+  const t = (m[2] ?? '').trim()
+  return t ? { confidence: n, text: t } : null
+}
+// A QUOTE value: `<locator> | <verbatim text>`, one pair of surrounding quotes stripped; no `|`, locator or text is no quote.
+const quoteOf = (v: string): Quote | null => {
+  const at = v.indexOf('|')
+  if (at === -1) return null
+  const locator = v.slice(0, at).trim().replace(/^`+|`+$/g, '').trim()
+  let t = v.slice(at + 1).trim()
+  if (t.length >= 2 && QUOTE_PAIRS.includes(`${t[0]}${t.slice(-1)}`)) t = t.slice(1, -1).trim()
+  return locator && t ? { locator, text: t } : null
+}
+// A worker's reply: STATUS, the OPEN items (its inline value and the list lines right below it), one answer per checked constraint id
+// (`C1: pass (cmd) <command> -> <result>`, `C1: pass (read) <where>`, `C1: fail <reason>`; the first line for an id decides, a later fail overrides a pass),
+// and its GAP and QUOTE lines (blockquoted ones do not count).
 export const parseReply = (text: unknown): Reply => {
   const all = str(text).split(/\r?\n/)
-  const reply: Reply = { status: parseStatus(text), open: [], answers: {} }
+  const reply: Reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [] }
   const at = all.findIndex(l => OPEN_RE.test(l))
   if (at !== -1) {
     const addItem = (item: string) => {
@@ -160,6 +206,14 @@ export const parseReply = (text: unknown): Reply => {
     }
     const prev = reply.answers[id]
     if (!prev || (verdict === 'fail' && prev.verdict === 'pass')) reply.answers[id] = answer
+  }
+  for (const l of all) {
+    const g = GAP_RE.exec(l)
+    const gap = g ? gapOf((g[1] ?? '').replace(/[*_`]+$/, '').trim()) : null
+    if (gap) reply.gaps.push(gap)
+    const q = QUOTE_RE.exec(l)
+    const quote = q ? quoteOf(q[1] ?? '') : null
+    if (quote) reply.quotes.push(quote)
   }
   return reply
 }

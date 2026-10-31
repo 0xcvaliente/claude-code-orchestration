@@ -1,0 +1,9 @@
+SLICE: survey
+FILES: docs/survey.md
+DEPENDS: none
+SOURCES: docs/research.md, https://example.com/spec.html, `papers/a.pdf`, , ./notes/b.md
+READ: Extract
+KIND: Survey of harnesses
+
+Read https://example.com/spec.html (section 2), then https://docs.example.org/guide?x=1&y=2. Also see
+<https://example.net/a>, [link](https://en.wikipedia.org/wiki/Foo_(bar)) and "https://example.com/spec.html".

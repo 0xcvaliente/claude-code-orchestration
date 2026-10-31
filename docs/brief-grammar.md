@@ -2,7 +2,7 @@
 
 Normative spec for the lines the orchestrator writes in its briefs, the lines workers write in their replies, and the run model the hooks and the dashboard derive from them. One implementation: `.claude/hooks/brief.mjs` (ESM, Node built-ins only, no side effects at import). Fixtures for every form are in `src/fixtures/briefs/` with their parse results in `expected.json`; `src/brief.test.mjs` checks both and each rule below.
 
-Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip.
+Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip. The same holds for the 0.4.0 lines (`SOURCES`, `READ`, `KIND`, `VALIDATE` in briefs; `GAP`, `QUOTE` in replies): every one is optional, and a brief or reply without them parses exactly as before, with the new fields empty.
 
 ## Line rule
 
@@ -23,7 +23,27 @@ CHECKS: C1, C3       (optional: constraint ids this slice must satisfy)
 
 `SLICE`, `FILES` and `DEPENDS` are required by the plan check; `PATH` is `light` when its value starts with the word `light`. A brief with a line `ORCHESTRATION: workflow` (the scripted workflow) is skipped by the plan check and by the run model.
 
-`parseHeader(text)` returns `{ slice, files, depends, path: 'light'|null, risky, checks, focus, workflow }`.
+`parseHeader(text)` returns `{ slice, files, depends, path: 'light'|null, risky, checks, focus, workflow, sources, read, kind, validate }`.
+
+## Optional brief lines (0.4.0)
+
+Any brief (implementer, reviewer, researcher) may carry these header lines. All are optional; none has gate behaviour yet (a later slice adds it, `KIND: bugfix` first). They follow the line rule above: first matching line wins, prefixes allowed, keys case-insensitive, a key in mid-line does not count.
+
+```
+SOURCES: docs/research.md, https://example.com/spec.html   (paths or URLs the worker should read)
+READ: extract                                              (lookup, extract or judge: how the sources are read)
+KIND: bugfix                                               (the kind of work; only bugfix will have behaviour)
+VALIDATE: gaps                                             (ask the reviewer to rate each gap it reports)
+```
+
+| Line | Field | Parse |
+|---|---|---|
+| `SOURCES: <list>` | `sources: string[]` | comma-separated, read like `FILES`: trimmed, outer quotes or backticks and a leading `./` removed, empty entries and `none` dropped |
+| `READ: <mode>` | `read: 'lookup'\|'extract'\|'judge'\|null` | the first word of the value (quotes, backticks, `*`, `_` and trailing `.,;:!?` removed), case-insensitive; any other word, or no line, is `null` |
+| `KIND: <kind>` | `kind: string\|null` | the first word, cleaned the same way, lower-cased (`KIND: Bugfix: crash` gives `bugfix`); empty or no line is `null` |
+| `VALIDATE: gaps` | `validate: boolean` | `true` only when the first word is `gaps` (any case); anything else is `false` |
+
+**URLs in a brief.** `briefUrls(text)` returns the `http://` and `https://` URLs anywhere in the text (header or body): unique (exact string), in order of first appearance, at most 50. A URL ends at whitespace, `<`, `>`, a quote or a backtick; trailing `).,;:'"]>` characters are then stripped, except a `)` or `]` that closes one opened inside the URL (`https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)`). A scheme with no host (`https://`, `https://?x`) is not a URL.
 
 ## PLAN REVIEW brief
 
@@ -88,7 +108,21 @@ OPEN: none
 
 Ids are upper-cased. The first line for an id decides, except that a later `fail` line for it overrides a pass. The template `C1: pass or fail` is not an answer.
 
-`parseReply(text)` returns `{ status, open: string[], answers: { C1: { verdict: 'pass'|'fail', mode: 'cmd'|'read'|null, detail } } }`; `parseStatus(text)` returns the status alone.
+**Gaps and quotes (0.4.0, optional).** A reviewer may list each gap it found with its confidence, and a researcher may back a claim with a verbatim quote:
+
+```
+GAP: 80 no test for the empty-input path
+GAP: 35% the error message is unclear
+QUOTE: docs/spec.md:12 | "the parser never throws"
+QUOTE: papers/b.pdf p.4 | the exact sentence
+```
+
+Like STATUS, OPEN and the answers, these are the worker's own lines: list and emphasis characters may come before the key (`- GAP:`, `**QUOTE:**`), a blockquoted line (`> GAP: ...`) and a key in mid-line do not count. Every such line counts, in order.
+
+- `GAP: <0-100> <text>`: the number may carry a trailing `%`. A number from 0 to 100 gives `{ confidence: <n>, text }`; a missing number, a number above 100, a negative or decimal one gives `{ confidence: null, text: <the whole rest> }`. Trailing emphasis characters are removed from the text. A GAP line with no text (`GAP:`, `GAP: 70`) and the template `GAP: <0-100> <text>` are dropped.
+- `QUOTE: <locator> | <verbatim text>`: the locator is the part before the first `|` (a path, `path:line` or `path p.N`; surrounding backticks removed), the text the part after it, trimmed, with one pair of surrounding quotes stripped (`"…"`, `'…'`, `“…”`, `‘…’` or backticks). A line without `|`, or with an empty locator or text, is dropped.
+
+`parseReply(text)` returns `{ status, open: string[], answers: { C1: { verdict: 'pass'|'fail', mode: 'cmd'|'read'|null, detail } }, gaps: [{ confidence: number|null, text }], quotes: [{ locator, text }] }`; `parseStatus(text)` returns the status alone. GAP and QUOTE lines never change the status, the answers or OPEN.
 
 ## Run model
 
@@ -134,8 +168,23 @@ Hooks log parsed fields only, never brief or reply text. Readers accept older re
 | `model` | `agentModel` (see Reviewer model) |
 | `isPlanReview`, `replan` | `parsePlan` |
 | `plan` | PLAN REVIEW briefs only: `{ constraints, slices }` from `parsePlan` |
+| `read`, `kind`, `validate` | `parseHeader` (0.4.0) |
+| `sources` | `parseHeader`'s `sources` with each `http://` or `https://` entry replaced by its host (`new URL(u).host`, port included; an entry that does not parse is dropped); paths stay as they are (0.4.0) |
+| `urls` | the hosts of `briefUrls` of the prompt (`new URL(u).host`), deduplicated, in order of first appearance; invalid URLs skipped (0.4.0) |
 
-**Stop record** (`journal.jsonl` at SubagentStop; `stopRecord({ ts, sessionId, agentId, role, slice, reply, status, run })`): `ts`, `session_id`, `agent_id`, `role` (bare; readers also accept `agent_type`), `slice` (from the launch record with the same `agent_id`, or through `journal-pending.jsonl` when the stop arrives before its launch, as `journal.mjs` does today), `status` (`parseStatus` of the final report), `answers`, `open` (`parseReply`), `run` (the id `foldRuns` gives the run at write time: runs are numbered 1, 2, ... in session order). A resumed agent keeps its `agent_id`, so its stops join the same launch. A reviewer stop may also carry `model`; otherwise the model comes from its launch record.
+The record keeps hosts only, never a URL's path, query or fragment (which can carry tokens). `parseHeader` and `briefUrls` still return the full text, for hooks that read the brief directly.
+
+**Stop record, 0.4.0 fields** (no gap or quote text is ever stored):
+
+| Field | Value |
+|---|---|
+| `gaps` | `[{ confidence, key }]`, one per GAP line of the reply, in order. `key` is `gapKey(text)`: the first 8 hex characters of the sha1 (`node:crypto`) of the gap text normalised: lower-cased, every run of non-alphanumerics (`[^a-z0-9]`) turned into one space, trimmed, cut to its first 120 characters. Equal keys mean the same gap across replies. |
+| `quotes` | the number of QUOTE lines |
+| `files_touched` | `string[]`, present only when the caller passes `filesTouched` as an array of strings (an empty array included); any other value leaves the field out |
+
+Records written before 0.4.0 lack these fields; readers treat a missing field as empty, and `foldRuns`, `doubtSignals` and the gates do not read them yet, so runs fold and gate exactly as before.
+
+**Stop record** (`journal.jsonl` at SubagentStop; `stopRecord({ ts, sessionId, agentId, role, slice, reply, status, run, filesTouched })`): `ts`, `session_id`, `agent_id`, `role` (bare; readers also accept `agent_type`), `slice` (from the launch record with the same `agent_id`, or through `journal-pending.jsonl` when the stop arrives before its launch, as `journal.mjs` does today), `status` (`parseStatus` of the final report), `answers`, `open` (`parseReply`), `run` (the id `foldRuns` gives the run at write time: runs are numbered 1, 2, ... in session order). A resumed agent keeps its `agent_id`, so its stops join the same launch. A reviewer stop may also carry `model`; otherwise the model comes from its launch record.
 
 **Test-gate record** (`gates.jsonl` from `verify.sh`, `gate: "test"`): carries `session_id` and `agent_id`, and no slice. The slice is resolved at read time by joining `agent_id` to a launch record; a record whose `session_id` differs from that launch's is ignored. `verify.sh` logs both. A record without `session_id` still counts through the join.
 
@@ -160,6 +209,8 @@ Hooks read the records through `.claude/hooks/run.mjs` (`loadRecords`, `sessionR
 | `isPlanReview(text)` / `sliceOfBrief(text)` | the PLAN REVIEW marker / journal slice key (`plan`, the SLICE id, or `null`) |
 | `normalizeFiles(files, baseDir)` | absolute paths: relative against `baseDir`, trailing slashes stripped, duplicates dropped |
 | `isOpusModel(model)`, `modelFromAgentFile(text)`, `agentModel(toolInput, dirs)` | reviewer model rules |
+| `briefUrls(text)` | unique http(s) URLs of a text, in order, at most 50 |
+| `gapKey(text)` | the 8-hex-character key of a gap text (stop record `gaps`) |
 | `launchRecord(toolInput, ctx)`, `stopRecord(ctx)` | the log records above |
 | `foldRuns({ launches, stops, gates, starts }, { now, staleMin, sessionId })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`, planned `files`; reviews carry their brief's `checks`), plus `planReviewed` and `running` per run |
 | `currentReviews(slice)` | reviews after the slice's latest implementer launch or stop |

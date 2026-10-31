@@ -1,0 +1,14 @@
+Reviewed the parser slice.
+
+STATUS: fail
+GAP: 80 no test for the empty-input path
+- GAP: 35% error message is unclear
+**GAP:** 55 bold gap**
+GAP: 150 out of range number
+GAP: no number at all
+GAP: 70
+GAP:
+GAP: <0-100> <text>
+> GAP: 90 a quoted gap does not count
+Mid-line GAP: 10 does not count
+OPEN: the gaps above
