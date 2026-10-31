@@ -8,6 +8,15 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/nudge.mjs\" --plugin"
           }
         ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/compact-context.mjs\" --plugin"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -16,7 +25,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/plan-check.mjs\" --plugin"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/plan-check.mjs\" --plugin",
+            "timeout": 60
           }
         ]
       },
@@ -25,7 +35,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs\" --plugin"
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/researcher-guard.mjs\" --plugin"
+          }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/egress-guard.mjs\" --plugin"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node \"$0\" \"$@\"' \"${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs\" --plugin",
+            "timeout": 120,
+            "onFailure": "block"
           }
         ]
       }
@@ -37,6 +67,15 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/journal.mjs\" --plugin"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/read-log.mjs\" --plugin"
           }
         ]
       }
@@ -73,7 +112,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --plugin"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --plugin",
+            "timeout": 900
+          }
+        ]
+      },
+      {
+        "matcher": "orchestration:researcher",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/quote-check.mjs\" --plugin"
           }
         ]
       }
