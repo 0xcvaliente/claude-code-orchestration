@@ -437,6 +437,47 @@ test("run model: a run with no launch or stop for ORCH_RUN_STALE_MIN minutes is 
   assert.equal(f.open?.slices.a?.passed, true);
 });
 
+// A foreground agent's SubagentStop (and its test-gate record) is logged before its PostToolUse launch record.
+/** @param {number} min @param {string} slice @param {string} verdict @param {string} [extra] @returns {Item[]} */
+const fgAttempt = (min, slice, verdict, extra = "") => {
+  const id = `impl-${slice}-${min}`;
+  const rid = `rev-${slice}-${min}`;
+  return [
+    implStop(min, id),
+    impl(min + 0.2, slice, extra, id),
+    { stop: stopRecord({ ts: at(min + 1), sessionId: "s1", agentId: rid, role: "reviewer", reply: `STATUS: ${verdict}` }) },
+    { launch: launchRecord({ subagent_type: "reviewer", prompt: `SLICE: ${slice}` }, { ts: at(min + 1.2), sessionId: "s1", agentId: rid }) },
+  ];
+};
+/** @param {any} rec */
+const tsOf = (rec) => Date.parse(rec?.ts);
+
+test("foreground order: stops and gates logged before their launch count after it", () => {
+  // A light slice run in the foreground: 3 attempts, 3 failed reviews.
+  const three = [...fgAttempt(1, "fix", "fail", "PATH: light"), ...fgAttempt(4, "fix", "fail", "PATH: light"), ...fgAttempt(7, "fix", "fail", "PATH: light")];
+  assert.ok(tsOf(three[0]?.stop) < tsOf(three[1]?.launch), "the fixture logs the stop first");
+  let f = foldRuns(R(...three), { now: T0 + 10 * 60000 });
+  assert.equal(f.runs.length, 1);
+  assert.deepEqual([f.runs[0]?.slices.fix?.launches, f.runs[0]?.slices.fix?.attempts, f.runs[0]?.slices.fix?.gaveUp], [3, 3, true]);
+  assert.deepEqual([f.runs[0]?.closed, f.open], [true, null]);
+  // The test-gate record of a foreground implementer precedes its launch too.
+  const gate = { gate: { ts: at(1.1), gate: "test", decision: "warn", reason: "tests_failed_isolated", agent_type: "implementer", agent_id: "A", session_id: "s1" } };
+  f = foldRuns(R(implStop(1, "A"), gate, impl(1.5, "fix", "PATH: light", "A")), { now: T0 + 2 * 60000 });
+  const s = f.open?.slices.fix;
+  assert.ok(s);
+  assert.equal(s.attempts, 1);
+  assert.deepEqual(doubtSignals(s), ["tests_failed_isolated"]);
+  // Mixed: slice a in the background (launch first), slice b in the foreground, interleaved; both pass and the run closes.
+  f = foldRuns(
+    R(planLaunch(0), impl(1, "a", "", "BG"), implStop(2, "FG"), impl(2.5, "b", "", "FG"), implStop(3, "BG"), ...review(4, "a", "STATUS: pass"), ...fgAttempt(5, "b", "pass").slice(2)),
+    { now: T0 + 7 * 60000 },
+  );
+  assert.deepEqual([f.runs[0]?.slices.a?.attempts, f.runs[0]?.slices.b?.attempts], [1, 1]);
+  assert.deepEqual([f.runs[0]?.slices.a?.passed, f.runs[0]?.slices.b?.passed, f.runs[0]?.closed], [true, true, true]);
+  // A stop whose launch never appears keeps its own time (here: no run has its slice, so it is not tracked).
+  assert.equal(foldRuns(R({ stop: stopRecord({ ts: at(1), sessionId: "s1", agentId: "ghost", role: "implementer", slice: "z" }) }), { now: T0 }).runs.length, 0);
+});
+
 test("doubt signals: risky, retry, read answer, open items, isolated test failure; ORCH_ESCALATION off/always", () => {
   /** @param {Item[]} items @param {string} slice */
   const sliceOf = (items, slice) => {
