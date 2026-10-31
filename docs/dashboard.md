@@ -8,13 +8,20 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 - It also opens when the first orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of an `npm run route` Bash call in the main session).
 - `/orchestration` opens it focused, so the arrow keys work at once.
 - A pane nobody asked for seats only from 144 columns. On a narrower terminal a toast (shown once per run) says to type `/orchestration`.
-- What starts a new run (the old agents, log, verdict, input and plan are dropped; what the session used is kept; `newRun`):
-  - A prompt you type while no agent runs and the main session is not still working on an earlier prompt: it starts a new run at once, however soon after the last agent ended (new input is new work; `newRun` with `force`).
-  - A first agent when nothing runs, the list already holds agents and the last agent ended 2 minutes or more earlier (`newRun` runs on a spawn only when the agent list is not empty, so with no agent yet an earlier input and verdict are not dropped; a typed prompt does reset).
+## Run boundary
+
+The pane uses the gates' run model ([brief-grammar.md, Run model](brief-grammar.md#run-model)), worked out from the agents it has seen (`runOpen`, `sliceRunOf`). It replaced the old rule that started a new run when the last agent had ended 2 minutes earlier.
+
+- **A run opens** at a `PLAN REVIEW` launch without `REPLAN:` (closing the previous one), or at a light-path implementer launch (`PATH: light`) when none is open. A `PLAN REVIEW` with `REPLAN:` extends the open run: a slice it names again is updated, a new one is added. The scripted workflow's briefs (`ORCHESTRATION: workflow`) open nothing.
+- **A run is open** while it is not stale and an agent runs or one of its slices is not final. A slice is final when its latest review (after its latest implementer launch or stop) passed, or failed after 3 implementer attempts (`MAX_RETRIES` 2); attempts are counted from implementer stops, and stops with no review between them count as one. A run with no slice yet (a plan review alone, or a plan without `SLICE:` lines) stays open until a slice is known or it goes stale.
+- **Stale**: agents ran, none runs and the last one ended more than 10 minutes ago (`STALE_MS`). The gates use `ORCH_RUN_STALE_MIN` (default 30) instead, so the pane can drop a run the gates still hold open.
+- What starts a new run (the old agents, log, verdict, input, plan and run are dropped; what the session used is kept; `newRun`):
+  - A prompt you type while no agent runs, the main session is not still working on an earlier prompt, and no run is open. A prompt never closes an open run: a headless run delivers background results as a new prompt, which only reopens the main turn.
+  - A spawn, when the pane already holds agents and either a new plan arrives (a `PLAN REVIEW` without `REPLAN:` that names slices, while the pane holds slice agents) or the session is idle (the main turn is not working and nothing runs) and the run is closed or stale. Agents with no run (no plan review and no light path) are dropped only when stale. A `PLAN REVIEW` that names no slices, or the fixed plan after a failed plan review with no slice launched yet, keeps the agents so the re-plan loop shows.
+  - On a spawn reset, the input line stays while the main turn still works on it or when it is newer than the old run's last agent, and the verdict stays when it is that new or came with the kept input. An older verdict or input is dropped.
   - Not counted as work: notifications and peer messages (see the `NOT_THE_PERSON` origins above) neither start a run nor open the pane.
-  - A prompt while the main session still works on an earlier prompt with no answer yet drops nothing and keeps the first input; so does any prompt while an agent runs.
-  - A main turn that never reports its end (killed or interrupted) counts as ended once agents ran, none runs and the last one ended more than 10 minutes ago (`STALE_MS`): the next typed prompt or spawn starts a clean run. A main turn that is legitimately busy for over 10 minutes after the last agent ended is treated the same way.
-  - A first agent that starts 2 minutes or more after the old run ended, with nothing running, drops the old agents and log but keeps the verdict and the input when they are newer than the old run's last agent (the prompt and the router both came before the spawn). An older verdict or input is dropped.
+  - A prompt while the main session still works on an earlier prompt with no answer yet drops nothing and keeps the first input; so does any prompt while an agent runs or a run is open.
+  - A main turn that never reports its end (killed or interrupted) counts as ended once agents ran, none runs and the last one ended more than 10 minutes ago (`STALE_MS`): the run is stale too, and the next typed prompt or spawn starts a clean run. A main turn that is legitimately busy for over 10 minutes after the last agent ended is treated the same way.
 
 ## Scrolling and resizing
 
@@ -24,23 +31,26 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 ## Sections, top to bottom
 
 1. **Model legend.** One coloured square per model in use.
-2. **Progress.** Drawn once the run has a slice: a heading `progress · <done>/<total> slices · <percent>%` (with `· N running` and `· N failed` when there are any), a bar and one line per slice.
-   - The slices are the plan's, in plan order: every `SLICE:` line of the latest `PLAN REVIEW` brief that names one (`planOf`), except the review's own `SLICE: plan`. A slice's goal is the rest of its `SLICE:` line, else the first `GOAL:` line under it. A slice named twice keeps its first goal. Markdown bullets, bold and backticks around the id are accepted, and a trailing `:` on the id is dropped. A later plan review that names slices replaces the plan (a re-plan); one that names none keeps it. A new run drops it.
+2. **Progress.** Drawn once the run has a slice: a heading `progress · <done>/<total> slices · <percent>%` (with `· N running` and `· N failed` when there are any, and `· ↻ replan N` once a `PLAN REVIEW` with `REPLAN: N` arrived), a bar and one line per slice.
+   - The slices are the plan's, in plan order: every `SLICE:` line of the latest `PLAN REVIEW` brief that names one (`planOf`, a mirror of `brief.mjs`'s `parsePlan`), except the review's own `SLICE: plan`. A slice's goal is the rest of its `SLICE:` line, else the first `GOAL:` line under it; its `RISKY:` and `CHECKS:` lines are kept with it. A slice named twice keeps its first entry. Markdown bullets, bold, a heading `#` and backticks around the id are accepted, and a trailing `:` on the id is dropped. A plan review without `REPLAN:` that names slices replaces the plan; one with `REPLAN:` extends the open run's plan (a slice named again is updated, a new one is added); one that names none keeps it. A new run drops it.
    - Then any slice that started outside the plan (a slice with no plan review, the light path, or one added later), in the order the diagram knows it, including a queued dependency while the run is going.
    - Each slice is counted at its latest attempt, with the card states: done once its review passed, or once it was built with no reviewer (`◆`), or when a later slice made its failure good. Queued until an agent of it starts.
    - The bar is 40 cells, or the pane width less 2 (at least 10), shared evenly by the slices in plan order: done green, running amber (pulsing), failed red, still to do grey. It is drawn in `━`, so it is never taken for flow-line art.
-   - Up to 8 slice lines (`<glyph> <id> · <goal>`, cut to the width), then `+N more`.
+   - Up to 8 slice lines (`<glyph> <id> <marks> · <goal>`, cut to the width), then `+N more`. Marks follow the id only when they apply, so an old-style plan and reply show none (`marksOf`):
+     - `⚑`: the slice is RISKY (its planned slice or an implementer brief says `RISKY: yes`).
+     - `⇧opus?` when a doubt signal asks for an opus review and none has passed after the latest attempt; `⇧opus✔` once one has. The pane's signals are RISKY, an earlier failed review, a `(read)` answer or OPEN items in the passing review; the gate also counts an isolated test failure, which the pane cannot see.
+     - One tick per checked constraint id (the slice's planned and brief `CHECKS:`, plus any id its latest review answered), from that review: `C1✔` passed by a command, `C1✓` passed by reading, `C1✖` failed, `C1·` not answered.
    - The orchestrator is told to write each planned slice in the PLAN REVIEW brief as the `SLICE:`, `FILES:`, `DEPENDS:` and `GOAL:` lines its brief will start with (`.claude/agents/orchestrator.md` step 2a, the route skill and the SessionStart nudge). Without them the bar still follows the slices as they start, but the total grows as they do.
 
    ```text
-   progress · 1/3 slices · 33% · 1 running · 1 failed
+   progress · 1/3 slices · 33% · 1 running · 1 failed · ↻ replan 1
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-   ✔ s1 · shared types
-   ⠋ s2 · the handler
-   ✖ s3 · docs
+   ✔ s1 C1✔ C2✓ · shared types
+   ⠋ s2 ⚑ ⇧opus? · the handler
+   ✖ s3 C2✖ · docs
    ```
 3. **Input box.** The first non-blank line of the prompt (cut to 120 characters), shown from the submit, with or without agents.
-4. **Orchestrator box.** The orchestrator's model, a state line (dispatching with the count of running agents, also "0 running" between two waves while the main turn works, signed off with N failed, passed with N fixed on the way, or all agents passed), and the agent count, total tokens and elapsed time. With no agents the state line reads "working in this session" while the main turn runs, then "answered in this session", or "stopped before an answer" when the main turn ended with a reason other than an answer.
+4. **Orchestrator box.** The orchestrator's model, a state line ("waiting for N agents" when the main turn has ended while background agents still run; dispatching with the count of running agents, also "0 running" between two waves while the main turn works; signed off with N failed, passed with N fixed on the way, or all agents passed), and the agent count, total tokens and elapsed time. With no agents the state line reads "working in this session" while the main turn runs, then "answered in this session", or "stopped before an answer" when the main turn ended with a reason other than an answer.
 5. **Triage box.** Shows the mode (plain, reviewed or orchestrate). Three sources:
    - A recorded route verdict, from the `route` tool or from a captured `npm run route`: the mode, the facts (files, lines, slices, risky, code) and the reason. The Bash capture takes any main-session Bash call that matches `npm run route` (also `npm run --silent route`); the orchestrator agent cannot use it because its tool list has no Bash (`.claude/agents/orchestrator.md`), not because of the code.
    - Otherwise, with agents, the mode is inferred from the agents (an implementer, integrator or plan review means orchestrate; a reviewer alone means reviewed; any other agent means orchestrate) and the box says "(inferred from the agents)". Nothing in the code forces it, but under the orchestrator the triage is inferred: its tool list has neither Bash nor the `route` tool, so no verdict is recorded there.
@@ -88,10 +98,10 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
    - A card of a retried slice carries a line `attempt k/n`, and a `◀ retry of X` line first among the `◀` lines (same colour as the retry connector). The `◀` lines show up to 3, then "+N more".
    - A first attempt that starts at or after the first failure end in the run (any agent) carries `✚ new` on that line: a slice added by a re-plan.
    - A resumed agent is a new attempt too. An `agent.spawn` for an id that already has a record adds a new record, and a turn that completes for a record that already ended adds a new record (its start is the old end, or the latest end of another agent of the slice if later); the old record stays as history. Tool updates and completions go to the latest still-running record of an id, else the latest. Because the new record starts after the failed one ended, it becomes a retry attempt.
-8. **Sign-off box.** "waiting for agents" until the run is signed off (see "Sign-off" below), then the passed, failed and fixed counts. With no agents it reads "waiting for the reply", then "answered in this session" or "stopped". A failure counts as fixed (grey `◆`, "fixed by <card>" in the tasks table, e.g. "fixed by X ↻2") when a later attempt of the same slice passed, or else a later slice that depends on the failed slice started after it ended and passed, or, for an agent with no slice (a plan review), when a later slice-less agent with the same role and label passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
+8. **Sign-off box.** "waiting for N agents" while the main turn has ended and background agents still run, otherwise "waiting for agents · verified findings only" until the run is signed off (see "Sign-off" below), then the passed, failed and fixed counts. With no agents it reads "waiting for the reply", then "answered in this session" or "stopped". A failure counts as fixed (grey `◆`, "fixed by <card>" in the tasks table, e.g. "fixed by X ↻2") when a later attempt of the same slice passed, or else a later slice that depends on the failed slice started after it ended and passed, or, for an agent with no slice (a plan review), when a later slice-less agent with the same role and label passed. Fixed failures are not counted as failed in the stages or in the orchestrator box.
 9. **Tasks table.** One row per attempt of a slice (the first keeps the slice id, a retry is `X ↻2`), or per agent without a slice: glyph, label, a share bar, tokens, time, and a second line with the reported result (the report's `Answer:` line, else its first non-heading line; a bare `GAPS:` heading (plain or in bold) is skipped so the finding under it shows) or, while running, the latest tool. A totals line gives input, output and cache tokens.
 10. **Usage by model.** One stacked bar, one segment per model with tokens, and a legend with tokens and percentage per model.
-11. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too. A started agent that opens a retry attempt is logged as `retry k of X · <label> started …`; a plan review that starts after a failed one ended is logged as `re-plan · …`. A resumed run that fires no spawn event logs its start entry when its turn completes.
+11. **Session log.** The last 10 events (7 on a narrow pane): time since the run began, a mark, what happened, duration and tokens. Triage verdicts are logged too. A started agent that opens a retry attempt is logged as `retry k of X · <label> started …`; a plan review that starts after a failed one ended is logged as `re-plan · …`. A resumed run that fires no spawn event logs its start entry when its turn completes. An `Agent` launch a gate denied (the plan check blocks before the agent exists, so no spawn follows) is logged as `⊘ blocked <reason>`, then ` · <slice>` and ` · <role>` when known; the reason is the gate's code when its message names one (`not_in_plan`, `builtin_agent_in_run`, `missing_lines`, `no_plan_review`, `light_path_multi`, `file_overlap`, `dependency_cycle` and the rest), else the code the plan check's message stands for. A `<reason>_gave_up` launch went through and is not logged as blocked.
 12. **Used in this session.** What the whole session used, like the Claude desktop app's list, one row per kind with as many names as fit and then `+N`. It is kept across runs (a new run does not reset it) and drawn once anything was used, also before any agent.
     - `skills`: skills expanded for the model (`skill.prompt`: a `/name` command, the Skill tool, or a worker's preloaded skill), in first-use order.
     - `connectors`: MCP servers whose tools ran, named from the tool name (`mcp__claude_ai_Google_Drive__search_files` is "Google Drive"; the `claude_ai_` and `plugin_` prefixes go, underscores become spaces). The pane's own `route` tool counts.
@@ -115,7 +125,8 @@ Under the stage row (`loops` in `register.tsx`) a connector is drawn for each of
 
 ## Sign-off
 
-- With a typed prompt (the run has a `work` line): signed off only when no agent runs and the main turn has ended (`signed`, `workOpen`). Between two waves of agents the orchestrator box reads "dispatching… 0 running", the sign-off box "waiting for agents", queued ghost cards stay.
+- With a typed prompt (the run has a `work` line): signed off only when no agent runs and the main turn has ended (`signed`, `workOpen`). Between two waves of agents the orchestrator box reads "dispatching… 0 running", the sign-off box "waiting for agents · verified findings only", queued ghost cards stay. When the main turn has ended while background agents still run (the orchestrator ended its turn to wait), both boxes read "waiting for N agents".
+- Sign-off is about the screen; the run itself stays open until every slice is final (see "Run boundary"), so a prompt typed after sign-off joins the open run instead of starting a new one.
 - With no typed prompt (agents without one, or background agents that wake the main session): signed off as soon as no agent runs. A flicker to signed off between waves can remain; this is a known limit.
 - If the main turn never reports its end and the last agent ended more than 10 minutes ago (`STALE_MS`), the work counts as ended: the pane redraws once more and shows signed off. A turn that is truly busy for over 10 minutes after the last agent ended is treated the same, and a spawn after that starts a clean run.
 
@@ -135,13 +146,19 @@ A run with no agents (research or simple work that stays in the main session) sh
 | `○` | a route not taken (or still being sized) | dim |
 | `↻` | a retry connector, a retry card's connector, a loop-back label | amber running, green passed, red failed |
 | `✚ new` | a slice added by a re-plan (on the card's attempt line) | dim |
+| `⚑` | a RISKY slice (progress line) | as the line |
+| `⇧opus?`, `⇧opus✔` | an opus review is needed and none passed yet, or one passed (progress line) | as the line |
+| `C1✔`, `C1✓`, `C1✖`, `C1·` | a checked constraint passed by a command, passed by reading, failed, not answered (progress line) | as the line |
+| `↻ replan N` | the plan was extended by a `PLAN REVIEW` with `REPLAN: N` (progress heading) | bold |
+| `⊘` | an Agent launch a gate blocked (session log) | red |
 
 Flow lines are amber while work moves through them, green once what feeds them is done, grey before that. Models are coloured by family: opus magenta, sonnet yellow, haiku cyan, fable green, others white. Triage modes: plain grey, reviewed yellow, orchestrate cyan. A card is outlined with a double border for 2 seconds after an agent finishes.
 
 ## Where the data comes from
 
-- The `SLICE:`, `FILES:` and `DEPENDS:` lines of each agent brief (matched on any line, with the multiline flag) give a slice's id, its file count and its dependencies. A brief that starts with `PLAN REVIEW` (only this one must be at the start) is labelled "plan review" and belongs to the plan review stage, whatever `SLICE:` line it also carries: it is never a slice card.
-- The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the report (its last `STATUS: pass` or `STATUS: fail`; none means done), the token usage and the end time. Tool calls give a running agent's latest tool.
+- Briefs and replies are read by a mirror of `.claude/hooks/brief.mjs` (the spec is [brief-grammar.md](brief-grammar.md)); the mod cannot import the hook, because the standalone `dist/dashboard` has no `hooks/brief.mjs`. `register.test.tsx` parses every fixture in `src/fixtures/briefs` with the mirror and checks `expected.json`, so parser, mirror and fixtures change together.
+- The `SLICE:`, `FILES:` and `DEPENDS:` lines of each agent brief give a slice's id, its file count and its dependencies (the first matching line wins, as in the plan check); `RISKY:`, `CHECKS:` and `PATH: light` are kept for the marks and the run boundary. A brief that starts with `PLAN REVIEW` (only this one must be at the start) is labelled "plan review" and belongs to the plan review stage, whatever `SLICE:` line it also carries: it is never a slice card.
+- The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the report, the token usage and the end time; the report's status follows the one STATUS rule (any `STATUS: fail` line fails, otherwise the first STATUS line decides; blockquoted lines, a STATUS in mid-line and the template `STATUS: pass or fail` do not count; none means done), and its constraint answers and OPEN items feed the marks. Tool calls give a running agent's latest tool; a denied `Agent` call gives a blocked log entry.
 - The route verdict comes from the `route` tool, or from the result of a main-loop `npm run route` call.
 - The plan comes from the `SLICE:` and `GOAL:` lines of the latest `PLAN REVIEW` brief that names a slice (see Progress above).
 - "Used in this session" comes from `skill.prompt`, `agent.spawn` and every `tool.call` (after it ran, from its result).
@@ -170,5 +187,7 @@ Flow lines are amber while work moves through them, green once what feeds them i
 - Attempts are told apart by timing: a non-reviewer agent starting at or after a failed agent's end. A retry that starts while the failed agent is still running joins that card.
 - Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and draw nothing.
 - The progress total is the plan's only when the PLAN REVIEW brief lists the slices as `SLICE:` lines; free-form plans fall back to the slices seen so far.
+- The run boundary goes stale after 10 minutes with no agent running (`STALE_MS`), not after the gates' `ORCH_RUN_STALE_MIN` (default 30), so the pane can start a clean run while the gates still hold the old one.
+- `⇧opus?` cannot see an isolated test failure (a test-gate record the pane does not read), so the gate may require an opus review the pane does not mark.
 - "Used in this session" keeps the last 300 skills, connectors and files of each list, and shows file base names, so two files with the same name show twice.
 - The stacked bar is at most 40 cells wide and at least 10, and each model with tokens needs one cell. It would overflow only with more such models than cells, which in practice means a very large number of distinct models.
