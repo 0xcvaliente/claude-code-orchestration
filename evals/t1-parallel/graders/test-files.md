@@ -1,6 +1,6 @@
 ---
 type: file_exists
-path: *.test.js
+path: '*.test.js'
 ---
 
 At least one test file created.
