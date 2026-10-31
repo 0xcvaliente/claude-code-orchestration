@@ -31,9 +31,25 @@
 // A wave's launches arrive at the same time, so read-decide-append runs under a lock (an exclusive mkdir); a lock
 // older than STALE_MS is taken over, and after WAIT_MS without it the hook decides unlocked rather than stall.
 // A brief with an ORCHESTRATION: workflow line (the scripted workflow) is not checked. Exits 0 on malformed input.
+//
+// Read router (0.4.0; design: docs/research-2026-10-31.md section 2). Off unless ORCH_READ_ROUTER=on. It acts only on
+// a launch of this plugin's own researcher (subagent_type `researcher` or `orchestration:researcher`; never a built-in,
+// fork or another plugin's agent), which no check above ever blocks, and only when the brief names SOURCES. It profiles
+// the sources with file-profile.mjs's profileSources (paths resolved against the project dir; READ and RISKY from the
+// brief; conversions cached in <state dir>/read-cache) in a child process with a time budget (ROUTER_BUDGET_MS, or
+// ORCH_READ_ROUTER_BUDGET_MS); any error or timeout skips routing. The effective model is tool_input.model, else the
+// agent file's model: line (brief.mjs agentModel), else CLAUDE_CODE_SUBAGENT_MODEL. It is ranked by family (alias or a
+// full claude-<family>-... id); when it is inherit, missing or cannot be ranked the router does not route (the agent may
+// run on the parent's model, which a tier could lower). When the tier (haiku < sonnet < opus) ranks above it, the
+// launch gets the tier's alias; a model is never lowered and fable is never chosen or changed. When conversions exist, a short note listing them (and each PDF's hard pages) is
+// appended to the prompt. In those two cases only, the hook prints {permissionDecision: "allow", updatedInput}: the
+// only allow any hook returns (a permissions.deny rule still wins). Every router decision goes to reads-route.jsonl
+// in the state dir with parsed fields only (tier, models, short reason codes, counts, paths; never brief or file text).
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
-import { join } from "node:path";
-import { normalizeFiles, parseHeader, stallGateOn } from "./brief.mjs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { agentModel, normalizeFiles, parseHeader, stallGateOn } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -43,6 +59,12 @@ const WAIT_MS = 5000;
 const STALE_MS = 10000;
 // Claude Code's built-in agent types (DENIED_AGENTS in src/config.ts) and fork, which no gate here tracks.
 const BUILTINS = new Set(["fork", "general-purpose", "claude", "Explore", "Plan", "claude-code-guide", "statusline-setup"]);
+// The read router rewrites only this plugin's researcher: the project's own copy or the plugin's namespaced one.
+const ROUTED_TYPES = new Set(["researcher", "orchestration:researcher"]);
+const ROUTE_LOG = "reads-route.jsonl";
+const ROUTER_BUDGET_MS = 15_000; // under the hook timeout the wiring slice sets; profiling past it skips routing
+/** @type {Record<string, number>} */
+const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -66,6 +88,179 @@ const builtin = !type.includes(":") && BUILTINS.has(type || "general-purpose");
 if (role === "implementer") {
   if (typeof tool.prompt !== "string") process.exit(0);
 } else if (!builtin || process.env.ORCH_ALLOW_BUILTINS === "1") {
+  // No check above blocks this launch. The read router may rewrite it, but only for our own researcher.
+  if (!builtin && ROUTED_TYPES.has(type) && routerOn(process.env) && typeof tool.prompt === "string") routeRead();
+  process.exit(0);
+}
+
+/** ORCH_READ_ROUTER: the router runs only on "on" (any case). @param {Record<string, string | undefined>} env */
+function routerOn(env) {
+  return String(env.ORCH_READ_ROUTER ?? "").trim().toLowerCase() === "on";
+}
+
+/**
+ * Model rank by family: the alias or a full id `claude-<family>-...` gives haiku 0, sonnet 1, opus 2, fable 3 (above every
+ * tier, so never changed). Anything else (inherit, no model at all, an id of another shape) is null: the subagent may run
+ * on the parent's model, so the router cannot know whether a tier would raise or lower it, and it does not route.
+ * @param {unknown} m @returns {number | null}
+ */
+function modelRank(m) {
+  const s = String(m ?? "").trim().toLowerCase();
+  const family = s.match(/^(?:claude-)?(haiku|sonnet|opus|fable)(?:$|-)/)?.[1];
+  return family === undefined ? null : ({ haiku: 0, sonnet: 1, opus: 2, fable: 3 })[family] ?? null;
+}
+
+/** Short reason codes from a profile (never file text). @param {any} r @param {import("./brief.mjs").Header} hd */
+function reasonCodes(r, hd) {
+  const codes = new Set();
+  if (hd.read) codes.add(`read_${hd.read}`);
+  if (hd.risky) codes.add("risky");
+  for (const f of r.files) {
+    const kind = String(f.kind ?? "unknown");
+    codes.add(`${kind}_${f.tier}`);
+    if (kind === "pdf") {
+      if (typeof f.charsPerPage === "number" && f.charsPerPage < 100) codes.add("pdf_scanned");
+      if (f.tables) codes.add("pdf_tables");
+      if (f.columns > 1) codes.add("pdf_columns");
+      if (Array.isArray(f.hardPages) && f.hardPages.length) codes.add("pdf_hard_pages");
+      if (f.wholeDocument) codes.add("long_judge");
+    }
+    if (f.formulas) codes.add("xlsx_formulas");
+    if (kind === "docx" && f.tables) codes.add("docx_tables");
+    if ((kind === "docx" || kind === "pptx") && f.images >= 3) codes.add("media_heavy");
+    if (f.textPath) codes.add("converted");
+  }
+  return [...codes];
+}
+
+/**
+ * The read router: profile the brief's SOURCES, then raise the model and/or point the researcher at cached text
+ * conversions. Prints the allow with updatedInput only when it changes something; always exits 0.
+ * @returns {never}
+ */
+function routeRead() {
+  const env = process.env;
+  const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+  /** @param {Record<string, unknown>} rec */
+  const log = (rec) => {
+    try {
+      ensureStateDir();
+      appendFileSync(join(stateDir, ROUTE_LOG), `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_type: type, ...rec })}\n`);
+    } catch {
+      // logging must never change the decision
+    }
+  };
+  if (!h.sources.length) {
+    log({ decision: "skip", reason: "no_sources" });
+    process.exit(0);
+  }
+  const dir = env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
+  const isUrl = (/** @type {string} */ s) => /^https?:\/\//i.test(s);
+  const sources = h.sources.map((s) => (isUrl(s) ? s : resolve(dir, s)));
+  const paths = sources.map((s) => {
+    if (!isUrl(s)) return s;
+    try {
+      return new URL(s).host;
+    } catch {
+      return "url";
+    }
+  });
+  const budgetEnv = Number(env.ORCH_READ_ROUTER_BUDGET_MS);
+  const budget = Number.isFinite(budgetEnv) && budgetEnv > 0 ? Math.min(budgetEnv, 50_000) : ROUTER_BUDGET_MS;
+
+  /** @type {any} */
+  let r = null;
+  let failure = "";
+  try {
+    ensureStateDir();
+    const profiler = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "file-profile.mjs")).href;
+    const script = `import { profileSources } from ${JSON.stringify(profiler)};
+let s = ""; process.stdin.setEncoding("utf8"); for await (const c of process.stdin) s += c;
+const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.list, a.opts)));`;
+    const opts = { read: h.read ?? undefined, risky: h.risky, cacheDir: join(stateDir, "read-cache") };
+    const out = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      input: JSON.stringify({ list: sources, opts }),
+      encoding: "utf8",
+      timeout: budget,
+      killSignal: "SIGKILL",
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    const errCode = /** @type {NodeJS.ErrnoException | undefined} */ (out.error)?.code;
+    if (errCode === "ETIMEDOUT" || (out.signal && !out.error)) failure = "profiler_timeout";
+    else if (out.error || out.status !== 0) failure = "profiler_error";
+    else {
+      r = JSON.parse(out.stdout);
+      if (!r || !(r.tier in TIER_RANK) || !Array.isArray(r.files) || r.files.length !== sources.length) {
+        r = null;
+        failure = "profiler_error";
+      }
+    }
+  } catch {
+    r = null;
+    failure = failure || "profiler_error";
+  }
+  if (!r) {
+    log({ decision: "skip", reason: failure, files: sources.length, paths });
+    process.exit(0);
+  }
+
+  const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
+  const pluginRoot = env.CLAUDE_PLUGIN_ROOT || null;
+  const fromFile = explicit
+    ? null
+    : type.includes(":")
+      ? agentModel({ subagent_type: type }, { pluginRoot }) ?? agentModel({ subagent_type: type }, { projectDir: dir })
+      : agentModel({ subagent_type: type }, { projectDir: dir });
+  const fromEnv = (env.CLAUDE_CODE_SUBAGENT_MODEL ?? "").trim() || null;
+  const effective = explicit ?? fromFile ?? fromEnv;
+  const source = explicit ? "call" : fromFile ? "agent_file" : fromEnv ? "env" : "unknown";
+  const tier = /** @type {'haiku'|'sonnet'|'opus'} */ (r.tier);
+  const rank = modelRank(effective);
+  if (rank === null) {
+    // inherit, no model anywhere, or an id it cannot rank: routing could lower the model, so the launch stays as it is
+    log({ decision: "skip", reason: "model_unranked", tier, model: effective ?? null, model_source: source, files: sources.length, paths });
+    process.exit(0);
+  }
+  const raised = (TIER_RANK[tier] ?? 0) > rank;
+
+  const converted = r.files.filter((/** @type {any} */ f) => typeof f.textPath === "string" && f.textPath);
+  let note = "";
+  if (converted.length) {
+    const rows = converted.map((/** @type {any} */ f) => {
+      const hard = Array.isArray(f.hardPages) && f.hardPages.length ? `; hard pages (read these from the original with Read's pages parameter): ${f.hardPages.join(", ")}` : "; no hard pages";
+      const whole = f.wholeDocument ? "; the question spans this long document: read all of it, do not split it by page" : "";
+      return `- ${f.path} -> ${f.textPath}${f.wholeDocument ? "" : hard}${whole}`;
+    });
+    note = [
+      "",
+      "",
+      "Converted sources (added by the plan check): these files were converted to text in advance. Read the converted text instead of the original, and open the original only for the hard pages listed. In QUOTE lines, keep the original path as the locator.",
+      ...rows,
+    ].join("\n");
+  }
+  const hardPages = converted.reduce((/** @type {number} */ n, /** @type {any} */ f) => n + (Array.isArray(f.hardPages) ? f.hardPages.length : 0), 0);
+  const changed = raised || !!note;
+  log({
+    decision: changed ? "route" : "keep",
+    tier,
+    model: effective ?? null,
+    model_source: source,
+    raised,
+    to: raised ? tier : null,
+    reasons: reasonCodes(r, h),
+    files: sources.length,
+    paths,
+    conversions: converted.length,
+    hard_pages: hardPages,
+  });
+  if (!changed) process.exit(0);
+  const updatedInput = { ...tool, ...(raised ? { model: tier } : {}), prompt: `${prompt}${note}` };
+  try {
+    writeSync(1, JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", updatedInput } }));
+  } catch {
+    // a closed stdout leaves the launch as it was
+  }
   process.exit(0);
 }
 const sessionId = typeof input.session_id === "string" ? input.session_id : "";
