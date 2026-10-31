@@ -44,7 +44,8 @@ export function score(dir) {
   const passed = res.filter((r) => r.ok).length;
   return {
     pass: passed === KEY.length, passed, total: KEY.length,
-    categories: Object.fromEntries(res.map((r) => [r.category, r.ok])),
-    failed: data ? res.filter((r) => !r.ok).map((r) => `${r.id} (${r.category})`) : ["answers.json missing or not valid JSON"],
+    // by_cat as k2 and h3 use it ({cat: [passed, total]}); bench/grade.mjs keeps by_cat and flags in grades.jsonl (H14).
+    by_cat: Object.fromEntries(res.map((r) => [r.category, [r.ok ? 1 : 0, 1]])),
+    flags: data ? res.filter((r) => !r.ok).map((r) => `${r.id} (${r.category}) wrong`) : ["answers.json missing or not valid JSON"],
   };
 }
