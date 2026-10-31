@@ -191,3 +191,11 @@ Setup (`probe-wt/setup.sh`): a bare `origin.git` with commit `origin-base`, a cl
 Hook input keys: `session_id, transcript_path, cwd, prompt_id, hook_event_name, name`, with `name` = `agent-<agent id>` and `cwd` the project root (also `CLAUDE_PROJECT_DIR`).
 
 **Answer: it works, but `worktree-head.mjs` was not written.** The hook replaces Claude Code's creation completely: any non-zero exit, empty stdout or non-directory path fails the agent launch with no fallback to the built-in path, so a hook bug would stop every isolated agent. Hook-created worktrees are not cleaned up (no WorktreeRemove call, the unchanged worktree and branch stay), while the built-in path removes them. `worktree.baseRef: "head"` in settings gives the local-HEAD start without either risk, so it stays the documented way (`.claude/rules/agents.md`).
+
+## Probes for 0.4.0, slice i-router (2026-10-31)
+
+### Check G: does the dashboard mod's `agent.spawn` hook run under `claude -p`, and can it rewrite a workflow researcher's model?
+
+**Not run.** The slice ran out of turns before this probe. It needs a scratch project with a function-hooks mod (an `agent.spawn` handler that logs the event and returns a changed `model`), a project workflow with one `agent(..., { agentType: 'researcher' })`, a headless `claude -p` run with the mod loaded through `--plugin-dir`, and the subagent's model read from its transcript at SubagentStop (the method of the section 2.3 probe in `docs/research-2026-10-31.md`). The CHANGELOG line saying `agent.spawn` can rewrite a workflow agent's prompt and model has not been checked against a run.
+
+**Consequence:** `dashboard/register.tsx` does not route workflow researchers. The read router covers only Agent tool launches, through `plan-check.mjs`, since a workflow's `agent()` makes no Agent tool call (Check C, and `.claude/rules/agents.md`, "The scripted workflow"). The pane shows the model each researcher runs with: `spawned.model` on its start line and card. Whether that value reflects a PreToolUse `updatedInput` model has not been checked live either.
