@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { skillCatalog, skillRoots, frontmatter } from "../.claude/hooks/skill-catalog.mjs";
-import { skillHints, hintBlock, sameFamily, safeName, HINT_INTRO } from "../.claude/hooks/skill-hint.mjs";
+import { skillHints, hintBlock, sameFamily, safeName, preferenceRules, HINT_INTRO } from "../.claude/hooks/skill-hint.mjs";
 import { parseHeader, parseReply } from "../.claude/hooks/brief.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -218,13 +218,13 @@ test("picks: explicit SKILLS names first (found, not found, not invocable), then
 
 test("picks: goal words need a strong match; one pick per near-duplicate family", () => {
   const brief = "SLICE: hero\nFILES: src/hero.tsx\nDEPENDS: none\nGOAL: add a GSAP ScrollTrigger pinned scroll animation with scrubbing and a timeline";
-  assert.deepEqual(picks("implementer", brief), [{ name: "gsap-scrolltrigger", reason: "goal_match" }]);
+  assert.deepEqual(picks("implementer", brief), [{ name: "gsap-scrolltrigger", reason: "goal_match" }, { name: "animate", reason: "motion" }], "the best goal match first, then the motion rule");
   assert.ok(sameFamily("gsap-core", "gsap-timeline"));
   assert.ok(sameFamily("animate", "animation-performance"));
   assert.ok(sameFamily("anthropic-skills:pptx", "pptx-deck"));
   assert.ok(!sameFamily("anthropic-skills:docx", "documents"));
   assert.ok(!sameFamily("anthropic-skills:pdf", "anthropic-skills:docx"));
-  assert.deepEqual(picks("implementer", "SLICE: a\nFILES: src/parser.ts\nDEPENDS: none\nFix the off-by-one in the parser."), [], "no strong signal, no picks");
+  assert.deepEqual(picks("implementer", "SLICE: a\nFILES: src/parser.ts\nDEPENDS: none\nRename the parser option."), [], "no strong signal, no picks");
   assert.deepEqual(picks("implementer", "SLICE: a\nFILES: src/x.ts\nDEPENDS: none\nMake the animation smoother."), [], "one word is not enough");
 });
 
@@ -257,6 +257,77 @@ test("hint block: names and reason codes only; no line parses as a brief or repl
   for (const l of block.split("\n")) assert.ok(!/^[\s>*_`#-]*(SKILLS|SLICE|FILES|DEPENDS|STATUS|OPEN|GOAL|CHECKS|SOURCES|GAP|QUOTE|C\d+):/i.test(l), l);
   assert.equal(hintBlock([{ name: "slice:x", reason: "explicit" }, { name: "ok", reason: "bad reason!" }]), "");
   assert.ok(!safeName("FILES:x") && !safeName("orchestration:workflow") && safeName("orchestration:route") && !safeName("c1:x") && !safeName("a b") && safeName("anthropic-skills:docx"));
+});
+
+// ---------------------------------------------------------------------------------------------------- preference table
+
+/** A catalog read from a temp root (user skills plus anthropic-skills synced ones). @param {(user: string, synced: string) => void} fill */
+function tempCatalog(fill) {
+  const dir = temp("skills-pref-");
+  try {
+    const user = join(dir, "user");
+    const synced = join(dir, "synced");
+    mkdirSync(user, { recursive: true });
+    mkdirSync(synced, { recursive: true });
+    fill(user, synced);
+    const sep = process.platform === "win32" ? ";" : ":";
+    return skillCatalog({ env: { ORCH_SKILL_ROOTS: [user, `anthropic-skills=${synced}`].join(sep) } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const PREF = tempCatalog((user, synced) => {
+  for (const [n, d] of /** @type {[string, string][]} */ ([
+    ["frontend-design", "Distinctive visual design for new UI."],
+    ["ui-design", "Designs and builds React UI."],
+    ["web-design-guidelines", "Review web interfaces."],
+    ["animate", "Build web UI animations and transitions."],
+    ["diagnosing-bugs", "Diagnosis loop for hard bugs."],
+    ["tdd", "Test-driven development."],
+    ["security-best-practices", "Security reviews and secure-by-default coding."],
+    ["documents", "Office files: Word (.docx), slides (.pptx), PDF."],
+  ])) skill(user, n, md({ name: n, description: d }));
+  skill(synced, "docx", md({ name: "docx", description: '"Word documents (.docx). Do NOT use for PDFs."' }));
+  skill(synced, "docs", md({ name: "docs", description: "'Editable docs; exports to Word or PDF; a .docx to change or use as a template → that format''s skill.'" }));
+});
+
+test("preference table: ui_work, motion, bugfix, tdd and security pick the first installed skill of each rule", () => {
+  const p = (/** @type {string} */ role, /** @type {string} */ brief, catalog = PREF) => skillHints({ role, header: parseHeader(brief), brief, catalog });
+  assert.deepEqual(p("implementer", "SLICE: hero\nFILES: src/Hero.tsx, src/hero.css\nDEPENDS: none\nGOAL: build the landing page hero component"), [{ name: "frontend-design", reason: "ui_work" }]);
+  assert.deepEqual(p("implementer", "SLICE: m\nFILES: src/Menu.vue\nDEPENDS: none\nGOAL: add a slide-in transition to the menu"), [{ name: "animate", reason: "motion" }]);
+  assert.deepEqual(p("implementer", "SLICE: m\nFILES: src/menu.ts\nDEPENDS: none\nGOAL: add a slide-in transition to the menu"), [], "motion needs a UI extension");
+  assert.deepEqual(p("implementer", "SLICE: p\nFILES: toolkit/parse.py\nDEPENDS: none\nGOAL: fix the crash on empty input"), [{ name: "diagnosing-bugs", reason: "bugfix" }]);
+  assert.deepEqual(p("implementer", "SLICE: p\nFILES: toolkit/parse.py\nDEPENDS: none\nKIND: bugfix\nGOAL: empty input"), [{ name: "diagnosing-bugs", reason: "bugfix" }], "KIND: bugfix alone fires");
+  assert.deepEqual(p("implementer", "SLICE: p\nFILES: toolkit/parse.py\nDEPENDS: none\nKIND: bugfix\nGOAL: work test-first"), [{ name: "diagnosing-bugs", reason: "bugfix" }, { name: "tdd", reason: "tdd" }]);
+  assert.deepEqual(p("implementer", "SLICE: q\nFILES: q.py\nDEPENDS: none\nGOAL: add the parser with tdd"), [{ name: "tdd", reason: "tdd" }]);
+  const noDiag = PREF.filter((s) => s.name !== "diagnosing-bugs");
+  assert.deepEqual(p("implementer", "SLICE: p\nFILES: p.py\nDEPENDS: none\nGOAL: fix the regression", noDiag), [{ name: "tdd", reason: "bugfix" }], "the next installed skill of the rule");
+  assert.deepEqual(p("implementer", "SLICE: p\nFILES: p.py\nDEPENDS: none\nGOAL: fix the regression", PREF.filter((s) => !["diagnosing-bugs", "tdd"].includes(s.name))), [], "a rule with no installed skill gives nothing");
+  const noFrontend = PREF.filter((s) => s.name !== "frontend-design");
+  assert.deepEqual(p("implementer", "SLICE: d\nFILES: app/page.jsx\nDEPENDS: none\nGOAL: dashboard layout", noFrontend), [{ name: "ui-design", reason: "ui_work" }]);
+  // Security: RISKY plus a security word; implementers and reviewers (cap 1).
+  const auth = "SLICE: auth\nFILES: src/auth/login.ts\nDEPENDS: none\nRISKY: yes\nGOAL: rotate the session token on login and fix the failing check";
+  assert.deepEqual(p("implementer", auth), [{ name: "security-best-practices", reason: "security" }, { name: "diagnosing-bugs", reason: "bugfix" }]);
+  assert.deepEqual(p("reviewer", "SLICE: auth\nRISKY: yes\nReview the password reset change and fix suggestions."), [{ name: "security-best-practices", reason: "security" }], "reviewer: security only, cap 1");
+  assert.deepEqual(p("reviewer", "SLICE: auth\nReview the password reset change."), [], "security needs RISKY");
+  assert.deepEqual(p("reviewer", "SLICE: x\nFILES: a.tsx\nRISKY: yes\nReview the landing page and the bug fix."), [], "other rules are not for reviewers");
+  assert.deepEqual(p("researcher", auth), [], "rules are not for researchers");
+  assert.deepEqual(p("integrator", auth), []);
+  // Caps and explicit names first.
+  const all = "SLICE: x\nFILES: src/App.tsx\nDEPENDS: none\nRISKY: yes\nKIND: bugfix\nGOAL: tdd fix for the login page animation";
+  assert.deepEqual(p("implementer", all).map((x) => x.reason), ["security", "bugfix", "tdd"]);
+  assert.deepEqual(p("implementer", `${all}\nSKILLS: documents`).map((x) => x.reason), ["explicit", "security", "bugfix"]);
+  assert.deepEqual(preferenceRules({ role: "implementer", files: ["a.html"], kind: null, risky: false, text: "style the screen" }).map((r) => r.reason), ["ui_work"]);
+});
+
+test("format picks: a skill whose description sends the format to another skill is skipped", () => {
+  const p = (/** @type {string} */ brief) => skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog: PREF });
+  assert.equal(PREF.find((s) => s.name === "anthropic-skills:docs")?.description.includes("that format's skill"), true);
+  assert.deepEqual(p("SLICE: r\nFILES: out/report.docx\nDEPENDS: none\nWrite it."), [
+    { name: "anthropic-skills:docx", reason: "ext_docx" },
+    { name: "documents", reason: "ext_docx" },
+  ], "no anthropic-skills:docs");
+  assert.deepEqual(p("SLICE: r\nFILES: out/report.pdf\nDEPENDS: none\nWrite it.").map((x) => x.name), ["documents"], "docx says not for PDFs, docs redirects");
 });
 
 // ---------------------------------------------------------------------------------------------------- plan-check
