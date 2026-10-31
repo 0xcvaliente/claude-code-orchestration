@@ -72,7 +72,7 @@ Every d2-docs run took the light path: the orchestrator ran the task as a single
 Three further points:
 
 - `all-haiku` puts the researcher on haiku, and no researcher ran, so no d2 run used haiku at all (the token records list only opus and sonnet). `all-haiku` and `routed` both ran as the shipped orchestrator; `all-sonnet` differed only in forcing reviews the orchestrator asked to run on opus onto sonnet (the review gate logged `opus_review_required_gave_up` once in each `all-sonnet` run).
-- The token spread between arms comes from how each orchestrator ran the slice, not from routing. In `all-haiku` r1 the orchestrator read six PDFs itself (`reads.jsonl`), its slice needed a second, opus implementer, and opus tokens reached 2,089,001 of the run's 2,584,315.
+- The token spread between arms comes from how each orchestrator ran the slice, not from routing. In `all-haiku` r1 the orchestrator made 6 PDF reads itself, of 4 distinct files (`manual.pdf` 3 times, in page ranges; `reads.jsonl`), its slice needed a second, opus implementer, and opus tokens reached 2,089,001 of the run's 2,584,315.
 - Headless runs use `--no-session-persistence` (`scripts/orchestrate.sh`), so they keep no subagent transcripts, and telemetry v2's per-agent fields (`tokens`, `models`, `turns`) are empty in all 31 SubagentStop records of the d2 runs. H14's "reading tokens" per role cannot be read from these runs.
 
 ## Live router check
@@ -91,14 +91,14 @@ This shows the mechanism works once: a researcher brief naming a scanned PDF was
 The run journals (`journal.jsonl` and `journal-launches.jsonl` for d2 in each run's `state/`; for k2 in the plugin data dir `~/.claude/plugins/data/orchestration-inline/state/<run repo>/`), folded with the gates' own `sessionRuns`:
 
 - No slice failed for good and none stalled. No `REPLAN` plan review, no `replan_required` gate decision and no `VALIDATE: gaps` (refute) review appears in any run.
-- On k2, no slice had more than two attempts. In `O-mix-plugin`, slice S2's implementer reported fail three times (it asked for Bash permission), and the orchestrator then launched a fresh opus implementer as the second attempt, which passed; this is not the third-attempt rule of H15. `O-mix-030` used one implementer launch per slice.
+- On k2, no slice had more than two attempts. In `O-mix-plugin`, slice S2's implementer (`ab2c8…`) reported fail at 16:25:07, 16:25:19 and 16:26:01 (it asked for Bash permission), then reported pass at 16:26:52 with the open item "`toolkit/regex.py` needs a real implementation". After that pass, at 16:27:02, the orchestrator launched a fresh opus implementer (`a9cc0…`) on S2, and at 16:27:05 an opus reviewer (`a13e7…`), which passed `ab2c8…`'s work at 16:27:15. The opus implementer reported pass at 16:29:06 and a second opus reviewer passed it at 16:29:22. This was an extra opus attempt after a pass that left an open item, not a retry after a failed review, and not the third-attempt rule of H15. `O-mix-030` used one implementer launch per slice.
 - On d2, `all-haiku` r1's slice had two attempts in the first journal run, then a fresh opus implementer that the journal recorded as a new run (run 2), which passed.
 
 So H15 (opus on the last attempt), H16 (gap cutoff plus refute pass) and H17 (stall replan) have no data from this campaign.
 
 ## Charts
 
-None. `bench/charts.mjs` draws only the arms `P-S`, `P-O`, `O-mix` and `O-O`; for this campaign it produces empty charts with captions from the k2 campaign, so the page uses tables.
+None. `bench/charts.mjs` draws only the arms `P-S`, `P-O`, `O-mix` and `O-O`; for this campaign it produces empty charts. Their caption is taken from the first run in `summary.json`, here a d2-docs run, so it would describe d2-docs with a wrong rep count. The page therefore uses tables.
 
 ## Limitations
 
