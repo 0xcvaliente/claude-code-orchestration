@@ -8,7 +8,8 @@
 // in src/fixtures/judge-corpus.json and on every command string in src/judge.test.ts, so change both together.
 // The doc comments of the TypeScript interfaces the strip removed are kept where they stood.
 import { randomBytes } from "node:crypto";
-import { isAbsolute, posix, resolve, sep } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, posix, resolve, sep } from "node:path";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // A small shell tokenizer. It does not run or expand anything: it records, for every word, its literal characters and
@@ -742,6 +743,55 @@ export function decide(command, cwd) {
   return { action: "none" };
 }
 
+export const JUDGE_TIMEOUT_DEFAULT_MS = 40_000;
+/** Claude Code kills a hook at its timeout (60 s when the registration sets none) and the command then runs, so the judge must always decide first. */
+export const JUDGE_TIMEOUT_MAX_MS = 45_000;
+
+/**
+ * The model-call budget from ORCH_JUDGE_TIMEOUT_MS: default 40 s, never above 45 s.
+ * @param {string | undefined} raw
+ */
+export function judgeTimeoutMs(raw) {
+  const n = Number.parseInt(raw ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, JUDGE_TIMEOUT_MAX_MS) : JUDGE_TIMEOUT_DEFAULT_MS;
+}
+
+/**
+ * The SDK judge's target check (src/judge.ts judgeBash and statPath), run at call time: a recursive rm target that is a
+ * symlink, or whose real path (or, when it does not exist, its parent's) lies outside the real working folder, is
+ * always blocked; so is a target or working folder that cannot be resolved. Otherwise returns the real paths.
+ * @param {string[]} targets
+ * @param {string} cwd
+ * @returns {{ reason: string } | { resolved: string[] }}
+ */
+export function checkRmTargets(targets, cwd) {
+  let root;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    return { reason: `the working folder ${cwd} cannot be resolved, so recursive rm is always blocked` };
+  }
+  const resolved = [];
+  for (const t of targets) {
+    const abs = resolve(cwd, t);
+    let real;
+    try {
+      if (lstatSync(abs).isSymbolicLink()) return { reason: `${t} is a symlink; recursive rm of it is always blocked` };
+      real = realpathSync(abs);
+    } catch (err) {
+      if (err?.code !== "ENOENT") return { reason: `${t} cannot be resolved; recursive rm of it is always blocked` };
+      try {
+        real = resolve(realpathSync(dirname(abs)), posix.basename(abs));
+      } catch {
+        return { reason: `${t} cannot be resolved; recursive rm of it is always blocked` };
+      }
+    }
+    if (!real.startsWith(root + sep)) return { reason: `${t} resolves outside the working folder ${root}; recursive rm of it is always blocked` };
+    resolved.push(real);
+  }
+  return { resolved };
+}
+
 export const NO_REQUEST_REASON =
   "no request typed by the user is recorded for this session, so nothing authorizes this push, remote change or recursive delete";
 
@@ -769,9 +819,9 @@ const MAX_REQUESTS_TEXT = 6000;
  * @param {"rm" | "git"} kind
  * @param {string} command
  * @param {string[]} requests the user's typed prompts, oldest first
- * @param {{ cwd?: string, targets?: string[], nonce?: string }} [opts]
+ * @param {{ cwd?: string, targets?: string[], facts?: string[], nonce?: string }} [opts] facts: extra lines (branch, remotes, real target paths)
  */
-export function nativePrompt(kind, command, requests, { cwd = "", targets = [], nonce = randomBytes(6).toString("hex") } = {}) {
+export function nativePrompt(kind, command, requests, { cwd = "", targets = [], facts: extra = [], nonce = randomBytes(6).toString("hex") } = {}) {
   const block = (/** @type {string} */ name, /** @type {string} */ body) => `<<<${name}_${nonce}\n${body}\n${name}_${nonce}>>>`;
   /** @type {string[]} */
   const kept = [];
@@ -782,7 +832,7 @@ export function nativePrompt(kind, command, requests, { cwd = "", targets = [], 
     kept.unshift(entry.slice(0, MAX_REQUESTS_TEXT));
     size += entry.length;
   }
-  const facts = `cwd: ${cwd || "(unknown)"}${kind === "rm" ? `\nrm targets: ${JSON.stringify(targets)}` : ""}`;
+  const facts = [`cwd: ${cwd || "(unknown)"}`, ...(kind === "rm" ? [`rm targets: ${JSON.stringify(targets)}`] : []), ...extra].join("\n");
   return (
     "You are a security judge for a coding agent. Decide whether one shell command may run.\n\n" +
     `Policy:\n${NATIVE_POLICY}\n\n` +
