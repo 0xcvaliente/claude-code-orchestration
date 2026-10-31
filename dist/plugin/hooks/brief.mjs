@@ -2,6 +2,7 @@
 // Spec: docs/brief-grammar.md. Imported by the hooks, by tests from a temp copy and possibly from a checkout, so it
 // has no side effects at import, uses Node built-ins only, and no parser throws: malformed or empty input gives
 // empty or null fields. Functions that read files (agentModel) catch every error and return null.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -9,6 +10,8 @@ import { join, resolve } from "node:path";
 export const MAX_RETRIES = 2;
 /** Default for ORCH_RUN_STALE_MIN: minutes without a launch or stop after which a run is stale. */
 export const RUN_STALE_MIN_DEFAULT = 30;
+/** Default for ORCH_GAP_MIN: a failed review counts only with a gap at this confidence (0-100) or above. */
+export const GAP_MIN_DEFAULT = 80;
 
 // A header key may follow list, quote and emphasis characters ("- **SLICE:** A0", "> FILES: a"), like the hooks today.
 const PRE = "[ \\t>*_`-]*";
@@ -17,6 +20,12 @@ const STATUS_RE = /^[\s*_#`]*STATUS[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?
 const OPEN_RE = /^[\s*_#`-]*OPEN[\s*_`]*:[\s*_`]*(.*)$/i;
 const ANSWER_RE = /^[\s*_#`-]*(C\d+)[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?![\s*_`]*(?:or|\/|\|)[\s*_`]*(?:pass|fail)\b)[\s*_`]*(.*)$/i;
 const NOTHING = new Set(["", "none", "-", "n/a", "nothing"]);
+// GAP and QUOTE are reply lines too: list and emphasis characters may come before the key, a blockquote never.
+const GAP_RE = /^[\s*_#`-]*GAP[\s*_`]*:[\s*_`]*(.*)$/i;
+const QUOTE_RE = /^[\s*_#`-]*QUOTE[\s*_`]*:[\s*_`]*(.*)$/i;
+const READ_MODES = new Set(["lookup", "extract", "judge"]);
+/** At most this many URLs come back from briefUrls. */
+const MAX_URLS = 50;
 
 /** @param {unknown} text @returns {string} */
 const str = (text) => (typeof text === "string" ? text : "");
@@ -68,6 +77,13 @@ function checkIds(v) {
 const yes = (v) => /^\**[ \t]*yes\b/i.test(v ?? "");
 
 /**
+ * The first word of a value, lower-cased, without quotes, backticks, asterisks, underscores or trailing punctuation
+ * ("Bugfix: x" gives "bugfix"); "" when none.
+ * @param {string | undefined} v
+ */
+const word = (v) => ((v ?? "").replace(/[`'"*_]/g, "").trim().split(/\s+/)[0] ?? "").replace(/[.,;:!?]+$/, "").toLowerCase();
+
+/**
  * @typedef {{
  *   slice: string | null,
  *   files: string[],
@@ -76,13 +92,19 @@ const yes = (v) => /^\**[ \t]*yes\b/i.test(v ?? "");
  *   risky: boolean,
  *   checks: string[],
  *   focus: string | null,
- *   workflow: boolean
+ *   workflow: boolean,
+ *   sources: string[],
+ *   read: 'lookup' | 'extract' | 'judge' | null,
+ *   kind: string | null,
+ *   validate: boolean
  * }} Header
  */
 
 /**
- * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS and the
- * scripted workflow's ORCHESTRATION: workflow marker. Missing lines give null, [] or false.
+ * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS, the scripted
+ * workflow's ORCHESTRATION: workflow marker, and the optional SOURCES (a list, read like FILES), READ (lookup, extract
+ * or judge, else null), KIND (its first word, lower-cased) and VALIDATE (true only for "gaps"). Missing lines give
+ * null, [] or false.
  * @param {unknown} text @returns {Header}
  */
 export function parseHeader(text) {
@@ -96,7 +118,41 @@ export function parseHeader(text) {
     checks: checkIds(field(t, "CHECKS")),
     focus: field(t, "FOCUS") || null,
     workflow: new RegExp(`^${PRE}ORCHESTRATION:\\**[ \\t]*workflow\\b`, "im").test(t),
+    sources: list(field(t, "SOURCES")),
+    read: readMode(field(t, "READ")),
+    kind: word(field(t, "KIND")) || null,
+    validate: word(field(t, "VALIDATE")) === "gaps",
   };
+}
+
+/** READ value: lookup, extract or judge (its first word, any case), else null. @param {string | undefined} v @returns {'lookup' | 'extract' | 'judge' | null} */
+function readMode(v) {
+  const w = word(v);
+  return READ_MODES.has(w) ? /** @type {'lookup' | 'extract' | 'judge'} */ (w) : null;
+}
+
+/**
+ * The http(s) URLs in a text: unique, in order of first appearance, at most 50. Trailing punctuation that ends a
+ * sentence or wraps a link (`).,;:'"]>`) is stripped, except a ) or ] that closes one opened inside the URL.
+ * @param {unknown} text @returns {string[]}
+ */
+export function briefUrls(text) {
+  /** @type {string[]} */
+  const out = [];
+  for (const m of str(text).matchAll(/https?:\/\/[^\s<>"'`]+/gi)) {
+    let u = m[0];
+    for (;;) {
+      const last = u.slice(-1);
+      if (!last || !").,;:'\"]>".includes(last)) break;
+      if (last === ")" && u.split("(").length >= u.split(")").length) break;
+      if (last === "]" && u.split("[").length >= u.split("]").length) break;
+      u = u.slice(0, -1);
+    }
+    if (!/^https?:\/\/[^/?#]/i.test(u) || out.includes(u)) continue;
+    out.push(u);
+    if (out.length >= MAX_URLS) break;
+  }
+  return out;
 }
 
 /** The brief starts with PLAN REVIEW (journal.mjs: leading whitespace allowed, case-sensitive). @param {unknown} text */
@@ -190,7 +246,9 @@ export function parseStatus(text) {
 
 /**
  * @typedef {{ verdict: 'pass' | 'fail', mode: 'cmd' | 'read' | null, detail: string }} Answer
- * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer> }} Reply
+ * @typedef {{ confidence: number | null, text: string }} Gap
+ * @typedef {{ locator: string, text: string }} Quote
+ * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer>, gaps: Gap[], quotes: Quote[] }} Reply
  */
 
 /**
@@ -199,12 +257,16 @@ export function parseStatus(text) {
  * an item, or the next KEY: line) are one item each; "none", "-", "n/a", "nothing" and empty mean nothing open.
  * Answers: `C<n>: pass (cmd) <command> -> <result>`, `C<n>: pass (read) <file:line or URL>`, `C<n>: fail <reason>`;
  * "→" is read as "->" (detail keeps "->"). The first line for an id decides unless a later line for it says fail.
+ * Gaps: `GAP: <0-100> <text>` (a trailing % allowed); a missing or out-of-range number gives confidence null and the
+ * whole rest as text; a gap without text and the template `GAP: <0-100> ...` are dropped. Quotes:
+ * `QUOTE: <locator> | <verbatim text>`, one pair of surrounding quotes stripped from the text; a line without the `|`,
+ * the locator or the text is dropped. Blockquoted GAP and QUOTE lines do not count.
  * @param {unknown} text @returns {Reply}
  */
 export function parseReply(text) {
   const all = lines(str(text));
   /** @type {Reply} */
-  const reply = { status: parseStatus(text), open: [], answers: {} };
+  const reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [] };
 
   const at = all.findIndex((l) => OPEN_RE.test(l));
   if (at !== -1) {
@@ -243,7 +305,39 @@ export function parseReply(text) {
     const prev = reply.answers[id];
     if (!prev || (verdict === "fail" && prev.verdict === "pass")) reply.answers[id] = answer;
   }
+
+  for (const l of all) {
+    const g = GAP_RE.exec(l);
+    const gap = g ? gapOf((g[1] ?? "").replace(/[*_`]+$/, "").trim()) : null;
+    if (gap) reply.gaps.push(gap);
+    const q = QUOTE_RE.exec(l);
+    const quote = q ? quoteOf(q[1] ?? "") : null;
+    if (quote) reply.quotes.push(quote);
+  }
   return reply;
+}
+
+/** The value of a GAP line as a gap; null when it has no text or is the template. @param {string} v @returns {Gap | null} */
+function gapOf(v) {
+  if (!v || /^<\s*0\s*-\s*100\s*>/.test(v)) return null;
+  const m = v.match(/^(\d+)[ \t]*%?(?:\s+|$)(.*)$/);
+  const n = m ? Number(m[1]) : NaN;
+  if (!m || !(n >= 0 && n <= 100)) return { confidence: null, text: v };
+  const t = (m[2] ?? "").trim();
+  return t ? { confidence: n, text: t } : null;
+}
+
+/** Surrounding quote pairs a QUOTE text may carry; one pair is stripped. */
+const QUOTE_PAIRS = ['""', "''", "“”", "‘’", "``"];
+
+/** The value of a QUOTE line as a quote; null when it lacks the `|`, the locator or the text. @param {string} v @returns {Quote | null} */
+function quoteOf(v) {
+  const at = v.indexOf("|");
+  if (at === -1) return null;
+  const locator = v.slice(0, at).trim().replace(/^`+|`+$/g, "").trim();
+  let t = v.slice(at + 1).trim();
+  if (t.length >= 2 && QUOTE_PAIRS.includes(`${t[0]}${t.slice(-1)}`)) t = t.slice(1, -1).trim();
+  return locator && t ? { locator, text: t } : null;
 }
 
 /**
@@ -306,6 +400,19 @@ export function staleMinutes(env = {}) {
   return Number.isFinite(n) && n > 0 ? n : RUN_STALE_MIN_DEFAULT;
 }
 
+/**
+ * ORCH_GAP_MIN as an integer from 0 to 100, else the default (80). 0 makes every failed review count (0.3.0).
+ * @param {Record<string, string | undefined>} [env] @returns {number}
+ */
+export function gapMinimum(env = {}) {
+  const v = String(env.ORCH_GAP_MIN ?? "").trim();
+  const n = /^\d+$/.test(v) ? Number(v) : NaN;
+  return n >= 0 && n <= 100 ? n : GAP_MIN_DEFAULT;
+}
+
+/** ORCH_STALL_GATE: the stall gate is on unless the value is "off" (any case). @param {Record<string, string | undefined>} [env] */
+export const stallGateOn = (env = {}) => String(env.ORCH_STALL_GATE ?? "").trim().toLowerCase() !== "off";
+
 /** ORCH_ESCALATION: "off", "always" or "auto" (anything else). @param {Record<string, string | undefined>} [env] @returns {'off' | 'always' | 'auto'} */
 export function escalationMode(env = {}) {
   const v = String(env.ORCH_ESCALATION ?? "").trim().toLowerCase();
@@ -319,18 +426,25 @@ export function escalationMode(env = {}) {
  *   ts: string, session_id: string, agent_id: string | null, agent_type: string,
  *   slice: string | null, files: string[], depends: string[], path: 'light' | null, risky: boolean, checks: string[],
  *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
- *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] }
+ *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] },
+ *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[]
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
- * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. Older records carry only session_id, agent_id, slice, role.
+ * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
+ * (invalid URLs skipped); in `sources` an http(s) entry becomes its host, a path stays as it is. Older records carry only
+ * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls.
  *
+ * @typedef {{ confidence: number | null, key: string }} GapKey
  * @typedef {{
  *   ts: string, session_id: string, agent_id: string | null, role: string, agent_type?: string, slice: string | null,
  *   status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], run?: number | null,
- *   model?: string | null, checks?: string[], risky?: boolean
+ *   model?: string | null, checks?: string[], risky?: boolean,
+ *   gaps?: GapKey[], quotes?: number, files_touched?: string[]
  * }} StopRecord
  * journal.jsonl, one per SubagentStop of a worker. `slice` comes from the launch record with the same agent_id (or the
- * pending path when the stop arrives first). Older records lack answers, open and run.
+ * pending path when the stop arrives first). Older records lack answers, open and run; records before 0.4.0 lack gaps
+ * and quotes. `gaps` holds each GAP's confidence and gapKey, `quotes` the number of QUOTE lines: never their text.
+ * `files_touched` is there only when the caller passed `filesTouched` as an array of strings.
  *
  * @typedef {{ ts: string, gate: string, decision: string, reason: string, agent_type?: string, agent_id?: string, session_id?: string }} GateRecord
  * gates.jsonl. A test-gate record (gate "test", from verify.sh) names no slice: it is joined by agent_id to a launch.
@@ -369,18 +483,45 @@ export function launchRecord(toolInput, ctx = {}) {
     replan: p.replan,
   };
   if (p.isPlanReview) rec.plan = { constraints: p.constraints, slices: p.slices };
+  rec.sources = h.sources.map((s) => (/^https?:\/\//i.test(s) ? (hostOf(s) ?? "") : s)).filter(Boolean);
+  rec.read = h.read;
+  rec.kind = h.kind;
+  rec.validate = h.validate;
+  rec.urls = [...new Set(briefUrls(prompt).map(hostOf).filter((x) => x !== null))];
   return rec;
 }
 
+/** The host (with port) of a URL, or null when it does not parse; records keep hosts, never paths or queries. @param {string} u @returns {string | null} */
+function hostOf(u) {
+  try {
+    return new URL(u).host || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The stop record for a finished worker: STATUS, answers and OPEN from its final report.
- * @param {{ ts?: string, sessionId?: string, agentId?: string | null, role?: string, slice?: string | null, reply?: unknown, status?: 'pass' | 'fail' | null, run?: number | null }} ctx
+ * A short, stable key for a gap's text, so records can match the same gap across replies without storing it: the first
+ * 8 hex characters of the sha1 of the text lower-cased, non-alphanumerics turned to spaces, collapsed, trimmed and cut
+ * to 120 characters.
+ * @param {unknown} text @returns {string}
+ */
+export function gapKey(text) {
+  const norm = str(text).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 120);
+  return createHash("sha1").update(norm).digest("hex").slice(0, 8);
+}
+
+/**
+ * The stop record for a finished worker: STATUS, answers and OPEN from its final report, each GAP's confidence and key,
+ * the QUOTE count, and files_touched when `filesTouched` is an array of strings.
+ * @param {{ ts?: string, sessionId?: string, agentId?: string | null, role?: string, slice?: string | null, reply?: unknown, status?: 'pass' | 'fail' | null, run?: number | null, filesTouched?: unknown }} ctx
  * @returns {StopRecord}
  */
 export function stopRecord(ctx) {
   const c = ctx && typeof ctx === "object" ? ctx : {};
   const r = parseReply(c.reply);
-  return {
+  /** @type {StopRecord} */
+  const rec = {
     ts: c.ts ?? new Date().toISOString(),
     session_id: c.sessionId ?? "",
     agent_id: c.agentId ?? null,
@@ -390,29 +531,50 @@ export function stopRecord(ctx) {
     answers: r.answers,
     open: r.open,
     run: c.run ?? null,
+    gaps: r.gaps.map((g) => ({ confidence: g.confidence, key: gapKey(g.text) })),
+    quotes: r.quotes.length,
   };
+  const ft = c.filesTouched;
+  if (Array.isArray(ft) && ft.every((f) => typeof f === "string")) rec.files_touched = [...ft];
+  return rec;
 }
 
 /**
- * @typedef {{ ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[] }} Review
- * checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply must answer.
+ * @typedef {{
+ *   ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[],
+ *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[],
+ *   implAt: number | null
+ * }} Review
+ * implAt: the slice's latest implementer launch or stop when the review arrived (its attempt): two reviews with
+ * different implAt have an implementer attempt between them.
+ * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
+ * must answer. counted: the status for slice finality and gating (docs/brief-grammar.md, "Review counting"): a fail whose
+ * gaps are all below ORCH_GAP_MIN (and with no failed answer) counts as a pass and sets lowConfidence; a review
+ * superseded by a later VALIDATE: gaps review of the same attempt counts as nothing (null, superseded). validate: its
+ * launch record had VALIDATE: gaps. keys: for a counted fail, the gap keys at or above the cutoff (a null confidence is
+ * 100); else [].
  * @typedef {{
  *   slice: string, planned: boolean, risky: boolean, checks: string[], files: string[],
  *   launches: number, attempts: number, lastImplAt: number | null, reviews: Review[],
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
- *   attemptFrom: number, testGates: number[], reviewedSince: boolean
+ *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
+ *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[]
  * }} SliceState
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
  * files: the slice's FILES in the plan (PLAN REVIEW and REPLAN entries, merged), [] when it was not planned.
+ * countedFails: reviews whose counted status is fail. stalled: not final, its last two counted reviews are fails of
+ * different implementer attempts that share a key (stallKeys) and no REPLAN plan review finished in the run after the second (stalledAt, its time); the
+ * fold reports it whatever ORCH_STALL_GATE says, the gates read the switch. signals: doubtSignals with the fold's env.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
  *   constraints: Record<string, string>, planned: string[], slices: Record<string, SliceState>,
- *   planReviewed: boolean, running: string[]
+ *   planReviewed: boolean, running: string[], replans: number[]
  * }} Run
  * planReviewed: a reviewer of this run's PLAN REVIEW (or REPLAN) brief has stopped. running: agent ids that started
- * (SubagentStart) in this run and have not stopped yet.
+ * (SubagentStart) in this run and have not stopped yet. replans: times the reviewers of this run's REPLAN plan reviews
+ * stopped (a REPLAN still running is not in it).
  * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[] }} Records
  * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
  */
@@ -428,16 +590,40 @@ const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string"
 const newSlice = (slice, planned) => ({
   slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
+  countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [],
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
 export const currentReviews = (s) => s.reviews.filter((r) => s.lastImplAt === null || r.ts > s.lastImplAt);
 
+/** A review's counted status (its own status for a review object without `counted`). @param {Partial<Review>} r @returns {'pass' | 'fail' | null} */
+export const countedStatus = (r) => (r.counted === undefined ? (r.status ?? null) : r.counted);
+
+/**
+ * How a reviewer's stop counts (docs/brief-grammar.md, "Review counting"). A fail counts as a fail with a gap at or above
+ * `gapMin` (a null confidence is 100), a failed answer, or no gap at all; otherwise it counts as a pass (lowConfidence).
+ * @param {'pass' | 'fail' | null} status @param {unknown} gaps @param {Record<string, any>} answers @param {number} gapMin
+ */
+function countReview(status, gaps, answers, gapMin) {
+  const all = arr(gaps);
+  /** @param {any} g */
+  const conf = (g) => (typeof g.confidence === "number" ? g.confidence : 100);
+  const high = all.filter((g) => conf(g) >= gapMin);
+  const failedAnswer = Object.values(answers).some((a) => a && a.verdict === "fail");
+  const low = status === "fail" && all.length > 0 && high.length === 0 && !failedAnswer;
+  /** @type {'pass' | 'fail' | null} */
+  const counted = low ? "pass" : status;
+  /** @type {string[]} */
+  const keys = counted === "fail" ? [...new Set(high.map((g) => g.key).filter((k) => typeof k === "string" && k))] : [];
+  return { counted, lowConfidence: low, keys };
+}
+
 /** @param {SliceState} s */
 function settle(s) {
   const latest = currentReviews(s).at(-1);
-  s.passed = latest?.status === "pass";
-  s.gaveUp = latest?.status === "fail" && s.attempts >= 1 + MAX_RETRIES;
+  const counted = latest ? countedStatus(latest) : null;
+  s.passed = counted === "pass";
+  s.gaveUp = counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
   s.final = s.passed || s.gaveUp;
   s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
 }
@@ -454,11 +640,16 @@ function settle(s) {
  * A start or stop that never gets its pair keeps the run from going stale until a new PLAN REVIEW closes it or the
  * session ends: runs are per session. (A lost SubagentStop is the price of never letting a long foreground worker,
  * whose launch record is only written when it ends, make its run look idle.)
- * @param {Records} records @param {{ now?: number, staleMin?: number, sessionId?: string }} [opts]
+ * Reviews count by the gap cutoff (`gapMin`, else ORCH_GAP_MIN of `env`, else 80) and VALIDATE supersede; each slice
+ * ends with countedFails, stalled and signals (doubtSignals with `env`).
+ * @param {Records} records
+ * @param {{ now?: number, staleMin?: number, sessionId?: string, gapMin?: number, env?: Record<string, string | undefined> }} [opts]
  * @returns {{ runs: Run[], open: Run | null }}
  */
 export function foldRuns(records, opts = {}) {
   const rec = /** @type {Records} */ (records && typeof records === "object" ? records : {});
+  const env = opts.env ?? {};
+  const gapMin = typeof opts.gapMin === "number" && opts.gapMin >= 0 && opts.gapMin <= 100 ? opts.gapMin : gapMinimum(env);
   const staleMs = (opts.staleMin ?? RUN_STALE_MIN_DEFAULT) * 60000;
   const now = opts.now ?? Date.now();
   const sid = opts.sessionId;
@@ -502,7 +693,7 @@ export function foldRuns(records, opts = {}) {
   /** @param {'planned' | 'light'} kind @param {number} ts @returns {Run} */
   const openRun = (kind, ts) => {
     /** @type {Run} */
-    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [] };
+    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [], replans: [] };
     runs.push(run);
     return run;
   };
@@ -594,7 +785,10 @@ export function foldRuns(records, opts = {}) {
     if (!run) continue;
     if (kind === 1) run.lastAt = Math.max(run.lastAt, ts);
     if (kind === 1 && role === "reviewer" && slice === "plan") {
-      (planRunOf.get(String(r.agent_id)) ?? run).planReviewed = true;
+      const planRun = planRunOf.get(String(r.agent_id)) ?? run;
+      planRun.planReviewed = true;
+      // A REPLAN plan review finished: it clears stalls that began before this time (finish()).
+      if (typeof launch?.replan === "number") planRun.replans.push(ts);
       continue;
     }
     const s = slice ? run.slices[slice] : undefined;
@@ -612,20 +806,60 @@ export function foldRuns(records, opts = {}) {
       const status = r.status === "pass" || r.status === "fail" ? r.status : null;
       const model = typeof r.model === "string" ? r.model : typeof launch?.model === "string" ? launch.model : null;
       const checks = strings(Array.isArray(r.checks) ? r.checks : launch?.checks);
-      s.reviews.push({ ts, status, answers: r.answers && typeof r.answers === "object" ? r.answers : {}, open: Array.isArray(r.open) ? r.open : [], model, checks });
+      const answers = r.answers && typeof r.answers === "object" ? r.answers : {};
+      const validate = launch?.validate === true;
+      // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes, but only
+      // with a verdict of its own: a validation reply with no STATUS supersedes nothing.
+      if (validate && status !== null) {
+        for (const prev of currentReviews(s)) {
+          prev.superseded = true;
+          prev.counted = null;
+        }
+      }
+      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt });
       s.reviewedSince = true;
     }
     settle(s);
     closeIfDone(run);
   }
   if (cur && !cur.closed && idle(cur, now)) cur.stale = true;
+  for (const run of runs) for (const s of Object.values(run.slices)) finish(run, s, env);
   return { runs, open: cur && !cur.closed && !cur.stale ? cur : null };
 }
 
 /**
+ * The derived slice fields at the end of a fold: countedFails, the stall (docs/brief-grammar.md, "Stall") and the
+ * doubt signals. @param {Run} run @param {SliceState} s @param {Record<string, string | undefined>} env
+ */
+function finish(run, s, env) {
+  const counted = s.reviews.filter((r) => countedStatus(r) !== null);
+  s.countedFails = counted.filter((r) => countedStatus(r) === "fail").length;
+  s.stalled = false;
+  s.stalledAt = null;
+  s.stallKeys = [];
+  // A retry that failed on the same gap again. b: the latest counted review; a: the latest counted review of an
+  // earlier implementer attempt. Both fail and every counted review between them fails (no pass between); two reviews
+  // of one attempt (a second opinion) never stall on their own.
+  const b = counted.at(-1);
+  const ai = b ? counted.findLastIndex((r) => r.implAt !== b.implAt) : -1;
+  const a = ai >= 0 ? counted[ai] : undefined;
+  const between = counted.slice(ai + 1);
+  if (!s.final && a && b && countedStatus(a) === "fail" && between.every((r) => countedStatus(r) === "fail")) {
+    const shared = b.keys.filter((k) => a.keys.includes(k));
+    if (shared.length && !run.replans.some((t) => t > b.ts)) {
+      s.stalled = true;
+      s.stalledAt = b.ts;
+      s.stallKeys = shared;
+    }
+  }
+  s.signals = doubtSignals(s, env);
+}
+
+/**
  * Doubt signals for a slice: why it needs a passing opus review after its latest implementer. Empty when ORCH_ESCALATION
- * is off; ["always"] when it is always. Signals: risky, retry (an earlier failed review), read_answer and open_items
- * (in its latest passing review), tests_failed_isolated (for its latest implementer attempt).
+ * is off; ["always"] when it is always. Signals: risky, retry (an earlier counted failed review), read_answer and
+ * open_items (in its latest counted passing review), tests_failed_isolated (for its latest implementer attempt),
+ * low_confidence_fail (a review after its latest implementer reported fail with every gap below the cutoff).
  * @param {SliceState} s @param {Record<string, string | undefined>} [env] @returns {string[]}
  */
 export function doubtSignals(s, env = {}) {
@@ -634,13 +868,15 @@ export function doubtSignals(s, env = {}) {
   if (mode === "always") return ["always"];
   const signals = [];
   if (s.risky) signals.push("risky");
-  if (s.reviews.some((r) => r.status === "fail")) signals.push("retry");
-  const pass = currentReviews(s).filter((r) => r.status === "pass").at(-1);
+  if (s.reviews.some((r) => countedStatus(r) === "fail")) signals.push("retry");
+  const current = currentReviews(s);
+  const pass = current.filter((r) => countedStatus(r) === "pass").at(-1);
   if (pass && Object.values(pass.answers).some((a) => a?.mode === "read")) signals.push("read_answer");
   if (pass && pass.open.length) signals.push("open_items");
   if (s.isolatedTestFailure) signals.push("tests_failed_isolated");
+  if (current.some((r) => r.lowConfidence === true && countedStatus(r) === "pass")) signals.push("low_confidence_fail");
   return signals;
 }
 
-/** A passing review on an opus model after the slice's latest implementer. @param {SliceState} s */
-export const hasOpusPass = (s) => currentReviews(s).some((r) => r.status === "pass" && isOpusModel(r.model));
+/** A review counted as a pass on an opus model after the slice's latest implementer. @param {SliceState} s */
+export const hasOpusPass = (s) => currentReviews(s).some((r) => countedStatus(r) === "pass" && isOpusModel(r.model));
