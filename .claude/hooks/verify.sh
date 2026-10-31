@@ -13,12 +13,18 @@
 # Isolated worktrees (cwd under .claude/worktrees/) follow ORCH_GATE_ISOLATED, because sibling slices
 # may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
 # block (gate as usual), skip (do not run tests).
-# Test baseline (ORCH_BASELINE=off disables): when the tests fail and the tree has changes against its base (HEAD for
-# the shared tree, the fork point from the main worktree's HEAD for an isolated worktree), bugfix-check.mjs runs the
-# same command in a clean detached worktree of the base and the gate warns (tests_failed_baseline, with counts) only
-# when every failing test, qualified by its file or package, also fails there. Output with an unqualified name, a
-# suite-level crash or no names, and a base run that times out (ORCH_BASE_TIMEOUT_S, default 300) or fails without
-# parsable names, never take that path.
+# Test baseline (ORCH_BASELINE: inform by default, allow, or off): when the tests fail and the tree has changes against
+# its base (HEAD for the shared tree, the fork point from the main worktree's HEAD for an isolated worktree),
+# bugfix-check.mjs runs the same command in a clean detached worktree of the base.
+#   inform (unset or any value but allow/off): never allows. The gate still blocks with tests_failed; the block message
+#     lists the qualified failing tests that also fail on the base as probably pre-existing, and the record logs the
+#     counts (failing, on_base).
+#   allow (opt-in, HEURISTIC): the gate warns with tests_failed_baseline (counts failing, base_failing) when every
+#     failing test, qualified by its file or package, also fails on the base. Runner output cannot be parsed
+#     completely, so a failure that shows as no named test may slip through; unqualified names, runner-level crash
+#     markers, and a base run that times out (ORCH_BASE_TIMEOUT_S, default 300), cannot use the main worktree's
+#     dependencies or fails without parsable names keep the block.
+#   off: no base run, as in 0.3.0.
 # KIND: bugfix (ORCH_BUGFIX_CHECK=off disables): after the tests pass, an implementer whose brief says KIND: bugfix
 # must have changed or added a test file that adds a qualified failing test on the base (bugfix-check.mjs); blocks
 # say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
@@ -73,12 +79,12 @@ log_gate() { # decision reason [extra JSON fields: counts only]
 check() { # mode stdin
   chk_decision="" chk_reason="" chk_extra="" chk_message=""
   local res
-  res="$(printf '%s' "$2" | node "$hooks_dir/bugfix-check.mjs" "$1" --cmd "$cmd" --state "$state" --isolated "$isolated" 2>/dev/null)" || return 0
+  res="$(printf '%s' "$2" | node "$hooks_dir/bugfix-check.mjs" "$1" --cmd "$cmd" --state "$state" --isolated "$isolated" --mode "${ORCH_BASELINE:-inform}" 2>/dev/null)" || return 0
   chk_decision="$(printf '%s\n' "$res" | sed -n 1p)"
   chk_reason="$(printf '%s\n' "$res" | sed -n 2p | LC_ALL=C tr -cd 'a-z_')"
   chk_extra="$(printf '%s\n' "$res" | sed -n 3p | LC_ALL=C tr -cd 'a-z_0-9,:"')"
   chk_message="$(printf '%s\n' "$res" | sed -n '4,$p')"
-  case "$chk_decision" in allow | warn | block) ;; *) chk_decision="" ;; esac
+  case "$chk_decision" in allow | warn | block | inform) ;; *) chk_decision="" ;; esac
   [ -n "$chk_reason" ] || chk_decision=""
   return 0
 }
@@ -192,17 +198,23 @@ case "$cmd" in
     ;;
 esac
 
-# Failures the base commit already has are not this agent's: warn instead of blocking.
+# Failures the base commit already has: inform (default) keeps the block and names them in the message; allow
+# (opt-in, heuristic) warns instead of blocking when every failing test also fails on the base.
+base_extra="" base_msg=""
 if [ "${ORCH_BASELINE:-}" != off ]; then
   check baseline "$out"
-  if [ "$chk_decision" = warn ]; then
+  if [ "$chk_decision" = warn ] && [ "${ORCH_BASELINE:-}" = allow ]; then
     log_gate warn "$chk_reason" "$chk_extra"
     exit 0
+  fi
+  if [ "$chk_decision" = inform ]; then
+    base_extra="$chk_extra"
+    base_msg="$chk_message"
   fi
 fi
 
 if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
-  log_gate warn tests_failed_isolated
+  log_gate warn tests_failed_isolated "$base_extra"
   exit 0
 fi
 
@@ -212,14 +224,15 @@ if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
   blocks="$(grep -c "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
-  log_gate allow max_blocks_reached
+  log_gate allow max_blocks_reached "$base_extra"
   exit 0
 fi
 
-log_gate block tests_failed
+log_gate block tests_failed "$base_extra"
 {
   echo "Acceptance gate failed: $cmd"
   printf '%s\n' "$out" | tail -n 40
+  [ -z "$base_msg" ] || printf '%s\n' "$base_msg"
   echo "Fix the root cause and rerun before finishing."
 } >&2
 exit 2

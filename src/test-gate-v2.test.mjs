@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { complete, inFiles, isTestFile, parseFailures } from "../.claude/hooks/bugfix-check.mjs";
+import { cacheKey, complete, inFiles, isTestFile, parseFailures } from "../.claude/hooks/bugfix-check.mjs";
 import { bridgeOptions } from "../.claude/hooks/state.mjs";
 
 const hook = (/** @type {string} */ name) => new URL(`../.claude/hooks/${name}`, import.meta.url).pathname;
@@ -50,6 +50,7 @@ const TAP_CMD = "cat failures.txt; ! test -s failures.txt";
 // Qualified failures in pytest's summary form.
 const FA = "FAILED tests/test_a.py::a - boom\n";
 const FB = "FAILED tests/test_b.py::b - boom\n";
+const ALLOW = { ORCH_BASELINE: "allow" };
 
 /**
  * verify.sh as the SubagentStop hook runs it. TMPDIR is a fresh dir per call (or `o.tmp`) so base worktrees can be checked.
@@ -118,20 +119,67 @@ test("parseFailures: unqualified names and suite-level crashes are flagged, so t
 
 // ---- baseline ----
 
-test("baseline: a test that already fails on HEAD warns with counts; a new failing test still blocks", () => {
+test("baseline inform (default): a test that already fails on HEAD still blocks, and the message names it", () => {
   const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   write(dir, { "app.js": "export const x = 1;\n" });
   const same = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD } });
+  assert.equal(same.status, 2);
+  const rec = last(dir);
+  assert.deepEqual([rec.decision, rec.reason, rec.failing, rec.on_base], ["block", "tests_failed", 1, 1]);
+  assert.match(same.stderr, /Acceptance gate failed/);
+  assert.match(same.stderr, /also fail on the base [0-9a-f]{8} \(probably pre-existing; do not fix them unless your slice touches them; say so in your report\):\n {2}- tests\/test_a\.py::a\n/);
+  assert.doesNotMatch(gateLog(dir), /FAILED|boom|test_a/, "no test output or names in gates.jsonl");
+
+  // A new failure: still a block, and only the shared test is named.
+  write(dir, { "failures.txt": FA + FB });
+  const added = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" });
+  assert.equal(added.status, 2);
+  assert.deepEqual([last(dir).reason, last(dir).failing, last(dir).on_base], ["tests_failed", 2, 1]);
+  assert.doesNotMatch(added.stderr, /- tests\/test_b\.py::b/);
+
+  // Nothing shared: counts only, no note.
+  write(dir, { "failures.txt": FB });
+  const none = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a3" });
+  assert.equal(none.status, 2);
+  assert.equal(last(dir).on_base, 0);
+  assert.doesNotMatch(none.stderr, /probably pre-existing/);
+});
+
+test("baseline allow (opt-in): a test that already fails on HEAD warns with counts; a new failing test still blocks", () => {
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
+  write(dir, { "app.js": "export const x = 1;\n" });
+  const same = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } });
   assert.equal(same.status, 0, same.stderr);
   const rec = last(dir);
   assert.deepEqual([rec.decision, rec.reason, rec.failing, rec.base_failing], ["warn", "tests_failed_baseline", 1, 1]);
   assert.doesNotMatch(gateLog(dir), /FAILED|boom/, "no test output in gates.jsonl");
 
   write(dir, { "failures.txt": FA + FB });
-  const added = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" });
+  const added = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW }, id: "a2" });
   assert.equal(added.status, 2);
   assert.equal(last(dir).reason, "tests_failed");
-  assert.match(added.stderr, /Acceptance gate failed/);
+  assert.match(added.stderr, /probably pre-existing/);
+});
+
+test("baseline allow: runner-level failures without a named test never count as already failing", () => {
+  // Each pair: the base fails test a; the working tree fails test a plus a failure that names no test.
+  const crashes = {
+    "go init panic": "panic: boom in init\nFAIL\texample.com/m/other\t0.01s\n",
+    "vitest unhandled errors": "⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯\nVitest caught 1 unhandled error during the test run.\n",
+    "cargo binary killed": "error: test failed, to rerun pass `--lib`\nCaused by:\n  process didn't exit successfully: `target/debug/deps/m-1a2b` (signal: 11, SIGSEGV: invalid memory reference)\n",
+    "jest coverage threshold": 'Jest: "global" coverage threshold for lines (80%) not met: 70%\n',
+  };
+  for (const [name, extra] of Object.entries(crashes)) {
+    assert.equal(parseFailures(extra).crash, true, name);
+    const dir = repo({ "failures.txt": FA, "app.js": "x\n" });
+    write(dir, { "failures.txt": FA + extra, "app.js": "y\n" });
+    assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } }).status, 2, name);
+    assert.equal(last(dir).reason, "tests_failed", name);
+  }
+  // go: a package line with no pending named test is a crash; with one, it qualifies the name.
+  assert.equal(parseFailures("FAIL\texample.com/m\t0.01s\n").crash, true);
+  assert.equal(parseFailures("FAIL\texample.com/m [setup failed]\n").crash, true);
+  assert.equal(complete(parseFailures("--- FAIL: TestX (0.00s)\nFAIL\nFAIL\texample.com/m\t0.01s\n")), true);
 });
 
 test("baseline: a clean shared tree and output without test names never take the baseline path", () => {
@@ -161,7 +209,7 @@ test("baseline: an isolated worktree compares against its fork point, not the ma
   git(dir, "commit", "-q", "-am", "fix a on main");
   write(wt, { "app.js": "export const x = 1;\n" });
   git(wt, "commit", "-q", "-am", "slice work");
-  const r = gate(dir, { cwd: wt, env: { ORCH_TEST_CMD: TAP_CMD, ORCH_GATE_ISOLATED: "block" } });
+  const r = gate(dir, { cwd: wt, env: { ORCH_TEST_CMD: TAP_CMD, ORCH_GATE_ISOLATED: "block", ...ALLOW } });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(last(dir).reason, "tests_failed_baseline");
   const forkPoint = git(dir, "rev-parse", "HEAD~1").trim();
@@ -173,7 +221,7 @@ test("baseline: the base result is cached per base commit and command, and the b
   const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   const head = git(dir, "rev-parse", "HEAD").trim();
   write(dir, { "app.js": "export const x = 1;\n" });
-  const first = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD } });
+  const first = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } });
   assert.equal(first.status, 0, first.stderr);
   assert.deepEqual(readdirSync(first.tmp).filter((f) => f.startsWith("orch-base-")), [], "temp dir cleaned");
   assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1, "no base worktree left");
@@ -188,7 +236,7 @@ test("baseline: the base result is cached per base commit and command, and the b
   cache[keys[0] ?? ""] = { rc: 1, names: ["tests/test_a.py::a", "tests/test_b.py::b"] };
   writeFileSync(cacheFile(dir), JSON.stringify(cache));
   write(dir, { "failures.txt": FA + FB });
-  const cached = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" });
+  const cached = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW }, id: "a2" });
   assert.equal(cached.status, 0, cached.stderr);
   assert.equal(last(dir).reason, "tests_failed_baseline");
 
@@ -209,16 +257,16 @@ test("baseline: ORCH_BASELINE=off gates as 0.3.0", () => {
 test("baseline: suite crashes in different files and same-named tests in different files are new failures", () => {
   const crash = repo({ "failures.txt": "FAIL src/a.test.js\n  ● Test suite failed to run\n", "app.js": "x\n" });
   write(crash, { "failures.txt": "FAIL src/b.test.js\n  ● Test suite failed to run\n", "app.js": "y\n" });
-  assert.equal(gate(crash, { env: { ORCH_TEST_CMD: TAP_CMD } }).status, 2);
+  assert.equal(gate(crash, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } }).status, 2);
   assert.equal(last(crash).reason, "tests_failed");
 
   const same = repo({ "failures.txt": "FAIL src/a.test.js\n  ● math › adds\n", "app.js": "x\n" });
   write(same, { "failures.txt": "FAIL src/b.test.js\n  ● math › adds\n", "app.js": "y\n" });
-  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD } }).status, 2);
+  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } }).status, 2);
   assert.equal(last(same).reason, "tests_failed");
   // The same test in the same file is already failing on the base.
   write(same, { "failures.txt": "FAIL src/a.test.js\n  ● math › adds\n" });
-  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" }).status, 0);
+  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW }, id: "a2" }).status, 0);
   assert.equal(last(same).reason, "tests_failed_baseline");
 });
 
@@ -229,12 +277,12 @@ const SLOW_CMD = `test -f env.ok || exec sleep 5; ${TAP_CMD}`;
 test("baseline: a base run that fails without names or times out is no baseline and is not cached", () => {
   const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
   write(dir, { "env.ok": "", "app.js": "y\n" });
-  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: ENV_CMD } }).status, 2);
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: ENV_CMD, ...ALLOW } }).status, 2);
   assert.equal(last(dir).reason, "tests_failed");
   assert.ok(!existsSync(cacheFile(dir)), "an environment failure is never cached");
 
   const t0 = Date.now();
-  const slow = gate(dir, { env: { ORCH_TEST_CMD: SLOW_CMD, ORCH_BASE_TIMEOUT_S: "1" }, id: "a2" });
+  const slow = gate(dir, { env: { ORCH_TEST_CMD: SLOW_CMD, ORCH_BASE_TIMEOUT_S: "1", ...ALLOW }, id: "a2" });
   assert.equal(slow.status, 2);
   assert.equal(last(dir).reason, "tests_failed");
   assert.ok(Date.now() - t0 < 4500, `the base run was cut off at the timeout (${Date.now() - t0} ms)`);
@@ -251,9 +299,58 @@ test("baseline: a base run prunes worktrees left by killed runs older than an ho
   git(dir, "worktree", "add", "-q", "--detach", join(tmp, "orch-base-old", "wt"));
   const hourAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
   utimesSync(join(tmp, "orch-base-old"), hourAgo, hourAgo);
-  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, tmp }).status, 0);
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW }, tmp }).status, 0);
   assert.deepEqual(readdirSync(tmp).filter((f) => f.startsWith("orch-base-")), ["orch-base-new"], "only the stale one is removed");
   assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1, "its worktree record is pruned");
+});
+
+test("baseline: on timeout the base run's whole process group is killed", () => {
+  const pidDir = mkdtempSync(join(tmpdir(), "orch-tg2-pid-"));
+  const pidFile = join(pidDir, "pid");
+  // In the base (no env.ok) a background grandchild holds the pipes; killing only bash would leave it running.
+  const cmd = `test -f env.ok || { sleep 30 & echo $! > '${pidFile}'; wait; }; ${TAP_CMD}`;
+  const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
+  write(dir, { "env.ok": "", "app.js": "y\n" });
+  const t0 = Date.now();
+  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASE_TIMEOUT_S: "1", ...ALLOW } });
+  assert.equal(r.status, 2);
+  assert.equal(last(dir).reason, "tests_failed");
+  assert.ok(Date.now() - t0 < 4500, `cut off at the timeout (${Date.now() - t0} ms)`);
+  const pid = readFileSync(pidFile, "utf8").trim();
+  const ps = spawnSync("ps", ["-o", "stat=", "-p", pid], { encoding: "utf8" });
+  assert.ok(ps.stdout.trim() === "" || ps.stdout.trim().startsWith("Z"), `the grandchild ${pid} is gone (ps: ${ps.stdout.trim()})`);
+  assert.deepEqual(readdirSync(r.tmp).filter((f) => f.startsWith("orch-base-")), []);
+});
+
+test("baseline: the cache key includes the run subdirectory", () => {
+  assert.notEqual(cacheKey("abc", "npm test", ""), cacheKey("abc", "npm test", "pkg"));
+  assert.equal(cacheKey("abc", "npm test"), cacheKey("abc", "npm test", ""));
+  const dir = repo({ "failures.txt": FA, "pkg/failures.txt": FB, "app.js": "x\n" });
+  write(dir, { "app.js": "y\n" });
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } }).status, 0);
+  // From pkg/ the base fails test b, not the root's test a: a key without the folder would reuse the root's result.
+  const sub = gate(dir, { cwd: join(dir, "pkg"), env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW }, id: "a2" });
+  assert.equal(sub.status, 0, sub.stderr);
+  assert.equal(last(dir).reason, "tests_failed_baseline");
+  assert.equal(Object.keys(JSON.parse(readFileSync(cacheFile(dir), "utf8"))).length, 2);
+});
+
+test("baseline: node_modules comes from the main worktree, and a lock file that differs from the base skips the base run", () => {
+  const dir = repo({ ".gitignore": "node_modules/\n", "package-lock.json": "{}\n", "failures.txt": FA, "app.js": "x\n" });
+  mkdirSync(join(dir, "node_modules", "dep"), { recursive: true });
+  // The base worktree has no node_modules of its own: the check passes there only through the symlink to the main's.
+  const nmCmd = `test -d node_modules/dep || { echo "no deps"; exit 1; }; ${TAP_CMD}`;
+  write(dir, { "app.js": "y\n" });
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: nmCmd, ...ALLOW } }).status, 0);
+  assert.equal(last(dir).reason, "tests_failed_baseline");
+
+  const changed = repo({ ".gitignore": "node_modules/\n", "package-lock.json": "{}\n", "failures.txt": FA, "app.js": "x\n" });
+  mkdirSync(join(changed, "node_modules"));
+  write(changed, { "package-lock.json": '{"lockfileVersion":3}\n' });
+  const r = gate(changed, { env: { ORCH_TEST_CMD: TAP_CMD, ...ALLOW } });
+  assert.equal(r.status, 2, "the base would run against other dependencies: no base run");
+  assert.equal(last(changed).reason, "tests_failed");
+  assert.ok(!existsSync(cacheFile(changed)));
 });
 
 // ---- KIND: bugfix ----
@@ -409,7 +506,7 @@ test("verify.sh bridges the options before reading any setting; an explicit ORCH
   write(dir, { "app.js": "export const x = 1;\n" });
   assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, CLAUDE_PLUGIN_OPTION_BASELINE: "off" } }).status, 2);
   assert.equal(last(dir).reason, "tests_failed");
-  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, CLAUDE_PLUGIN_OPTION_BASELINE: "off", ORCH_BASELINE: "on" }, id: "a2" }).status, 0);
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, CLAUDE_PLUGIN_OPTION_BASELINE: "off", ORCH_BASELINE: "allow" }, id: "a2" }).status, 0);
   assert.equal(last(dir).reason, "tests_failed_baseline");
 
   const wt = mkdtempSync(join(tmpdir(), "orch-tg2-iso-"));
