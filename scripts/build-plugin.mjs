@@ -5,17 +5,29 @@
 // Project settings (the permissions.deny list) are not part of a plugin; add them to your own settings.
 // dashboard/ (the live orchestration pane, a function-hooks module) ships twice: inside the plugin, so an installed
 // orchestrator shows it, and alone as dist/dashboard for `claude --agent orchestrator --plugin-dir dist/dashboard`.
+// .claude/workflows/*.js ship as plugin workflows. A plugin workflow's agent() must name the namespaced agent type
+// ("orchestration:implementer"; a bare "implementer" is not found), and that agent then reports the namespaced
+// agent_type to SubagentStart/SubagentStop hooks (probed on Claude Code 2.1.314), which the plugin verify.sh matcher
+// below already matches. A repo-root evals/ directory ships as evals/ when it exists. The judge hooks are registered
+// only when their files exist in .claude/hooks.
+// --out <dir>: build into <dir>/plugin and <dir>/dashboard instead of dist/ (ignored with --check).
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const NAME = "orchestration";
 const src = join(process.cwd(), ".claude");
 // --check builds into a temp dir and fails when the committed dist/plugin differs, like `npm run check-agents`.
 const check = process.argv.includes("--check");
 const committedRoot = join(process.cwd(), "dist");
-const outRoot = check ? mkdtempSync(join(tmpdir(), "orch-plugin-")) : committedRoot;
+const outAt = process.argv.indexOf("--out");
+const outArg = outAt >= 0 ? process.argv[outAt + 1] : undefined;
+if (outAt >= 0 && !outArg) {
+  console.error("--out needs a directory");
+  process.exit(1);
+}
+const outRoot = check ? mkdtempSync(join(tmpdir(), "orch-plugin-")) : outArg ? resolve(outArg) : committedRoot;
 const out = join(outRoot, "plugin");
 const dash = join(outRoot, "dashboard");
 const dashSrc = join(process.cwd(), "dashboard");
@@ -31,6 +43,16 @@ for (const d of [join(dash, ".claude-plugin"), join(dash, "hooks"), join(dash, "
 cpSync(join(src, "agents"), join(out, "agents"), { recursive: true });
 cpSync(join(src, "skills"), join(out, "skills"), { recursive: true });
 for (const f of readdirSync(join(src, "hooks"))) cpSync(join(src, "hooks", f), join(out, "hooks", f));
+const workflows = join(src, "workflows");
+if (existsSync(workflows)) {
+  mkdirSync(join(out, "workflows"), { recursive: true });
+  for (const f of readdirSync(workflows).filter((n) => n.endsWith(".js"))) {
+    const text = readFileSync(join(workflows, f), "utf8").replace(/agentType: '([\w-]+)'/g, `agentType: '${NAME}:$1'`);
+    writeFileSync(join(out, "workflows", f), text);
+  }
+}
+const evals = join(process.cwd(), "evals");
+if (existsSync(evals)) cpSync(evals, join(out, "evals"), { recursive: true });
 
 const orch = join(out, "agents", "orchestrator.md");
 writeFileSync(
@@ -58,6 +80,13 @@ const hooks = {
     Stop: [{ hooks: [{ type: "command", command: run("review-gate.mjs") }] }],
   },
 };
+// The judge hooks ship only when their files exist.
+/** @type {Record<string, unknown[]>} */
+const events = hooks.hooks;
+/** @param {string} script */
+const has = (script) => existsSync(join(src, "hooks", script));
+if (has("judge-hook.mjs")) events.PreToolUse?.push({ matcher: "Bash", hooks: [{ type: "command", command: run("judge-hook.mjs") }] });
+if (has("prompt-capture.mjs")) events.UserPromptSubmit = [{ hooks: [{ type: "command", command: run("prompt-capture.mjs") }] }];
 // The module sits beside the command hooks in the plugin; it imports its state types from ../types.
 // State keys belong to the plugin that holds the module, so inside this plugin the mod's own name becomes ours.
 /** @param {string} file */

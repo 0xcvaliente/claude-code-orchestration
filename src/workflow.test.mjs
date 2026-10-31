@@ -26,9 +26,9 @@ const body = source.replace(/^export const meta = /m, "const meta = ");
 const slice = (id, o = {}) => ({ id, goal: `goal ${id}`, files: [`${id}.txt`], acceptance: `check ${id}`, dependsOn: [], risky: false, ...o });
 
 // Runs the script with a fake runtime. `slices` is the plan; `verdict(label)` returns a reviewer verdict.
-/** @typedef {{ args?: Record<string, unknown>, slices?: any[], questions?: string[], verdict?: (label: string) => any, implement?: (label: string, opts: any) => any }} RunOpts */
+/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any }} RunOpts */
 /** @param {RunOpts} [opts] */
-async function run({ args = {}, slices, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement } = {}) {
+async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement } = {}) {
   /** @type {any[]} */
   const calls = [];
   /** @type {string[]} */
@@ -40,11 +40,12 @@ async function run({ args = {}, slices, questions = [], verdict = () => ({ pass:
     calls.push({ prompt, opts });
     const { label = "", agentType } = opts;
     if (label === "plan:questions") return { questions };
-    if (label === "plan:slices") return { slices };
+    if (label === "plan:slices") return constraints ? { constraints, slices } : { slices };
+    if (label === "plan:replan") return replan;
     if (label === "checkpoint") return { status: "pass", commit: "abc123", open: "" };
     if (agentType === "researcher") return `answer to ${prompt}`;
     if (agentType === "implementer") return implement ? implement(label, opts) : { status: "pass", branch: opts.isolation ? `wt-${label}` : "", evidence: "ok", open: "" };
-    if (agentType === "reviewer") return verdict(label);
+    if (agentType === "reviewer") return verdict(label, opts);
     if (agentType === "integrator") return "merged";
     throw new Error(`unexpected agent call ${label}`);
   };
@@ -146,7 +147,7 @@ test("a failing review retries with the gaps, then reports failed after maxRetri
     verdict: () => ({ pass: false, gaps: ["missing test"], evidence: "x" }),
   });
   const l = labels(r.calls);
-  assert.deepEqual(l.slice(-4), ["build:a#1", "review:a#1", "build:a#2", "review:a#2"]);
+  assert.deepEqual(l.slice(-5), ["build:a#1", "review:a#1", "build:a#2", "review:a#2", "plan:replan"], "then one replan (which here returns nothing)");
   assert.match(implementers(r.calls)[1].prompt, /A previous attempt was rejected\. Fix:\nmissing test/);
   assert.doesNotMatch(implementers(r.calls)[0].prompt, /previous attempt/);
   assert.deepEqual(r.result.slices, [{ id: "a", status: "failed", attempts: 2, gaps: ["missing test"] }]);
@@ -200,6 +201,117 @@ test("every implementer brief the script sends is skipped by plan-check.mjs; the
     // Control: with the marker removed the brief has no SLICE:/FILES: lines, so plan-check blocks it.
     const stripped = briefs[0].replace(/^ORCHESTRATION: workflow\n/, "");
     assert.equal(launch(dir, stripped).status, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** @param {any[]} calls */
+const reviewers = (calls) => calls.filter((c) => c.opts.agentType === "reviewer");
+const C = [{ id: "C1", text: "parsing never throws" }, { id: "c2", text: "no new dependencies" }];
+/** @param {string[]} ids @param {"cmd"|"read"} [mode] */
+const answered = (ids, mode = "cmd") => ({ pass: true, gaps: [], evidence: "ok", open: "", answers: ids.map((id) => ({ id, verdict: "pass", mode, detail: "npm test -> ok" })) });
+
+test("constraints and checks: CHECKS line and constraint texts in implementer and reviewer briefs, marker still first", async () => {
+  const r = await run({ constraints: C, slices: [slice("a", { checks: ["c1", "C2", "C1"] }), slice("b")], verdict: (l) => (l.startsWith("review:a") ? answered(["C1", "C2"]) : answered([])) });
+  const [ia, ib] = implementers(r.calls).map((c) => c.prompt);
+  assert.match(ia, /^ORCHESTRATION: workflow\nSlice a\nCHECKS: C1, C2\nC1: parsing never throws\nC2: no new dependencies\nGoal: goal a\n/);
+  assert.match(ia, /Meet every constraint in CHECKS/);
+  assert.match(ib, /^ORCHESTRATION: workflow\nSlice b\nGoal: goal b\n/, "no CHECKS line without checks");
+  const [ra, rb] = reviewers(r.calls);
+  assert.match(ra.prompt, /^CHECKS: C1, C2\nC1: parsing never throws\nC2: no new dependencies\nGoal: goal a\n/);
+  assert.match(ra.prompt, /Answer every id in CHECKS/);
+  assert.doesNotMatch(rb.prompt, /CHECKS/);
+  assert.deepEqual(ra.opts.schema.required, ["pass", "gaps", "evidence", "answers", "open"]);
+  const planCall = r.calls.find((c) => c.opts.label === "plan:slices");
+  assert.deepEqual(planCall.opts.schema.required, ["constraints", "slices"]);
+  assert.ok(planCall.opts.schema.properties.slices.items.required.includes("checks"));
+  assert.equal(r.result.passed, 2);
+  assert.deepEqual(labels(r.calls).filter((l) => /^review/.test(l)), ["review:a#1", "review:b#1"], "cmd answers and no open: no escalation");
+});
+
+test("a checked id left unanswered, or answered fail, counts as a failed review and retries", async () => {
+  let n = 0;
+  const r = await run({ constraints: C, slices: [slice("a", { checks: ["C1", "C2"] })], verdict: () => (++n === 1 ? { ...answered(["C2"]), answers: [{ id: "c2", verdict: "fail", mode: "cmd", detail: "added lodash" }] } : answered(["C1", "C2"])) });
+  const l = labels(r.calls);
+  assert.deepEqual(l.filter((x) => /^(build|review)/.test(x)), ["build:a#1", "review:a#1", "build:a#2", "review:a#2", "review:a#2:opus"], "the passing retry is escalated to opus");
+  assert.match(implementers(r.calls)[1].prompt, /A previous attempt was rejected\. Fix:\nC1: not answered\nC2: added lodash/);
+  assert.equal(r.result.slices[0].status, "passed");
+});
+
+test("escalation: a read-mode answer or a non-empty open sends a passing review to one opus reviewer, whose verdict decides", async () => {
+  const read = await run({ constraints: C, slices: [slice("a", { checks: ["C1"] })], verdict: () => answered(["C1"], "read") });
+  assert.deepEqual(reviewers(read.calls).map((c) => [c.opts.label, c.opts.model]), [["review:a#1", undefined], ["review:a#1:opus", "opus"]]);
+  assert.match(reviewers(read.calls)[1].prompt, /^CHECKS: C1\n/);
+  assert.equal(read.result.passed, 1);
+  // open items, then the opus review fails: the slice retries.
+  const open = await run({ args: { maxRetries: 1 }, slices: [slice("a")], verdict: (_l, o) => (o.model === "opus" ? { pass: false, gaps: ["opus gap"], evidence: "", answers: [], open: "" } : { pass: true, gaps: [], evidence: "", answers: [], open: "flaky test" }) });
+  assert.deepEqual(labels(open.calls).filter((x) => /^(build|review)/.test(x)), ["build:a#1", "review:a#1", "review:a#1:opus", "build:a#2", "review:a#2", "review:a#2:opus"]);
+  assert.match(implementers(open.calls)[1].prompt, /opus gap/);
+  assert.equal(open.result.slices[0].status, "failed");
+  // "none" in open is not a doubt signal.
+  const none = await run({ slices: [slice("a")], verdict: () => ({ pass: true, gaps: [], evidence: "", answers: [], open: "none" }) });
+  assert.equal(reviewers(none.calls).length, 1);
+});
+
+test("one replan: slices failed for good go back to the planner once, which may depend on finished slices", async () => {
+  const r = await run({
+    args: { maxRetries: 1 },
+    slices: [slice("a"), slice("b")],
+    replan: { constraints: [{ id: "C9", text: "new rule" }], slices: [slice("a2", { dependsOn: ["b"], checks: ["C9"] }), slice("b")] },
+    verdict: (l) => (l.startsWith("review:b") ? answered([]) : { pass: false, gaps: ["broken"], evidence: "", answers: [], open: "" }),
+  });
+  const l = labels(r.calls);
+  assert.equal(l.filter((x) => x === "plan:replan").length, 1, "exactly one replan even though a2 fails too");
+  const rp = r.calls.find((c) => c.opts.label === "plan:replan");
+  assert.match(rp.prompt, /Finished slices[^\n]*\n- b: goal b/);
+  assert.match(rp.prompt, /Failed slices[^\n]*\n- a: goal a \[a\.txt\]\n {2}gaps: broken/);
+  assert.ok(l.indexOf("plan:replan") < l.indexOf("build:a2#1"));
+  assert.ok(!l.slice(l.indexOf("plan:replan")).includes("build:b#1"), "the finished id b is not planned again");
+  assert.match(implementers(r.calls).find((c) => c.opts.label === "build:a2#1").prompt, /CHECKS: C9\nC9: new rule\n/);
+  assert.deepEqual(r.result.slices.map((/** @type {any} */ s) => [s.id, s.status]), [["a", "replanned"], ["b", "passed"], ["a2", "failed"]]);
+  assert.equal(r.result.failed, 1);
+  assert.ok(r.logs.some((m) => m.startsWith("plan after replan: ")));
+});
+
+test("no replan when nothing failed for good; an empty replan leaves the slice failed", async () => {
+  const ok = await run({ slices: [slice("a")] });
+  assert.ok(!labels(ok.calls).includes("plan:replan"));
+  const empty = await run({ args: { maxRetries: 1 }, slices: [slice("a")], verdict: () => ({ pass: false, gaps: ["g"], evidence: "" }) });
+  assert.ok(labels(empty.calls).includes("plan:replan"));
+  assert.deepEqual(empty.result.slices.map((/** @type {any} */ s) => s.status), ["failed"]);
+});
+
+test("the plan JSON is logged once and resumes a new run through args.plan and args.skip", async () => {
+  const first = await run({ constraints: C, slices: [slice("a", { checks: ["C1"] }), slice("b", { dependsOn: ["a"] })], verdict: () => answered(["C1"]) });
+  const planLogs = first.logs.filter((m) => m.startsWith("plan: "));
+  assert.equal(planLogs.length, 1);
+  const plan = JSON.parse(String(planLogs[0]).slice("plan: ".length));
+  assert.deepEqual(plan.constraints, [{ id: "C1", text: "parsing never throws" }, { id: "C2", text: "no new dependencies" }]);
+  const resumed = await run({ args: { plan, skip: ["a"] }, verdict: () => answered(["C1"]) });
+  const l = labels(resumed.calls);
+  assert.ok(!l.some((x) => /^(plan|explore):/.test(x)), "no planning with args.plan");
+  assert.deepEqual(l, ["build:b#1", "review:b#1"], "a is skipped; b, which depends on it, runs");
+  assert.deepEqual(resumed.phases, ["Build"]);
+  assert.deepEqual(resumed.result.slices.map((/** @type {any} */ s) => [s.id, s.status]), [["a", "skipped"], ["b", "passed"]]);
+  // args.plan keeps its constraint texts in the briefs.
+  const again = await run({ args: { plan }, verdict: () => answered(["C1"]) });
+  assert.match(implementers(again.calls)[0].prompt, /^ORCHESTRATION: workflow\nSlice a\nCHECKS: C1\nC1: parsing never throws\n/);
+});
+
+test("C5: the script never reads the clock or randomness", () => {
+  assert.doesNotMatch(source, /Date\.now\(|Math\.random\(|new Date\(/);
+});
+
+test("briefs with CHECKS lines are still skipped by plan-check.mjs", async () => {
+  const dir = hookProject();
+  try {
+    const r = await run({ constraints: C, slices: [slice("a", { checks: ["C1"] })], verdict: () => answered(["C1"]) });
+    const b = implementers(r.calls)[0].prompt;
+    assert.ok(b.startsWith("ORCHESTRATION: workflow\n"));
+    const res = launch(dir, b);
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.stderr, "");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
