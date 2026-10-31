@@ -35,9 +35,17 @@ export function researcherViolation(command) {
   }
   if (t.substitutions.length) return { reason: "command or process substitution (or backticks)" };
   if (t.defines) return { reason: "a function definition" };
-  // Quoted text removed, any < or > left is a redirection or a heredoc (the tokenizer records no word for a heredoc).
+  // The tokenizer records no word for a heredoc or here-string, so `<<` anywhere in the raw text denies, quoted or not:
+  // an escaped quote (`ls \'<<X ...`) would hide it from any quote-stripping regex.
+  if (command.includes("<<")) return { reason: "a heredoc or here-string" };
+  // Quoted text removed, any < or > left is a redirection.
   const unquoted = command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "");
   if (/[<>]/.test(unquoted)) return { reason: "output redirection or a heredoc" };
+  // stdin from anything but a pipe (heredoc, here-string, `<`) denies. A pipe also sets stdin on the command after it,
+  // so stdin is only proof of an input redirection on the first command or in a command with no `|` at all.
+  if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !command.includes("|")))) {
+    return { reason: "input redirection, a heredoc or here-string" };
+  }
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };

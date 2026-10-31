@@ -72,6 +72,11 @@ const DENIED = [
   ["f() { ls; }; f", /function|`f`/],
   ["ls 'unterminated", /cannot be read/],
   ["git log\nrm -r src", /`rm`/],
+  // Review GAP 30: an escaped quote hid this heredoc from the quote-stripping regex.
+  ["ls \\'<<X\n${x:=y}'\nX", /heredoc/],
+  ["ls <<<'text'", /here-string|heredoc/],
+  ["git log | wc -l <<X\nx\nX", /heredoc/],
+  ["ls \\'<f \\'", /redirection/],
 ];
 
 test("researcher guard: allowlisted commands pass", () => {
