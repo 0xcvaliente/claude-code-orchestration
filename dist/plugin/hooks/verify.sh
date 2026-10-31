@@ -42,8 +42,8 @@ MAX_BLOCKS=2 # per agent; the cap is the loop guard, so a still-failing agent is
 log_gate() { # decision reason
   mkdir -p "$state" 2>/dev/null || return 0
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
-  printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" >> "$state/gates.jsonl" 2>/dev/null || true
+  printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" >> "$state/gates.jsonl" 2>/dev/null || true
 }
 
 # Prose: documentation or plain text by extension, any case (nocasematch: bash 3.2 has no ${var,,}). Not prose:
@@ -90,6 +90,9 @@ only_prose_changed() {
 
 agent_type="$(printf '%s' "$input" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 agent_id="$(printf '%s' "$input" | sed -n 's/.*"agent_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+# session_id lets the run model (brief.mjs foldRuns) check that a test-gate record belongs to its launch's session.
+# Only id characters are kept, so the log line stays valid JSON.
+session_id="$(printf '%s' "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 | LC_ALL=C tr -cd 'A-Za-z0-9_.-')"
 
 agent_type="${agent_type##*:}" # plugin agents arrive namespaced ("orchestration:implementer")
 
