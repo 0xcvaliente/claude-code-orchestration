@@ -456,9 +456,18 @@ test("launch record: sources, read, kind, validate and urls; stop record: gap ke
   const l = launchRecord({ subagent_type: "orchestration:researcher", prompt }, { ts: "t", sessionId: "s", agentId: "a1" });
   assert.deepEqual(
     { sources: l.sources, read: l.read, kind: l.kind, validate: l.validate, urls: l.urls },
-    { sources: ["docs/a.md", "https://x.example/doc"], read: "extract", kind: "research", validate: true, urls: ["https://x.example/doc", "https://y.example/p"] },
+    { sources: ["docs/a.md", "x.example"], read: "extract", kind: "research", validate: true, urls: ["x.example", "y.example"] },
   );
   assert.doesNotMatch(JSON.stringify(l), /secret body/);
+  // hosts only in the record: no path, query or fragment; parseHeader keeps the full SOURCES text for hooks that read the brief
+  const q = "SLICE: q\nSOURCES: https://api.example.com:8443/v1?token=SECRET1#frag, notes/b.md, http://x.example/a?k=SECRET2\nSee https://api.example.com:8443/other?token=SECRET3 and https://z.example/p?q=SECRET4 and https://x.example/again.";
+  const lq = launchRecord({ subagent_type: "researcher", prompt: q }, { ts: "t" });
+  assert.deepEqual(lq.sources, ["api.example.com:8443", "notes/b.md", "x.example"]);
+  assert.deepEqual(lq.urls, ["api.example.com:8443", "x.example", "z.example"]);
+  assert.doesNotMatch(JSON.stringify(lq), /SECRET|token|\/v1|frag/);
+  assert.deepEqual(parseHeader(q).sources, ["https://api.example.com:8443/v1?token=SECRET1#frag", "notes/b.md", "http://x.example/a?k=SECRET2"]);
+  assert.deepEqual(briefUrls("https://z.example/p?q=1"), ["https://z.example/p?q=1"], "briefUrls still returns full URLs");
+  assert.deepEqual(launchRecord({ prompt: "SOURCES: https://[bad\nhttps://[bad" }).urls, [], "an invalid URL is skipped");
 
   const reply = "STATUS: pass\nGAP: 80 No test for the empty-input path!\nGAP: unnumbered secret gap\nQUOTE: a.md:1 | secret quoted text\nQUOTE: b.md | other\nOPEN: none";
   const s = stopRecord({ ts: "t", sessionId: "s", agentId: "r1", role: "reviewer", slice: "a", reply, filesTouched: ["a.md", "src/b.ts"] });

@@ -168,8 +168,11 @@ Hooks log parsed fields only, never brief or reply text. Readers accept older re
 | `model` | `agentModel` (see Reviewer model) |
 | `isPlanReview`, `replan` | `parsePlan` |
 | `plan` | PLAN REVIEW briefs only: `{ constraints, slices }` from `parsePlan` |
-| `sources`, `read`, `kind`, `validate` | `parseHeader` (0.4.0) |
-| `urls` | `briefUrls` of the prompt (0.4.0) |
+| `read`, `kind`, `validate` | `parseHeader` (0.4.0) |
+| `sources` | `parseHeader`'s `sources` with each `http://` or `https://` entry replaced by its host (`new URL(u).host`, port included; an entry that does not parse is dropped); paths stay as they are (0.4.0) |
+| `urls` | the hosts of `briefUrls` of the prompt (`new URL(u).host`), deduplicated, in order of first appearance; invalid URLs skipped (0.4.0) |
+
+The record keeps hosts only, never a URL's path, query or fragment (which can carry tokens). `parseHeader` and `briefUrls` still return the full text, for hooks that read the brief directly.
 
 **Stop record, 0.4.0 fields** (no gap or quote text is ever stored):
 

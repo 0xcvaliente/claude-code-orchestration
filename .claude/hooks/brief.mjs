@@ -415,7 +415,8 @@ export function escalationMode(env = {}) {
  *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[]
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
- * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is briefUrls of the prompt. Older records carry only
+ * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
+ * (invalid URLs skipped); in `sources` an http(s) entry becomes its host, a path stays as it is. Older records carry only
  * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls.
  *
  * @typedef {{ confidence: number | null, key: string }} GapKey
@@ -467,12 +468,21 @@ export function launchRecord(toolInput, ctx = {}) {
     replan: p.replan,
   };
   if (p.isPlanReview) rec.plan = { constraints: p.constraints, slices: p.slices };
-  rec.sources = h.sources;
+  rec.sources = h.sources.map((s) => (/^https?:\/\//i.test(s) ? (hostOf(s) ?? "") : s)).filter(Boolean);
   rec.read = h.read;
   rec.kind = h.kind;
   rec.validate = h.validate;
-  rec.urls = briefUrls(prompt);
+  rec.urls = [...new Set(briefUrls(prompt).map(hostOf).filter((x) => x !== null))];
   return rec;
+}
+
+/** The host (with port) of a URL, or null when it does not parse; records keep hosts, never paths or queries. @param {string} u @returns {string | null} */
+function hostOf(u) {
+  try {
+    return new URL(u).host || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
