@@ -1,9 +1,84 @@
 {
   "name": "orchestration",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.",
   "author": {
     "name": "0xcvaliente"
   },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "test_cmd": {
+      "type": "string",
+      "title": "Test command",
+      "description": "Command the test gate runs instead of the detected one (ORCH_TEST_CMD)."
+    },
+    "escalation": {
+      "type": "string",
+      "title": "Opus review escalation",
+      "description": "Empty: opus review for slices with a doubt signal; off or always (ORCH_ESCALATION)."
+    },
+    "judge": {
+      "type": "string",
+      "title": "Bash judge",
+      "description": "Empty: off; native turns on the deny-only Bash judge hook (ORCH_JUDGE)."
+    },
+    "judge_timeout_ms": {
+      "type": "number",
+      "title": "Bash judge timeout (ms)",
+      "description": "How long the Bash judge may take, capped at 45000 (ORCH_JUDGE_TIMEOUT_MS)."
+    },
+    "read_router": {
+      "type": "string",
+      "title": "Read router",
+      "description": "Empty: off; on picks the reading model for researchers by file type (ORCH_READ_ROUTER)."
+    },
+    "gap_min": {
+      "type": "number",
+      "title": "Gap cutoff",
+      "description": "Reviewer gap confidence at or above which a review fails, default 80 (ORCH_GAP_MIN).",
+      "default": 80
+    },
+    "stall_gate": {
+      "type": "string",
+      "title": "Stall gate",
+      "description": "Empty: on; off stops requiring a replan for a stalled slice (ORCH_STALL_GATE)."
+    },
+    "guards": {
+      "type": "string",
+      "title": "Researcher and egress guards",
+      "description": "Empty: on; off disables the researcher Bash and reviewer WebFetch guards (ORCH_GUARDS)."
+    },
+    "allow_builtins": {
+      "type": "string",
+      "title": "Allow built-in subagents",
+      "description": "Empty: blocked during a run; 1 allows built-in and fork subagents (ORCH_ALLOW_BUILTINS)."
+    },
+    "run_stale_min": {
+      "type": "number",
+      "title": "Run stale after (minutes)",
+      "description": "Minutes without activity before an open run counts as stale, default 30 (ORCH_RUN_STALE_MIN).",
+      "default": 30
+    },
+    "baseline": {
+      "type": "string",
+      "title": "Test baseline",
+      "description": "inform (default), allow or off: compare failing tests with the base (ORCH_BASELINE).",
+      "default": "inform"
+    },
+    "bugfix_check": {
+      "type": "string",
+      "title": "Bugfix check",
+      "description": "Empty: on; off skips the KIND: bugfix reproduction test check (ORCH_BUGFIX_CHECK)."
+    },
+    "quote_check": {
+      "type": "string",
+      "title": "Quote check",
+      "description": "Empty: on; off skips checking researcher QUOTE lines against their sources (ORCH_QUOTE_CHECK)."
+    },
+    "gate_isolated": {
+      "type": "string",
+      "title": "Test gate in worktrees",
+      "description": "Test gate in isolated worktrees: warn (default), block or skip (ORCH_GATE_ISOLATED)."
+    }
+  }
 }

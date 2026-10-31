@@ -19,17 +19,37 @@
     ]
   },
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/compact-context.mjs\"" }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Agent|Task",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/plan-check.mjs\"" }
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/plan-check.mjs\"", "timeout": 30 }
         ]
       },
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/judge-hook.mjs\"", "timeout": 120 }
+          { "type": "command", "command": "sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node \"$0\"' \"${CLAUDE_PROJECT_DIR}/.claude/hooks/judge-hook.mjs\"", "timeout": 120, "onFailure": "block" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/researcher-guard.mjs\"" }
+        ]
+      },
+      {
+        "matcher": "WebFetch",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/egress-guard.mjs\"" }
         ]
       }
     ],
@@ -45,6 +65,12 @@
         "matcher": "Agent|Task",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/journal.mjs\"" }
+        ]
+      },
+      {
+        "matcher": "Read|WebFetch",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/read-log.mjs\"" }
         ]
       }
     ],
@@ -69,7 +95,13 @@
       {
         "matcher": "^implementer$",
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify.sh" }
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify.sh", "timeout": 900 }
+        ]
+      },
+      {
+        "matcher": "^researcher$",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/quote-check.mjs\"" }
         ]
       }
     ],
