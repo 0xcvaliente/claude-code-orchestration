@@ -1,0 +1,1 @@
+{"id":"d3-reader","title":"Twelve questions over hard documents, one researcher per question (read router benchmark)","tier":"small","shape":"parallel","lang":"python","cap_min":8,"total":12,"test_cmd":"python3 tools/check.py","graded_paths":["answers.json"],"snapshot_every_s":30}
