@@ -152,6 +152,19 @@ test("stall: the last two counted fails share a gap key at or above the cutoff, 
   assert.equal(sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 30 low"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 30 low")], "a", { ORCH_GAP_MIN: "0" }).stalled, true);
 });
 
+test("stall: two same-gap fails of one attempt (a second opinion) do not stall; of two attempts they do", () => {
+  const same = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 crashes on empty input"), ...review(3, "a", "STATUS: fail\nGAP: 95 crashes on empty input")], "a");
+  assert.deepEqual([same.stalled, same.countedFails, same.reviews[0]?.implAt === same.reviews[1]?.implAt], [false, 2, true]);
+  const diff = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 crashes on empty input"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 95 crashes on empty input")], "a");
+  assert.deepEqual([diff.stalled, diff.stallKeys, diff.attempts], [true, [gapKey("crashes on empty input")], 2]);
+  // A second opinion after the retry keeps the stall: the latest fail is still compared with the earlier attempt's.
+  const third = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 x"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 90 x"), ...review(5, "a", "STATUS: fail\nGAP: 90 x")], "a");
+  assert.equal(third.stalled, true);
+  // A pass in the retry's attempt sits between them: no stall.
+  const passed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 x"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: pass"), ...review(5, "a", "STATUS: fail\nGAP: 90 x")], "a");
+  assert.equal(passed.stalled, false);
+});
+
 test("stall: three failed attempts still end the slice for good, which is never stalled", () => {
   const items = [1, 3, 5].flatMap((m) => [...implAttempt(m, "a"), ...review(m + 1, "a", "STATUS: fail\nGAP: 90 same gap")]);
   const s = sliceOf(items, "a");
