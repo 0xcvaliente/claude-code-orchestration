@@ -27,13 +27,13 @@ CHECKS: C1, C3       (optional: constraint ids this slice must satisfy)
 
 ## Optional brief lines (0.4.0)
 
-Any brief (implementer, reviewer, researcher) may carry these header lines. All are optional; none has gate behaviour yet (a later slice adds it, `KIND: bugfix` first). They follow the line rule above: first matching line wins, prefixes allowed, keys case-insensitive, a key in mid-line does not count.
+Any brief (implementer, reviewer, researcher) may carry these header lines. All are optional. `VALIDATE: gaps` on a reviewer brief changes how its review counts (see Review counting under Run model); `SOURCES`, `READ` and `KIND` have no gate behaviour yet (a later slice adds it, `KIND: bugfix` first). They follow the line rule above: first matching line wins, prefixes allowed, keys case-insensitive, a key in mid-line does not count.
 
 ```
 SOURCES: docs/research.md, https://example.com/spec.html   (paths or URLs the worker should read)
 READ: extract                                              (lookup, extract or judge: how the sources are read)
 KIND: bugfix                                               (the kind of work; only bugfix will have behaviour)
-VALIDATE: gaps                                             (ask the reviewer to rate each gap it reports)
+VALIDATE: gaps                                             (a validation review: re-check the listed gaps against the diff, keep only those that stand)
 ```
 
 | Line | Field | Parse |
@@ -130,9 +130,23 @@ A run belongs to one session. It is computed only from the log records below (no
 
 - **Open.** A PLAN REVIEW launch record (reviewer, `isPlanReview`) without `replan` opens a planned run and closes any run open in the session. A light-path implementer launch (`path: "light"`) opens a light run when no run is open. A PLAN REVIEW with `replan` extends the open run with its `plan.slices` and `plan.constraints` (with no run open it opens one). Other implementer launches join the open run; with none open they are not tracked. Launches with `workflow: true` are skipped. A new user prompt does not close a run.
 - **Attempts.** A retry may be a fresh implementer launch or a `SendMessage` resume of the same agent, which makes no launch. So attempts of a slice are counted from its implementer stop records (slice joined by `agent_id`), fresh launches and resumes alike. Stops with no review of the slice between them count as one attempt (a test-gate block makes the agent stop again).
-- **Final slice.** A slice is final when its latest review (a reviewer stop after the slice's latest implementer launch or stop) passed, or failed for good: its latest review failed after 3 implementer attempts in the run (`MAX_RETRIES` 2). A review with no STATUS is neither.
+- **Final slice.** A slice is final when its latest review (a reviewer stop after the slice's latest implementer launch or stop) passed, or failed for good: its latest review failed after 3 implementer attempts in the run (`MAX_RETRIES` 2). A review with no STATUS is neither. "Passed" and "failed" here, and in the gates, mean the review's counted status (below), not its raw STATUS.
 - **Closed run.** A planned run closes when every planned slice is final; a light run closes when its slice is final.
 - **Stale run.** A run is stale when nothing of it is running and no launch, stop or agent start happened in it for `ORCH_RUN_STALE_MIN` minutes (default 30). Running agents come from the `starts` input (telemetry.jsonl SubagentStart and SubagentStop records, which every agent emits): an agent runs from its SubagentStart to its next SubagentStop, or journal stop record, with the same `agent_id`; a resumed agent starts again under its id. A start belongs to the open run; a start after the run was idle for the threshold marks it stale instead of reviving it. So a long foreground worker, whose launch record is written only when it ends, never makes its run look idle. Without `starts`, staleness depends on launches and stops alone. A lost SubagentStop keeps the run from going stale until a new PLAN REVIEW closes it or the session ends (the review gate's own running check ignores starts older than the threshold). The plan check treats a stale run as closed (so a light launch opens a new run); the review gate keeps gating its unreviewed slices. A stop that arrives later (a long worker) still lands in the latest run that has its slice.
+
+### Review counting (0.4.0)
+
+Each review in a slice state keeps the reviewer's own `status` and adds a counted status, `counted`, which is what slice finality, `doubtSignals`, `hasOpusPass` and the gates use (`countedStatus(review)`).
+
+- **Gap cutoff.** `ORCH_GAP_MIN` is an integer from 0 to 100, default 80; any other value (empty, negative, above 100, a decimal, text) is 80. A review with STATUS fail counts as a fail when its stop record has any of: a gap with confidence at or above the cutoff; a gap with a null confidence (counted as 100, as the workflow does); an answer with verdict fail; or no gaps at all (an old-style reply, or a record from before 0.4.0 without `gaps`). Otherwise, a fail whose gaps are all below the cutoff counts as a pass and sets `lowConfidence`; it adds the doubt signal `low_confidence_fail`, so the opus escalation applies (an opus reviewer's low-confidence fail counts as an opus pass). `ORCH_GAP_MIN=0` makes every fail count: the 0.3.0 behaviour. A pass stays a pass and a reply without STATUS stays `null`, whatever its gaps.
+- **VALIDATE supersede.** `VALIDATE: gaps` marks a validation review: the reviewer re-checks the gaps an earlier review of the attempt listed against the diff and reports only the ones that stand. A review whose launch record has `validate: true` (that line in the reviewer's brief) supersedes the earlier reviews of the same slice made since the slice's latest implementer launch or stop: they get `superseded: true` and `counted: null`, so they count neither as a pass nor as a fail (no `retry` signal, no part of a stall). Reviews of an earlier attempt are not touched, and a validation reply with no STATUS supersedes nothing (it has no verdict to put in their place).
+- **Keys.** A counted fail keeps `keys`: the gap keys of its gaps at or above the cutoff (null confidence included), deduplicated. Every other review has `keys: []`.
+
+### Stall (0.4.0)
+
+A slice is **stalled** when a retry failed on the same gap again: it is not final; its latest review with a counted status (pass or fail) is a counted fail; the latest counted review of an earlier implementer attempt (with an implementer launch or stop between the two; each review keeps `implAt`, the slice's latest implementer launch or stop when it arrived) is a counted fail too; every counted review between them is a fail (no counted pass lies between them); the two share at least one key; and no REPLAN plan review of the run (a PLAN REVIEW launch with `replan`) has finished, meaning its reviewer stopped, after the later of them. A REPLAN still running keeps the stall; one that finished after the stall clears it even when it was launched before. The REPLAN need not name the stalled slice, since replacement slices get new ids. Two failing reviews of one attempt (a second opinion) never stall a slice on their own; a second opinion after the retry keeps comparing the latest fail with the earlier attempt's. A plain PLAN REVIEW opens a new run, where the slice starts with no reviews. A slice that failed for good (3 attempts) is final, so never stalled: three attempts still end as `slice_failed_for_good` exactly as before; the stall only adds the earlier, same-gap case. The fold reports the stall whatever `ORCH_STALL_GATE` says; the gates read the switch.
+
+Slice states also carry `countedFails` (reviews counted as fails), `stalled`, `stalledAt` (the second fail's time, or `null`), `stallKeys` (the shared keys) and `signals` (`doubtSignals` with the `env` passed to `foldRuns`); each run carries `replans` (the times the reviewers of its REPLAN plan reviews stopped).
 
 ## Reviewer model
 
@@ -145,10 +159,11 @@ A slice needs a passing opus review after its latest implementer launch when any
 | Signal | When |
 |---|---|
 | `risky` | `RISKY: yes` on its planned slice or its implementer brief |
-| `retry` | the slice already had a failed review |
-| `read_answer` | its latest passing review answered a constraint with `(read)` |
-| `open_items` | its latest passing review has a non-empty OPEN |
+| `retry` | the slice already had a review counted as a fail |
+| `read_answer` | its latest review counted as a pass answered a constraint with `(read)` |
+| `open_items` | its latest review counted as a pass has a non-empty OPEN |
 | `tests_failed_isolated` | a test-gate record `tests_failed_isolated` (joined by `agent_id`) belongs to its latest attempt: it is later than the review the attempt followed |
+| `low_confidence_fail` | a review after its latest implementer launch or stop reported fail but counts as a pass, because every gap was below `ORCH_GAP_MIN` (and not superseded) |
 
 `ORCH_ESCALATION=off` disables the signals; `ORCH_ESCALATION=always` requires an opus review for every slice (signal `always`).
 
@@ -182,7 +197,7 @@ The record keeps hosts only, never a URL's path, query or fragment (which can ca
 | `quotes` | the number of QUOTE lines |
 | `files_touched` | `string[]`, present only when the caller passes `filesTouched` as an array of strings (an empty array included); any other value leaves the field out |
 
-Records written before 0.4.0 lack these fields; readers treat a missing field as empty, and `foldRuns`, `doubtSignals` and the gates do not read them yet, so runs fold and gate exactly as before.
+Records written before 0.4.0 lack these fields; readers treat a missing field as empty. `foldRuns` reads `gaps` for review counting and the stall, and the reviewer launch record's `validate` for supersede; a stop record without `gaps` is an old-style reply, whose fail counts, so records without the 0.4.0 fields fold and gate exactly as before.
 
 **Stop record** (`journal.jsonl` at SubagentStop; `stopRecord({ ts, sessionId, agentId, role, slice, reply, status, run, filesTouched })`): `ts`, `session_id`, `agent_id`, `role` (bare; readers also accept `agent_type`), `slice` (from the launch record with the same `agent_id`, or through `journal-pending.jsonl` when the stop arrives before its launch, as `journal.mjs` does today), `status` (`parseStatus` of the final report), `answers`, `open` (`parseReply`), `run` (the id `foldRuns` gives the run at write time: runs are numbered 1, 2, ... in session order). A resumed agent keeps its `agent_id`, so its stops join the same launch. A reviewer stop may also carry `model`; otherwise the model comes from its launch record.
 
@@ -190,7 +205,7 @@ Records written before 0.4.0 lack these fields; readers treat a missing field as
 
 **Ordering.** A foreground agent's SubagentStop, and the test-gate record written at that stop, are logged before its PostToolUse launch record (journal.mjs:10). So a stop or gate record whose `agent_id` matches a launch record is placed at its effective time, `max(own ts, launch ts)`: never before its launch. Every launch, stop and gate record is ordered by that time. At equal times the launch comes first, and the stops and gates keep the order of their own `ts` (a stop before a gate at equal `ts`). The effective time is also the time the record counts at (review times, run activity, staleness). A record whose launch never appears keeps its own `ts` and today's handling.
 
-New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opus_review_required`, `builtin_agent_in_run`. Every one except `agents_running` has a `<reason>_gave_up` form, logged when the gate lets the launch or reply through after 2 blocks (the loop guard). `agents_running` is an allow and is never counted as a block, so it never gives up and has no `_gave_up` form.
+New gate reasons: `agents_running`, `not_in_plan`, `constraints_unchecked`, `opus_review_required`, `builtin_agent_in_run`, and in 0.4.0 `replan_required` (both gates). Every one except `agents_running` has a `<reason>_gave_up` form, logged when the gate lets the launch or reply through after 2 blocks (the loop guard). `agents_running` is an allow and is never counted as a block, so it never gives up and has no `_gave_up` form.
 
 ## Gates (slice A1)
 
@@ -198,6 +213,14 @@ Hooks read the records through `.claude/hooks/run.mjs` (`loadRecords`, `sessionR
 
 - **Review gate** (`review-gate.mjs`, Stop). `agents_running` (allow, not counted as a block) while Stop's `background_tasks` lists an active (`running`, `pending`, `queued`) subagent, workflow or teammate; without `background_tasks`, while a SubagentStart younger than `ORCH_RUN_STALE_MIN` has no SubagentStop. Otherwise each slice of the latest run with an implementer attempt, and the slice of the session's last implementer, needs its latest review after its latest attempt to pass (`no_reviewer_after_last_implementer`, `last_reviewer_failed`, `last_reviewer_no_status`), every CHECKS id of that reviewer's brief answered with pass (`constraints_unchecked`; no CHECKS skips, logged in `skips`), and, when a doubt signal fired, a passing opus review (`opus_review_required`). A slice failed for good allows with `slice_failed_for_good` and a systemMessage naming it. When the last implementer has no slice in the run model (workflow agents, old briefs), the old rule decides (a passing reviewer after the last implementer, from telemetry). Loop guard: 2 blocks per reason since the last implementer stop, then allow with a systemMessage (`max_blocks_reached` for the old reasons, `<reason>_gave_up` for the new ones).
 - **Plan check** (`plan-check.mjs`, PreToolUse on Agent). Scoped to the open run (with none open, to the launches since the last run; a light launch opening the next run sees both); each entry logs its `run`. `builtin_agent_in_run` blocks fork and the built-ins (`general-purpose`, also meant by a missing `subagent_type`, `claude`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) while a run is open and not stale, never namespaced or project agents (`ORCH_ALLOW_BUILTINS=1` disables). `no_plan_review` waits for this run's plan reviewer to stop. `not_in_plan`: in a planned run with slice lines, the SLICE must be planned (or added by REPLAN) and FILES covered by its planned FILES after `normalizeFiles` (a planned folder or glob covers what is under it); no slice lines or no planned FILES skip, logged. Each of these, and `missing_lines`, blocks twice per scope, then lets the launch through as `<reason>_gave_up`. `file_overlap` and `dependency_cycle` block every time, as before.
+
+## Stall gate and gap cutoff in the gates (0.4.0)
+
+- **Review counting.** Both gates read reviews through the fold, so a low-confidence fail counts as a pass there (the Stop gate logs `last_reviewer_failed:<slice>:low_confidence` in `skips` and, with `low_confidence_fail` as a doubt signal, asks for an opus review), and a VALIDATE review replaces the earlier reviews of its attempt. The Stop gate's fallback for an implementer outside the run model (old rule, from telemetry) reads the raw STATUS and is unchanged.
+- **Stop gate.** For a stalled slice whose latest review after its latest attempt is a counted fail, the Stop gate blocks with `replan_required` instead of `last_reviewer_failed`: send the plan reviewer a PLAN REVIEW brief with `REPLAN: <n>` and a changed approach, or report the slice as failed. Loop guard as for the other new reasons: 2 blocks since the last implementer stop, then allow with a systemMessage and `replan_required_gave_up` (`NEW_REASONS`).
+- **Plan check.** While the open run's slice is stalled, an implementer launch with that SLICE blocks with `replan_required` (checked after `no_plan_review`); 2 blocks per slice counted since the stall began (`stalledAt`), then the launch goes through as `replan_required_gave_up`. Other slices are not affected.
+- **Switches.** `ORCH_GAP_MIN` (0-100, default 80; `0` = every fail counts) and `ORCH_STALL_GATE` (on unless `off`; `off` = no `replan_required` in either gate). With `ORCH_GAP_MIN=0` and `ORCH_STALL_GATE=off` both gates behave as in 0.3.0.
+- **Native only.** The stall gate lives in `plan-check.mjs` and the Stop gate's per-slice check. The scripted workflow's agents make no Agent tool call and its implementer briefs carry `ORCHESTRATION: workflow`, so they never reach the plan check or the run model, and the workflow applies its own `gapMin` cutoff in code.
 
 ## API (`.claude/hooks/brief.mjs`)
 
@@ -212,9 +235,9 @@ Hooks read the records through `.claude/hooks/run.mjs` (`loadRecords`, `sessionR
 | `briefUrls(text)` | unique http(s) URLs of a text, in order, at most 50 |
 | `gapKey(text)` | the 8-hex-character key of a gap text (stop record `gaps`) |
 | `launchRecord(toolInput, ctx)`, `stopRecord(ctx)` | the log records above |
-| `foldRuns({ launches, stops, gates, starts }, { now, staleMin, sessionId })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`, planned `files`; reviews carry their brief's `checks`), plus `planReviewed` and `running` per run |
-| `currentReviews(slice)` | reviews after the slice's latest implementer launch or stop |
+| `foldRuns({ launches, stops, gates, starts }, { now, staleMin, sessionId, gapMin, env })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`, planned `files`, `countedFails`, `stalled`, `stalledAt`, `stallKeys`, `signals`; reviews carry their brief's `checks`, `counted`, `lowConfidence`, `superseded`, `validate` and `keys`), plus `planReviewed`, `running` and `replans` per run. `gapMin` defaults to `gapMinimum(env)`; `env` defaults to `{}` |
+| `currentReviews(slice)`, `countedStatus(review)` | reviews after the slice's latest implementer launch or stop; a review's counted status |
 | `doubtSignals(slice, env)`, `hasOpusPass(slice)` | escalation |
-| `staleMinutes(env)`, `escalationMode(env)`, `MAX_RETRIES`, `RUN_STALE_MIN_DEFAULT` | settings |
+| `staleMinutes(env)`, `escalationMode(env)`, `gapMinimum(env)`, `stallGateOn(env)`, `MAX_RETRIES`, `RUN_STALE_MIN_DEFAULT`, `GAP_MIN_DEFAULT` | settings |
 
 Parity: `parseHeader` reads `SLICE`, `FILES` and `DEPENDS` as `plan-check.mjs` logs them, and `sliceOfBrief` keys a brief as `journal.mjs` does (`src/brief.test.mjs` runs both hooks to check). One difference: `journal.mjs` finds no slice in ``SLICE: `s1` `` (an id in backticks); `parseHeader` reads `s1`, as `plan-check.mjs` does.
