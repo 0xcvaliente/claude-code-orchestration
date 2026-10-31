@@ -1,0 +1,6 @@
+ORCHESTRATION: workflow
+SLICE: s2
+FILES: lib/a.js
+DEPENDS: none
+
+Implement a.

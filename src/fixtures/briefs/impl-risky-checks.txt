@@ -1,0 +1,7 @@
+- **SLICE:** `auth`
+- FILES: `src/auth.ts`, src/session/
+- DEPENDS: A0, A1
+- RISKY: yes
+- CHECKS: C1, c3, C3, notes
+
+Rotate the session secret.
