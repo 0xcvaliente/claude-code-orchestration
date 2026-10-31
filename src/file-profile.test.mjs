@@ -329,6 +329,17 @@ test("never throws: an unreadable file with an unknown extension is sonnet with 
   } finally {
     chmodSync(f, 0o600);
   }
+  const txt = join(dir, "u.txt");
+  writeFileSync(txt, "words");
+  chmodSync(txt, 0o000);
+  try {
+    const t = profileFile(txt, { cacheDir: dir });
+    assert.equal(t.kind, "missing");
+    assert.equal(t.tier, "sonnet");
+    assert.deepEqual(t.reasons, ["unreadable (EACCES): sonnet to be safe"]);
+  } finally {
+    chmodSync(txt, 0o600);
+  }
 });
 
 test("never throws: bad arguments and internal errors give a conservative result", () => {
@@ -341,6 +352,15 @@ test("never throws: bad arguments and internal errors give a conservative result
   assert.equal(none.tier, "haiku");
   assert.deepEqual(none.files, []);
   assert.deepEqual(none.reasons, ["no source list given"]);
+  const judged = profileSources([], { read: "judge" });
+  assert.equal(judged.tier, "sonnet");
+  assert.deepEqual(judged.reasons, ["no source list given", "read judge: sonnet"]);
+  assert.equal(profileSources(/** @type {any} */ (undefined), { risky: true }).tier, "opus");
+  for (const bad of ["a.pdf", { a: 1 }]) {
+    const r = profileSources(/** @type {any} */ (bad), { read: "lookup" });
+    assert.equal(r.tier, "sonnet");
+    assert.deepEqual(r.reasons, ["source list is not an array: sonnet to be safe", "read lookup: haiku"]);
+  }
   const mixed = profileSources(/** @type {any} */ ([null, fx("plain.txt")]), /** @type {any} */ (null));
   assert.equal(mixed.tier, "sonnet");
   assert.equal(mixed.files.length, 2);

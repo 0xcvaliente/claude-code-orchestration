@@ -5,7 +5,7 @@
 // Text conversions are cached under cacheDir (never in a .jsonl log), keyed by a sha1 of path, size and mtime.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -511,6 +511,14 @@ function profileFileUnsafe(path, opts) {
   }
   p.kind = kind;
   if (kind === "text" || kind === "code") {
+    try {
+      accessSync(real, constants.R_OK);
+    } catch (err) {
+      p.kind = "missing";
+      p.tier = "sonnet";
+      p.reasons.push(`unreadable (${errName(err)}): sonnet to be safe`);
+      return p;
+    }
     p.reasons.push(`${kind}: read as is`);
     if (st.size > READ_TIERS.largeTextBytes) p.reasons.push(`large: ${st.size} bytes, over Haiku's 100K-token price step`);
     return p;
@@ -558,12 +566,19 @@ export function profileSources(list, opts = {}) {
   const sources = Array.isArray(list) ? list : [];
   const files = sources.map((src) => profileFile(src, { read: opts.read, cacheDir: opts.cacheDir, run: opts.run }));
   /** @type {string[]} */
-  const reasons = Array.isArray(list) ? [] : ["no source list given"];
+  const reasons = [];
   /** @type {Tier} */
   let tier = "haiku";
+  if (list !== null && list !== undefined && !Array.isArray(list)) {
+    tier = "sonnet";
+    reasons.push("source list is not an array: sonnet to be safe");
+  } else if (!sources.length) {
+    reasons.push("no source list given");
+  }
   if (opts.read) {
-    tier = QUESTION_TIER[opts.read] ?? "haiku";
-    reasons.push(`read ${opts.read}: ${tier}`);
+    const question = QUESTION_TIER[opts.read] ?? "haiku";
+    tier = maxTier(tier, question);
+    reasons.push(`read ${opts.read}: ${question}`);
   }
   for (const f of files) {
     if (TIER_RANK[f.tier] > TIER_RANK[tier]) reasons.push(`${f.kind === "url" ? f.path : basename(f.path)}: ${f.tier}`);
