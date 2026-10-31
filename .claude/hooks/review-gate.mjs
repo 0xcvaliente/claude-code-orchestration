@@ -24,7 +24,7 @@
 //    ORCH_GAP_MIN (default 80; 0 = every fail counts) counts as a pass and adds the doubt signal low_confidence_fail;
 //    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
 //    "off"): a slice whose last two counted failed reviews share a gap key at or above the cutoff, with no REPLAN plan
-//    review started since, blocks with replan_required instead of last_reviewer_failed.
+//    review finished since, blocks with replan_required instead of last_reviewer_failed.
 // 3. Fallback, the old rule, when the session's last implementer has no slice in the run model (workflow agents, old
 //    briefs, launches outside a run): a reviewer must have finished after the last implementer (telemetry.jsonl) with
 //    STATUS: pass. Status is brief.mjs parseStatus (telemetry.mjs and journal.mjs both use it).
