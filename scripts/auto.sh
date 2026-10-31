@@ -14,6 +14,8 @@
 #                   allowed for the session, the orchestrator and the reviewer. The route line on stderr ends in (code: yes|no).
 # Usage: scripts/auto.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # Env: ORCH_MODE (auto|plain|reviewed|orchestrate, default auto: triage decides), plus everything scripts/orchestrate.sh reads.
+#      Every session (plain, reviewer, orchestrator) runs through orchestrate.sh, so ORCH_SESSION_PERSISTENCE=1 there keeps
+#      the session and subagent transcripts for all of them (default: --no-session-persistence).
 # Decisions are appended to <repo>/.claude/state/routes.jsonl (--project-state: beside runs.jsonl, even when the
 # folder does not register the hooks).
 set -uo pipefail
