@@ -26,9 +26,12 @@ const body = source.replace(/^export const meta = /m, "const meta = ");
 const slice = (id, o = {}) => ({ id, goal: `goal ${id}`, files: [`${id}.txt`], acceptance: `check ${id}`, dependsOn: [], risky: false, ...o });
 
 // Runs the script with a fake runtime. `slices` is the plan; `verdict(label)` returns a reviewer verdict.
-/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any }} RunOpts */
+// `planReview(prompt)` answers plan:review (default pass), `recheck(label, prompt)` the planner's re-ask after a failed plan
+// check (default null: the planner returns nothing, so the plan is fixed in code), `revise(prompt)` plan:revise (default
+// null) and `refute(label, prompt)` the refute pass (default: every gap stands).
+/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any, planReview?: (prompt: string) => any, recheck?: (label: string, prompt: string) => any, revise?: (prompt: string) => any, refute?: (label: string, prompt: string) => any }} RunOpts */
 /** @param {RunOpts} [opts] */
-async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement } = {}) {
+async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement, planReview = () => ({ pass: true, gaps: [] }), recheck = () => null, revise = () => null, refute = () => ({ gaps: [] }) } = {}) {
   /** @type {any[]} */
   const calls = [];
   /** @type {string[]} */
@@ -42,6 +45,10 @@ async function run({ args = {}, slices, constraints, replan = { slices: [] }, qu
     if (label === "plan:questions") return { questions };
     if (label === "plan:slices") return constraints ? { constraints, slices } : { slices };
     if (label === "plan:replan") return replan;
+    if (label === "plan:review") return planReview(prompt);
+    if (label === "plan:revise") return revise(prompt);
+    if (label.endsWith(":recheck")) return recheck(label, prompt);
+    if (label.startsWith("refute:")) return refute(label, prompt);
     if (label === "checkpoint") return { status: "pass", commit: "abc123", open: "" };
     if (agentType === "researcher") return `answer to ${prompt}`;
     if (agentType === "implementer") return implement ? implement(label, opts) : { status: "pass", branch: opts.isolation ? `wt-${label}` : "", evidence: "ok", open: "" };
@@ -61,6 +68,9 @@ async function run({ args = {}, slices, constraints, replan = { slices: [] }, qu
 const labels = (calls) => calls.map((c) => c.opts.label);
 /** @param {any[]} calls */
 const implementers = (calls) => calls.filter((c) => c.opts.agentType === "implementer");
+// Slice reviewers only (the plan review and the refute pass are reviewer agents too).
+/** @param {any[]} calls */
+const reviewers = (calls) => calls.filter((c) => c.opts.agentType === "reviewer" && /^review:/.test(c.opts.label));
 
 test("meta is a pure literal whose phases match the phase() titles the script uses", async () => {
   assert.equal(meta.name, "orchestrate");
@@ -77,7 +87,7 @@ test("meta is a pure literal whose phases match the phase() titles the script us
 
 test("one slice: plan, explore, implement (workflow brief), review, in that order", async () => {
   const r = await run({ slices: [slice("only")], questions: ["q1", "q2"] });
-  assert.deepEqual(labels(r.calls), ["plan:questions", "explore:q1", "explore:q2", "plan:slices", "build:only#1", "review:only#1"]);
+  assert.deepEqual(labels(r.calls), ["plan:questions", "explore:q1", "explore:q2", "plan:slices", "plan:review", "build:only#1", "review:only#1"]);
   const brief = implementers(r.calls)[0].prompt;
   assert.match(brief, /^ORCHESTRATION: workflow\nSlice only\n/);
   assert.match(brief, /Files you own: only\.txt/);
@@ -147,7 +157,7 @@ test("a failing review retries with the gaps, then reports failed after maxRetri
     verdict: () => ({ pass: false, gaps: ["missing test"], evidence: "x" }),
   });
   const l = labels(r.calls);
-  assert.deepEqual(l.slice(-5), ["build:a#1", "review:a#1", "build:a#2", "review:a#2", "plan:replan"], "then one replan (which here returns nothing)");
+  assert.deepEqual(l.slice(-7), ["build:a#1", "review:a#1", "refute:a#1", "build:a#2", "review:a#2", "refute:a#2", "plan:replan"], "a refute pass after each failing review, then one replan (which here returns nothing)");
   assert.match(implementers(r.calls)[1].prompt, /A previous attempt was rejected\. Fix:\nmissing test/);
   assert.doesNotMatch(implementers(r.calls)[0].prompt, /previous attempt/);
   assert.deepEqual(r.result.slices, [{ id: "a", status: "failed", attempts: 2, gaps: ["missing test"] }]);
@@ -157,7 +167,7 @@ test("a failing review retries with the gaps, then reports failed after maxRetri
 test("risky slices get an extra opus review; a review that fails then passes ends passed on attempt 2", async () => {
   let n = 0;
   const r = await run({ slices: [slice("a", { risky: true })], verdict: () => (++n <= 2 ? { pass: false, gaps: ["g"], evidence: "" } : { pass: true, gaps: [], evidence: "" }) });
-  const reviews = r.calls.filter((c) => c.opts.agentType === "reviewer");
+  const reviews = reviewers(r.calls);
   assert.deepEqual(reviews.map((c) => c.opts.model), [undefined, "opus", undefined, "opus"]);
   assert.equal(r.result.slices[0].status, "passed");
   assert.equal(r.result.slices[0].attempts, 2);
@@ -206,8 +216,6 @@ test("every implementer brief the script sends is skipped by plan-check.mjs; the
   }
 });
 
-/** @param {any[]} calls */
-const reviewers = (calls) => calls.filter((c) => c.opts.agentType === "reviewer");
 const C = [{ id: "C1", text: "parsing never throws" }, { id: "c2", text: "no new dependencies" }];
 /** @param {string[]} ids @param {"cmd"|"read"} [mode] */
 const answered = (ids, mode = "cmd") => ({ pass: true, gaps: [], evidence: "ok", open: "", answers: ids.map((id) => ({ id, verdict: "pass", mode, detail: "npm test -> ok" })) });
