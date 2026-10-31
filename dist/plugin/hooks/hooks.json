@@ -26,7 +26,7 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/plan-check.mjs\" --plugin",
-            "timeout": 30
+            "timeout": 60
           }
         ]
       },
