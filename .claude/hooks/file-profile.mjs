@@ -201,6 +201,36 @@ export function pageLayout(page, t = READ_TIERS) {
 /** @param {string} msg */
 const short = (msg) => msg.split("\n")[0]?.slice(0, 80) ?? "";
 
+/** Error code or first line, for reasons (never file text). @param {unknown} err */
+const errName = (err) => {
+  const e = /** @type {NodeJS.ErrnoException} */ (err);
+  return (e && typeof e === "object" && e.code) || short(String((e && typeof e === "object" && e.message) || e));
+};
+
+/**
+ * Write a conversion to the cache. A cache failure keeps the tier: it drops textPath and says why.
+ * @param {string} cacheDir @param {string} file @param {string} text @param {string[]} reasons
+ */
+function writeCache(cacheDir, file, text, reasons) {
+  try {
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(file, text);
+    return true;
+  } catch (err) {
+    reasons.push(`cache unwritable (${errName(err)}): no text conversion`);
+    return false;
+  }
+}
+
+/** Cached text, or undefined when absent or unreadable. @param {string} file */
+function readCache(file) {
+  try {
+    return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Run a tool; on failure return undefined and note why (missing or failed) in reasons.
  * @param {ToolRunner} run @param {string} cmd @param {string[]} args @param {number} timeout @param {string[]} reasons
@@ -237,23 +267,16 @@ function profilePdf(p, abs, st, o) {
   p.pages = pages;
 
   const txtPath = cachePath(o.cacheDir, abs, st, ".txt");
-  /** @type {string | undefined} */
-  let text;
-  if (existsSync(txtPath)) {
-    text = readFileSync(txtPath, "utf8");
-    reasons.push("text from cache");
-  } else {
-    text = tool(o.run, "pdftotext", ["-layout", "-enc", "UTF-8", abs, "-"], t.extractTimeoutMs, reasons);
-    if (text === undefined) return byExtension(p, "sonnet", "pdftotext unavailable");
-    if (nonSpace(text) > 0) {
-      mkdirSync(o.cacheDir, { recursive: true });
-      writeFileSync(txtPath, text);
-    }
-  }
+  const fromCache = readCache(txtPath);
+  let cached = fromCache !== undefined;
+  if (cached) reasons.push("text from cache");
+  const text = fromCache ?? tool(o.run, "pdftotext", ["-layout", "-enc", "UTF-8", abs, "-"], t.extractTimeoutMs, reasons);
+  if (text === undefined) return byExtension(p, "sonnet", "pdftotext unavailable");
+  if (!cached && nonSpace(text) > 0) cached = writeCache(o.cacheDir, txtPath, text, reasons);
   const pageTexts = text.split("\f").slice(0, Math.max(pages, 1));
   const totalChars = nonSpace(text);
   p.charsPerPage = Math.round(totalChars / Math.max(pages, 1));
-  if (totalChars > 0) p.textPath = txtPath;
+  if (totalChars > 0 && cached) p.textPath = txtPath;
 
   /** @type {Map<number, number>} figure share and image count per 1-based page */
   const area = new Map(), count = new Map();
@@ -411,14 +434,16 @@ function profileZip(p, abs, st, o) {
     p.mergedCells = merged;
     reasons.push(`${sheets.length} sheet(s)`);
     if (formulas) { tier = "sonnet"; reasons.push(`${formulas} formulas`); }
-    if (merged) { tier = "sonnet"; reasons.push(`${merged} merged cell ranges`); }
+    // Conservative beyond the research table (2.2): merged cells mean a layout the CSV export flattens.
+    if (merged) { tier = "sonnet"; reasons.push(`${merged} merged cell ranges: layout lost in CSV, sonnet to be safe`); }
     if (!formulas && !merged) reasons.push("plain data: read as CSV");
   } else if (p.kind === "docx") {
     const xml = part("word/document.xml");
     text = xml.split(/<\/w:p>/).map((para) => tagTexts(para, "w:t").join("")).filter((l) => l).join("\n") + "\n";
     p.images = names.filter((n) => n.startsWith("word/media/")).length;
     p.tables = (xml.match(/<w:tbl>/g) ?? []).length;
-    if (p.tables) { tier = "sonnet"; reasons.push(`${p.tables} tables`); }
+    // Conservative beyond the research table (2.2): "any table goes to sonnet" (2.7), as the text export flattens it.
+    if (p.tables) { tier = "sonnet"; reasons.push(`${p.tables} tables: structure lost in text, sonnet to be safe`); }
   } else {
     const slides = names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n)).sort(byNumber);
     text = slides.map((s, i) => `--- slide ${i + 1} ---\n${tagTexts(part(s), "a:t").join("\n")}`).join("\n") + "\n";
@@ -430,9 +455,7 @@ function profileZip(p, abs, st, o) {
     if (images >= t.imageHeavyMedia) { tier = "sonnet"; reasons.push(`image-heavy: ${images} media files`); }
     else reasons.push(`text from XML, ${images} media file(s)`);
   }
-  mkdirSync(o.cacheDir, { recursive: true });
-  writeFileSync(textPath, text);
-  p.textPath = textPath;
+  if (writeCache(o.cacheDir, textPath, text, reasons)) p.textPath = textPath;
   p.tier = tier;
   return p;
 }
@@ -444,6 +467,20 @@ function profileZip(p, abs, st, o) {
  * @returns {FileProfile}
  */
 export function profileFile(path, opts = {}) {
+  if (typeof path !== "string" || !path) {
+    return { path: String(path ?? ""), kind: "missing", ext: "", bytes: 0, tier: "sonnet", reasons: ["invalid path: not a non-empty string"] };
+  }
+  try {
+    return profileFileUnsafe(path, opts && typeof opts === "object" ? opts : {});
+  } catch (err) {
+    const ext = extname(path).slice(1).toLowerCase();
+    const kind = /^https?:\/\//i.test(path) ? "url" : kindOfExt(ext) ?? "missing";
+    return { path, kind, ext, bytes: 0, tier: "sonnet", reasons: [`profiler error (${errName(err)}): sonnet to be safe`] };
+  }
+}
+
+/** @param {string} path @param {ProfileOptions} opts @returns {FileProfile} */
+function profileFileUnsafe(path, opts) {
   const o = { run: opts.run ?? defaultRun, cacheDir: opts.cacheDir ?? join(tmpdir(), "orchestration-file-cache"), read: opts.read };
   if (/^https?:\/\//i.test(path)) return profileUrl(path);
   const abs = resolve(path);
@@ -463,7 +500,13 @@ export function profileFile(path, opts = {}) {
   const real = (() => { try { return realpathSync(abs); } catch { return abs; } })();
   let kind = kindOfExt(ext);
   if (!kind) {
-    kind = sniff(head(real));
+    try {
+      kind = sniff(head(real));
+    } catch (err) {
+      p.tier = "sonnet";
+      p.reasons.push(`unreadable (${errName(err)}): sonnet to be safe`);
+      return p;
+    }
     p.reasons.push(`no known extension: sniffed as ${kind}`);
   }
   p.kind = kind;
@@ -477,7 +520,7 @@ export function profileFile(path, opts = {}) {
     return p;
   }
   if (kind === "image") {
-    const size = imageSize(head(real, 65536));
+    const size = (() => { try { return imageSize(head(real, 65536)); } catch { return undefined; } })();
     if (size) { p.width = size.width; p.height = size.height; }
     p.tier = "sonnet";
     p.reasons.push(`image${size ? ` ${size.width}x${size.height}` : ""}: content cannot be judged without a model`);
@@ -511,9 +554,11 @@ const QUESTION_TIER = { lookup: "haiku", extract: "haiku", judge: "sonnet" };
  * @param {{ read?: ReadKind, risky?: boolean, cacheDir?: string, run?: ToolRunner }} [opts]
  */
 export function profileSources(list, opts = {}) {
-  const files = list.map((src) => profileFile(src, { read: opts.read, cacheDir: opts.cacheDir, run: opts.run }));
+  if (!opts || typeof opts !== "object") opts = {};
+  const sources = Array.isArray(list) ? list : [];
+  const files = sources.map((src) => profileFile(src, { read: opts.read, cacheDir: opts.cacheDir, run: opts.run }));
   /** @type {string[]} */
-  const reasons = [];
+  const reasons = Array.isArray(list) ? [] : ["no source list given"];
   /** @type {Tier} */
   let tier = "haiku";
   if (opts.read) {

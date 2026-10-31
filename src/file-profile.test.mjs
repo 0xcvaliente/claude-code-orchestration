@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,7 +240,7 @@ test("xlsx with formulas: sonnet; sheets, formulas, merged cells and CSV from ca
   assert.equal(p.sheets, 2);
   assert.equal(p.formulas, 4);
   assert.equal(p.mergedCells, 1);
-  assert.deepEqual(p.reasons, ["2 sheet(s)", "4 formulas", "1 merged cell ranges"]);
+  assert.deepEqual(p.reasons, ["2 sheet(s)", "4 formulas", "1 merged cell ranges: layout lost in CSV, sonnet to be safe"]);
   assert.ok(p.textPath?.endsWith(".csv"));
   assert.equal(readFileSync(p.textPath ?? "", "utf8"),
     "# sheet: Sheet1\nItem,Qty,Price,Total\nWidget,3,2.5,7.5\nGadget,4,10,40\n,,,47.5\n\n# sheet: Summary\nBudget 2026\n\"Grand, total\",47.5\n");
@@ -298,6 +298,58 @@ test("image-heavy pptx and docx with tables go to sonnet (canned unzip)", () => 
   }) });
   assert.equal(tabled.tier, "sonnet");
   assert.equal(tabled.tables, 1);
+  assert.ok(tabled.reasons.includes("1 tables: structure lost in text, sonnet to be safe"));
+});
+
+test("never throws: an unwritable cacheDir keeps the tier and drops textPath", { skip: UNZIP || POPPLER }, () => {
+  const dir = tmp();
+  const notDir = join(dir, "a-file");
+  writeFileSync(notDir, "x");
+  const badCache = join(notDir, "cache");
+  const d = profileFile(fx("doc.docx"), { cacheDir: badCache });
+  assert.equal(d.tier, "haiku");
+  assert.equal(d.textPath, undefined);
+  assert.ok(d.reasons.includes("cache unwritable (ENOTDIR): no text conversion"), d.reasons.join("|"));
+  const p = profileFile(fx("text.pdf"), { cacheDir: badCache });
+  assert.equal(p.tier, "haiku");
+  assert.equal(p.textPath, undefined);
+  assert.ok(p.reasons.includes("cache unwritable (ENOTDIR): no text conversion"), p.reasons.join("|"));
+});
+
+test("never throws: an unreadable file with an unknown extension is sonnet with the error", { skip: process.getuid?.() === 0 ? "root can read any file" : false }, () => {
+  const dir = tmp();
+  const f = join(dir, "secret.unknownext");
+  writeFileSync(f, "data");
+  chmodSync(f, 0o000);
+  try {
+    const p = profileFile(f, { cacheDir: dir });
+    assert.equal(p.tier, "sonnet");
+    assert.equal(p.kind, "missing");
+    assert.deepEqual(p.reasons, ["unreadable (EACCES): sonnet to be safe"]);
+  } finally {
+    chmodSync(f, 0o600);
+  }
+});
+
+test("never throws: bad arguments and internal errors give a conservative result", () => {
+  const u = profileFile(/** @type {any} */ (undefined));
+  assert.equal(u.kind, "missing");
+  assert.equal(u.tier, "sonnet");
+  assert.deepEqual(u.reasons, ["invalid path: not a non-empty string"]);
+  assert.equal(profileFile(/** @type {any} */ (42)).tier, "sonnet");
+  const none = profileSources(/** @type {any} */ (null));
+  assert.equal(none.tier, "haiku");
+  assert.deepEqual(none.files, []);
+  assert.deepEqual(none.reasons, ["no source list given"]);
+  const mixed = profileSources(/** @type {any} */ ([null, fx("plain.txt")]), /** @type {any} */ (null));
+  assert.equal(mixed.tier, "sonnet");
+  assert.equal(mixed.files.length, 2);
+  const boom = profileFile(fx("text.pdf"), { cacheDir: tmp(), run: () => { throw "not an Error"; } });
+  assert.equal(boom.tier, "sonnet");
+  const crash = profileFile(fx("plain.xlsx"), { cacheDir: tmp(), run: /** @type {any} */ (() => 7) });
+  assert.equal(crash.kind, "xlsx");
+  assert.equal(crash.tier, "sonnet");
+  assert.match(crash.reasons[0] ?? "", /^profiler error \(.+\): sonnet to be safe$/);
 });
 
 test("conversions are cached by path, size and mtime", { skip: POPPLER }, () => {
