@@ -1,0 +1,12 @@
+{
+  "name": "short-k2",
+  "seed": 11,
+  "groups": [
+    {
+      "tasks": ["k2-stdlib-toolkit-xl"],
+      "arms": ["O-mix", "N-UC", "W-mix"],
+      "cells": [{ "id": "cap10", "cap_min": 10 }],
+      "reps": 1
+    }
+  ]
+}

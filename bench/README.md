@@ -15,6 +15,8 @@ Defined in `bench/arms.mjs`. Every arm except `SDK` goes through the product scr
 | `O-mix` | Orchestrator with agents as shipped (this repo's `.claude/` copied in) |
 | `O-O` | Orchestrator with every agent's `model:` line rewritten to Opus |
 | `AUTO` | `scripts/auto.sh`: triage picks plain, reviewed or the orchestrator |
+| `N-UC` | Native ultracode: Claude Code as shipped. No `.claude/` copied and every user-enabled plugin disabled, so the orchestration plugin and this repo's agents and hooks are not loaded. Built-in and fork subagents are allowed. Model Opus, as in `P-O`. The prompt is `ultracode <task prompt>`. `Workflow` is allowed. Launched by `bench/lib/native-launch.sh` (see "Short documentation run") |
+| `W-mix` | The shipped gated workflow: this repo's `.claude/` copied in (as `O-mix`, so `.claude/workflows/orchestrate.js` is present). `scripts/orchestrate.sh` runs with `ORCH_AGENT=none` and the prompt `/orchestrate {"task":<task prompt>,"code":true,"baseRefHead":true}`. `Workflow` is allowed |
 | `SDK` | The SDK pipeline: `npx tsx src/cli.ts --repo <run repo> --task <prompt> --mode orchestrate --no-escalate --out <run dir>/sdk [--test-cmd <task test_cmd>] [--budget <tokens>]`; no `.claude/` copied; no mid-run snapshots (see "The SDK arm") |
 
 ## Tasks
@@ -43,6 +45,7 @@ npm run bench -- --matrix bench/matrix/pilot-k2.json     # 1 rep: k2, P-O and O-
 npm run bench -- --matrix bench/matrix/lite-k2.json      # 2 reps: k2, all five arms, main cell (10 runs)
 npm run bench -- --matrix bench/matrix/sweeps.json       # k2 only, P-O vs O-mix, caps 10 and 60 min, budgets 3M and 8M tokens (16 runs)
 npm run bench -- --matrix bench/matrix/sdk-vs-native.json   # NOT RUN: k2 at cap10, O-mix vs SDK, 4 reps (8 runs); H8 in HYPOTHESES.md
+npm run bench -- --matrix bench/matrix/short-k2.json     # 1 rep: k2 at cap10, O-mix vs N-UC vs W-mix in one block (~10-15 min); direction only
 npm run bench:grade -- runs/bench/<campaign>             # offline grading of snapshots into grades.jsonl
 npm run bench:analyze -- runs/bench/<campaign>           # summary.json: token metrics, comparisons, hypothesis verdicts
 npm run bench:report -- runs/bench/<campaign>/summary.json   # report.html, plus benchmarks.md for docs/benchmarks.md
@@ -75,6 +78,15 @@ Compares the SDK pipeline (`src/cli.ts`) with the native orchestrator (`O-mix`) 
 - Test gate. A task may set `sdk_test_cmd` in `meta.json`; the SDK arm uses it instead of `test_cmd`, because the pipeline runs the gate in each slice's worktree, where other slices' modules are still stubs (k2 runs only the changed modules' public tests). Other arms ignore it.
 - Cost. O-mix medians were about 4.7M tokens per run, so the 8 runs of `sdk-vs-native.json` are roughly 40M tokens plus the SDK's own spend. `ORCH_BUDGET_TOKENS` (a cell's `budget_tokens`) becomes `--budget` for the SDK; this campaign sets none.
 - No claims. The SDK prints no result claim, so its false-success rate is not meaningful.
+
+## Short documentation run
+
+`npm run bench -- --matrix bench/matrix/short-k2.json` runs k2-stdlib-toolkit-xl at a 10-minute cap (as `k2-cap10`), one rep each of `O-mix`, `N-UC` and `W-mix`. All three are one block, so they start together: about 10 to 15 minutes of wall time, plus grading. It is for documentation (Plan C, H12 in [HYPOTHESES.md](HYPOTHESES.md)). One rep per arm shows direction only. It decides no hypothesis.
+
+- `N-UC` launcher. `scripts/orchestrate.sh` exports `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0` for every run, and those would block native subagents. `bench/lib/native-launch.sh` therefore gets orchestrate.sh's claude arguments with `ORCH_DRY_RUN=1` and the same `ORCH_*` environment (model, permission rules, test-command rules, unsafe-Bash deny list, budget). It then runs `claude` itself in the run repo with those arguments and without the two variables. Tokens come from claude's JSON on stdout, per model, as for every other arm. orchestrate.sh's per-repo `runs.jsonl` log is not written.
+- `ultracode` in `-p`. The workflows doc (code.claude.com/docs/en/workflows.md) says the keyword opts in only in a prompt the user types, "It doesn't start a workflow when it reaches the session another way: a prompt passed with `-p`". So `N-UC` may run as a plain Opus session with built-in subagents rather than as a workflow. The stdout JSON does not list tool calls, so a run does not record which of the two happened. Check the session transcript before reading `N-UC` as "native workflow orchestration".
+- `W-mix` feasibility. On Claude Code 2.1.314 a probe (haiku, `--max-budget-usd 0.05`, 2 turns, about $0.008) ran `claude -p '/hello {"task":"toy"}' --permission-mode dontAsk --allowedTools Workflow` in a scratch folder with a toy `.claude/workflows/hello.js`. The model called `Workflow {"name":"hello","args":{"task":"toy"}}`, the workflow ran in the background, and `-p` waited for it and returned `{"echoed":{"task":"toy"}}`. A project workflow can therefore be started headless with the task as its argument. The shipped workflow is a project workflow (`.claude/workflows/orchestrate.js`): `dist/plugin` ships none, so the arm uses `/orchestrate` and not `/orchestration:orchestrate`. The k2 prompt itself was not probed. Whether the workflow's `agent()` launches reach the hook gates is unverified (see the header of `orchestrate.js`).
+- Analysis. `bench/analyze.mjs` must list `N-UC` and `W-mix` in its `ARMS` for the summary to include them.
 
 ## Outputs
 
