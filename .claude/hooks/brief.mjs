@@ -96,15 +96,16 @@ const word = (v) => ((v ?? "").replace(/[`'"*_]/g, "").trim().split(/\s+/)[0] ??
  *   sources: string[],
  *   read: 'lookup' | 'extract' | 'judge' | null,
  *   kind: string | null,
- *   validate: boolean
+ *   validate: boolean,
+ *   skills: string[]
  * }} Header
  */
 
 /**
  * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS, the scripted
  * workflow's ORCHESTRATION: workflow marker, and the optional SOURCES (a list, read like FILES), READ (lookup, extract
- * or judge, else null), KIND (its first word, lower-cased) and VALIDATE (true only for "gaps"). Missing lines give
- * null, [] or false.
+ * or judge, else null), KIND (its first word, lower-cased), VALIDATE (true only for "gaps") and SKILLS (skillNames).
+ * Missing lines give null, [] or false.
  * @param {unknown} text @returns {Header}
  */
 export function parseHeader(text) {
@@ -122,7 +123,24 @@ export function parseHeader(text) {
     read: readMode(field(t, "READ")),
     kind: word(field(t, "KIND")) || null,
     validate: word(field(t, "VALIDATE")) === "gaps",
+    skills: skillNames(field(t, "SKILLS")),
   };
+}
+
+/** At most this many skill names come back from a SKILLS line. */
+const MAX_SKILLS = 8;
+// A skill name: letters, digits, dot, underscore, slash and hyphen, with optional `ns:` parts ("anthropic-skills:docx"),
+// at most 100 characters. Anything else (a phrase, a sentence) is dropped, so a record never carries brief text.
+const SKILL_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/;
+
+/**
+ * SKILLS value: comma-separated skill names read like FILES (trimmed, quotes and backticks removed, empty and "none"
+ * dropped), entries that are not a skill name dropped, deduplicated keeping the first, at most 8.
+ * @param {string | undefined} v @returns {string[]}
+ */
+function skillNames(v) {
+  const names = list(v).filter((s) => s.length <= 100 && SKILL_RE.test(s));
+  return [...new Set(names)].slice(0, MAX_SKILLS);
 }
 
 /** READ value: lookup, extract or judge (its first word, any case), else null. @param {string | undefined} v @returns {'lookup' | 'extract' | 'judge' | null} */
@@ -427,12 +445,14 @@ export function escalationMode(env = {}) {
  *   slice: string | null, files: string[], depends: string[], path: 'light' | null, risky: boolean, checks: string[],
  *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
  *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] },
- *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[]
+ *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[],
+ *   skills?: string[]
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
  * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
  * (invalid URLs skipped); in `sources` an http(s) entry becomes its host, a path stays as it is. Older records carry only
- * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls.
+ * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls; older ones lack
+ * skills (the names from SKILLS, never other brief text).
  *
  * @typedef {{ confidence: number | null, key: string }} GapKey
  * @typedef {{
@@ -488,6 +508,7 @@ export function launchRecord(toolInput, ctx = {}) {
   rec.kind = h.kind;
   rec.validate = h.validate;
   rec.urls = [...new Set(briefUrls(prompt).map(hostOf).filter((x) => x !== null))];
+  rec.skills = h.skills;
   return rec;
 }
 

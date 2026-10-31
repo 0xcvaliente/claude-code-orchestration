@@ -1,0 +1,6 @@
+SLICE: deck
+FILES: out/deck.pptx
+DEPENDS: none
+SKILLS: anthropic-skills:pptx, orchestration:route, `tdd`
+
+Build the deck. A SKILLS: key in mid-line does not count.
