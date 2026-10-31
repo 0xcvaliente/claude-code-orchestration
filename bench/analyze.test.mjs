@@ -615,3 +615,123 @@ test("buildPaired: only configured pairs that have pairs, three metrics each", (
   assert.deepEqual(out.map((d) => `${d.arm_a}>${d.arm_b}:${d.metric}`), ["all-haiku>routed:score_pct", "all-haiku>routed:pass", "all-haiku>routed:tokens"]);
   assert.equal(out[0].mean_diff, 43);
 });
+
+// ---------- d3-reader: researcher tokens, launches, validity (H14 amendment for d3-reader) ----------
+
+import { READER_HARD, buildReader, readerOf } from "./analyze.mjs";
+import { HARD as D3_HARD, KEY as D3_KEY } from "./tasks/d3-reader/score.mjs";
+
+const tok = (input, output, cache_read = 0, cache_write = 0) => ({ input, output, cache_read, cache_write });
+const rStart = (id) => ({ hook_event_name: "SubagentStart", agent_type: "researcher", agent_id: id, ts: "2026-10-31T00:00:00Z" });
+const rStop = (id, tokens, models = ["claude-haiku-4-5"]) => ({ hook_event_name: "SubagentStop", agent_type: "researcher", agent_id: id, ts: "2026-10-31T00:01:00Z", tokens, models });
+
+test("READER_HARD matches the d3-reader scorer's HARD list, and every hard kind has a question", () => {
+  assert.deepEqual(READER_HARD, D3_HARD);
+  for (const k of READER_HARD) assert.ok(D3_KEY.some((q) => q.category === k), k);
+});
+
+test("readerOf: last SubagentStop per researcher, launches from starts, models, hard and easy accuracy", () => {
+  const events = [
+    rStart("a"), rStart("b"), rStart("c"),
+    { hook_event_name: "SubagentStart", agent_type: "implementer", agent_id: "i" },
+    rStop("a", tok(10, 100, 1000, 0)), // blocked by the quote check ...
+    rStop("a", tok(20, 200, 2000, 500)), // ... its second stop includes the first's usage
+    rStop("b", tok(5, 50, 0, 0), ["claude-sonnet-5-5"]),
+    { hook_event_name: "SubagentStop", agent_type: "orchestration:researcher", agent_id: "c" }, // no transcript: no tokens
+    { hook_event_name: "SubagentStop", agent_type: "implementer", agent_id: "i", tokens: tok(1e6, 1e6) },
+  ];
+  const byCat = { "pdf-text": [2, 2], "pdf-table": [1, 2], "pdf-scan": [0, 2], chart: [2, 2], "xlsx-formula": [1, 2], docx: [1, 1], "pdf-long": [0, 1] };
+  const r = readerOf(events, [], { questions: 3, byCat });
+  assert.equal(r.researcher_launches, 3);
+  assert.equal(r.researcher_stops, 4);
+  assert.equal(r.researcher_tokens, 20 + 200 + 2000 + 500 + 5 + 50);
+  assert.equal(r.researcher_output_tokens, 250);
+  assert.equal(r.researchers_with_tokens, 2);
+  assert.deepEqual(r.researcher_models, { "haiku-4-5": 1, "sonnet-5-5": 1 });
+  assert.equal(r.hard_pct, 55.56); // 5 of 9
+  assert.equal(r.easy_pct, 66.67); // 2 of 3
+  assert.deepEqual(r.invalid, []);
+});
+
+test("readerOf: invalid with fewer launches than questions, or a routed run without router decisions", () => {
+  const two = [rStart("a"), rStart("b"), rStop("a", tok(1, 1)), rStop("b", tok(1, 1))];
+  assert.deepEqual(readerOf(two, [], { questions: 12 }).invalid, ["researcher_launches 2 < 12 questions"]);
+  const routedNone = readerOf(two, [], { questions: 2, routed: true });
+  assert.deepEqual(routedNone.invalid, ["no reads-route.jsonl decisions"]);
+  const routedOk = readerOf(two, [{ decision: "route", raised: true }, { decision: "skip" }, { junk: 1 }], { questions: 2, routed: true });
+  assert.deepEqual(routedOk.invalid, []);
+  assert.equal(routedOk.route_decisions, 2);
+  assert.equal(routedOk.routed_launches, 1);
+  assert.equal(routedOk.raised, 1);
+  // Stops only (no SubagentStart records): launches counted from stops. No tokens anywhere: researcher_tokens is null.
+  const noTok = readerOf([rStop("x"), rStop("y")], [], { questions: 2 });
+  assert.equal(noTok.researcher_launches, 2);
+  assert.equal(noTok.researcher_tokens, null);
+});
+
+test("analyze: d3-reader runs get reader metrics; invalid runs are listed and excluded from cells and paired differences", async () => {
+  const { mkdirSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tmp = mkdtempSync(join(tmpdir(), "an-reader-"));
+  try {
+    const doc = { type: "result", result: "Done.", num_turns: 1, modelUsage: { "claude-sonnet-5-5": { inputTokens: 10, outputTokens: 10, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } } };
+    const id = (arm, rep) => `d3-reader__${arm}__cap8__r${rep}`;
+    const rows = [];
+    const grades = [];
+    const plan = [
+      // arm, rep, researcher launches, tokens per researcher, router decisions, passed (of 12), hard passed (of 9)
+      ["reader-haiku", 1, 12, 1000, 0, 6, 3],
+      ["reader-haiku", 2, 12, 1200, 0, 7, 4],
+      ["reader-sonnet", 1, 12, 3000, 0, 11, 8],
+      ["reader-sonnet", 2, 12, 3400, 0, 12, 9],
+      ["reader-routed", 1, 12, 2000, 12, 11, 8],
+      ["reader-routed", 2, 12, 2000, 0, 12, 9], // invalid: no router decisions
+      ["reader-routed", 3, 9, 2000, 9, 9, 7], // invalid: 9 launches for 12 questions
+    ];
+    for (const [arm, rep, n, perR, decisions, passed, hard] of plan) {
+      const runId = id(arm, rep);
+      rows.push({ run_id: runId, task: "d3-reader", arm, cell: "cap8", rep, cap_min: 8, wall_ms: 200_000, end_reason: "exited", results: [doc] });
+      grades.push({ run_id: runId, snap: "final", secs: 200, pass: passed === 12, passed, total: 12, by_cat: { "pdf-table": [hard, 9], "pdf-text": [passed - hard, 3] } });
+      const state = join(tmp, runId, "state");
+      mkdirSync(state, { recursive: true });
+      const ev = [];
+      for (let i = 0; i < n; i++) ev.push(rStart(`r${i}`), rStop(`r${i}`, tok(0, perR / 2, perR / 2, 0)));
+      writeFileSync(join(state, "telemetry.jsonl"), ev.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      if (decisions) writeFileSync(join(state, "reads-route.jsonl"), Array.from({ length: decisions }, () => JSON.stringify({ decision: "route", raised: true })).join("\n") + "\n");
+    }
+    writeFileSync(join(tmp, "runs.jsonl"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    writeFileSync(join(tmp, "grades.jsonl"), grades.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const s = analyze([tmp], { now: "x" });
+    const run = (arm, rep) => s.runs.find((r) => r.run_id === id(arm, rep));
+    assert.equal(run("reader-haiku", 1).reader.researcher_tokens, 12_000);
+    assert.equal(run("reader-haiku", 1).reader.hard_pct, 33.33);
+    assert.equal(run("reader-routed", 1).excluded, false);
+    assert.equal(run("reader-routed", 2).excluded, true);
+    assert.deepEqual(s.reader.invalid.map((x) => [x.run_id, x.reasons]), [
+      [id("reader-routed", 2), ["no reads-route.jsonl decisions"]],
+      [id("reader-routed", 3), ["researcher_launches 9 < 12 questions"]],
+    ]);
+    assert.equal(s.counts.invalid, 2);
+    assert.equal(s.counts.included, 5);
+    assert.ok(s.excluded.find((e) => e.run_id === id("reader-routed", 3)).invalid);
+    const cell = (arm) => s.reader.cells.find((c) => c.arm === arm);
+    assert.equal(cell("reader-sonnet").researcher_tokens_median, 38_400);
+    assert.equal(cell("reader-sonnet").score_median, 95.84); // median of 91.67 and 100
+    assert.equal(cell("reader-routed").n, 1);
+    assert.equal(cell("reader-routed").researcher_tokens_median, 24_000);
+    assert.equal(cell("reader-haiku").hard_pct_median, 38.89);
+    assert.equal(s.cells.find((c) => c.arm === "reader-routed").n, 1); // the main cells exclude invalid runs too
+    const pd = (a, b, metric) => s.paired.find((d) => d.arm_a === a && d.arm_b === b && d.metric === metric);
+    assert.equal(pd("reader-sonnet", "reader-routed", "researcher_tokens").n_pairs, 1); // rep 1 only: reps 2 and 3 invalid
+    assert.equal(pd("reader-sonnet", "reader-routed", "researcher_tokens").mean_diff, 24_000 - 36_000);
+    assert.equal(pd("reader-haiku", "reader-sonnet", "researcher_tokens").n_pairs, 2);
+    assert.equal(pd("reader-haiku", "reader-routed", "hard_pct").mean_diff, 88.89 - 33.33);
+    assert.ok(pd("reader-haiku", "reader-sonnet", "score_pct").direction_only);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("buildReader: no reader runs gives an empty section; analyze adds the section only for d3-reader campaigns", () => {
+  assert.deepEqual(buildReader([{ run_id: "x", arm: "O-mix" }], []), { runs: 0, valid: 0, invalid: [], cells: [] });
+});
