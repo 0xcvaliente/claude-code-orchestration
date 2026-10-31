@@ -2,11 +2,11 @@
 // verify.sh) and the plugin userConfig bridge (state.mjs and verify.sh). Real temporary git repos, as in hooks.test.ts.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { isTestFile, parseFailures } from "../.claude/hooks/bugfix-check.mjs";
+import { complete, inFiles, isTestFile, parseFailures } from "../.claude/hooks/bugfix-check.mjs";
 import { bridgeOptions } from "../.claude/hooks/state.mjs";
 
 const hook = (/** @type {string} */ name) => new URL(`../.claude/hooks/${name}`, import.meta.url).pathname;
@@ -45,15 +45,18 @@ function repo(files) {
   return dir;
 }
 
-// A fake runner: prints failures.txt as TAP and fails when it is not empty.
+// A fake runner: prints failures.txt (runner output) and fails when it is not empty.
 const TAP_CMD = "cat failures.txt; ! test -s failures.txt";
+// Qualified failures in pytest's summary form.
+const FA = "FAILED tests/test_a.py::a - boom\n";
+const FB = "FAILED tests/test_b.py::b - boom\n";
 
 /**
- * verify.sh as the SubagentStop hook runs it. TMPDIR is a fresh dir per call so base worktrees can be checked.
- * @param {string} project @param {{ cwd?: string, env?: Record<string, string>, id?: string, transcript?: string }} [o]
+ * verify.sh as the SubagentStop hook runs it. TMPDIR is a fresh dir per call (or `o.tmp`) so base worktrees can be checked.
+ * @param {string} project @param {{ cwd?: string, env?: Record<string, string>, id?: string, transcript?: string, tmp?: string }} [o]
  */
 function gate(project, o = {}) {
-  const tmp = mkdtempSync(join(tmpdir(), "orch-tg2-tmp-"));
+  const tmp = o.tmp ?? mkdtempSync(join(tmpdir(), "orch-tg2-tmp-"));
   /** @type {Record<string, unknown>} */
   const event = { agent_type: "orchestration:implementer", agent_id: o.id ?? "a1", cwd: o.cwd ?? project, session_id: "s1" };
   if (o.transcript) event.agent_transcript_path = o.transcript;
@@ -70,33 +73,61 @@ const cacheFile = (/** @type {string} */ project) => join(project, ".claude", "s
 
 // ---- parser ----
 
-test("parseFailures: names from node --test (TAP and spec), jest, vitest, pytest, go and cargo", () => {
-  assert.deepEqual(parseFailures("TAP version 13\nok 1 - fine\nnot ok 2 - adds numbers\n  not ok 1 - nested case\nnot ok 3 - later # TODO\n"), ["adds numbers", "nested case"]);
-  assert.deepEqual(parseFailures("✔ ok (0.1ms)\n✖ a b (0.47ms)\n✖ failing tests:\n✖ a b (0.47ms)\n"), ["a b"]);
-  assert.deepEqual(parseFailures("  ● Math › adds\n    ✕ adds (5 ms)\n"), ["Math › adds", "adds"]);
-  assert.deepEqual(parseFailures(" FAIL  src/x.test.ts > suite > case\n × case 3ms\n"), ["case", "src/x.test.ts > suite > case"]);
-  assert.deepEqual(parseFailures("FAILED tests/test_x.py::test_a - AssertionError: no\nERROR tests/test_y.py::test_b\n"), ["tests/test_x.py::test_a", "tests/test_y.py::test_b"]);
-  assert.deepEqual(parseFailures("--- FAIL: TestAdd (0.00s)\n    --- FAIL: TestAdd/sub (0.00s)\n"), ["TestAdd", "TestAdd/sub"]);
-  assert.deepEqual(parseFailures("test tests::adds ... FAILED\ntest tests::ok ... ok\n"), ["tests::adds"]);
-  assert.deepEqual(parseFailures("\x1b[31mnot ok 1 - red\x1b[0m\n"), ["red"]);
-  assert.deepEqual(parseFailures("Error: boom\nnpm ERR! Test failed.\n"), []);
-  assert.deepEqual(parseFailures(undefined), []);
+/** @param {string} text @param {string} [root] */
+const names = (text, root) => parseFailures(text, root).names;
+
+test("parseFailures: every name is qualified by its file or package", () => {
+  const tap = "TAP version 13\nok 1 - fine\nnot ok 2 - adds numbers\n  ---\n  duration_ms: 1\n  location: '/repo/test/a.test.mjs:3:1'\n  ...\nnot ok 3 - later # TODO\n";
+  assert.deepEqual(names(tap, "/repo"), ["test/a.test.mjs::adds numbers"]);
+  assert.deepEqual(names(tap), ["/repo/test/a.test.mjs::adds numbers"]);
+  const spec = "✖ a b (0.47ms)\nℹ fail 1\n\n✖ failing tests:\n\ntest at test/x.test.mjs:1:32\n✖ a b (0.47ms)\n  Error: x\n";
+  assert.deepEqual(names(spec), ["test/x.test.mjs::a b"]);
+  assert.deepEqual(names("FAIL src/math.test.js\n  ● Math › adds\n    ✕ adds (5 ms)\n"), ["src/math.test.js::Math › adds", "src/math.test.js::adds"]);
+  assert.deepEqual(names(" FAIL  src/x.test.ts > suite > case\n ❯ src/y.test.ts (2 tests | 1 failed)\n   × other 3ms\n"), ["src/x.test.ts::suite > case", "src/y.test.ts::other"]);
+  assert.deepEqual(names("FAILED tests/test_x.py::test_a - AssertionError: no\nERROR tests/test_y.py::test_b\nFAILED (failures=1)\n"), ["tests/test_x.py::test_a", "tests/test_y.py::test_b"]);
+  assert.deepEqual(names("--- FAIL: TestAdd (0.00s)\n    --- FAIL: TestAdd/sub (0.00s)\nFAIL\nFAIL\texample.com/m/calc\t0.01s\n"), ["example.com/m/calc::TestAdd", "example.com/m/calc::TestAdd/sub"]);
+  assert.deepEqual(names("     Running unittests src/lib.rs (target/debug/deps/m-1a2b)\ntest tests::adds ... FAILED\ntest tests::ok ... ok\n"), ["src/lib.rs::tests::adds"]);
+  assert.deepEqual(names("\x1b[31mFAILED t/test_r.py::red\x1b[0m\n"), ["t/test_r.py::red"]);
+  assert.deepEqual(parseFailures("Error: boom\nnpm ERR! Test failed.\n"), { names: [], unqualified: [], crash: false });
+  assert.deepEqual(parseFailures(undefined), { names: [], unqualified: [], crash: false });
   assert.ok(isTestFile("tests/value_test.sh") && isTestFile("src/a.test.ts") && isTestFile("pkg/test_x.py") && isTestFile("x_test.go"));
   assert.ok(!isTestFile("src/app.ts") && !isTestFile("latest/notes.js"));
+});
+
+test("parseFailures: unqualified names and suite-level crashes are flagged, so they never count as already failing", () => {
+  const bareTap = parseFailures("not ok 1 - a\n");
+  assert.deepEqual([bareTap.names, bareTap.unqualified, complete(bareTap)], [[], ["a"], false]);
+  const goNoPkg = parseFailures("--- FAIL: TestX (0.00s)\n");
+  assert.deepEqual([goNoPkg.unqualified, complete(goNoPkg)], [["TestX"], false]);
+  assert.equal(complete(parseFailures("  ● Math › adds\n")), false, "jest name without its FAIL header");
+  assert.equal(complete(parseFailures("✖ a b (1ms)\n")), false, "spec reporter without the summary");
+  for (const crash of [
+    "FAIL src/a.test.js\n  ● Test suite failed to run\n",
+    "ERROR tests/test_a.py\n!!! Interrupted: 1 error during collection !!!\n",
+    "_____ ERROR collecting tests/test_a.py _____\nImportError while importing test module\n",
+    "FAIL\texample.com/m [build failed]\n",
+    "error: could not compile `m`\n",
+    " FAIL  src/a.test.ts [ src/a.test.ts ]\n",
+  ]) {
+    assert.equal(parseFailures(crash).crash, true, crash);
+    assert.equal(complete(parseFailures(`${FA}${crash}`)), false, crash);
+  }
+  assert.ok(inFiles("tests/v_test.sh::case", ["tests/v_test.sh"]) && inFiles("example.com/m/calc::TestX", ["calc/x_test.go"]));
+  assert.ok(!inFiles("tests/other_test.sh::case", ["tests/v_test.sh"]) && !inFiles("case", ["tests/v_test.sh"]));
 });
 
 // ---- baseline ----
 
 test("baseline: a test that already fails on HEAD warns with counts; a new failing test still blocks", () => {
-  const dir = repo({ "failures.txt": "not ok 1 - a\n", "app.js": "export {};\n" });
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   write(dir, { "app.js": "export const x = 1;\n" });
   const same = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD } });
   assert.equal(same.status, 0, same.stderr);
   const rec = last(dir);
   assert.deepEqual([rec.decision, rec.reason, rec.failing, rec.base_failing], ["warn", "tests_failed_baseline", 1, 1]);
-  assert.doesNotMatch(gateLog(dir), /not ok/, "no test output in gates.jsonl");
+  assert.doesNotMatch(gateLog(dir), /FAILED|boom/, "no test output in gates.jsonl");
 
-  write(dir, { "failures.txt": "not ok 1 - a\nnot ok 2 - b\n" });
+  write(dir, { "failures.txt": FA + FB });
   const added = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" });
   assert.equal(added.status, 2);
   assert.equal(last(dir).reason, "tests_failed");
@@ -104,7 +135,7 @@ test("baseline: a test that already fails on HEAD warns with counts; a new faili
 });
 
 test("baseline: a clean shared tree and output without test names never take the baseline path", () => {
-  const clean = repo({ "failures.txt": "not ok 1 - a\n" });
+  const clean = repo({ "failures.txt": FA });
   assert.equal(gate(clean, { env: { ORCH_TEST_CMD: TAP_CMD } }).status, 2);
   assert.equal(last(clean).reason, "tests_failed");
   assert.ok(!existsSync(cacheFile(clean)), "no base run for a clean tree");
@@ -122,7 +153,7 @@ test("baseline: a clean shared tree and output without test names never take the
 });
 
 test("baseline: an isolated worktree compares against its fork point, not the main worktree's later HEAD", () => {
-  const dir = repo({ "failures.txt": "not ok 1 - a\n", "app.js": "export {};\n" });
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   const wt = join(dir, ".claude", "worktrees", "s1");
   git(dir, "worktree", "add", "-q", "-b", "slice", wt);
   // Main moves on and fixes test a; the slice forked before that.
@@ -139,7 +170,7 @@ test("baseline: an isolated worktree compares against its fork point, not the ma
 });
 
 test("baseline: the base result is cached per base commit and command, and the base worktree is removed", () => {
-  const dir = repo({ "failures.txt": "not ok 1 - a\n", "app.js": "export {};\n" });
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   const head = git(dir, "rev-parse", "HEAD").trim();
   write(dir, { "app.js": "export const x = 1;\n" });
   const first = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD } });
@@ -154,9 +185,9 @@ test("baseline: the base result is cached per base commit and command, and the b
   const keys = Object.keys(cache);
   assert.equal(keys.length, 1);
   assert.ok(keys[0]?.startsWith(head));
-  cache[keys[0] ?? ""] = { rc: 1, names: ["a", "b"] };
+  cache[keys[0] ?? ""] = { rc: 1, names: ["tests/test_a.py::a", "tests/test_b.py::b"] };
   writeFileSync(cacheFile(dir), JSON.stringify(cache));
-  write(dir, { "failures.txt": "not ok 1 - a\nnot ok 2 - b\n" });
+  write(dir, { "failures.txt": FA + FB });
   const cached = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" });
   assert.equal(cached.status, 0, cached.stderr);
   assert.equal(last(dir).reason, "tests_failed_baseline");
@@ -168,20 +199,75 @@ test("baseline: the base result is cached per base commit and command, and the b
 });
 
 test("baseline: ORCH_BASELINE=off gates as 0.3.0", () => {
-  const dir = repo({ "failures.txt": "not ok 1 - a\n", "app.js": "export {};\n" });
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   write(dir, { "app.js": "export const x = 1;\n" });
   assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ORCH_BASELINE: "off" } }).status, 2);
   assert.equal(last(dir).reason, "tests_failed");
   assert.ok(!existsSync(cacheFile(dir)));
 });
 
+test("baseline: suite crashes in different files and same-named tests in different files are new failures", () => {
+  const crash = repo({ "failures.txt": "FAIL src/a.test.js\n  ● Test suite failed to run\n", "app.js": "x\n" });
+  write(crash, { "failures.txt": "FAIL src/b.test.js\n  ● Test suite failed to run\n", "app.js": "y\n" });
+  assert.equal(gate(crash, { env: { ORCH_TEST_CMD: TAP_CMD } }).status, 2);
+  assert.equal(last(crash).reason, "tests_failed");
+
+  const same = repo({ "failures.txt": "FAIL src/a.test.js\n  ● math › adds\n", "app.js": "x\n" });
+  write(same, { "failures.txt": "FAIL src/b.test.js\n  ● math › adds\n", "app.js": "y\n" });
+  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD } }).status, 2);
+  assert.equal(last(same).reason, "tests_failed");
+  // The same test in the same file is already failing on the base.
+  write(same, { "failures.txt": "FAIL src/a.test.js\n  ● math › adds\n" });
+  assert.equal(gate(same, { env: { ORCH_TEST_CMD: TAP_CMD }, id: "a2" }).status, 0);
+  assert.equal(last(same).reason, "tests_failed_baseline");
+});
+
+// The base worktree lacks the git-ignored env.ok: there the command fails without names, or hangs.
+const ENV_CMD = `test -f env.ok || { echo "environment missing"; exit 1; }; ${TAP_CMD}`;
+const SLOW_CMD = `test -f env.ok || exec sleep 5; ${TAP_CMD}`;
+
+test("baseline: a base run that fails without names or times out is no baseline and is not cached", () => {
+  const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
+  write(dir, { "env.ok": "", "app.js": "y\n" });
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: ENV_CMD } }).status, 2);
+  assert.equal(last(dir).reason, "tests_failed");
+  assert.ok(!existsSync(cacheFile(dir)), "an environment failure is never cached");
+
+  const t0 = Date.now();
+  const slow = gate(dir, { env: { ORCH_TEST_CMD: SLOW_CMD, ORCH_BASE_TIMEOUT_S: "1" }, id: "a2" });
+  assert.equal(slow.status, 2);
+  assert.equal(last(dir).reason, "tests_failed");
+  assert.ok(Date.now() - t0 < 4500, `the base run was cut off at the timeout (${Date.now() - t0} ms)`);
+  assert.ok(!existsSync(cacheFile(dir)));
+  assert.deepEqual(readdirSync(slow.tmp).filter((f) => f.startsWith("orch-base-")), []);
+  assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
+});
+
+test("baseline: a base run prunes worktrees left by killed runs older than an hour", () => {
+  const dir = repo({ "failures.txt": FA, "app.js": "x\n" });
+  write(dir, { "app.js": "y\n" });
+  const tmp = mkdtempSync(join(tmpdir(), "orch-tg2-tmp-"));
+  for (const d of ["orch-base-old", "orch-base-new"]) mkdirSync(join(tmp, d));
+  git(dir, "worktree", "add", "-q", "--detach", join(tmp, "orch-base-old", "wt"));
+  const hourAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  utimesSync(join(tmp, "orch-base-old"), hourAgo, hourAgo);
+  assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD }, tmp }).status, 0);
+  assert.deepEqual(readdirSync(tmp).filter((f) => f.startsWith("orch-base-")), ["orch-base-new"], "only the stale one is removed");
+  assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1, "its worktree record is pruned");
+});
+
 // ---- KIND: bugfix ----
 
-const RUN = 'for f in tests/*_test.sh; do [ -e "$f" ] || continue; bash "$f" || { echo "FAILED $f::case - no"; exit 1; }; done\n';
+// Runs every tests/*_test.sh and reports each failure as "FAILED <file>::case"; env.ok (git-ignored, present only in
+// the working tree) stands for the environment a base worktree may lack.
+const RUN = 'if [ -e need-env ] && [ ! -e env.ok ]; then echo "environment missing"; exit 1; fi\nrc=0\nfor f in tests/*_test.sh; do [ -e "$f" ] || continue; bash "$f" || { echo "FAILED $f::case - no"; rc=1; }; done\nexit $rc\n';
 const BUG_CMD = "bash run.sh";
-/** A repo with a bug (VALUE=1, should be 2) and a transcript whose brief has `kind`. @param {string | null} [kind] */
-function bugRepo(kind = "bugfix") {
-  const dir = repo({ "app.sh": "VALUE=1\n", "run.sh": RUN, "tests/ok_test.sh": "true\n" });
+/**
+ * A repo with a bug (VALUE=1, should be 2) and a transcript whose brief has `kind`.
+ * @param {string | null} [kind] @param {Record<string, string>} [extra] more committed files
+ */
+function bugRepo(kind = "bugfix", extra = {}) {
+  const dir = repo({ "app.sh": "VALUE=1\n", "run.sh": RUN, "tests/ok_test.sh": "true\n", ...extra });
   const transcript = join(mkdtempSync(join(tmpdir(), "orch-tg2-tr-")), "agent.jsonl");
   const brief = `SLICE: fix\nFILES: app.sh\nDEPENDS: none\n${kind ? `KIND: ${kind}\n` : ""}Fix VALUE.`;
   writeFileSync(transcript, [JSON.stringify({ type: "user", message: { content: brief } }), JSON.stringify({ type: "assistant", message: { content: [] } })].join("\n") + "\n");
@@ -211,7 +297,7 @@ test("bugfix: blocks without a test change, blocks when the test also passes on 
   const passes = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } });
   assert.equal(passes.status, 2);
   assert.equal(last(dir).reason, "bugfix_test_passes_on_base");
-  assert.match(passes.stderr, /tests\/other_test\.sh.*also pass on/);
+  assert.match(passes.stderr, /tests\/other_test\.sh.*add no failing test on/);
 
   const third = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } });
   assert.equal(third.status, 0, "two blocks for this agent: the third stop is let through");
@@ -239,6 +325,43 @@ test("bugfix: ORCH_BUGFIX_CHECK=off, a brief without KIND: bugfix, and the launc
   assert.equal(gate(headless.dir, { env: { ORCH_TEST_CMD: BUG_CMD }, id: "h1" }).status, 2);
   assert.equal(last(headless.dir).reason, "bugfix_no_test");
   assert.equal(gate(headless.dir, { env: { ORCH_TEST_CMD: BUG_CMD }, id: "h2" }).status, 0, "another agent's launch is not read");
+});
+
+test("bugfix: unrelated failures on the base do not verify a test that passes there; a real reproduction still does", () => {
+  const { dir, transcript } = bugRepo("bugfix", { "tests/broken_test.sh": REPRO });
+  write(dir, { "app.sh": "VALUE=2\n", "tests/other_test.sh": "true\n" });
+  const r = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } });
+  assert.equal(r.status, 2, "the base fails, but only the way it already did without the copied test");
+  assert.equal(last(dir).reason, "bugfix_test_passes_on_base");
+
+  write(dir, { "tests/value_test.sh": REPRO });
+  const ok = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD }, id: "a2" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual([last(dir).reason, last(dir).new_failing], ["bugfix_verified", 1]);
+});
+
+test("bugfix: an environment failure on the base blocks as unverified and is not cached", () => {
+  const { dir, transcript } = bugRepo("bugfix", { "need-env": "", ".gitignore": "env.ok\n" });
+  write(dir, { "env.ok": "", "app.sh": "VALUE=2\n", "tests/value_test.sh": REPRO });
+  const r = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } });
+  assert.equal(r.status, 2);
+  assert.equal(last(dir).reason, "bugfix_base_unusable");
+  assert.match(r.stderr, /unverified/);
+  assert.ok(!existsSync(cacheFile(dir)));
+});
+
+test("bugfix blocks and test-failure blocks have separate caps", () => {
+  const { dir, transcript } = bugRepo();
+  write(dir, { "app.sh": "VALUE=2\n" });
+  assert.equal(gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } }).status, 2);
+  assert.equal(gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } }).status, 2);
+  assert.equal(last(dir).reason, "bugfix_no_test");
+  const failing = gate(dir, { transcript, env: { ORCH_TEST_CMD: "exit 1" } });
+  assert.equal(failing.status, 2, "two bugfix blocks do not use up the tests_failed cap");
+  assert.equal(last(dir).reason, "tests_failed");
+  gate(dir, { transcript, env: { ORCH_TEST_CMD: "exit 1" } });
+  assert.equal(gate(dir, { transcript, env: { ORCH_TEST_CMD: "exit 1" } }).status, 0);
+  assert.equal(last(dir).reason, "max_blocks_reached");
 });
 
 test("bugfix and baseline: malformed hook input exits 0", () => {
@@ -282,7 +405,7 @@ test("verify.sh bridges the options before reading any setting; an explicit ORCH
   assert.equal(gate(outside, { env: { CLAUDE_PLUGIN_OPTION_TEST_CMD: "exit 0", ORCH_TEST_CMD: "exit 1" } }).status, 2);
   assert.equal(last(outside).reason, "tests_failed");
 
-  const dir = repo({ "failures.txt": "not ok 1 - a\n", "app.js": "export {};\n" });
+  const dir = repo({ "failures.txt": FA, "app.js": "export {};\n" });
   write(dir, { "app.js": "export const x = 1;\n" });
   assert.equal(gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, CLAUDE_PLUGIN_OPTION_BASELINE: "off" } }).status, 2);
   assert.equal(last(dir).reason, "tests_failed");

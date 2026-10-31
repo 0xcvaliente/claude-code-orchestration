@@ -16,10 +16,13 @@
 # Test baseline (ORCH_BASELINE=off disables): when the tests fail and the tree has changes against its base (HEAD for
 # the shared tree, the fork point from the main worktree's HEAD for an isolated worktree), bugfix-check.mjs runs the
 # same command in a clean detached worktree of the base and the gate warns (tests_failed_baseline, with counts) only
-# when every named failing test also fails there. Output without parsable test names never takes that path.
+# when every failing test, qualified by its file or package, also fails there. Output with an unqualified name, a
+# suite-level crash or no names, and a base run that times out (ORCH_BASE_TIMEOUT_S, default 300) or fails without
+# parsable names, never take that path.
 # KIND: bugfix (ORCH_BUGFIX_CHECK=off disables): after the tests pass, an implementer whose brief says KIND: bugfix
-# must have changed or added a test file that fails on the base (bugfix-check.mjs); blocks say what is missing, and
-# after two such blocks it allows with bugfix_unverified_gave_up.
+# must have changed or added a test file that adds a qualified failing test on the base (bugfix-check.mjs); blocks
+# say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
+# the bugfix cap are counted separately. Hook timeout needed: at least 2 x ORCH_BASE_TIMEOUT_S plus the test run.
 # Plugin userConfig: each ORCH_<KEY> setting falls back to CLAUDE_PLUGIN_OPTION_<KEY> when unset (state.mjs mirrors it).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
 # Every decision is appended to gates.jsonl in the state dir (the same rule as state.mjs) so a run can show
@@ -205,7 +208,8 @@ fi
 
 blocks=0
 if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
-  blocks="$(grep -c "\"decision\":\"block\".*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
+  # Only tests_failed blocks count here; bugfix-check.mjs counts its own bugfix_ blocks.
+  blocks="$(grep -c "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   log_gate allow max_blocks_reached
