@@ -215,14 +215,63 @@ test("worker agents and the conventions skill describe their 0.4.0 lines", () =>
 });
 
 test("model-facing text names gate reasons but no environment switch", () => {
-  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|TEST_CMD|JUDGE)\b|CLAUDE_PLUGIN_OPTION_/;
+  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b/;
   const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS];
   for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
   for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) assert.doesNotMatch(nudgeContext(env), switches, "the nudge context names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
   const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
-  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
+  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
   assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
+});
+
+// --- Skill selection (0.4.0 addendum): the SKILLS line, the plan check's suggestions and the Skill tool. ---
+test("the orchestrator, the route skill and the nudge describe the SKILLS line the same way", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.ok(text.includes("SKILLS: <comma-separated skill names>"), `${file} must give the SKILLS line`);
+    assert.match(text, /clearly needs/, `${file} adds SKILLS only when a slice clearly needs a skill`);
+    assert.match(text, /never invent a (skill )?name/i, `${file} forbids invented skill names`);
+    assert.match(text, /as the Skill tool lists it/, `${file} names skills as the Skill tool lists them`);
+    assert.match(text, /implementer, researcher or reviewer brief/, `${file} limits SKILLS to those roles`);
+    assert.match(text, /integrator/, `${file} keeps SKILLS away from the integrator`);
+    assert.match(text, /plan check may append/i, `${file} mentions the plan check's suggestions`);
+  }
+  assert.match(read(ORCH), /VALIDATE and SKILLS are optional/, `${ORCH} lists SKILLS among the optional lines`);
+});
+
+test("workers load listed skills with the Skill tool and ignore ones that do not fit", () => {
+  for (const file of [IMPLEMENTER, RESEARCHER, REVIEWER]) {
+    const text = read(file);
+    assert.match(text, /load each skill named in the brief's `SKILLS:` line or in the plan check's suggested-skills block with the Skill tool/, `${file} loads listed skills`);
+    assert.match(text, /does not fit[^.]*ignore it and say so under OPEN/, `${file} ignores a skill that does not fit and says so`);
+  }
+  assert.match(read(REVIEWER), /review skill only to sharpen the review, never to change files/);
+  assert.match(read(RESEARCHER), /you still change nothing/);
+  assert.match(read(CONVENTIONS), /`SKILLS:` line[^.]*load each with it before starting work/);
+  assert.doesNotMatch(read(".claude/agents/integrator.md"), /SKILLS|Skill tool/, "the integrator gets no skills");
+});
+
+test("the Skill tool goes to the researcher and the reviewer, not the integrator", async () => {
+  const { NATIVE_TOOLS } = await import("./config.js");
+  assert.ok(NATIVE_TOOLS.researcher.tools?.includes("Skill"));
+  assert.ok(NATIVE_TOOLS.reviewer.tools?.includes("Skill"));
+  assert.ok(!NATIVE_TOOLS.integrator.tools?.includes("Skill"));
+  assert.ok(!NATIVE_TOOLS.implementer.disallowedTools?.includes("Skill"), "the implementer inherits Skill");
+  for (const file of [RESEARCHER, REVIEWER]) assert.match(read(file), /^tools: .*\bSkill\b/m, `${file} frontmatter lists Skill`);
+});
+
+test("maintainer text describes the skill suggestions and the widened allow", () => {
+  for (const file of [".claude/rules/agents.md", "CLAUDE.md"]) {
+    const text = read(file);
+    for (const t of ["SKILLS:", "ORCH_SKILL_HINTS=off", "skill_hints", "at most 3", "anthropic-skills:<name>", "synced/<uuid>/<name>", ".claude/skills", "Workflow agents get no hints", "light_path", "never for built-ins or fork"]) {
+      assert.ok(text.includes(t), `${file} must mention ${t}`);
+    }
+    assert.match(text, /1 for (a )?reviewers?|at most 1 for a reviewer/, `${file} caps reviewer hints at 1`);
+    assert.match(text, /names and reason codes only|skill names and reason codes only/, `${file} says the block holds names and reason codes only`);
+    assert.match(text, /not found on disk pass through/, `${file} says unknown SKILLS names pass through`);
+    assert.match(text, /never lower/i, `${file} says the allow never lowers a model`);
+  }
 });
 
 test("the orchestrator says once that an answer it writes itself is reviewed", () => {
