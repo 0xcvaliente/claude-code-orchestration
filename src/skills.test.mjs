@@ -255,7 +255,7 @@ test("hint block: names and reason codes only; no line parses as a brief or repl
   assert.deepEqual([r.status, r.open, r.answers, r.gaps, r.quotes], [null, [], {}, [], []]);
   for (const l of block.split("\n")) assert.ok(!/^[\s>*_`#-]*(SKILLS|SLICE|FILES|DEPENDS|STATUS|OPEN|GOAL|CHECKS|SOURCES|GAP|QUOTE|C\d+):/i.test(l), l);
   assert.equal(hintBlock([{ name: "slice:x", reason: "explicit" }, { name: "ok", reason: "bad reason!" }]), "");
-  assert.ok(!safeName("FILES:x") && !safeName("c1:x") && !safeName("a b") && safeName("anthropic-skills:docx"));
+  assert.ok(!safeName("FILES:x") && !safeName("orchestration:workflow") && safeName("orchestration:route") && !safeName("c1:x") && !safeName("a b") && safeName("anthropic-skills:docx"));
 });
 
 // ---------------------------------------------------------------------------------------------------- plan-check
@@ -318,7 +318,7 @@ test("plan check: an implementer allow (light_path or ok) gets the hint block in
     assert.ok(!o.updatedInput.prompt.includes("SECRET-DESCRIPTION"));
     const log = logOf(dir, "plan-check.jsonl");
     assert.deepEqual(log.map((e) => e.reason), ["light_path"]);
-    assert.deepEqual(Object.keys(log[0]).sort(), ["agent_type", "decision", "depends", "files", "reason", "run", "session_id", "slice", "ts"], "the launch record is unchanged");
+    assert.deepEqual(Object.keys(log[0]).sort(), ["agent_type", "decision", "depends", "files", "reason", "run", "session_id", "skips", "slice", "ts"], "the launch record is unchanged");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -452,7 +452,7 @@ test("plan check: missing, broken or unreadable skill roots never fail a launch"
     } catch {
       // chmod missing: the file stays readable
     }
-    for (const roots of [join(dir, "missing"), bad, "", "\0"]) {
+    for (const roots of [join(dir, "missing"), bad, "", join(dir, "plain.txt")]) {
       const r = launch(dir, "implementer", "SLICE: a\nFILES: a.docx\nDEPENDS: none\nPATH: light", { ORCH_SKILL_ROOTS: roots });
       assert.equal(r.status, 0, roots);
       assert.equal(r.stderr, "");
