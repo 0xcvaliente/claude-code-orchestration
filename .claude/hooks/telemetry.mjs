@@ -59,10 +59,78 @@ if (payload.hook_event_name === "SubagentStop") {
   if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
 }
 
+/**
+ * Telemetry v2 from the subagent transcript: token usage, turns, models and whether the agent stopped at maxTurns.
+ * Claude Code writes one transcript line per content block, each carrying the whole message's usage, so usage is
+ * summed once per message id. "<synthetic>" messages (harness-made, no API call) are skipped.
+ * max_turns_hit (seen in 2.1.316 transcripts): a maxTurns stop ends the transcript on the tool_result of the last
+ * turn's tool call, with no assistant message after it. A normal finish ends on an assistant message with
+ * stop_reason end_turn, or on the tool_result of a tool that ends the turn (SubagentHandback, toolEndsTurn: true).
+ * Anything else (no messages, a user text message last, a max_tokens stop) is null: it cannot tell.
+ * Only numbers and model names are returned, never message text.
+ * @param {string} path
+ */
+function usageFromTranscript(path) {
+  try {
+    const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+    /** @type {Set<string>} */
+    const ids = new Set();
+    /** @type {Set<string>} */
+    const models = new Set();
+    /** @type {any} */
+    let lastMsg = null; // the last user or assistant entry
+    /** @type {any} */
+    let lastAssistant = null;
+    let n = 0;
+    for (const l of lines) {
+      let e;
+      try {
+        e = JSON.parse(l);
+      } catch {
+        continue;
+      }
+      if (e?.type !== "assistant" && e?.type !== "user") continue;
+      lastMsg = e;
+      if (e.type !== "assistant") continue;
+      const m = e.message;
+      if (!m || typeof m !== "object" || m.model === "<synthetic>") continue;
+      lastAssistant = e;
+      const id = typeof m.id === "string" && m.id ? m.id : `#${n++}`;
+      if (ids.has(id)) continue;
+      ids.add(id);
+      if (typeof m.model === "string" && m.model) models.add(m.model);
+      const u = m.usage && typeof m.usage === "object" ? m.usage : {};
+      /** @param {unknown} v */
+      const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+      tokens.input += num(u.input_tokens);
+      tokens.output += num(u.output_tokens);
+      tokens.cache_read += num(u.cache_read_input_tokens);
+      tokens.cache_write += num(u.cache_creation_input_tokens);
+    }
+    /** @type {boolean | null} */
+    let maxTurnsHit = null;
+    const stop = lastAssistant?.message?.stop_reason;
+    const content = lastMsg?.message?.content;
+    const isToolResult = Array.isArray(content) && content.length > 0 && content.every((b) => b?.type === "tool_result");
+    if (lastMsg && lastMsg === lastAssistant && (stop === "end_turn" || stop === "stop_sequence")) maxTurnsHit = false;
+    else if (lastMsg?.type === "user" && isToolResult) maxTurnsHit = lastMsg.toolEndsTurn === true ? false : stop === "tool_use" ? true : null;
+    return { tokens, turns: ids.size, models: [...models], max_turns_hit: maxTurnsHit };
+  } catch {
+    return undefined; // missing or unreadable transcript: the fields are left out
+  }
+}
+
 /** @param {unknown} v */
-const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
+const clip =(v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
 const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
 
-ensureStateDir();
-appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim })}\n`);
+const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path) : undefined;
+
+try {
+  ensureStateDir();
+  appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim, ...usage })}\n`);
+} catch {
+  // the log must never fail the agent
+}
 process.exit(0);
