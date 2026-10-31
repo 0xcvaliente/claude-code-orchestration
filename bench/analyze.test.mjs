@@ -536,3 +536,82 @@ test("H8 evidence counts capped SDK runs next to the token ratio", () => {
   const h8 = evaluateHypotheses(runs).find((h) => h.id === "H8");
   assert.equal(h8.evidence.capped_sdk_runs, 2);
 });
+
+// ---------- paired differences, clustered SE, pass^k ----------
+
+import { buildPaired, pairedDiff, passHatK, passK } from "./analyze.mjs";
+
+const pr = (task, arm, rep, score_pct, pass = score_pct === 100, cell = "main") => ({ task, arm, rep, cell, score_pct, pass, tokens: { total: score_pct === null ? 0 : score_pct * 1000 } });
+
+test("pairedDiff: pairs on (task, cell, rep), B minus A, drops unpaired and null runs", () => {
+  const runs = [
+    pr("t1-parallel", "all-haiku", 1, 50), pr("t1-parallel", "all-sonnet", 1, 80),
+    pr("t1-parallel", "all-haiku", 2, 60), pr("t1-parallel", "all-sonnet", 2, 70),
+    pr("t1-parallel", "all-haiku", 3, 40), // no partner
+    pr("d2-docs", "all-haiku", 1, null), pr("d2-docs", "all-sonnet", 1, 90), // null side
+  ];
+  const d = pairedDiff(runs, "all-haiku", "all-sonnet");
+  assert.equal(d.n_pairs, 2);
+  assert.equal(d.n_tasks, 1);
+  assert.equal(d.mean_diff, 20);
+  assert.equal(d.se_clustered, null); // one cluster: no clustered SE
+  assert.equal(d.ci95, null);
+  assert.equal(d.direction_only, true);
+  assert.deepEqual(d.per_task, [{ task: "t1-parallel", n: 2, mean_diff: 20, diffs: [30, 10] }]);
+  // Tokens are paired per metric: the d2-docs pair has tokens on both sides (0 and 90k) though its score is null.
+  const tok = pairedDiff(runs, "all-haiku", "all-sonnet", { metric: "tokens" });
+  assert.deepEqual([tok.n_pairs, tok.n_tasks, Math.round(tok.mean_diff)], [3, 2, 43_333]);
+  assert.equal(pairedDiff(runs, "all-haiku", "all-sonnet", { cell: "cap10" }).n_pairs, 0);
+});
+
+test("pairedDiff: task-clustered SE (CR1) matches a hand computation and exceeds the naive SE for correlated tasks", () => {
+  // Task t1: diffs 10, 10; task t2: diffs -10, -10. Mean 0. Cluster sums of residuals: 20 and -20.
+  // CR1: sqrt(2/1 * (400 + 400)) / 4 = sqrt(1600) / 4 = 10.
+  const runs = [
+    pr("t1-parallel", "O-mix-030", 1, 50), pr("t1-parallel", "O-mix-plugin", 1, 60),
+    pr("t1-parallel", "O-mix-030", 2, 50), pr("t1-parallel", "O-mix-plugin", 2, 60),
+    pr("t2-single", "O-mix-030", 1, 60), pr("t2-single", "O-mix-plugin", 1, 50),
+    pr("t2-single", "O-mix-030", 2, 60), pr("t2-single", "O-mix-plugin", 2, 50),
+  ];
+  const d = pairedDiff(runs, "O-mix-030", "O-mix-plugin");
+  assert.equal(d.mean_diff, 0);
+  assert.equal(d.n_tasks, 2);
+  assert.ok(Math.abs(d.se_clustered - 10) < 1e-9);
+  assert.deepEqual(d.ci95.map((x) => Math.round(x * 100) / 100), [-19.6, 19.6]);
+  // Naive SE treating the 4 pairs as independent: sd 11.547 / 2 = 5.77, smaller than the clustered 10.
+  const naive = Math.sqrt([10, 10, -10, -10].reduce((s, x) => s + x * x, 0) / 3) / 2;
+  assert.ok(d.se_clustered > naive);
+  assert.equal(pairedDiff(runs, "O-mix-030", "O-mix-plugin", { metric: "pass" }).mean_diff, 0);
+});
+
+test("passHatK: C(c,k)/C(n,k), and edge cases", () => {
+  assert.equal(passHatK(3, 3, 3), 1);
+  assert.equal(passHatK(3, 2, 3), 0);
+  assert.equal(passHatK(4, 2, 2), 1 / 6);
+  assert.equal(passHatK(5, 5, 1), 1);
+  assert.equal(passHatK(4, 3, 1), 0.75);
+  assert.equal(passHatK(2, 1, 3), null);
+  assert.equal(passHatK(0, 0, 1), null);
+});
+
+test("passK: per task, arm and cell with k = number of graded reps", () => {
+  const runs = [
+    pr("d2-docs", "routed", 1, 100), pr("d2-docs", "routed", 2, 100), pr("d2-docs", "routed", 3, 100),
+    pr("d2-docs", "all-haiku", 1, 100), pr("d2-docs", "all-haiku", 2, 57), pr("d2-docs", "all-haiku", 3, 100),
+    { ...pr("d2-docs", "all-sonnet", 1, 100), pass: null }, // ungraded: skipped
+  ];
+  const out = passK(runs);
+  const routed = out.find((x) => x.arm === "routed");
+  const haiku = out.find((x) => x.arm === "all-haiku");
+  assert.deepEqual([routed.n, routed.c, routed.k, routed.pass_hat_k, routed.pass_at_1], [3, 3, 3, 1, 1]);
+  assert.deepEqual([haiku.n, haiku.c, haiku.pass_hat_k], [3, 2, 0]);
+  assert.equal(haiku.pass_hat_2, 1 / 3);
+  assert.equal(out.some((x) => x.arm === "all-sonnet"), false);
+});
+
+test("buildPaired: only configured pairs that have pairs, three metrics each", () => {
+  const runs = [pr("d2-docs", "all-haiku", 1, 57), pr("d2-docs", "routed", 1, 100), pr("k2-stdlib-toolkit-xl", "O-mix", 1, 40)];
+  const out = buildPaired(runs);
+  assert.deepEqual(out.map((d) => `${d.arm_a}>${d.arm_b}:${d.metric}`), ["all-haiku>routed:score_pct", "all-haiku>routed:pass", "all-haiku>routed:tokens"]);
+  assert.equal(out[0].mean_diff, 43);
+});
