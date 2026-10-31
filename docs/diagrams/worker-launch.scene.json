@@ -9,7 +9,7 @@
   "nodes": [
     {"id": "launch", "label": "Agent launch", "detail": "Agent type and brief", "x": 380, "y": 20, "w": 240, "h": 64, "status": "observed", "sources": [".claude/settings.json (PreToolUse, matcher Agent|Task)"]},
     {"id": "rules", "label": "Plan-check rules", "shape": "decision", "x": 380, "y": 114, "w": 240, "h": 120, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (checks, in order)"]},
-    {"id": "blocked", "label": "Blocked", "detail": "Exit 2, with the reason", "x": 764, "y": 138, "w": 216, "h": 72, "status": "observed", "sources": [".claude/hooks/plan-check.mjs decide()"]},
+    {"id": "blocked", "label": "Blocked", "detail": "Exit 2; most give up after 2, overlap and cycle never", "x": 764, "y": 126, "w": 216, "h": 96, "status": "observed", "sources": [".claude/hooks/plan-check.mjs decide()"]},
     {"id": "allowed", "label": "Allowed", "detail": "Which agent?", "x": 380, "y": 284, "w": 240, "h": 60, "status": "observed"},
     {"id": "unchanged", "label": "Launch unchanged", "detail": "Built-ins, fork, the integrator, or nothing to add", "x": 720, "y": 280, "w": 240, "h": 96, "status": "observed", "sources": [".claude/rules/agents.md (the plan check's single allow exception)"]},
     {"id": "profile", "label": "File profile", "detail": "Each SOURCES file, with local tools, no model", "x": 40, "y": 490, "w": 340, "h": 72, "status": "observed", "sources": [".claude/hooks/file-profile.mjs profileSources"]},
@@ -38,7 +38,7 @@
     {"id": "w-start-plain", "from": "unchanged", "to": "worker", "points": [[960,320],[985,320],[985,986],[620,986]], "status": "observed"}
   ],
   "notes": [
-    "Plan rules block implementer briefs (missing lines, file overlap, dependency cycle, no plan review, not in the plan, a stalled slice: replan_required) and built-ins or fork while a run is open. Researchers and reviewers are never blocked.",
+    "Plan rules block implementer briefs (missing lines, file overlap, dependency cycle, no plan review, not in the plan, a stalled slice: replan_required) and built-ins or fork while a run is open. Researchers and reviewers are never blocked. Most checks let the launch through after 2 blocks; file overlap and dependency cycle block every time.",
     "Hints reach an implementer only when its launch is allowed outright (ok or light_path), never after a gate gave up. An explicit SKILLS: line still reaches the worker; names not found on disk pass through, marked.",
     "plan-check.mjs is the only hook that returns an allow, and a permissions.deny rule still wins. The scripted workflow makes no Agent call, so its agents never reach this check.",
     "Switches (maintainer-facing): ORCH_READ_ROUTER=on turns the router on; ORCH_SKILL_HINTS=off turns the hints off."

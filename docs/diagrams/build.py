@@ -39,12 +39,14 @@ GATES_DESC = (
     "lower) and the skill hints append up to 3 suggested skills (1 for a reviewer). researcher-guard.mjs denies a "
     "researcher's Bash command unless it is read-only, and egress-guard.mjs denies a reviewer's WebFetch to a host its brief "
     "and files do not name. When an implementer stops, verify.sh blocks it with the test output while the tests fail "
-    "(by default it marks failures that also fail on the base as probably pre-existing; an opt-in allow mode lets it finish "
+    "in the shared tree (in an isolated worktree it only warns by default; by default it marks failures that also fail on the base as probably pre-existing; an opt-in allow mode lets it finish "
     "when every failure also fails on the base; off skips the base run), and blocks a KIND: bugfix slice that has no test "
     "failing on the base. When a researcher stops, quote-check.mjs blocks it once for a quote not found in its source. "
     "review-gate.mjs (Stop) defers while agents run and blocks the final reply while an implementer has no later reviewer, "
     "the last review failed (a gap of 80 or more or a failed check; lower gaps pass with a doubt signal), an opus review is "
-    "missing after a doubt signal, a checked constraint is unanswered, or a stalled slice has no replan."
+    "missing after a doubt signal, a checked constraint is unanswered, or a stalled slice has no replan. The test and review "
+    "gates and most plan checks let the work through after 2 blocks; file overlap and dependency cycle block every time, "
+    "the guards deny every time, and quote-check blocks once."
 )
 
 
@@ -52,7 +54,7 @@ def sequence_svg(theme):
     """Native sequence notation: the scene renderer has no lifelines or alt frames."""
     c = PALETTES[theme]
     p = f"gates-{theme}"
-    W, H = 1320, 1784
+    W, H = 1320, 1800
     right = W - 20
     keys = ["o", "p", "w", "v", "g", "r", "s"]
     xs = {k: 90 + 190 * i for i, k in enumerate(keys)}
@@ -117,7 +119,7 @@ def sequence_svg(theme):
     # Implementer stop: the test gate
     message("w", "v", 700, "implementer stops")
     alt(722, 956, [800, 878])
-    guard(746, "[tests fail]")
+    guard(746, "[tests fail in the shared tree (an isolated worktree only warns by default)]")
     message("v", "w", 780, "blocked + test output", reply=True)
     guard(824, "[tests pass, but a KIND: bugfix slice has no test that fails on the base]")
     message("v", "w", 858, "blocked: repro test", reply=True)
@@ -148,7 +150,8 @@ def sequence_svg(theme):
 
     foot = [
         "Solid arrow: call or event. Dashed arrow: reply or hook decision. Time runs down.",
-        "A review fails on a failed checked id or a gap of 80 or more; lower gaps pass with a doubt signal. Each gate lets the work through after 2 blocks.",
+        "A review fails on a failed checked id or a gap of 80 or more; lower gaps pass with a doubt signal.",
+        "After 2 blocks the test gate, the review gate and most plan checks let the work through; overlap and cycle block every time, the guards always deny, quote-check blocks once.",
         "Test baseline: by default the block marks failures that also fail on the base as probably pre-existing; allow mode (opt-in) lets the implementer finish; off skips the base run.",
     ]
     for i, line in enumerate(foot):

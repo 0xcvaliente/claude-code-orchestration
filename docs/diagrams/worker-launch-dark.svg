@@ -1,86 +1,86 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1040" width="1000" height="1040" role="img" aria-labelledby="dc-7916de2bd9-title dc-7916de2bd9-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-<title id="dc-7916de2bd9-title">Worker launch: how plan-check.mjs shapes a launch before the worker starts</title>
-<desc id="dc-7916de2bd9-desc">Every Agent launch passes plan-check.mjs first. A launch that breaks a plan rule is blocked and the reason goes back to the orchestrator. An allowed launch of the plugin&#x27;s researcher that names SOURCES goes through the read router when it is switched on: each file is profiled with local tools, the cheapest adequate tier is picked, and the model is raised to that tier, never lowered. An allowed launch of the plugin&#x27;s implementer, researcher or reviewer gets skill hints: from the user, synced, project and plugin skills found on disk, up to 3 suggestions (1 for a reviewer) are appended to the brief as names and reason codes. Both changes go out in one updatedInput with an allow. Built-ins, fork and the integrator, and launches with nothing to add, start unchanged.</desc>
-<defs><marker id="dc-7916de2bd9-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1040" width="1000" height="1040" role="img" aria-labelledby="dc-8a5f1dd43d-title dc-8a5f1dd43d-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="dc-8a5f1dd43d-title">Worker launch: how plan-check.mjs shapes a launch before the worker starts</title>
+<desc id="dc-8a5f1dd43d-desc">Every Agent launch passes plan-check.mjs first. A launch that breaks a plan rule is blocked and the reason goes back to the orchestrator. An allowed launch of the plugin&#x27;s researcher that names SOURCES goes through the read router when it is switched on: each file is profiled with local tools, the cheapest adequate tier is picked, and the model is raised to that tier, never lowered. An allowed launch of the plugin&#x27;s implementer, researcher or reviewer gets skill hints: from the user, synced, project and plugin skills found on disk, up to 3 suggestions (1 for a reviewer) are appended to the brief as names and reason codes. Both changes go out in one updatedInput with an allow. Built-ins, fork and the integrator, and launches with nothing to add, start unchanged.</desc>
+<defs><marker id="dc-8a5f1dd43d-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
 <rect width="1000" height="1040" fill="#0d1117" aria-hidden="true"/>
 <rect x="20" y="450" width="380" height="356" rx="8" fill="none" stroke="#656c76" stroke-dasharray="4 4"/>
 <text x="36" y="474" font-size="13" font-weight="600" fill="#9198a1" text-anchor="start"><tspan x="36" dy="0">Read router (opt-in)</tspan></text>
 <rect x="600" y="450" width="370" height="356" rx="8" fill="none" stroke="#656c76" stroke-dasharray="4 4"/>
 <text x="616" y="474" font-size="13" font-weight="600" fill="#9198a1" text-anchor="start"><tspan x="616" dy="0">Skill hints (on by default)</tspan></text>
-<polyline data-edge="w-check" points="500,84 500,114" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-block" points="620,174 764,174" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-allow" points="500,234 500,284" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-unchanged" points="620,314 720,314" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-router" points="420,344 420,380 210,380 210,490" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-hints" points="580,344 580,380 785,380 785,490" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-tier" points="210,562 210,602" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-raise" points="210,674 210,714" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-pick" points="785,562 785,602" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-append" points="785,674 785,714" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-merge-router" points="210,786 210,882 300,882" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-merge-hints" points="785,786 785,882 700,882" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-start" points="500,918 500,958" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<polyline data-edge="w-start-plain" points="960,320 985,320 985,986 620,986" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-7916de2bd9-arrow)"/>
-<g id="dc-7916de2bd9-node-launch" data-node="launch" data-x="380" data-y="20" data-w="240" data-h="64">
+<polyline data-edge="w-check" points="500,84 500,114" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-block" points="620,174 764,174" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-allow" points="500,234 500,284" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-unchanged" points="620,314 720,314" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-router" points="420,344 420,380 210,380 210,490" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-hints" points="580,344 580,380 785,380 785,490" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-tier" points="210,562 210,602" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-raise" points="210,674 210,714" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-pick" points="785,562 785,602" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-append" points="785,674 785,714" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-merge-router" points="210,786 210,882 300,882" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-merge-hints" points="785,786 785,882 700,882" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-start" points="500,918 500,958" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<polyline data-edge="w-start-plain" points="960,320 985,320 985,986 620,986" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-8a5f1dd43d-arrow)"/>
+<g id="dc-8a5f1dd43d-node-launch" data-node="launch" data-x="380" data-y="20" data-w="240" data-h="64">
 <rect x="380" y="20" width="240" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="398" y="49.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="launch"><tspan x="398" dy="0">Agent launch</tspan></text>
 <text x="398" y="75.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="launch"><tspan x="398" dy="0">Agent type and brief</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-rules" data-node="rules" data-x="380" data-y="114" data-w="240" data-h="120">
+<g id="dc-8a5f1dd43d-node-rules" data-node="rules" data-x="380" data-y="114" data-w="240" data-h="120">
 <polygon points="500.0,114 620,174.0 500.0,234 380,174.0" fill="#151b23" stroke="#656c76" stroke-width="2"/>
 <text x="500.0" y="169.0" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="middle" data-node-text="rules"><tspan x="500.0" dy="0">Plan-check</tspan><tspan x="500.0" dy="23">rules</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-blocked" data-node="blocked" data-x="764" data-y="138" data-w="216" data-h="72">
-<rect x="764" y="138" width="216" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="782" y="171.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="blocked"><tspan x="782" dy="0">Blocked</tspan></text>
-<text x="782" y="197.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="blocked"><tspan x="782" dy="0">Exit 2, with the reason</tspan></text>
+<g id="dc-8a5f1dd43d-node-blocked" data-node="blocked" data-x="764" data-y="126" data-w="216" data-h="96">
+<rect x="764" y="126" width="216" height="96" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="782" y="153.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="blocked"><tspan x="782" dy="0">Blocked</tspan></text>
+<text x="782" y="179.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="blocked"><tspan x="782" dy="0">Exit 2; most give up</tspan><tspan x="782" dy="18">after 2, overlap and</tspan><tspan x="782" dy="18">cycle never</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-allowed" data-node="allowed" data-x="380" data-y="284" data-w="240" data-h="60">
+<g id="dc-8a5f1dd43d-node-allowed" data-node="allowed" data-x="380" data-y="284" data-w="240" data-h="60">
 <rect x="380" y="284" width="240" height="60" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="398" y="311.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="allowed"><tspan x="398" dy="0">Allowed</tspan></text>
 <text x="398" y="337.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="allowed"><tspan x="398" dy="0">Which agent?</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-unchanged" data-node="unchanged" data-x="720" data-y="280" data-w="240" data-h="96">
+<g id="dc-8a5f1dd43d-node-unchanged" data-node="unchanged" data-x="720" data-y="280" data-w="240" data-h="96">
 <rect x="720" y="280" width="240" height="96" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="738" y="307.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="unchanged"><tspan x="738" dy="0">Launch unchanged</tspan></text>
 <text x="738" y="333.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="unchanged"><tspan x="738" dy="0">Built-ins, fork, the</tspan><tspan x="738" dy="18">integrator, or nothing to</tspan><tspan x="738" dy="18">add</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-profile" data-node="profile" data-x="40" data-y="490" data-w="340" data-h="72">
+<g id="dc-8a5f1dd43d-node-profile" data-node="profile" data-x="40" data-y="490" data-w="340" data-h="72">
 <rect x="40" y="490" width="340" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="58" y="514.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="profile"><tspan x="58" dy="0">File profile</tspan></text>
 <text x="58" y="540.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="profile"><tspan x="58" dy="0">Each SOURCES file, with local tools, no</tspan><tspan x="58" dy="18">model</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-tier" data-node="tier" data-x="40" data-y="602" data-w="340" data-h="72">
+<g id="dc-8a5f1dd43d-node-tier" data-node="tier" data-x="40" data-y="602" data-w="340" data-h="72">
 <rect x="40" y="602" width="340" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="58" y="626.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="tier"><tspan x="58" dy="0">Tier</tspan></text>
 <text x="58" y="652.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="tier"><tspan x="58" dy="0">The cheapest adequate one: haiku, sonnet</tspan><tspan x="58" dy="18">or opus</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-raise" data-node="raise" data-x="40" data-y="714" data-w="340" data-h="72">
+<g id="dc-8a5f1dd43d-node-raise" data-node="raise" data-x="40" data-y="714" data-w="340" data-h="72">
 <rect x="40" y="714" width="340" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="58" y="738.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="raise"><tspan x="58" dy="0">Model raise</tspan></text>
 <text x="58" y="764.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="raise"><tspan x="58" dy="0">Only when the tier ranks higher; never</tspan><tspan x="58" dy="18">lower</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-catalog" data-node="catalog" data-x="620" data-y="490" data-w="330" data-h="72">
+<g id="dc-8a5f1dd43d-node-catalog" data-node="catalog" data-x="620" data-y="490" data-w="330" data-h="72">
 <rect x="620" y="490" width="330" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="638" y="514.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="catalog"><tspan x="638" dy="0">Skill catalog</tspan></text>
 <text x="638" y="540.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="catalog"><tspan x="638" dy="0">User, synced, project and plugin</tspan><tspan x="638" dy="18">skills on disk</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-pick" data-node="pick" data-x="620" data-y="602" data-w="330" data-h="72">
+<g id="dc-8a5f1dd43d-node-pick" data-node="pick" data-x="620" data-y="602" data-w="330" data-h="72">
 <rect x="620" y="602" width="330" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="638" y="626.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="pick"><tspan x="638" dy="0">Suggestions</tspan></text>
 <text x="638" y="652.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="pick"><tspan x="638" dy="0">Up to 3 (1 for a reviewer), from file</tspan><tspan x="638" dy="18">types, role and goal</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-block" data-node="block" data-x="620" data-y="714" data-w="330" data-h="72">
+<g id="dc-8a5f1dd43d-node-block" data-node="block" data-x="620" data-y="714" data-w="330" data-h="72">
 <rect x="620" y="714" width="330" height="72" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="638" y="747.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="block"><tspan x="638" dy="0">Appended block</tspan></text>
 <text x="638" y="773.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="block"><tspan x="638" dy="0">Skill names and reason codes only</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-update" data-node="update" data-x="300" data-y="846" data-w="400" data-h="72">
+<g id="dc-8a5f1dd43d-node-update" data-node="update" data-x="300" data-y="846" data-w="400" data-h="72">
 <rect x="300" y="846" width="400" height="72" rx="6" fill="#0f2a4a" stroke="#4493f8" stroke-width="2"/>
 <text x="318" y="879.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="update"><tspan x="318" dy="0">One updatedInput</tspan></text>
 <text x="318" y="905.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="update"><tspan x="318" dy="0">Allow, with the raised model and the added text</tspan></text>
 </g>
-<g id="dc-7916de2bd9-node-worker" data-node="worker" data-x="380" data-y="958" data-w="240" data-h="56">
+<g id="dc-8a5f1dd43d-node-worker" data-node="worker" data-x="380" data-y="958" data-w="240" data-h="56">
 <rect x="380" y="958" width="240" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="398" y="992.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="worker"><tspan x="398" dy="0">Worker starts</tspan></text>
 </g>
