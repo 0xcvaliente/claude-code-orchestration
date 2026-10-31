@@ -98,6 +98,8 @@ fi
 # Block Claude Code's built-in subagents (general-purpose, Explore, Plan, ...) in headless runs: this repo's own agents
 # do those jobs, with gates. DENIED_AGENTS in src/config.ts; src/policy.test.ts fails if this line goes away.
 export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
+# Fork subagents (on by default since v2.1.302) inherit the whole conversation and every tool; Agent(fork) is denied too.
+export CLAUDE_CODE_FORK_SUBAGENT=0
 
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
