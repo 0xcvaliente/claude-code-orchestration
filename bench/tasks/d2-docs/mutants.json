@@ -1,0 +1,10 @@
+[
+  { "name": "q1 old project name", "file": "answers.json", "from": "\"BRAMBLE\"", "to": "\"Larch\"" },
+  { "name": "q2 Porto date", "file": "answers.json", "from": "\"2023-03-09\"", "to": "\"2022-12-12\"" },
+  { "name": "q3 wrong tier", "file": "answers.json", "from": "3.85", "to": "4.25" },
+  { "name": "q4 serial misread", "file": "answers.json", "from": "\"IC-58213-Q\"", "to": "\"IC-58218-O\"" },
+  { "name": "q5 gross instead of net", "file": "answers.json", "from": "18058.45", "to": "15703" },
+  { "name": "q6 next gridline", "file": "answers.json", "from": "\"q6\": 47", "to": "\"q6\": 50" },
+  { "name": "q7 standard interval only", "file": "answers.json", "from": "\"q7\": 450", "to": "\"q7\": 750" },
+  { "name": "q7 MX-7 interval", "file": "answers.json", "from": "\"q7\": 450", "to": "\"q7\": 360" }
+]

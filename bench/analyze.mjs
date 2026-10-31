@@ -13,8 +13,8 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO", "N-UC", "W-mix"];
-export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook"];
+export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO", "N-UC", "W-mix", "O-mix-plugin", "O-mix-030", "all-haiku", "all-sonnet", "routed"];
+export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook", "d2-docs"];
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },
   "t2-single": { tier: "small", shape: "single" },
@@ -24,7 +24,7 @@ export const TASK_META = {
   "h3-sql-engine": { tier: "large", shape: "monolithic" },
   "k2-stdlib-toolkit-xl": { tier: "large", shape: "splittable" },
 };
-export const CELLS = ["main", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
+export const CELLS = ["main", "cap6", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 const CLAIMS = new Set(["success", "partial", "failure", "unclear", "none"]);
 export const EXCLUDED_REASONS = new Set(["rate_limited", "error"]);
 const BOOT_ITERATIONS = 10_000;
@@ -595,6 +595,106 @@ export function evaluateHypotheses(runs) {
   return out;
 }
 
+// ---------- paired arm differences and pass^k ----------
+
+// Arm pairs (A, B) reported as paired differences B - A when both ran on the same (task, cell, rep).
+export const PAIRS = [
+  ["O-mix-030", "O-mix-plugin"],
+  ["all-haiku", "all-sonnet"],
+  ["all-haiku", "routed"],
+  ["all-sonnet", "routed"],
+];
+
+const metricOf = (r, metric) => {
+  const v = metric === "pass" ? (r.pass === null || r.pass === undefined ? null : r.pass ? 1 : 0) : metric === "tokens" ? r.tokens?.total ?? null : r[metric];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+};
+
+// Pairs runs of armA and armB that share (task, cell, rep) and takes d = metric(B) - metric(A) per pair (a pair with a
+// null on either side is dropped). Returns the mean over all pairs, its standard error clustered by task (pairs of one
+// task are not independent: same documents, same tests), a normal 95% interval, and the mean per task.
+// Cluster-robust SE of a mean (CR1): sqrt(G/(G-1) * sum_g (sum_{i in g} (d_i - mean))^2) / n, G = number of tasks.
+// With fewer than 2 tasks the SE is null. direction_only is true below DIRECTION_ONLY_N tasks or pairs.
+export function pairedDiff(runs, armA, armB, { metric = "score_pct", cell = null } = {}) {
+  const side = (arm) => {
+    const m = new Map();
+    for (const r of runs) if (r.arm === arm && (cell === null || (r.cell ?? "main") === cell)) m.set(`${r.task}|${r.cell ?? "main"}|${r.rep}`, r);
+    return m;
+  };
+  const a = side(armA);
+  const b = side(armB);
+  const byTask = new Map();
+  for (const [k, ra] of a) {
+    const rb = b.get(k);
+    if (!rb) continue;
+    const va = metricOf(ra, metric);
+    const vb = metricOf(rb, metric);
+    if (va === null || vb === null) continue;
+    if (!byTask.has(ra.task)) byTask.set(ra.task, []);
+    byTask.get(ra.task).push(vb - va);
+  }
+  const all = [...byTask.values()].flat();
+  const n = all.length;
+  const G = byTask.size;
+  const m = n ? all.reduce((s, x) => s + x, 0) / n : null;
+  let se = null;
+  if (G >= 2) {
+    const ss = [...byTask.values()].reduce((s, ds) => s + ds.reduce((t, d) => t + (d - m), 0) ** 2, 0);
+    se = Math.sqrt((G / (G - 1)) * ss) / n;
+  }
+  const perTask = [...byTask.entries()]
+    .sort(([x], [y]) => idx(TASKS, x) - idx(TASKS, y) || x.localeCompare(y))
+    .map(([task, ds]) => ({ task, n: ds.length, mean_diff: ds.reduce((s, x) => s + x, 0) / ds.length, diffs: ds }));
+  return {
+    arm_a: armA, arm_b: armB, metric, cell, n_pairs: n, n_tasks: G,
+    mean_diff: m, se_clustered: se, ci95: se === null ? null : [m - 1.96 * se, m + 1.96 * se],
+    direction_only: G < DIRECTION_ONLY_N || n < DIRECTION_ONLY_N,
+    per_task: perTask,
+  };
+}
+
+const choose = (n, k) => {
+  if (k < 0 || k > n) return 0;
+  let c = 1;
+  for (let i = 1; i <= k; i++) c = (c * (n - k + i)) / i;
+  return c;
+};
+
+// Unbiased estimate of pass^k (all k independent attempts pass) from c passes in n attempts: C(c,k) / C(n,k).
+export function passHatK(n, c, k) {
+  if (!(n >= 1) || !(k >= 1) || k > n) return null;
+  return choose(c, k) / choose(n, k);
+}
+
+// Per (task, arm, cell) with graded runs: n reps, c passes, pass@1 = c/n and pass^k for k = n (every rep passed: 1 or 0)
+// and, when n >= 2, pass^2.
+export function passK(runs) {
+  const cells = new Map();
+  for (const r of runs) {
+    if (r.pass === null || r.pass === undefined) continue;
+    const k = key(r.task, r.arm, r.cell ?? "main");
+    if (!cells.has(k)) cells.set(k, { task: r.task, arm: r.arm, cell: r.cell ?? "main", n: 0, c: 0 });
+    const x = cells.get(k);
+    x.n++;
+    if (r.pass) x.c++;
+  }
+  return [...cells.values()].sort((x, y) => order(x) - order(y)).map((x) => ({
+    ...x, k: x.n, pass_at_1: x.c / x.n, pass_hat_k: passHatK(x.n, x.c, x.n), pass_hat_2: x.n >= 2 ? passHatK(x.n, x.c, 2) : null,
+  }));
+}
+
+// Every PAIRS entry with at least one pair in runs, for score_pct, pass and tokens.
+export function buildPaired(runs) {
+  const out = [];
+  for (const [a, b] of PAIRS) {
+    for (const metric of ["score_pct", "pass", "tokens"]) {
+      const d = pairedDiff(runs, a, b, { metric });
+      if (d.n_pairs) out.push(d);
+    }
+  }
+  return out;
+}
+
 // ---------- top level ----------
 
 // Keeps the LAST row per run_id of one campaign's runs.jsonl (file order); earlier rows are returned as superseded.
@@ -652,6 +752,8 @@ export function analyze(dirs, opts = {}) {
     cells,
     comparisons: buildComparisons(included, opts),
     hypotheses: evaluateHypotheses(included),
+    paired: buildPaired(included),
+    pass_k: passK(included),
   };
 }
 
@@ -680,4 +782,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const { runs, included, excluded } = summary.counts;
   console.log(`${file}: ${runs} runs (${included} analysed, ${excluded} excluded), ${summary.cells.length} cells`);
   for (const h of summary.hypotheses) console.log(`${h.id}: ${h.verdict}`);
+  const f = (x) => (x === null ? "n/a" : x.toFixed(2));
+  for (const d of summary.paired) console.log(`paired ${d.arm_b} - ${d.arm_a} (${d.metric}): ${f(d.mean_diff)} (task-clustered SE ${f(d.se_clustered)}; ${d.n_pairs} pairs, ${d.n_tasks} tasks${d.direction_only ? ", direction only" : ""})`);
+  for (const p of summary.pass_k) console.log(`pass^${p.k} ${p.task} ${p.arm} ${p.cell}: ${f(p.pass_hat_k)} (${p.c}/${p.n} passed)`);
 }
