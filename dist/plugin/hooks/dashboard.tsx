@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Hook, Register, Timer } from 'claude-code'
 
-import type { Agent, LogEntry, Plan, TriageInfo, Used, Work } from '../types'
+import type { Agent, Answer, LogEntry, Plan, Run, TriageInfo, Used, Work } from '../types'
 
 const PANE = 'orchestration'
 const ROLES = ['researcher', 'implementer', 'reviewer', 'integrator']
@@ -14,6 +14,7 @@ const triage = atom({ plugin: 'orchestration', key: 'triage' } as const, null)
 const workAtom = atom({ plugin: 'orchestration', key: 'work' } as const, null)
 const planAtom = atom({ plugin: 'orchestration', key: 'plan' } as const, null)
 const usedAtom = atom({ plugin: 'orchestration', key: 'used' } as const, NO_USE)
+const runAtom = atom({ plugin: 'orchestration', key: 'run' } as const, null)
 
 const GLYPH = { running: '●', pass: '✔', fail: '✖', done: '◆', queued: '◌' } as const
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -21,32 +22,155 @@ const COLOR = { running: 'warning', pass: 'success', fail: 'error', done: 'subtl
 type State = keyof typeof GLYPH
 
 const bare = (type: string) => type.split(':').pop() ?? type
-// The brief names its slice on the first lines: "SLICE: s2", "FILES: a, b", "DEPENDS: s1, s3 | none".
-const sliceOf = (prompt: string) => prompt.match(/^\s*SLICE:\s*(\S+)/m)?.[1]
-const depsOf = (prompt: string) =>
-  (prompt.match(/^\s*DEPENDS:\s*(.*)$/m)?.[1] ?? '').split(/[\s,;]+/).filter(d => d && !/^(none|-|n\/a)$/i.test(d))
-const filesOf = (prompt: string) => (prompt.match(/^\s*FILES:\s*(.*)$/m)?.[1] ?? '').split(/[\s,;]+/).filter(Boolean).length
-// The orchestrator's plan, from its PLAN REVIEW brief: every SLICE line (the journal's pattern, so bullets and bold pass) is a planned slice, in order.
-// Its goal is the rest of that line, else the first GOAL line under it. "plan" is the review's own SLICE line, not a slice.
-const planOf = (brief: string): Plan['slices'] => {
-  const out: Plan['slices'] = []
-  let cur: Plan['slices'][number] | undefined
-  for (const line of brief.split('\n')) {
-    const m = line.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*[`*]*([^\s`'"*]+)[`*]*(.*)$/i)
-    if (m) {
-      const id = (m[1] as string).replace(/[:,;.]+$/, '')
-      const rest = (m[2] as string).replace(/^[\s*`_:|—–-]+/, '').trim()
+// ---- Brief and reply grammar: a mirror of .claude/hooks/brief.mjs (spec: docs/brief-grammar.md). The mod cannot import it (the standalone
+// dist/dashboard has no hooks/brief.mjs), so register.test.tsx parses every fixture in src/fixtures/briefs with these and checks expected.json.
+// No parser throws: empty, malformed or non-string input gives null, [], {} or false.
+const PRE = '[ \\t>*_`-]*'
+const STATUS_RE = /^[\s*_#`]*STATUS[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?![\s*_`]*(?:or|\/|\|)[\s*_`]*(?:STATUS\b|pass|fail))/i
+const OPEN_RE = /^[\s*_#`-]*OPEN[\s*_`]*:[\s*_`]*(.*)$/i
+const ANSWER_RE = /^[\s*_#`-]*(C\d+)[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(?![\s*_`]*(?:or|\/|\|)[\s*_`]*(?:pass|fail)\b)[\s*_`]*(.*)$/i
+const NOTHING = new Set(['', 'none', '-', 'n/a', 'nothing'])
+const str = (text: unknown) => (typeof text === 'string' ? text : '')
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const field = (text: string, key: string) => text.match(new RegExp(`^${PRE}${esc(key)}:\\**[ \\t]*(.+)$`, 'im'))?.[1]?.trim()
+const lineValue = (l: string, key: string) => {
+  const m = l.match(new RegExp(`^${PRE}${esc(key)}:\\**[ \\t]*(.*)$`, 'i'))
+  return m ? (m[1] ?? '').trim() : undefined
+}
+const listOf = (v: string | undefined) =>
+  (v ?? '').split(',').map(s => s.trim().replace(/^[`'"]+|[`'"]+$/g, '').replace(/^\.\//, '')).filter(s => s && s.toLowerCase() !== 'none')
+const sliceId = (v: string | undefined) => (v ?? '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0] || null
+const checkIds = (v: string | undefined) => [...new Set(((v ?? '').match(/\bC\d+\b/gi) ?? []).map(s => s.toUpperCase()))]
+const yes = (v: string | undefined) => /^\**[ \t]*yes\b/i.test(v ?? '')
+
+export type Header = { slice: string | null; files: string[]; depends: string[]; path: 'light' | null; risky: boolean; checks: string[]; focus: string | null; workflow: boolean }
+export const parseHeader = (text: unknown): Header => {
+  const t = str(text)
+  return {
+    slice: sliceId(field(t, 'SLICE')),
+    files: listOf(field(t, 'FILES')),
+    depends: listOf(field(t, 'DEPENDS')),
+    path: /^light\b/i.test(field(t, 'PATH') ?? '') ? 'light' : null,
+    risky: yes(field(t, 'RISKY')),
+    checks: checkIds(field(t, 'CHECKS')),
+    focus: field(t, 'FOCUS') || null,
+    workflow: new RegExp(`^${PRE}ORCHESTRATION:\\**[ \\t]*workflow\\b`, 'im').test(t),
+  }
+}
+// The brief starts with PLAN REVIEW (leading whitespace allowed, upper case), not any later line.
+export const isPlanReview = (text: unknown) => /^\s*PLAN REVIEW\b/.test(str(text))
+
+export type PlannedSlice = { slice: string; files: string[]; depends: string[]; goal: string | null; risky: boolean; checks: string[] }
+export type ParsedPlan = { isPlanReview: boolean; replan: number | null; constraints: Record<string, string>; slices: PlannedSlice[] }
+// The orchestrator's plan, from its PLAN REVIEW brief: REPLAN, the CONSTRAINTS block and every SLICE line (bullets, bold and a heading pass) as a
+// planned slice, in order, filled by the FILES, DEPENDS, GOAL, RISKY and CHECKS lines under it. Its goal is the rest of the SLICE line, else the
+// first GOAL line. "plan" is the review's own SLICE line, not a slice; a repeated id continues its first entry.
+export const parsePlan = (text: unknown): ParsedPlan => {
+  const t = str(text)
+  const plan: ParsedPlan = { isPlanReview: isPlanReview(t), replan: null, constraints: {}, slices: [] }
+  if (!plan.isPlanReview) return plan
+  const n = field(t, 'REPLAN')?.match(/^\**[ \t]*(\d+)/)?.[1]
+  plan.replan = n === undefined ? null : Number(n)
+  let cur: PlannedSlice | null = null
+  let inConstraints = false
+  for (const l of t.split(/\r?\n/)) {
+    if (inConstraints) {
+      const c = l.match(new RegExp(`^${PRE}(C\\d+)\\**:\\**[ \\t]*(.*)$`, 'i'))
+      if (c) {
+        const id = (c[1] ?? '').toUpperCase()
+        const body = (c[2] ?? '').trim()
+        if (body && !(id in plan.constraints)) plan.constraints[id] = body
+        continue
+      }
+      if (!l.trim()) continue // blank lines inside the block are fine
+      inConstraints = false
+    }
+    if (lineValue(l, 'CONSTRAINTS') !== undefined) {
+      inConstraints = true
+      continue
+    }
+    const s = l.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*[`*]*([^\s`'"*]+)[`*]*(.*)$/i)
+    if (s) {
+      const id = (s[1] ?? '').replace(/[:,;.]+$/, '')
       const own = !!id && id.toLowerCase() !== 'plan'
-      cur = own ? out.find(s => s.id === id) : undefined
-      if (own && !cur) out.push((cur = { id }))
+      cur = own ? (plan.slices.find(x => x.slice === id) ?? null) : null
+      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [] }))
+      const rest = (s[2] ?? '').replace(/^[\s*`_:|—–-]+/, '').trim()
       if (cur && rest && !cur.goal) cur.goal = rest
       continue
     }
-    const goal = line.match(/^[ \t>*_`-]*GOAL:\**[ \t]*(.+)$/i)?.[1]?.trim()
-    if (goal && cur && !cur.goal) cur.goal = goal
+    if (!cur) continue
+    const files = lineValue(l, 'FILES')
+    if (files !== undefined) cur.files = listOf(files)
+    const depends = lineValue(l, 'DEPENDS')
+    if (depends !== undefined) cur.depends = listOf(depends)
+    const goal = lineValue(l, 'GOAL')
+    if (goal && !cur.goal) cur.goal = goal
+    const risky = lineValue(l, 'RISKY')
+    if (risky !== undefined) cur.risky = yes(risky)
+    const checks = lineValue(l, 'CHECKS')
+    if (checks !== undefined) cur.checks = checkIds(checks)
   }
-  return out
+  return plan
 }
+
+// STATUS: any STATUS line that says fail fails, otherwise the first one decides; blockquoted lines, a STATUS in mid-line and the template
+// "STATUS: pass or fail" do not count; none is null.
+export const parseStatus = (text: unknown): 'pass' | 'fail' | null => {
+  const found = str(text).split(/\r?\n/).map(l => STATUS_RE.exec(l)?.[1]?.toLowerCase()).filter(v => v === 'pass' || v === 'fail')
+  if (found.includes('fail')) return 'fail'
+  return found[0] === 'pass' ? 'pass' : null
+}
+export type Reply = { status: 'pass' | 'fail' | null; open: string[]; answers: Record<string, Answer> }
+// A worker's reply: STATUS, the OPEN items (its inline value and the list lines right below it) and one answer per checked constraint id
+// (`C1: pass (cmd) <command> -> <result>`, `C1: pass (read) <where>`, `C1: fail <reason>`; the first line for an id decides, a later fail overrides a pass).
+export const parseReply = (text: unknown): Reply => {
+  const all = str(text).split(/\r?\n/)
+  const reply: Reply = { status: parseStatus(text), open: [], answers: {} }
+  const at = all.findIndex(l => OPEN_RE.test(l))
+  if (at !== -1) {
+    const addItem = (item: string) => {
+      const v = item.trim()
+      if (!NOTHING.has(v.toLowerCase().replace(/[.;:]+$/, '').trim())) reply.open.push(v)
+    }
+    addItem(OPEN_RE.exec(all[at] as string)?.[1] ?? '')
+    let started = false
+    for (const l of all.slice(at + 1)) {
+      if (!l.trim()) {
+        if (started) break
+        continue
+      }
+      const item = l.match(/^\s*(?:[-*+•]|\d+[.)])\s+(.*)$/)
+      if (!item) break // a new field or a paragraph ends the list
+      started = true
+      addItem(item[1] ?? '')
+    }
+  }
+  for (const l of all) {
+    const m = ANSWER_RE.exec(l)
+    if (!m) continue
+    const id = (m[1] ?? '').toUpperCase()
+    const verdict = (m[2] ?? '').toLowerCase() as Answer['verdict']
+    const rest = (m[3] ?? '').replace(/[*_`]+$/, '').trim()
+    const mode = rest.match(/^\((cmd|read)\)\s*/i)
+    const answer: Answer = {
+      verdict,
+      mode: mode ? ((mode[1] ?? '').toLowerCase() as 'cmd' | 'read') : null,
+      detail: rest.slice(mode ? mode[0].length : 0).replace(/\s*→\s*/g, ' -> ').trim(),
+    }
+    const prev = reply.answers[id]
+    if (!prev || (verdict === 'fail' && prev.verdict === 'pass')) reply.answers[id] = answer
+  }
+  return reply
+}
+// ---- end of the mirror ----
+
+// The pane's view of a brief: its slice, file count and dependencies ("-" and "n/a" also mean none here, as before).
+const sliceOf = (prompt: string) => parseHeader(prompt).slice ?? undefined
+const depsOf = (prompt: string) => parseHeader(prompt).depends.filter(d => !/^(-|n\/a)$/i.test(d))
+const filesOf = (prompt: string) => parseHeader(prompt).files.length
+const planOf = (brief: string): Plan['slices'] =>
+  parsePlan(brief).slices.map(s => ({ id: s.slice, ...(s.goal ? { goal: s.goal } : {}), ...(s.risky ? { risky: true } : {}), ...(s.checks.length ? { checks: s.checks } : {}) }))
 
 // What the session used, for "used in this session": MCP servers by their name in the tool (`mcp__claude_ai_Google_Drive__x` is "Google Drive"),
 // built-in tools by count, and the files the file tools read or changed. The Agent and Skill tools are left to agent.spawn and skill.prompt.
@@ -73,10 +197,6 @@ const fitted = (names: string[], w: number) => {
   const text = (k: number) => names.slice(0, k).join(' · ') + (k < names.length ? `${k ? ' · ' : ''}+${names.length - k}` : '')
   while (shown > 1 && text(shown).length > w) shown--
   return text(shown)
-}
-const statusOf = (answer: string): Agent['status'] => {
-  const found = [...answer.matchAll(/^[ \t>*_`-]*STATUS:\**[ \t]*(pass|fail)\b/gim)].pop()?.[1]?.toLowerCase()
-  return found === 'pass' || found === 'fail' ? found : 'done'
 }
 const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -478,9 +598,6 @@ const latestOf = (list: Agent[], id: string) => {
 }
 
 type Ctx = Parameters<Hook<'agent.spawn'>>[0]
-// Nothing runs and the last agent ended over two minutes ago (or none ever ran): what follows starts a new run. `force` (a new prompt from the person)
-// drops the two minutes: once nothing runs, new input is new work.
-const isNewRun = (list: Agent[], t: number, force = false) => !list.some(a => a.status === 'running') && (force || t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) >= 120_000)
 
 // The main turn still works: `work` exists and has no end. Stale (a killed or interrupted session whose `turn.complete` never came): agents ran, none runs,
 // the last one ended over ten minutes ago. A solo run (no agents) is never stale by this rule.
@@ -490,23 +607,91 @@ const STALE_MS = 600_000
 const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
   !!work && !work.endedAt && !(list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS)
 
-// A new run drops the old diagram: agents, log and main. With `keepVerdict` (the spawn path) the verdict and the work line stay when they are newer than
-// the old run's last agent: the person's prompt and the router both came before the first spawn of this run.
-async function newRun($: Ctx, t: number, keepVerdict: boolean, force = false) {
+// ---- The run model of the gates (docs/brief-grammar.md, Run model), worked out from the agents on the pane. ----
+// A run opens at a PLAN REVIEW launch without REPLAN (closing the previous one) or at a light-path implementer launch when none is open; REPLAN extends
+// the open run; it closes when every slice is final. A new prompt never closes it (headless runs deliver background results as a new prompt).
+const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed review is final
+type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer> }
+const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number]): SliceRun => {
+  const mine = list.filter(a => a.slice === id)
+  const impls = mine.filter(a => a.role === 'implementer')
+  // Attempts: implementer stops (fresh launches and resumes alike); stops with no review of the slice between them count as one.
+  let attempts = 0
+  let reviewed = true
+  for (const a of mine.filter(x => x.endedAt !== undefined).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))) {
+    if (a.role === 'implementer') {
+      if (reviewed) attempts++
+      reviewed = false
+    } else if (a.role === 'reviewer') reviewed = true
+  }
+  // Reviews that count: reviewer stops after the slice's latest implementer launch or stop.
+  const lastImpl = Math.max(-Infinity, ...impls.map(a => a.endedAt ?? a.startedAt))
+  const reviews = mine.filter(a => a.role === 'reviewer' && a.endedAt !== undefined)
+  const current = reviews.filter(r => (r.endedAt as number) > lastImpl).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
+  const latest = current[current.length - 1]
+  const pass = current.filter(r => r.status === 'pass').pop()
+  const risky = !!planned?.risky || impls.some(a => a.risky)
+  const signals = [
+    ...(risky ? ['risky'] : []),
+    ...(reviews.some(r => r.status === 'fail') ? ['retry'] : []),
+    ...(pass && Object.values(pass.answers ?? {}).some(a => a.mode === 'read') ? ['read_answer'] : []),
+    ...(pass?.open?.length ? ['open_items'] : []),
+  ]
+  return {
+    attempts,
+    final: latest?.status === 'pass' || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES),
+    risky,
+    signals,
+    opusPass: current.some(r => r.status === 'pass' && family(r.model) === 'opus'),
+    checks: [...new Set([...(planned?.checks ?? []), ...mine.flatMap(a => a.checks ?? [])])],
+    answers: latest?.answers ?? {},
+  }
+}
+// Stale: agents ran, none runs, the last one ended over ten minutes ago (the same escape as the main turn's below).
+const staleOf = (list: Agent[], t: number) =>
+  list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS
+// A run is open while it exists, is not stale, and an agent runs or a slice of it is not final. A run with no slice yet (a plan review alone, an
+// old-style plan without SLICE lines) stays open until a slice is known or it goes stale.
+const runOpen = (list: Agent[], plan: Plan | null, run: Run | null, t: number) => {
+  if (!run || staleOf(list, t)) return false
+  if (list.some(a => a.status === 'running')) return true
+  const inRun = list.filter(a => a.startedAt >= run.at)
+  const ids = run.kind === 'light' ? [run.slice as string] : [...new Set([...(plan?.slices ?? []).map(s => s.id), ...inRun.flatMap(a => (a.slice ? [a.slice] : []))])]
+  return !ids.length || ids.some(id => !sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
+}
+
+// A new run drops the old diagram: agents, log, main, plan and run. With `keepVerdict` (the spawn path) the work line stays while the main turn works on
+// it or when it is newer than the old run's last agent, and the verdict when it is that new or came with the kept work.
+async function newRun($: Ctx, t: number, keepVerdict: boolean) {
   const before = await read($, agents)
-  if (!isNewRun(before, t, force)) return
   const w = await read($, workAtom)
-  if (workOpen(w, before, t)) return // the main turn still works: these agents belong to this run
   const kept = await read($, triage)
   const lastEnd = Math.max(0, ...before.map(a => a.endedAt ?? 0))
-  const keep = keepVerdict && kept && kept.at > lastEnd ? kept : null
+  const keepWork = keepVerdict && !!w && (workOpen(w, before, t) || w.startedAt > lastEnd)
+  const keep = keepVerdict && kept && (kept.at > lastEnd || (keepWork && w && kept.at >= w.startedAt)) ? kept : null
   await update($, agents, () => [])
   await update($, triage, () => keep)
   await update($, log, () => (keep ? [{ at: keep.at, kind: 'triage', role: 'router', label: keep.mode, model: '' } as LogEntry] : []))
   await update($, main, () => '')
   await update($, planAtom, () => null) // the plan belongs to its run; what the session used stays
-  if (!(keepVerdict && w && w.startedAt > lastEnd)) await update($, workAtom, () => null)
+  await update($, runAtom, () => null)
+  if (!keepWork) await update($, workAtom, () => null)
   told = false
+}
+
+// Blocked Agent launches: the gate's reason code when its message names one, else the reason the plan check's message stands for.
+const GATE_REASONS = [
+  'not_in_plan', 'builtin_agent_in_run', 'agents_running', 'constraints_unchecked', 'opus_review_required', 'missing_lines', 'no_plan_review', 'light_path_multi',
+  'file_overlap', 'dependency_cycle',
+]
+const GATE_PHRASES: [RegExp, string][] = [
+  [/every implementer brief starts with SLICE/i, 'missing_lines'], [/PATH: light is only for/i, 'light_path_multi'], [/no plan review has finished/i, 'no_plan_review'],
+  [/would change files another slice owns/i, 'file_overlap'], [/forms a cycle/i, 'dependency_cycle'],
+]
+const denialOf = (ran: unknown) => {
+  const text = stringsOf(ran).join('\n').slice(0, 20_000)
+  // `\b` treats `_` as a word character, so `not_in_plan_gave_up` (a launch let through) does not match `not_in_plan`
+  return GATE_REASONS.find(r => new RegExp(`\\b${r}\\b`).test(text)) ?? GATE_PHRASES.find(([re]) => re.test(text))?.[1] ?? (/\bplan check\b/i.test(text) ? 'plan check' : undefined)
 }
 
 // Redraw four times a second for the animation while an agent runs, finished under 2.5 s ago, or the main session works; then stop.
@@ -540,11 +725,15 @@ export const register: Register = on => {
       const working = await read($, workAtom)
       const before = await read($, agents)
       const open = workOpen(working, before, now) // a stale one (a lost turn.complete) starts a clean run
-      if (!open) await newRun($, now, false, true)
-      const running = (await read($, agents)).some(a => a.status === 'running')
-      if (!running && !open) {
+      const running = before.some(a => a.status === 'running')
+      // New input is new work once nothing runs and no run is open; a prompt never closes an open run (a headless run's background results
+      // arrive as a prompt), it only reopens the main turn.
+      if (!open && !running && !runOpen(before, await read($, planAtom), await read($, runAtom), now)) await newRun($, now, false)
+      if (!open) {
+        const w = await read($, workAtom)
         const line = e.text.split('\n').find(l => l.trim()) ?? ''
-        await update($, workAtom, () => ({ text: line.trim().slice(0, 120), startedAt: now }))
+        if (!w && !running) await update($, workAtom, () => ({ text: line.trim().slice(0, 120), startedAt: now }))
+        else if (w?.endedAt) await update($, workAtom, () => ({ text: w.text, startedAt: w.startedAt }))
       }
       await openPane($)
       startTimer($, slot)
@@ -599,22 +788,46 @@ export const register: Register = on => {
       }
     }
     if (!ROLES.includes(role) || !('agentId' in spawned) || !spawned.agentId) return spawned
-    const plan = /^\s*PLAN REVIEW\b/.test(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
+    const plan = isPlanReview(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
+    const parsed = plan ? parsePlan(e.prompt) : undefined
+    const header = parseHeader(e.prompt)
     const slice = plan ? undefined : sliceOf(e.prompt) // a plan review is a stage of its own, whatever SLICE line its brief carries
     const agent: Agent = {
       id: spawned.agentId, role, model: spawned.model, slice, label: slice ?? (plan ? 'plan review' : e.description),
       deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
       tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
+      ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
     }
-    // a spawn with nothing running and the last agent done over two minutes ago starts a new run: drop the old diagram
-    // (newRun leaves the run alone while the main turn is open: a slow plan review before the writers must not wipe the agents on the pane)
-    if ((await read($, agents)).length > 0) await newRun($, agent.startedAt, true)
+    const t = agent.startedAt
+    const before = await read($, agents)
+    const run0 = await read($, runAtom)
+    const open0 = runOpen(before, await read($, planAtom), run0, t)
+    // A new plan (a PLAN REVIEW without REPLAN that names slices) closes the run on the pane once it holds slices; one that names none, or the fixed
+    // plan after a failed plan review with no slice launched yet, keeps the agents so the re-plan loop shows. Otherwise the diagram is dropped only once
+    // nothing runs, the main turn is not working, and the run is closed (every slice final) or stale; agents with no run (no plan review, no light
+    // path) are dropped only when stale.
+    const newPlan = !!parsed && parsed.replan === null && parsed.slices.length > 0 && before.some(a => a.slice)
+    const idle = !workOpen(await read($, workAtom), before, t) && !before.some(a => a.status === 'running')
+    const reset = before.length > 0 && (newPlan || (idle && (staleOf(before, t) || (!!run0 && !open0))))
+    if (reset) await newRun($, t, true)
+    // The run the gates would see; the scripted workflow's briefs are not part of it.
+    if (parsed && (parsed.replan === null || reset || !open0)) await update($, runAtom, () => ({ kind: 'planned', at: t }) as Run)
+    else if (!plan && role === 'implementer' && header.path === 'light' && !header.workflow && slice && (reset || !open0)) await update($, runAtom, () => ({ kind: 'light', at: t, slice }) as Run)
     // a spawn whose id already has a record (a resume that fires agent.spawn again) is a new record, so the earlier run stays as history
     const grown = await update($, agents, list => [...list, agent].slice(-80))
     await update($, main, () => e.parentModel)
-    // The plan the review checks is the plan the progress bar follows; a brief that names no slice leaves the last plan in place.
-    const planned = plan ? planOf(e.prompt) : []
-    if (planned.length) await update($, planAtom, () => ({ at: agent.startedAt, slices: planned }))
+    // The plan the review checks is the plan the progress bar follows; a brief that names no slice leaves the last plan in place. REPLAN extends the
+    // plan of the open run: a slice it names again is updated, a new one is added.
+    if (parsed) {
+      const planned = planOf(e.prompt)
+      const marks = { ...(parsed.replan !== null ? { replan: parsed.replan } : {}), ...(Object.keys(parsed.constraints).length ? { constraints: parsed.constraints } : {}) }
+      const old = await read($, planAtom)
+      if (parsed.replan !== null && old && open0 && !reset) {
+        const slices = old.slices.map(s => ({ ...s, ...(planned.find(p => p.id === s.id) ?? {}) }))
+        for (const p of planned) if (!slices.some(s => s.id === p.id)) slices.push(p)
+        await update($, planAtom, () => ({ ...old, slices, ...marks, ...(marks.constraints ? { constraints: { ...(old.constraints ?? {}), ...marks.constraints } } : {}) }))
+      } else if (planned.length) await update($, planAtom, () => ({ at: t, slices: planned, ...marks }))
+    }
     const note = startNote(grown, agent)
     await update($, log, l => [...l, { at: agent.startedAt, kind: 'start', role, label: agent.label, model: agent.model, ...(note ? { note } : {}) } as LogEntry].slice(-60))
     await openPane($)
@@ -675,6 +888,24 @@ export const register: Register = on => {
     } catch {
       // the list must never change the tool call
     }
+    // An Agent launch a gate blocked (the plan check denies before the agent exists, so no agent.spawn follows): log the reason.
+    if ((e.tool === 'Agent' || e.tool === 'Task') && (('deny' in ran && ran.deny) || ran.isError)) {
+      try {
+        const reason = denialOf(ran)
+        if (reason) {
+          const t = e as unknown as Record<string, unknown>
+          const input = (t.input && typeof t.input === 'object' ? t.input : t) as Record<string, unknown>
+          const prompt = str(input.prompt)
+          const slice = isPlanReview(prompt) ? 'plan' : parseHeader(prompt).slice
+          const at = await $.clock.now()
+          const entry = { at, kind: 'blocked', role: bare(str(input.subagent_type)), label: reason, model: '', ...(slice ? { note: slice } : {}) } as LogEntry
+          await update($, log, l => [...l, entry].slice(-60))
+        }
+      } catch {
+        // a denial the pane cannot read must never change the tool call
+      }
+      return ran
+    }
     if (e.agentId || e.tool !== 'Bash' || !ROUTE_CMD.test(commandOf(e))) return ran
     // The router ran in the main loop: take its verdict from the result, and hand the result on untouched.
     try {
@@ -710,7 +941,10 @@ export const register: Register = on => {
       const inT = u?.input_tokens ?? 0
       const outT = u?.output_tokens ?? 0
       const cacheT = (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0)
-      const status = statusOf(e.answer)
+      const reply = parseReply(e.answer)
+      const status: Agent['status'] = reply.status ?? 'done'
+      // the constraint answers and OPEN items of this report (absent on an old-style reply, so its record is as before)
+      const said = { ...(Object.keys(reply.answers).length ? { answers: reply.answers } : {}), ...(reply.open.length ? { open: reply.open } : {}) }
       const result = resultOf(e.answer)
       const spent = { tokens: inT + outT + cacheT, inTokens: inT, outTokens: outT, cacheTokens: cacheT }
       const hold: { one?: Agent; resumed?: boolean } = {}
@@ -720,14 +954,14 @@ export const register: Register = on => {
         if (!a) return l
         if (a.endedAt === undefined) {
           // the run this record opened ends
-          const upd = { ...a, status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result }
+          const upd = { ...a, status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
           hold.one = upd
           return l.map((x, j) => (j === i ? upd : x))
         }
         // a turn ends for a record that already ended (a resume that fires no agent.spawn): the old run stays as history, the resumed run is a new record.
         // It starts when the old one ended, or after the last other end in its slice, so a retry after a reviewer's verdict starts after that verdict.
         const from = Math.max(a.endedAt, ...l.filter(x => a.slice && x.slice === a.slice && x !== a).map(x => x.endedAt ?? 0))
-        const again = { ...a, startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined }
+        const again = { ...a, startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
         hold.one = again
         hold.resumed = true
         return [...l, again].slice(-80)
@@ -776,9 +1010,21 @@ export const register: Register = on => {
     // Progress through the orchestrator's plan: the planned slices in plan order, then any slice that started outside the plan, each at its latest
     // attempt (a failure made good counts as done). A slice is done once it passed review, or was built with no reviewer.
     const goals = new Map((plan?.slices ?? []).map(s => [s.id, s.goal]))
+    // Marks after a slice id, each only when it applies (an old-style plan and reply show none): ⚑ RISKY; ⇧opus✔ or ⇧opus? when a doubt signal
+    // (RISKY, a failed review before, a (read) answer or OPEN items in its passing review) asks for an opus review, and whether one passed; then one
+    // tick per constraint from its latest review: C1✔ passed by a command, C1✓ passed by reading, C1✖ failed, C1· not answered.
+    const marksOf = (id: string) => {
+      const sr = sliceRunOf(list, id, plan?.slices.find(s => s.id === id))
+      const ids = [...new Set([...sr.checks, ...Object.keys(sr.answers)])]
+      const ticks = ids.map(c => {
+        const a = sr.answers[c]
+        return `${c}${!a ? '·' : a.verdict === 'fail' ? '✖' : a.mode === 'read' ? '✓' : '✔'}`
+      })
+      return [...(sr.risky ? ['⚑'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
+    }
     const steps = [...new Set([...(plan?.slices ?? []).map(s => s.id), ...[...map.values()].map(n => n.slice)])].map(id => {
       const n = resolve(map, id)
-      return { id, goal: goals.get(id), state: (!n ? 'queued' : fix.has(n.id) ? 'done' : stateOf(n)) as State }
+      return { id, goal: goals.get(id), marks: marksOf(id), state: (!n ? 'queued' : fix.has(n.id) ? 'done' : stateOf(n)) as State }
     })
     const stepsDone = steps.filter(s => s.state === 'pass' || s.state === 'done').length
     const stepsRunning = steps.filter(s => s.state === 'running').length
@@ -829,6 +1075,9 @@ export const register: Register = on => {
     // Agents and a main turn: signed off once nothing runs and the turn ended. With no `work` (agents without a typed prompt, or background agents that woke the
     // main session) only "nothing runs" is known, so the pane can still flicker to signed off between waves there: a known limit.
     const signed = list.length > 0 ? !running && !working : !!work?.endedAt
+    // The main turn ended while agents still run (background agents): the pane waits for them before it signs off.
+    const waiting = running > 0 && !!work?.endedAt
+    const waitingText = `waiting for ${running} agent${running === 1 ? '' : 's'}`
     // The orchestrator plans itself, so the plan stage has no agent: it is done once plan review or a build has started.
     const planned = list.some(a => a.role === 'implementer' || a.label === 'plan review')
     // No integrator ran (one slice at a time in a shared tree, or no code): once the run is signed off the merge stage is skipped.
@@ -1028,8 +1277,8 @@ export const register: Register = on => {
     const logN = wide ? 10 : 7
     const shownLog = lines.slice(-logN)
     const logW = Math.max(10, width - 2)
-    const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇' } as const
-    const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle' } as const
+    const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇', blocked: '⊘' } as const
+    const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle', blocked: 'error' } as const
 
     const mainState: State = running || working ? 'running' : solo ? workState : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
@@ -1114,6 +1363,7 @@ export const register: Register = on => {
             <Text bold wrap="truncate-end">
               progress · {stepsDone}/{steps.length} slices · {Math.round((100 * stepsDone) / steps.length)}%{stepsRunning ? ` · ${stepsRunning} running` : ''}
               {stepsFailed ? ` · ${stepsFailed} failed` : ''}
+              {plan?.replan !== undefined ? ` · ↻ replan ${plan.replan}` : ''}
             </Text>
             <Box>
               {progRuns.map(r => (
@@ -1122,7 +1372,7 @@ export const register: Register = on => {
             </Box>
             {steps.slice(0, STEPS_SHOWN).map(s => (
               <Text color={COLOR[s.state]} wrap="truncate-end">
-                {g(s.state)} {s.id}{s.goal ? ` · ${s.goal}` : ''}
+                {g(s.state)} {s.id}{s.marks ? ` ${s.marks}` : ''}{s.goal ? ` · ${s.goal}` : ''}
               </Text>
             ))}
             {steps.length > STEPS_SHOWN && <Text dimColor>+{steps.length - STEPS_SHOWN} more</Text>}
@@ -1140,7 +1390,9 @@ export const register: Register = on => {
               {g(mainState)} {short(orchestrator || 'main')} · orchestrator
             </Text>
             <Text color={COLOR[mainState]} wrap="truncate-end">
-              {running || (working && !solo)
+              {waiting
+                ? waitingText
+                : running || (working && !solo)
                 ? `dispatching${dots} ${running} running`
                 : solo
                   ? work ? (working ? `working in this session${dots}` : work.outcome === 'answered' ? 'answered in this session' : 'stopped before an answer') : 'waiting for agents'
@@ -1331,7 +1583,7 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">
               {solo && work
                 ? working ? 'waiting for the reply' : work.outcome === 'answered' ? 'answered in this session' : 'stopped'
-                : signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : 'waiting for agents · verified findings only'}
+                : signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : waiting ? waitingText : 'waiting for agents · verified findings only'}
             </Text>
           </Box>
         )}
@@ -1378,6 +1630,8 @@ export const register: Register = on => {
               const text =
                 l.kind === 'triage'
                   ? `triage ${l.label}`
+                  : l.kind === 'blocked'
+                  ? `blocked ${l.label}${l.note ? ` · ${l.note}` : ''}${l.role ? ` · ${l.role}` : ''}`
                   : l.kind === 'start' && l.note
                     ? `${l.note} · ${l.label} started · ${short(l.model)}`
                     : `${l.label} ${l.kind === 'start' ? `started · ${short(l.model)}` : `${ABBR[l.role] ?? l.role} · ${clock(l.ms ?? 0)} · ${tokens(l.tokens ?? 0)}`}`

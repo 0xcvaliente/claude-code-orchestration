@@ -74,3 +74,15 @@ Known differences between the arms (none is corrected for):
 - Budget. `ORCH_BUDGET_TOKENS` is a token cap for the SDK (`--budget`) and a dollar-converted cap (1M tokens per dollar) natively. No budget is set in this campaign.
 - Token undercount. A worker's tokens are recorded only when it finishes, and a capped SDK run has no `report.json`, so tokens of workers still running at the cap are lost. SDK token totals for capped runs are an undercount; this favours the SDK on tokens and does not affect the primary strict-score metric. Read H8's token ratio together with the count of capped SDK runs (`capped_sdk_runs` in the H8 evidence).
 - Claims. The SDK prints no result claim, so its false-success rate is not meaningful and H4 does not use it.
+
+## Amendment, 2026-10-31: H9–H13, written before any run of 0.2.0 or later
+
+Written before any run of plugin version 0.2.0 or later, real or benchmark. The baselines come from the plugin's state logs and the k2 campaign with the built-in subagents blocked (README, "Benchmark"; [docs/benchmark-builtins-blocked.md](../docs/benchmark-builtins-blocked.md)). What each hypothesis tests is set out in [docs/native-vs-plugin.md](../docs/native-vs-plugin.md).
+
+- **H9.** Over the first 14 days of real use after 0.2.0, review-gate give-ups that fire while an agent is running (per Stop `background_tasks` or the SubagentStart/SubagentStop pairing) = 0. Baseline: 430 of 440 up to 2026-10-31. Source: the plugin's state logs (`gates.jsonl`, `telemetry.jsonl`).
+- **H10.** On k2-stdlib-toolkit-xl with a 10-minute cap, O-mix 0.2+ (constraints ledger) has a median strict score ≥ 97% with 0 false successes. Baseline: O-mix median 92.4% with 2 false successes in 2 runs.
+- **H11.** Same task and cap: O-mix 0.2+ median strict score within 2 points of O-O's 99.8%, at ≤ 0.9× O-O's median tokens (≤ 5.71M).
+- **H12.** Same task and cap: the gated workflow (0.3.0) vs native ultracode with the plugin disabled has a median strict score within 2 points or higher, and no more false successes. Tokens and wall time are reported.
+- **H13.** On a fixed command corpus (`src/fixtures/judge-corpus.json`, 0.3.0), the native judge hook allows 0 push, remote or recursive-delete commands without a matching user request. False denies are reported, without a threshold.
+
+Short runs (1 or 2 per arm) show direction only. The existing verdict rules apply: a hypothesis with n < 2 is inconclusive, and rate-limited and errored runs are excluded.
