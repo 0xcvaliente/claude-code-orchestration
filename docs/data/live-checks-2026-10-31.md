@@ -196,9 +196,14 @@ Hook input keys: `session_id, transcript_path, cwd, prompt_id, hook_event_name, 
 
 ### Check G: does the dashboard mod's `agent.spawn` hook run under `claude -p`, and can it rewrite a workflow researcher's model?
 
-**Not run.** The slice ran out of turns before this probe. It needs a scratch project with a function-hooks mod (an `agent.spawn` handler that logs the event and returns a changed `model`), a project workflow with one `agent(..., { agentType: 'researcher' })`, a headless `claude -p` run with the mod loaded through `--plugin-dir`, and the subagent's model read from its transcript at SubagentStop (the method of the section 2.3 probe in `docs/research-2026-10-31.md`). The CHANGELOG line saying `agent.spawn` can rewrite a workflow agent's prompt and model has not been checked against a run.
+**Run later, with a minimal probe mod in place of the dashboard: see [live-checks-workflow.md](live-checks-workflow.md)** (Claude Code 2.1.316, 2026-10-31). The slice that wrote this section ran out of turns first. In short:
 
-**Consequence:** `dashboard/register.tsx` does not route workflow researchers. The read router covers only Agent tool launches, through `plan-check.mjs`, since a workflow's `agent()` makes no Agent tool call (Check C, and `.claude/rules/agents.md`, "The scripted workflow"). The pane shows the model each researcher runs with: `spawned.model` on its start line and card. Whether that value reflects a PreToolUse `updatedInput` model has not been checked live either.
+- A `--plugin-dir` mod's `agent.spawn` hook runs under `claude -p`.
+- The hook fires for workflow agents (`e.workflow` is set) and for Agent-tool subagents.
+- It can rewrite a workflow agent's `model` and `prompt`. The script asked for sonnet, the hook set haiku, and the transcript shows `claude-haiku-5-5` and the rewritten prompt.
+- Mod code can read files (`$.fs.read`) and run `node` scripts (`$.process.run`). It can import only its own files, never `node:*` or files outside the plugin.
+
+**Consequence:** `dashboard/register.tsx` still does not route workflow researchers. The probe shows routing is possible; [live-checks-workflow.md](live-checks-workflow.md) ends with what an implementation would need. The read router covers only Agent tool launches, through `plan-check.mjs`, since a workflow's `agent()` makes no Agent tool call (Check C, and `.claude/rules/agents.md`, "The scripted workflow"). The pane shows the model each researcher runs with: `spawned.model` on its start line and card. Whether that value reflects a PreToolUse `updatedInput` model has not been checked live either.
 
 ## Check H: does the read router raise a researcher on a scanned PDF? (Claude Code 2.1.316, 2026-10-31)
 
