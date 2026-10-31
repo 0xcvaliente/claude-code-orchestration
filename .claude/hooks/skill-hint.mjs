@@ -1,9 +1,11 @@
 // Skill hints for a worker launch: which installed skills (skill-catalog.mjs) the plan check suggests to the worker.
 // Pure: no I/O, no side effects at import, never throws. Picks hold a skill name and a short reason code only.
 // Order: the brief's SKILLS names first (validated against the catalog), then strong signals only: a document
-// extension in FILES or SOURCES matched to skills whose name or description names that format, else a minimum score
-// from the brief's words against a skill's name and description. One pick per near-duplicate family; at most 3 picks
-// (1 for a reviewer), none for the integrator or any other role.
+// extension in FILES or SOURCES matched to skills whose name or description names that format (a description that
+// sends the format to another skill does not count), then the preference table (RULES: security, bugfix, tdd, ui_work,
+// motion; each suggests the first of its skills that is installed), else a minimum score from the brief's words against
+// a skill's name and description. One pick per near-duplicate family; at most 3 picks (1 for a reviewer), none for the
+// integrator or any other role.
 
 /** Picks per role; a role not listed (the integrator, anything else) gets none. @type {Record<string, number>} */
 export const MAX_PICKS = { implementer: 3, researcher: 3, reviewer: 1 };
@@ -106,12 +108,60 @@ function autoOk(s) {
   return !OWN.has(bare) && !META.has(bare) && safeName(s.name);
 }
 
+/**
+ * A description that sends work in this format to another skill ("→ that format's skill", "use the docx skill",
+ * "not for .pdf"): such a skill is no format match.
+ * @param {unknown} desc @param {string[]} words the format's words
+ */
+function redirects(desc, words) {
+  const d = String(desc ?? "").toLowerCase().replace(/[’']/g, "'");
+  if (/that format's skill|the format's (?:own )?skill/.test(d)) return true;
+  if (/\buse (?:the|a|its) [\w:.-]+ skill\b/.test(d)) return true;
+  return words.some((w) => new RegExp(`\\bnot (?:for|use for|used for) [^.;]*\\b\\.?${w}\\b`).test(d));
+}
+
+// The preference table: rule -> reason code and skills in order of preference (the first installed one wins).
+const UI_EXTS = new Set(["tsx", "jsx", "vue", "svelte", "css", "scss", "html"]);
+const UI_WORDS = ["ui", "page", "pages", "component", "components", "layout", "layouts", "design", "landing", "style", "styles", "styling", "screen", "screens", "dashboard", "dashboards"];
+const MOTION_WORDS = ["animation", "animations", "animate", "transition", "transitions", "motion"];
+const BUG_WORDS = ["bug", "bugs", "fix", "fixes", "regression", "regressions", "crash", "crashes", "failing"];
+const SECURITY_WORDS = ["auth", "authentication", "authorization", "login", "token", "tokens", "password", "passwords", "permission", "permissions", "crypto", "injection", "xss", "csrf", "security"];
+/** @type {{ reason: string, skills: string[], roles: string[] }[]} */
+const RULES = [
+  { reason: "security", skills: ["security-best-practices", "security-review"], roles: ["implementer", "reviewer"] },
+  { reason: "bugfix", skills: ["diagnosing-bugs", "tdd"], roles: ["implementer"] },
+  { reason: "tdd", skills: ["tdd"], roles: ["implementer"] },
+  { reason: "ui_work", skills: ["frontend-design", "ui-design", "web-design-guidelines"], roles: ["implementer"] },
+  { reason: "motion", skills: ["animate"], roles: ["implementer"] },
+];
+
+/**
+ * The preference rules that fire for a launch, in table order.
+ * @param {{ role: string, files: string[], kind: string | null, risky: boolean, text: string }} a
+ * @returns {{ reason: string, skills: string[] }[]}
+ */
+export function preferenceRules(a) {
+  const lower = a.text.toLowerCase();
+  const words = new Set(lower.split(/[^a-z0-9]+/).filter(Boolean));
+  const any = (/** @type {string[]} */ list) => list.some((w) => words.has(w));
+  const ui = a.files.some((f) => UI_EXTS.has(extOf(f)));
+  /** @type {Record<string, boolean>} */
+  const fires = {
+    security: a.risky && any(SECURITY_WORDS),
+    bugfix: a.kind === "bugfix" || any(BUG_WORDS),
+    tdd: words.has("tdd") || /\btest[- ]first\b/.test(lower),
+    ui_work: ui && any(UI_WORDS),
+    motion: ui && any(MOTION_WORDS),
+  };
+  return RULES.filter((r) => r.roles.includes(a.role) && fires[r.reason]).map((r) => ({ reason: r.reason, skills: r.skills }));
+}
+
 /** The lower-case extension of a path or glob ("" when none). @param {string} p */
 const extOf = (p) => (p.replace(/[?#].*$/, "").match(/\.([A-Za-z0-9]+)$/)?.[1] ?? "").toLowerCase();
 
 /**
  * Skill hints for one launch.
- * @param {{ role?: string, header?: { files?: string[], sources?: string[], depends?: string[], skills?: string[] }, brief?: string, catalog?: CatalogSkill[] }} args
+ * @param {{ role?: string, header?: { files?: string[], sources?: string[], depends?: string[], skills?: string[], kind?: string | null, risky?: boolean }, brief?: string, catalog?: CatalogSkill[] }} args
  * @returns {SkillPick[]}
  */
 export function skillHints(args) {
@@ -160,7 +210,7 @@ export function skillHints(args) {
       const named = pool.filter((s) => tokens(bareName(s.name)).some((t) => words.includes(t))).sort((a, b) => a.name.localeCompare(b.name));
       byName.push(...named.map((s) => ({ s, reason })));
       const described = pool
-        .filter((s) => !named.includes(s))
+        .filter((s) => !named.includes(s) && !redirects(s.description, words))
         .map((s) => ({ s, n: affirmed(s.description).filter((t) => words.includes(t)).length }))
         .filter((x) => x.n > 0)
         .sort((a, b) => b.n - a.n || a.s.name.localeCompare(b.s.name));
@@ -168,13 +218,17 @@ export function skillHints(args) {
     }
     for (const { s, reason } of [...byName, ...byDesc]) if (fresh(s)) add(s.name, reason);
 
-    // 3. No format signal: the brief's words against name and description, above a minimum score.
-    if (!exts.length && picks.length < max) {
-      let text = String(args?.brief ?? "");
-      // Paths and names already used above are not words of the task.
-      for (const v of [...paths, ...(Array.isArray(header.depends) ? header.depends : []), ...(Array.isArray(header.skills) ? header.skills : [])]) {
-        if (typeof v === "string" && v) text = text.split(v).join(" ");
-      }
+    let text = String(args?.brief ?? "");
+    // Paths and names already used above are not words of the task.
+    for (const v of [...paths, ...(Array.isArray(header.depends) ? header.depends : []), ...(Array.isArray(header.skills) ? header.skills : [])]) {
+      if (typeof v === "string" && v) text = text.split(v).join(" ");
+    }
+
+    // 3. No format signal: the brief's words against name and description, above a minimum score. The best match comes
+    // before the preference table (it names the task more precisely), the rest after it.
+    /** @type {CatalogSkill[]} */
+    let goal = [];
+    if (!exts.length) {
       const words = new Set(tokens(text).filter((t) => !STOP.has(t)));
       const scored = pool
         .map((s) => {
@@ -185,8 +239,21 @@ export function skillHints(args) {
         })
         .filter((x) => x.nameHits >= 1 && x.descHits >= 2 && x.score >= 5)
         .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
-      for (const x of scored) if (fresh(x.s)) add(x.s.name, "goal_match");
+      goal = scored.map((x) => x.s);
     }
+    const best = goal.find(fresh);
+    if (best) add(best.name, "goal_match");
+
+    // 4. The preference table: each rule that fires suggests the first of its skills that is installed (and suggestable).
+    const files = (Array.isArray(header.files) ? header.files : []).filter((p) => typeof p === "string");
+    const fired = preferenceRules({ role, files, kind: typeof header.kind === "string" ? header.kind : null, risky: header.risky === true, text });
+    for (const rule of fired) {
+      const s = rule.skills.map((n) => pool.find((x) => x.name === n)).find((x) => x !== undefined);
+      if (s && fresh(s)) add(s.name, rule.reason);
+    }
+
+    // 5. The remaining goal matches.
+    for (const s of goal) if (fresh(s)) add(s.name, "goal_match");
     return picks;
   } catch {
     return [];
