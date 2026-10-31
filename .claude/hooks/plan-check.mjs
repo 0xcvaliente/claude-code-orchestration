@@ -38,9 +38,10 @@
 // the sources with file-profile.mjs's profileSources (paths resolved against the project dir; READ and RISKY from the
 // brief; conversions cached in <state dir>/read-cache) in a child process with a time budget (ROUTER_BUDGET_MS, or
 // ORCH_READ_ROUTER_BUDGET_MS); any error or timeout skips routing. The effective model is tool_input.model, else the
-// agent file's model: line (brief.mjs agentModel), else CLAUDE_CODE_SUBAGENT_MODEL, else unknown (counted as haiku).
-// When the tier (haiku < sonnet < opus) ranks above it, the launch gets the tier's alias; a model is never lowered and
-// fable is never chosen or changed. When conversions exist, a short note listing them (and each PDF's hard pages) is
+// agent file's model: line (brief.mjs agentModel), else CLAUDE_CODE_SUBAGENT_MODEL. It is ranked by family (alias or a
+// full claude-<family>-... id); when it is inherit, missing or cannot be ranked the router does not route (the agent may
+// run on the parent's model, which a tier could lower). When the tier (haiku < sonnet < opus) ranks above it, the
+// launch gets the tier's alias; a model is never lowered and fable is never chosen or changed. When conversions exist, a short note listing them (and each PDF's hard pages) is
 // appended to the prompt. In those two cases only, the hook prints {permissionDecision: "allow", updatedInput}: the
 // only allow any hook returns (a permissions.deny rule still wins). Every router decision goes to reads-route.jsonl
 // in the state dir with parsed fields only (tier, models, short reason codes, counts, paths; never brief or file text).
@@ -97,13 +98,16 @@ function routerOn(env) {
   return String(env.ORCH_READ_ROUTER ?? "").trim().toLowerCase() === "on";
 }
 
-/** Model rank: haiku 0 (also unknown), sonnet 1, opus 2, fable 3 (above every tier, so never changed). @param {unknown} m */
+/**
+ * Model rank by family: the alias or a full id `claude-<family>-...` gives haiku 0, sonnet 1, opus 2, fable 3 (above every
+ * tier, so never changed). Anything else (inherit, no model at all, an id of another shape) is null: the subagent may run
+ * on the parent's model, so the router cannot know whether a tier would raise or lower it, and it does not route.
+ * @param {unknown} m @returns {number | null}
+ */
 function modelRank(m) {
-  const s = String(m ?? "").toLowerCase();
-  if (s.includes("fable")) return 3;
-  if (s.includes("opus")) return 2;
-  if (s.includes("sonnet")) return 1;
-  return 0;
+  const s = String(m ?? "").trim().toLowerCase();
+  const family = s.match(/^(?:claude-)?(haiku|sonnet|opus|fable)(?:$|-)/)?.[1];
+  return family === undefined ? null : ({ haiku: 0, sonnet: 1, opus: 2, fable: 3 })[family] ?? null;
 }
 
 /** Short reason codes from a profile (never file text). @param {any} r @param {import("./brief.mjs").Header} hd */
@@ -212,7 +216,13 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
   const effective = explicit ?? fromFile ?? fromEnv;
   const source = explicit ? "call" : fromFile ? "agent_file" : fromEnv ? "env" : "unknown";
   const tier = /** @type {'haiku'|'sonnet'|'opus'} */ (r.tier);
-  const raised = (TIER_RANK[tier] ?? 0) > modelRank(effective);
+  const rank = modelRank(effective);
+  if (rank === null) {
+    // inherit, no model anywhere, or an id it cannot rank: routing could lower the model, so the launch stays as it is
+    log({ decision: "skip", reason: "model_unranked", tier, model: effective ?? null, model_source: source, files: sources.length, paths });
+    process.exit(0);
+  }
+  const raised = (TIER_RANK[tier] ?? 0) > rank;
 
   const converted = r.files.filter((/** @type {any} */ f) => typeof f.textPath === "string" && f.textPath);
   let note = "";
