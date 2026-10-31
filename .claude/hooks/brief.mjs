@@ -394,9 +394,10 @@ export function stopRecord(ctx) {
 }
 
 /**
- * @typedef {{ ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null }} Review
+ * @typedef {{ ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[] }} Review
+ * checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply must answer.
  * @typedef {{
- *   slice: string, planned: boolean, risky: boolean, checks: string[],
+ *   slice: string, planned: boolean, risky: boolean, checks: string[], files: string[],
  *   launches: number, attempts: number, lastImplAt: number | null, reviews: Review[],
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
  *   attemptFrom: number, testGates: number[], reviewedSince: boolean
@@ -404,11 +405,16 @@ export function stopRecord(ctx) {
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
+ * files: the slice's FILES in the plan (PLAN REVIEW and REPLAN entries, merged), [] when it was not planned.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
- *   constraints: Record<string, string>, planned: string[], slices: Record<string, SliceState>
+ *   constraints: Record<string, string>, planned: string[], slices: Record<string, SliceState>,
+ *   planReviewed: boolean, running: string[]
  * }} Run
- * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[] }} Records
+ * planReviewed: a reviewer of this run's PLAN REVIEW (or REPLAN) brief has stopped. running: agent ids that started
+ * (SubagentStart) in this run and have not stopped yet.
+ * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[] }} Records
+ * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
  */
 
 /** @param {unknown} ts */
@@ -420,7 +426,7 @@ const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string"
 
 /** @param {string} slice @param {boolean} planned @returns {SliceState} */
 const newSlice = (slice, planned) => ({
-  slice, planned, risky: false, checks: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
+  slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
 });
 
@@ -441,7 +447,13 @@ function settle(s) {
  * dropped when `sessionId` is given. A gate record counts when its agent_id joins a launch and its session_id (when it
  * has one) is that launch's. A run opens at a PLAN REVIEW launch without REPLAN (closing any open run) or at a PATH: light implementer
  * launch with no run open; a PLAN REVIEW with REPLAN extends the open run (or opens one). Launches outside any run are
- * not tracked. `now` decides staleness at the end; a launch decides it on the way.
+ * not tracked. `now` decides staleness at the end; a launch or an agent start decides it on the way. With `starts`
+ * (telemetry SubagentStart/SubagentStop records), an agent counts as running from its SubagentStart to its next
+ * SubagentStop or journal stop with the same agent_id; a run with a running agent is never stale, and each start or
+ * telemetry stop of its agents is activity. Without `starts` staleness depends on launches and stops alone.
+ * A start or stop that never gets its pair keeps the run from going stale until a new PLAN REVIEW closes it or the
+ * session ends: runs are per session. (A lost SubagentStop is the price of never letting a long foreground worker,
+ * whose launch record is only written when it ends, make its run look idle.)
  * @param {Records} records @param {{ now?: number, staleMin?: number, sessionId?: string }} [opts]
  * @returns {{ runs: Run[], open: Run | null }}
  */
@@ -456,6 +468,9 @@ export function foldRuns(records, opts = {}) {
   const byAgent = new Map();
   for (const l of launches) if (typeof l.agent_id === "string" && l.agent_id) byAgent.set(l.agent_id, l);
   const stops = arr(rec.stops).filter(mine);
+  const starts = arr(rec.starts).filter(
+    (r) => mine(r) && typeof r.agent_id === "string" && r.agent_id && (r.hook_event_name === "SubagentStart" || r.hook_event_name === "SubagentStop"),
+  );
   const gates = arr(rec.gates).filter(
     (g) =>
       g.gate === "test" &&
@@ -476,6 +491,8 @@ export function foldRuns(records, opts = {}) {
     ...launches.map((r, i) => ({ kind: 0, i, r, own: time(r.ts), at: time(r.ts) })),
     ...stops.map((r, i) => ({ kind: 1, i, r, own: time(r.ts), at: effective(r) })),
     ...gates.map((r, i) => ({ kind: 2, i, r, own: time(r.ts), at: effective(r) })),
+    // Telemetry starts and stops are logged when they happen (never ahead of time), so they keep their own ts.
+    ...starts.map((r, i) => ({ kind: r.hook_event_name === "SubagentStart" ? 3 : 4, i, r, own: time(r.ts), at: time(r.ts) })),
   ].sort((a, b) => a.at - b.at || Number(a.kind !== 0) - Number(b.kind !== 0) || a.own - b.own || a.kind - b.kind || a.i - b.i);
 
   /** @type {Run[]} */
@@ -485,7 +502,7 @@ export function foldRuns(records, opts = {}) {
   /** @param {'planned' | 'light'} kind @param {number} ts @returns {Run} */
   const openRun = (kind, ts) => {
     /** @type {Run} */
-    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {} };
+    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [] };
     runs.push(run);
     return run;
   };
@@ -496,12 +513,39 @@ export function foldRuns(records, opts = {}) {
   };
   /** @param {string} slice */
   const runWith = (slice) => (slice ? runs.findLast((r) => slice in r.slices) : undefined);
+  /** Idle: nothing of the run is running and nothing happened in it for staleMs. @param {Run} run @param {number} ts */
+  const idle = (run, ts) => run.running.length === 0 && ts - run.lastAt > staleMs;
+  /** @type {Map<string, Run>} the run each PLAN REVIEW reviewer (by agent id) belongs to */
+  const planRunOf = new Map();
+  /** An agent stopped: it no longer keeps its run alive; the stop is activity in that run. @param {unknown} id @param {number} ts */
+  const ended = (id, ts) => {
+    if (typeof id !== "string" || !id) return;
+    for (const run of runs) {
+      if (!run.running.includes(id)) continue;
+      run.running = run.running.filter((x) => x !== id);
+      run.lastAt = Math.max(run.lastAt, ts);
+    }
+  };
 
   for (const { kind, r, at: ts } of events) {
     const role = bare(r.agent_type ?? r.role);
+    if (kind === 3 || kind === 4) {
+      if (kind === 4) {
+        ended(r.agent_id, ts);
+        continue;
+      }
+      // An agent started: it belongs to the open run (judged for staleness first, so a start after a long idle
+      // spell does not revive a run). A resumed agent starts again under the same agent_id.
+      if (cur && !cur.closed && !cur.stale && idle(cur, ts)) cur.stale = true;
+      if (cur && !cur.closed && !cur.stale) {
+        if (!cur.running.includes(r.agent_id)) cur.running.push(r.agent_id);
+        cur.lastAt = Math.max(cur.lastAt, ts);
+      }
+      continue;
+    }
     if (kind === 0) {
       // Staleness is judged at a launch: a stale run no longer counts as open, so a light launch opens a new run.
-      if (cur && !cur.closed && ts - cur.lastAt > staleMs) cur.stale = true;
+      if (cur && !cur.closed && idle(cur, ts)) cur.stale = true;
       /** @type {Run | null} */
       let open = cur && !cur.closed && !cur.stale ? cur : null;
       if (role === "reviewer" && (r.isPlanReview === true || r.slice === "plan")) {
@@ -512,6 +556,7 @@ export function foldRuns(records, opts = {}) {
         }
         open.kind = "planned";
         open.lastAt = ts;
+        if (typeof r.agent_id === "string" && r.agent_id) planRunOf.set(r.agent_id, open);
         const plan = r.plan && typeof r.plan === "object" ? r.plan : {};
         if (plan.constraints && typeof plan.constraints === "object") Object.assign(open.constraints, plan.constraints);
         for (const p of arr(plan.slices)) {
@@ -521,6 +566,7 @@ export function foldRuns(records, opts = {}) {
           s.planned = true;
           s.risky = s.risky || p.risky === true;
           s.checks = [...new Set([...s.checks, ...strings(p.checks)])];
+          s.files = [...new Set([...s.files, ...strings(p.files)])];
         }
         continue;
       }
@@ -543,9 +589,14 @@ export function foldRuns(records, opts = {}) {
     }
     const launch = typeof r.agent_id === "string" ? byAgent.get(r.agent_id) : undefined;
     const slice = String((kind === 2 ? launch?.slice : (r.slice ?? launch?.slice)) ?? "");
+    if (kind === 1) ended(r.agent_id, ts);
     const run = runWith(slice) ?? cur;
     if (!run) continue;
     if (kind === 1) run.lastAt = Math.max(run.lastAt, ts);
+    if (kind === 1 && role === "reviewer" && slice === "plan") {
+      (planRunOf.get(String(r.agent_id)) ?? run).planReviewed = true;
+      continue;
+    }
     const s = slice ? run.slices[slice] : undefined;
     if (!s) continue;
     if (kind === 2) {
@@ -560,13 +611,14 @@ export function foldRuns(records, opts = {}) {
     } else if (role === "reviewer") {
       const status = r.status === "pass" || r.status === "fail" ? r.status : null;
       const model = typeof r.model === "string" ? r.model : typeof launch?.model === "string" ? launch.model : null;
-      s.reviews.push({ ts, status, answers: r.answers && typeof r.answers === "object" ? r.answers : {}, open: Array.isArray(r.open) ? r.open : [], model });
+      const checks = strings(Array.isArray(r.checks) ? r.checks : launch?.checks);
+      s.reviews.push({ ts, status, answers: r.answers && typeof r.answers === "object" ? r.answers : {}, open: Array.isArray(r.open) ? r.open : [], model, checks });
       s.reviewedSince = true;
     }
     settle(s);
     closeIfDone(run);
   }
-  if (cur && !cur.closed && now - cur.lastAt > staleMs) cur.stale = true;
+  if (cur && !cur.closed && idle(cur, now)) cur.stale = true;
   return { runs, open: cur && !cur.closed && !cur.stale ? cur : null };
 }
 
