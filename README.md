@@ -287,7 +287,7 @@ One `k2-stdlib-toolkit-xl` run per arm at a 10-minute cap, and two `d2-docs` run
 - No slice stalled or failed for good, no `VALIDATE: gaps` review or replan ran, and no run applied the third-attempt rule, so H15 (opus on the last attempt), H16 (gap cutoff and validation) and H17 (stall replan) have no data from this run.
 - Status: direction only. No hypothesis (H14 to H17 included) is called supported.
 
-### Built-in subagents blocked
+### Benchmark: orchestrator vs plain sessions, built-in subagents blocked
 
 Claude Code's six built-in subagents are blocked in this repository, so a plain session cannot delegate. Benchmarked on `k2-stdlib-toolkit-xl` (twelve Python standard-library modules, 1,762 hidden tests) under a 10-minute cap, 2 runs per setup, tokens counted over every model. Full write-up and every chart: [docs/benchmark-builtins-blocked.md](docs/benchmark-builtins-blocked.md).
 
@@ -324,7 +324,7 @@ Same task and 10-minute cap, one run per arm, Claude Code 2.1.314, plugin 0.3.0.
 
 W-mix was cut off at the deadline before it finished, so its tokens were not recorded. N-UC's strict gap is one module importing `re`.
 
-### Why a router (built-ins allowed)
+### Why a router
 
 Measured on seven coding tasks, five setups, with Claude Code's built-in subagents allowed (they are blocked now), 2 runs per cell; details in [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -381,6 +381,10 @@ npm start -- --repo . --resume <id>                # continue a run
 ```
 
 It retries transient errors (rate limit, overload, 5xx, dropped stream) up to twice with backoff, writes `runs/<id>/journal.json` after each slice for `--resume`, replans failed slices with `--replans N` (0 to 3) and caps tokens only when `--budget` is set. A run writes `plan.json`, `findings.md`, `journal.json`, `judge-audit.jsonl`, `telemetry.jsonl` and `report.json` under `runs/<id>/`, and branches `orch/<id>/<slice>`; it never pushes on its own.
+
+### Bash judge (SDK workers)
+
+SDK workers with Bash (`solo`, `writer`, `verifier`) run every command through `src/judge.ts`. The `deny` class (the hard floor: `sudo`, catastrophic or non-plain recursive `rm`, commands the tokenizer cannot read) is refused at once; the `judge` class (`git push`, `git remote`, one plain `rm -r[f] <paths>`) goes to opus with the user's original `--task` as the only authority, so a resume without `--task` refuses them; everything else passes. It fails closed. Classes, prompt, audit log and limits: [docs/bash-judge.md](docs/bash-judge.md).
 
 ## Reference
 
