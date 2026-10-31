@@ -15,7 +15,7 @@ const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 // Plugin userConfig reaches hooks as CLAUDE_PLUGIN_OPTION_<KEY>; the hooks read ORCH_<KEY>. verify.sh has the same list.
 export const OPTION_KEYS = Object.freeze([
   "TEST_CMD", "ESCALATION", "JUDGE", "JUDGE_TIMEOUT_MS", "READ_ROUTER", "GAP_MIN", "STALL_GATE", "GUARDS",
-  "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED",
+  "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED", "SKILL_HINTS",
 ]);
 
 /**
