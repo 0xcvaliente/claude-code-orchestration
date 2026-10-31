@@ -151,3 +151,43 @@ These ran after Checks A to C, while the 0.3.0 slices were built. Their record i
 - **Plugin workflow `agentType` (slice B1; `scripts/build-plugin.mjs` header).** In a workflow shipped by a plugin, `agent()` with a namespaced `agentType` (`<plugin>:implementer`) resolved to the plugin's agent, and SubagentStart and SubagentStop hooks saw `agent_type: "<plugin>:implementer"`. A bare `agentType: 'implementer'` was "not found". So `npm run build-plugin` rewrites every `agentType: '<role>'` in `.claude/workflows/*.js` to `orchestration:<role>`, and the plugin's `verify.sh` matcher `orchestration:implementer` matches those agents. Check C still holds for the project copy: a project workflow's agents report the bare name.
 - **A saved workflow starts headless with JSON arguments (slice B4; `bench/README.md`, "Short documentation run").** `claude -p '/hello {"task":"toy"}' --permission-mode dontAsk --allowedTools Workflow` (haiku, about $0.008) in a scratch folder with a toy `.claude/workflows/hello.js`: the model called `Workflow {"name":"hello","args":{"task":"toy"}}`, the workflow ran in the background, and `-p` waited for it and returned `{"echoed":{"task":"toy"}}`.
 - **A direct request in a `-p` prompt starts a workflow; `ultracode` alone does not (slice B4; same section).** The workflows doc (https://code.claude.com/docs/en/workflows.md) says the `ultracode` keyword opts in only in a prompt the person types, not in one passed with `-p`, and that a direct request is the same opt-in. Probe: `claude -p 'ultracode Use a workflow with two agents to list the files in this folder.' --model haiku --max-turns 3 --max-budget-usd 0.10 --permission-mode dontAsk --allowedTools Workflow Read Glob 'Bash(ls*)'` with `CLAUDE_CODE_SUBAGENT_MODEL=haiku`: the model loaded the workflow-authoring skill, called `Workflow` with a two-agent script, and `-p` waited for both agents (about $0.016). The bench arm `N-UC` therefore adds the direct request to the keyword.
+
+## Probes for 0.4.0, slice e-guards (Claude Code 2.1.316, 2026-10-31)
+
+Version: `2.1.316 (Claude Code)`. All runs used `--model haiku`, `--setting-sources project` and `ORCH_NO_NUDGE=1`, in scratch folders under the session scratchpad (`probe-guards/` and `probe-wt/`). Every run cost under $0.01.
+
+### Check E: what a subagent's PreToolUse input carries, and where its brief is
+
+Setup: `probe-guards/.claude/agents/reviewer.md` (haiku, `tools: WebFetch, Bash(ls*)`), a project workflow `probe.js` with one `agent(..., { agentType: 'reviewer' })`, and a PreToolUse hook on `WebFetch|Bash` that logs the input keys, reads the first `type: "user"` line of candidate transcripts and then exits 2 for WebFetch, so nothing was fetched. Commands (script `probe-guards-fg.sh`):
+
+    claude -p "Use the Agent tool with subagent_type reviewer (foreground, not background) and this exact prompt: 'SLICE: fg-probe ...'" --allowedTools "Agent,WebFetch" --output-format json
+    claude -p "Run the saved workflow named probe with the Workflow tool and report what it returned." --allowedTools "Workflow,WebFetch" --output-format json
+    claude -p "Use the Agent tool with subagent_type reviewer and run_in_background set to true, ... 'SLICE: bg-probe ...'" --allowedTools "Agent,WebFetch" --output-format json
+
+Results, for all three (foreground, workflow `agent()` and background):
+
+- PreToolUse keys: `session_id, transcript_path, cwd, prompt_id, permission_mode, agent_id, agent_type, effort, hook_event_name, tool_name, tool_input, tool_use_id`. `agent_type` is `"reviewer"` in all three. **There is no `agent_transcript_path`** (only SubagentStop carries it). `transcript_path` is the main session's transcript, whose first user message is the parent's prompt, not the brief.
+- The subagent's own transcript, already on disk when its first tool call fires: `<transcript_path minus .jsonl>/subagents/agent-<agent_id>.jsonl` for the Agent tool (foreground and background), and `<same>/subagents/workflows/<wf run id>/agent-<agent_id>.jsonl` for a workflow agent. Its first line is `type: "user"`, `isSidechain: true`, `agentId: <agent_id>`, and `message.content` is the brief as a string.
+- Agent tool: the content is the brief verbatim (`"SLICE: fg-probe\nFetch https://example.com/fg ..."`). Workflow: the harness wraps it, `"[Workflow harness — computed task] ... The computed task text follows:\n  SLICE: wf-probe\n  Fetch https://example.com/wf ..."`, every brief line indented by two spaces. `parseHeader` reads the indented `SLICE:` and `briefUrls` the URLs.
+- Exit 2 from the PreToolUse hook blocked the fetch inside the subagent in all three cases (`web_fetch_requests: 0`).
+
+Used by `.claude/hooks/egress-guard.mjs`; its fixtures in `src/guards.test.mjs` copy both transcript shapes.
+
+### Check F: can a WorktreeCreate hook start `isolation: worktree` agents from the local HEAD?
+
+Setup (`probe-wt/setup.sh`): a bare `origin.git` with commit `origin-base`, a clone `repo/` with one more unpushed commit `local-only`, no `worktree.baseRef` setting, an agent `iso` (`isolation: worktree`, `tools: Bash(git log*), Bash(pwd)`) that prints `pwd` and `git log -1 --format=%s`, and a WorktreeCreate hook `wt.mjs` whose behaviour `WT_MODE` picks. Command per mode (`probe-wt/run.sh <mode>`):
+
+    WT_MODE=<mode> claude -p "Use the Agent tool with subagent_type iso and the prompt 'report'. Then reply with exactly what it returned, or with the exact error text if the Agent tool failed." --allowedTools "Agent,Bash(git log*),Bash(pwd)" --output-format json
+
+| mode | hook behaviour | outcome |
+|---|---|---|
+| baseline | no hook | agent in `.claude/worktrees/agent-<id>` at `origin-base` (the remote default branch); worktree and branch removed afterwards |
+| head | `git worktree add -b worktree-<name> <repo>/.claude/worktrees/<name> HEAD`, print the path | worktree created at `local-only` (86b2c30). A rerun with `--allowedTools "Agent,Bash"` (`head2.sh`) had the agent report `<repo>/.claude/worktrees/agent-a8f035cf6a2925bed local-only`. The worktree and its branch were **left behind** after the run, and a logging WorktreeRemove hook never fired |
+| garbage | print `this is not a path`, exit 0 | Agent tool fails: "WorktreeCreate hook returned a path that is not a directory: <cwd>/this is not a path. The hook must create the directory before echoing its path." |
+| fail | exit 1 | Agent tool fails: "WorktreeCreate hook failed: node ...wt.mjs: probe fails" |
+| empty | exit 0, no output | Agent tool fails: "WorktreeCreate hook failed: hook succeeded but returned no worktree path (command: echo the path to stdout; http/callback: return hookSpecificOutput.worktreePath)" |
+| deny | exit 2 | Agent tool fails: "WorktreeCreate hook failed: ... probe denies" |
+
+Hook input keys: `session_id, transcript_path, cwd, prompt_id, hook_event_name, name`, with `name` = `agent-<agent id>` and `cwd` the project root (also `CLAUDE_PROJECT_DIR`).
+
+**Answer: it works, but `worktree-head.mjs` was not written.** The hook replaces Claude Code's creation completely: any non-zero exit, empty stdout or non-directory path fails the agent launch with no fallback to the built-in path, so a hook bug would stop every isolated agent. Hook-created worktrees are not cleaned up (no WorktreeRemove call, the unchanged worktree and branch stay), while the built-in path removes them. `worktree.baseRef: "head"` in settings gives the local-HEAD start without either risk, so it stays the documented way (`.claude/rules/agents.md`).
