@@ -176,3 +176,66 @@ test("journal.mjs parses SLICE in implementer and reviewer briefs, with a FOCUS 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- 0.4.0 lines: every model-facing place that describes briefs and replies names them. ---
+const IMPLEMENTER = ".claude/agents/implementer.md";
+const RESEARCHER = ".claude/agents/researcher.md";
+const CONVENTIONS = ".claude/skills/orchestration-conventions/SKILL.md";
+const nudgeContext = (env: Record<string, string> = {}) => {
+  const r = spawnSync("node", [join(root, NUDGE)], { input: "{}", env: { ...process.env, ORCH_NO_NUDGE: "", CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "", ...env }, encoding: "utf8" });
+  assert.equal(r.status, 0);
+  return JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
+};
+
+test("0.4.0 brief and reply lines appear in the orchestrator, the route skill and the nudge", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    for (const t of ["SOURCES:", "READ:", "KIND: bugfix", "VALIDATE: gaps", "GAP: <0-100> <text>", "QUOTE: <locator> | <verbatim text>", "replan_required"]) assert.ok(text.includes(t), `${file} must mention ${t}`);
+    assert.match(text, /lookup\|extract\|judge/, `${file} names the READ modes`);
+    assert.match(text, /third and last attempt[^.]*\bfresh\b[^.]*\bopus\b/i, `${file} runs the third attempt as a fresh opus implementer`);
+    assert.match(text, /model:? "?opus"?/, `${file} says the last attempt runs on opus`);
+    assert.match(text, /BRANCH/, `${file} checks the BRANCH of a resumed worktree agent`);
+  }
+});
+
+test("the route skill and the nudge list the integrator in the delegation list", () => {
+  assert.match(read(SKILL), /delegate with the Agent tool to `orchestration:researcher`, `orchestration:implementer`, `orchestration:reviewer` and `orchestration:integrator`/);
+  assert.match(nudgeContext(), /delegate with the Agent tool to orchestration:researcher, orchestration:implementer, orchestration:reviewer and orchestration:integrator/);
+});
+
+test("worker agents and the conventions skill describe their 0.4.0 lines", () => {
+  const reviewer = read(REVIEWER);
+  for (const t of ["GAP: <0-100>", "VALIDATE: gaps", "predate the slice", "linter", "nitpicks", "style"]) assert.ok(reviewer.includes(t), `${REVIEWER} must mention ${t}`);
+  assert.match(reviewer, /STATUS is pass when no gap stands/);
+  assert.match(read(IMPLEMENTER), /`KIND: bugfix`, reproduce the bug first: write a test that fails/);
+  const researcher = read(RESEARCHER);
+  for (const t of ["QUOTE: <locator> | <verbatim text>", "path:line", "p.N", "SOURCES:", "READ:", "`pages` parameter"]) assert.ok(researcher.includes(t), `${RESEARCHER} must mention ${t}`);
+  const conventions = read(CONVENTIONS);
+  for (const t of ["GAP: <0-100> <text>", "QUOTE: <locator> | <verbatim text>"]) assert.ok(conventions.includes(t), `${CONVENTIONS} must mention ${t}`);
+});
+
+test("model-facing text names gate reasons but no environment switch", () => {
+  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|TEST_CMD|JUDGE)\b|CLAUDE_PLUGIN_OPTION_/;
+  const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS];
+  for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
+  for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) assert.doesNotMatch(nudgeContext(env), switches, "the nudge context names a switch");
+  for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
+  const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
+  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
+  assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
+});
+
+test("the orchestrator says once that an answer it writes itself is reviewed", () => {
+  assert.equal(read(ORCH).match(/answer you write yourself/g)?.length, 1);
+});
+
+test("nudge warns about agent teams only when they are switched on", () => {
+  assert.doesNotMatch(nudgeContext(), /agent teams/i);
+  assert.doesNotMatch(nudgeContext({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" }), /agent teams/i);
+  const on = nudgeContext({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" });
+  assert.match(on, /agent teams are switched on/i);
+  assert.match(on, /passes a name starts a teammate/);
+  assert.match(on, /outside the plan check/);
+  const bad = spawnSync("node", [join(root, NUDGE)], { input: "not json", env: { ...process.env, ORCH_NO_NUDGE: "" }, encoding: "utf8" });
+  assert.equal(bad.status, 0, "malformed input exits 0");
+});
