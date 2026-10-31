@@ -545,7 +545,7 @@ export function stopRecord(ctx) {
  *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[]
  * }} Review
  * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
- * must answer. counted: the status for slice finality and gating (docs/brief-grammar.md, "Gap cutoff"): a fail whose
+ * must answer. counted: the status for slice finality and gating (docs/brief-grammar.md, "Review counting"): a fail whose
  * gaps are all below ORCH_GAP_MIN (and with no failed answer) counts as a pass and sets lowConfidence; a review
  * superseded by a later VALIDATE: gaps review of the same attempt counts as nothing (null, superseded). validate: its
  * launch record had VALIDATE: gaps. keys: for a counted fail, the gap keys at or above the cutoff (a null confidence is
@@ -596,7 +596,7 @@ export const currentReviews = (s) => s.reviews.filter((r) => s.lastImplAt === nu
 export const countedStatus = (r) => (r.counted === undefined ? (r.status ?? null) : r.counted);
 
 /**
- * How a reviewer's stop counts (docs/brief-grammar.md, "Gap cutoff"). A fail counts as a fail with a gap at or above
+ * How a reviewer's stop counts (docs/brief-grammar.md, "Review counting"). A fail counts as a fail with a gap at or above
  * `gapMin` (a null confidence is 100), a failed answer, or no gap at all; otherwise it counts as a pass (lowConfidence).
  * @param {'pass' | 'fail' | null} status @param {unknown} gaps @param {Record<string, any>} answers @param {number} gapMin
  */
@@ -821,7 +821,7 @@ export function foldRuns(records, opts = {}) {
 }
 
 /**
- * The derived slice fields at the end of a fold: countedFails, the stall (docs/brief-grammar.md, "Stall gate") and the
+ * The derived slice fields at the end of a fold: countedFails, the stall (docs/brief-grammar.md, "Stall") and the
  * doubt signals. @param {Run} run @param {SliceState} s @param {Record<string, string | undefined>} env
  */
 function finish(run, s, env) {
