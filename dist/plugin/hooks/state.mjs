@@ -12,6 +12,26 @@ import { join } from "node:path";
 
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
+// Plugin userConfig reaches hooks as CLAUDE_PLUGIN_OPTION_<KEY>; the hooks read ORCH_<KEY>. verify.sh has the same list.
+export const OPTION_KEYS = Object.freeze([
+  "TEST_CMD", "ESCALATION", "JUDGE", "JUDGE_TIMEOUT_MS", "READ_ROUTER", "GAP_MIN", "STALL_GATE", "GUARDS",
+  "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED",
+]);
+
+/**
+ * Set ORCH_<KEY> from a non-empty CLAUDE_PLUGIN_OPTION_<KEY> when ORCH_<KEY> is unset; an explicit ORCH_ value wins.
+ * Runs once at import on process.env (the only side effect of importing this module besides reading settings).
+ * @param {NodeJS.ProcessEnv} [env]
+ */
+export function bridgeOptions(env = process.env) {
+  for (const k of OPTION_KEYS) {
+    const opt = env[`CLAUDE_PLUGIN_OPTION_${k}`];
+    if (env[`ORCH_${k}`] === undefined && opt) env[`ORCH_${k}`] = opt;
+  }
+  return env;
+}
+bridgeOptions();
+
 // The project's own settings register .claude/hooks/<script>, and the script is there.
 /** @param {string} project @param {string} script */
 export function projectRegisters(project, script) {

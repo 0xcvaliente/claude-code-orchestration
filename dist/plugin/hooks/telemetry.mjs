@@ -59,10 +59,113 @@ if (payload.hook_event_name === "SubagentStop") {
   if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
 }
 
+/**
+ * maxTurns of a role from its agent file's frontmatter: the project's .claude/agents/<role>.md, then the plugin
+ * root's agents/<role>.md. null when neither has a maxTurns line.
+ * @param {string} role bare agent type
+ * @returns {number | null}
+ */
+function maxTurnsOf(role) {
+  if (!/^[A-Za-z0-9_-]+$/.test(role)) return null;
+  const dirs = [join(process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".claude", "agents"), process.env.CLAUDE_PLUGIN_ROOT ? join(process.env.CLAUDE_PLUGIN_ROOT, "agents") : ""];
+  for (const d of dirs) {
+    if (!d) continue;
+    try {
+      const front = readFileSync(join(d, `${role}.md`), "utf8").match(/^---\r?\n([\s\S]*?)\r?\n---/)?.[1] ?? "";
+      const n = Number(front.match(/^maxTurns:\s*(\d+)\s*$/m)?.[1]);
+      if (Number.isInteger(n) && n > 0) return n;
+    } catch {
+      // no agent file here
+    }
+  }
+  return null;
+}
+
+/**
+ * Telemetry v2 from the subagent transcript: token usage, turns, models and whether the agent stopped at maxTurns.
+ * Claude Code writes one transcript line per content block, each carrying the message's usage, so each usage field
+ * is the maximum over the lines of one message id (a partial usage on an early line cannot undercount), then summed
+ * over messages. "<synthetic>" messages (harness-made, no API call) are skipped.
+ * max_turns_hit (seen in 2.1.316 transcripts): a maxTurns stop ends the transcript on the tool_result of the last
+ * turn's tool call, with no assistant message after it. A killed agent can end the same way, so when the role's
+ * maxTurns is known (maxTurnsOf) such an ending counts as a hit only when turns >= maxTurns, and is null below it;
+ * without a known maxTurns the ending alone decides. A normal finish ends on an assistant message with stop_reason
+ * end_turn, or on the tool_result of a tool that ends the turn (SubagentHandback, toolEndsTurn: true). Anything else
+ * (no messages, a user text message last, a max_tokens stop) is null: it cannot tell.
+ * Only numbers and model names are returned, never message text.
+ * @param {string} path
+ * @param {string} role bare agent type
+ */
+function usageFromTranscript(path, role) {
+  try {
+    const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+    /** @type {Map<string, { input: number, output: number, cache_read: number, cache_write: number }>} */
+    const perMessage = new Map();
+    /** @type {Set<string>} */
+    const models = new Set();
+    /** @type {any} */
+    let lastMsg = null; // the last user or assistant entry
+    /** @type {any} */
+    let lastAssistant = null;
+    let n = 0;
+    /** @param {unknown} v */
+    const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    for (const l of lines) {
+      let e;
+      try {
+        e = JSON.parse(l);
+      } catch {
+        continue;
+      }
+      if (e?.type !== "assistant" && e?.type !== "user") continue;
+      lastMsg = e;
+      if (e.type !== "assistant") continue;
+      const m = e.message;
+      if (!m || typeof m !== "object" || m.model === "<synthetic>") continue;
+      lastAssistant = e;
+      const id = typeof m.id === "string" && m.id ? m.id : `#${n++}`;
+      if (typeof m.model === "string" && m.model) models.add(m.model);
+      const u = m.usage && typeof m.usage === "object" ? m.usage : {};
+      const prev = perMessage.get(id) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+      perMessage.set(id, {
+        input: Math.max(prev.input, num(u.input_tokens)),
+        output: Math.max(prev.output, num(u.output_tokens)),
+        cache_read: Math.max(prev.cache_read, num(u.cache_read_input_tokens)),
+        cache_write: Math.max(prev.cache_write, num(u.cache_creation_input_tokens)),
+      });
+    }
+    const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+    for (const t of perMessage.values()) for (const k of /** @type {const} */ (["input", "output", "cache_read", "cache_write"])) tokens[k] += t[k];
+    const turns = perMessage.size;
+    /** @type {boolean | null} */
+    let maxTurnsHit = null;
+    const stop = lastAssistant?.message?.stop_reason;
+    const content = lastMsg?.message?.content;
+    const isToolResult = Array.isArray(content) && content.length > 0 && content.every((b) => b?.type === "tool_result");
+    if (lastMsg && lastMsg === lastAssistant && (stop === "end_turn" || stop === "stop_sequence")) maxTurnsHit = false;
+    else if (lastMsg?.type === "user" && isToolResult) {
+      if (lastMsg.toolEndsTurn === true) maxTurnsHit = false;
+      else if (stop === "tool_use") {
+        const limit = maxTurnsOf(role);
+        maxTurnsHit = limit === null ? true : turns >= limit ? true : null;
+      }
+    }
+    return { tokens, turns, models: [...models], max_turns_hit: maxTurnsHit };
+  } catch {
+    return undefined; // missing or unreadable transcript: the fields are left out
+  }
+}
+
 /** @param {unknown} v */
-const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
+const clip =(v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
 const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
 
-ensureStateDir();
-appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim })}\n`);
+const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path, String(payload.agent_type ?? "").split(":").pop() ?? "") : undefined;
+
+try {
+  ensureStateDir();
+  appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim, ...usage })}\n`);
+} catch {
+  // the log must never fail the agent
+}
 process.exit(0);
