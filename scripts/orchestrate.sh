@@ -24,6 +24,8 @@
 #        folder or the installed plugins; for CI or a plugin loaded another way; a missing trailing colon is added),
 #      ORCH_ADD_DIR (extra directory the agents may read, e.g. a project to analyse),
 #      ORCH_ADVISOR (e.g. opus; passes --advisor to claude, experimental),
+#      ORCH_SESSION_PERSISTENCE=1 (omit --no-session-persistence, so the session and its subagent transcripts are written
+#        and telemetry v2 can read per-agent tokens, turns and models at SubagentStop; unset or any other value keeps it),
 #      ORCH_DRY_RUN=1 (print the claude arguments, one per line, and exit).
 set -uo pipefail
 export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a run that was already routed
@@ -103,7 +105,9 @@ export CLAUDE_CODE_FORK_SUBAGENT=0
 
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
-args+=(--output-format json --permission-mode dontAsk --no-session-persistence)
+args+=(--output-format json --permission-mode dontAsk)
+# Without transcripts telemetry v2's per-agent tokens, turns and models stay empty; ORCH_SESSION_PERSISTENCE=1 keeps them.
+[ "${ORCH_SESSION_PERSISTENCE:-}" = 1 ] || args+=(--no-session-persistence)
 [ -n "$budget_usd" ] && args+=(--max-budget-usd "$budget_usd")
 # Experimental advisor (second, stronger model consulted at decision points); see the docs' /advisor page.
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
