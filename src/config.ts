@@ -40,7 +40,8 @@ export const DENIED_AGENTS = [
 // kept in step by src/sync-agents.ts (`npm run check-agents` fails on drift, `npm run sync-agents` fixes it). A key left
 // out here means the agent file must not have that line. The implementer inherits every tool except Agent, so it cannot
 // nest subagents (Claude Code already removes the Workflow tool from every subagent). These are the role boundaries:
-// never loosen a list without a reason.
+// never loosen a list without a reason. The researcher and the reviewer have `Skill` so they can load the skills a brief
+// names (SKILLS line or the plan check's suggestions); the integrator does not.
 export interface ToolPolicy {
   tools?: string[];
   disallowedTools?: string[];
@@ -55,11 +56,11 @@ export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
       "Bash(git show*)", "Bash(git branch --show-current)",
       "Bash(git -C * log*)", "Bash(git -C * ls-files*)", "Bash(git -C * rev-list*)", "Bash(git -C * rev-parse*)",
       "Bash(git -C * status*)", "Bash(git -C * show*)", "Bash(git -C * branch --show-current)",
-      "Bash(wc*)", "Bash(ls*)", "Bash(du*)", "WebSearch", "WebFetch",
+      "Bash(wc*)", "Bash(ls*)", "Bash(du*)", "WebSearch", "WebFetch", "Skill",
     ],
   },
   implementer: { disallowedTools: ["Agent"] },
-  reviewer: { tools: ["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"] },
+  reviewer: { tools: ["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Skill"] },
   integrator: { tools: ["Read", "Grep", "Glob", "Bash"] },
 };
 // Workers with Bash: pushing, remote changes and recursive deletion need the task to ask for them, and a reviewer model
