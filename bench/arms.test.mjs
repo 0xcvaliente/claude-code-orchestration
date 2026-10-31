@@ -44,6 +44,37 @@ test("workflowRunsIn: lists wf_*.json of sessions started in the repo, empty whe
   }
 });
 
+test("workflowRunsIn: counts a workflow cut off before its wf_*.json, once, under the stale filters", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-wf-"));
+  try {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo);
+    const projects = join(tmp, "projects");
+    const proj = join(projects, realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"));
+    // Present before launch (old mtime, in the pre-launch snapshot): not reported.
+    const oldDir = join(proj, "sess-0", "subagents", "workflows", "wf_old");
+    mkdirSync(oldDir, { recursive: true });
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(oldDir, old, old);
+    const before = new Set(workflowRunsIn(repo, projects));
+    assert.deepEqual([...before], ["wf_old"]);
+    const t0 = Date.now() - 1000;
+    assert.deepEqual(workflowRunsIn(repo, projects, { since: t0, exclude: before }), []);
+    // Only the agents' folder, written after launch (killed mid-workflow): reported.
+    mkdirSync(join(proj, "sess-1", "subagents", "workflows", "wf_x"), { recursive: true });
+    assert.deepEqual(workflowRunsIn(repo, projects, { since: t0, exclude: before }), ["wf_x"]);
+    // A finished workflow with its wf_*.json, folder and script: reported once.
+    const wf = join(proj, "sess-2", "workflows");
+    mkdirSync(join(wf, "scripts"), { recursive: true });
+    writeFileSync(join(wf, "wf_987c4129-0f1.json"), "{}");
+    writeFileSync(join(wf, "scripts", "implement-toolkit-wf_987c4129-0f1.js"), "");
+    mkdirSync(join(proj, "sess-2", "subagents", "workflows", "wf_987c4129-0f1"), { recursive: true });
+    assert.deepEqual(workflowRunsIn(repo, projects, { since: t0, exclude: before }), ["wf_987c4129-0f1", "wf_x"]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("existing arms keep their command line and environment", () => {
   for (const id of ["P-S", "P-O", "O-mix", "O-O", "AUTO"]) {
     const c = command(id, "do it", "/repo", root);

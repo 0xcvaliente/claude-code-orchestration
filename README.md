@@ -47,6 +47,20 @@ Claude Code's six built-in subagents (`general-purpose`, `claude`, `Explore`, `P
 - With the built-ins allowed (an earlier campaign, different plugin version), plain Opus scored 99.7% on this task by delegating to `general-purpose` itself, so this benchmark does not show the orchestrator beating built-in delegation on raw score. What the orchestrator adds is role limits, test and review gates, and independent review; the full discussion, per-run tables and every chart are in [docs/benchmark-builtins-blocked.md](docs/benchmark-builtins-blocked.md).
 - One task, coding only, two runs per setup. Nothing here covers tasks that do not split.
 
+### 0.3.0 short run
+
+Same task and 10-minute cap, one run per arm (direction only; it decides no hypothesis that needs two runs), Claude Code 2.1.314, plugin 0.3.0, 2026-10-31. Full write-up: [docs/benchmark-short-k2.md](docs/benchmark-short-k2.md).
+
+| Setup | Strict score | Lenient | Tokens | Wall time | False success |
+|---|---|---|---|---|---|
+| Orchestrator 0.3.0, shipped models (O-mix) | 99.6% | 99.6% | 4.44M | 395 s | no |
+| Native workflow orchestration, no plugin (N-UC) | 92.91% | 99.94% | 5.65M | 429 s | no |
+| This repo's gated workflow (W-mix) | 66.91% | 91.54% | not measured | killed at 602 s | no (claimed nothing) |
+
+- Both workflow arms really ran a workflow (`workflow_runs`: 12 agents for N-UC, 27 for W-mix). W-mix was cut off at the deadline before it finished, so its tokens were not recorded.
+- N-UC's strict gap is one module (`tomlparse` imports `re`, which the spec forbids). O-mix 0.3.0 broke no such rule: its strict and lenient scores are equal.
+- One run per arm, one task. The baselines above come from a different campaign and an earlier plugin version.
+
 ## Why a router
 
 Measured on seven coding tasks, five setups, **with Claude Code's built-in subagents allowed** (they are blocked now; see the benchmark above) (plain Sonnet, plain Opus, the orchestrator as shipped, an all-Opus orchestrator, triage routing), all headless; details in [docs/benchmarks.md](docs/benchmarks.md), method and hypotheses in [bench/HYPOTHESES.md](bench/HYPOTHESES.md). Nothing here has been measured for research, writing, analysis or operations. With 2 runs per cell the results show direction only. Ranges are per run; token ratios are per-task medians.

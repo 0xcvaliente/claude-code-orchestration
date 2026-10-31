@@ -3,8 +3,10 @@
 //   block is a pure literal whose phases match the phase() titles; the stage order (plan, explore, build, review, then
 //   integrate for isolated waves); the slice cap; retries with reviewer gaps and the failed result; and that every
 //   implementer brief starts with `ORCHESTRATION: workflow`, which plan-check.mjs skips (run against the real hook).
-// UNVERIFIED against a live run: whether this script's agent() launches reach PreToolUse hooks (plan-check.mjs,
-//   journal.mjs) at all, and whether the Stop gates (verify.sh, the review gate) fire for them. Do not rely on either.
+// VERIFIED live on Claude Code 2.1.314 (docs/data/live-checks-2026-10-31.md): SubagentStart and SubagentStop fire for
+//   this script's agent() launches, with agent_type equal to the agentType given, so the test gate (verify.sh) and the
+//   review gate see them. No PreToolUse(Agent) fires, because the script launches agents directly, so plan-check.mjs
+//   and journal.mjs launch records do not see them. The agents' own tool calls do fire PreToolUse and PostToolUse.
 export const meta = {
   name: 'orchestrate',
   description: 'Plan a task, build slices with the implementer agent, review each with a fresh reviewer, merge isolated code branches',

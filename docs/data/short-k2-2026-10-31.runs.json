@@ -1,0 +1,99 @@
+{
+  "campaign": "short-k2-2026-10-31",
+  "matrix": "bench/matrix/short-k2.json",
+  "task": "k2-stdlib-toolkit-xl",
+  "cap_min": 10,
+  "reps": 1,
+  "claude_version": "2.1.314",
+  "caveat": "One run per arm: direction only, decides no hypothesis. Strict score is official; lenient is the k2 variant grade of final/ only. workflow_runs null = arm does not record it.",
+  "counts": {
+    "runs": 3,
+    "included": 3,
+    "excluded": 0,
+    "rate_limited": 0,
+    "error": 0,
+    "retries": 0,
+    "retries_by_reason": {}
+  },
+  "runs": [
+    {
+      "arm": "O-mix",
+      "run_id": "k2-stdlib-toolkit-xl__O-mix__cap10__r1",
+      "score_pct_strict": 99.6,
+      "score_pct_lenient": 99.6,
+      "passed_strict": 1755,
+      "total": 1762,
+      "tokens": {
+        "by_model": {
+          "opus-5-5": 1272948,
+          "sonnet-5-5": 3164160
+        },
+        "total": 4437108,
+        "measured": true
+      },
+      "wall_s": 395.005,
+      "end_reason": "exited",
+      "exit_code": 0,
+      "claim": "partial",
+      "claim_auto": "partial",
+      "false_success": false,
+      "workflow_runs": null,
+      "error": null,
+      "requeued": false,
+      "note": "finished before the cap (exited 0); no requeue; O-mix records no workflow_runs (not a workflow arm)"
+    },
+    {
+      "arm": "N-UC",
+      "run_id": "k2-stdlib-toolkit-xl__N-UC__cap10__r1",
+      "score_pct_strict": 92.91,
+      "score_pct_lenient": 99.94,
+      "passed_strict": 1637,
+      "total": 1762,
+      "tokens": {
+        "by_model": {
+          "opus-5-5": 5650062
+        },
+        "total": 5650062,
+        "measured": true
+      },
+      "wall_s": 428.938,
+      "end_reason": "exited",
+      "exit_code": 0,
+      "claim": "partial",
+      "claim_auto": "partial",
+      "false_success": false,
+      "workflow_runs": [
+        "wf_987c4129-0f1"
+      ],
+      "error": null,
+      "requeued": false,
+      "note": "finished before the cap (exited 0); no requeue; workflow_runs has one id: Claude Code recorded wf_987c4129-0f1 (workflowName implement-toolkit, status completed, agentCount 12), so a native workflow did run"
+    },
+    {
+      "arm": "W-mix",
+      "run_id": "k2-stdlib-toolkit-xl__W-mix__cap10__r1",
+      "score_pct_strict": 66.91,
+      "score_pct_lenient": 91.54,
+      "passed_strict": 1179,
+      "total": 1762,
+      "tokens": {
+        "by_model": {},
+        "total": 0,
+        "measured": false
+      },
+      "wall_s": 602.36,
+      "end_reason": "deadline",
+      "exit_code": null,
+      "claim": "none",
+      "claim_auto": "none",
+      "false_success": false,
+      "workflow_runs": [
+        "wf_512226a5-9f0"
+      ],
+      "workflow_runs_rederived": "2026-10-31, after the C3 fix (mtime filter only)",
+      "error": null,
+      "requeued": false,
+      "note": "killed at the 10-minute deadline (end_reason deadline, exit_code null); no requeue. stdout.txt is empty because claude never printed its final JSON, so the recorded tokens (0, result_docs 0) are NOT the spend: token use was not measured for this run. workflow_runs is empty as recorded by the runner, but that is a false negative: the session dir holds subagents/workflows/wf_512226a5-9f0/ (27 agent meta files), workflows/scripts/orchestrate-wf_512226a5-9f0.js, and the run repo git log has worktree-wf_512226a5-9f0-* merge commits. workflowRunsIn only reads <session>/workflows/wf_*.json, which Claude Code had not written yet when the run was killed. Hook gates fired inside the workflow (test:warn 8, review:allow 2 in state/gates.jsonl). After the C3 fix workflowRunsIn finds it from that script and subagents folder, so workflow_runs now lists wf_512226a5-9f0."
+    }
+  ]
+}
