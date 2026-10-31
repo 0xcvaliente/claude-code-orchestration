@@ -10,6 +10,8 @@ import { join, resolve } from "node:path";
 export const MAX_RETRIES = 2;
 /** Default for ORCH_RUN_STALE_MIN: minutes without a launch or stop after which a run is stale. */
 export const RUN_STALE_MIN_DEFAULT = 30;
+/** Default for ORCH_GAP_MIN: a failed review counts only with a gap at this confidence (0-100) or above. */
+export const GAP_MIN_DEFAULT = 80;
 
 // A header key may follow list, quote and emphasis characters ("- **SLICE:** A0", "> FILES: a"), like the hooks today.
 const PRE = "[ \\t>*_`-]*";
@@ -398,6 +400,19 @@ export function staleMinutes(env = {}) {
   return Number.isFinite(n) && n > 0 ? n : RUN_STALE_MIN_DEFAULT;
 }
 
+/**
+ * ORCH_GAP_MIN as an integer from 0 to 100, else the default (80). 0 makes every failed review count (0.3.0).
+ * @param {Record<string, string | undefined>} [env] @returns {number}
+ */
+export function gapMinimum(env = {}) {
+  const v = String(env.ORCH_GAP_MIN ?? "").trim();
+  const n = /^\d+$/.test(v) ? Number(v) : NaN;
+  return n >= 0 && n <= 100 ? n : GAP_MIN_DEFAULT;
+}
+
+/** ORCH_STALL_GATE: the stall gate is on unless the value is "off" (any case). @param {Record<string, string | undefined>} [env] */
+export const stallGateOn = (env = {}) => String(env.ORCH_STALL_GATE ?? "").trim().toLowerCase() !== "off";
+
 /** ORCH_ESCALATION: "off", "always" or "auto" (anything else). @param {Record<string, string | undefined>} [env] @returns {'off' | 'always' | 'auto'} */
 export function escalationMode(env = {}) {
   const v = String(env.ORCH_ESCALATION ?? "").trim().toLowerCase();
@@ -525,25 +540,37 @@ export function stopRecord(ctx) {
 }
 
 /**
- * @typedef {{ ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[] }} Review
- * checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply must answer.
+ * @typedef {{
+ *   ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[],
+ *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[]
+ * }} Review
+ * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
+ * must answer. counted: the status for slice finality and gating (docs/brief-grammar.md, "Gap cutoff"): a fail whose
+ * gaps are all below ORCH_GAP_MIN (and with no failed answer) counts as a pass and sets lowConfidence; a review
+ * superseded by a later VALIDATE: gaps review of the same attempt counts as nothing (null, superseded). validate: its
+ * launch record had VALIDATE: gaps. keys: for a counted fail, the gap keys at or above the cutoff (a null confidence is
+ * 100); else [].
  * @typedef {{
  *   slice: string, planned: boolean, risky: boolean, checks: string[], files: string[],
  *   launches: number, attempts: number, lastImplAt: number | null, reviews: Review[],
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
- *   attemptFrom: number, testGates: number[], reviewedSince: boolean
+ *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
+ *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[]
  * }} SliceState
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
  * files: the slice's FILES in the plan (PLAN REVIEW and REPLAN entries, merged), [] when it was not planned.
+ * countedFails: reviews whose counted status is fail. stalled: not final, its last two counted reviews are fails that
+ * share a key (stallKeys) and no REPLAN plan review started in the run after the second (stalledAt, its time); the
+ * fold reports it whatever ORCH_STALL_GATE says, the gates read the switch. signals: doubtSignals with the fold's env.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
  *   constraints: Record<string, string>, planned: string[], slices: Record<string, SliceState>,
- *   planReviewed: boolean, running: string[]
+ *   planReviewed: boolean, running: string[], replans: number[]
  * }} Run
  * planReviewed: a reviewer of this run's PLAN REVIEW (or REPLAN) brief has stopped. running: agent ids that started
- * (SubagentStart) in this run and have not stopped yet.
+ * (SubagentStart) in this run and have not stopped yet. replans: launch times of the REPLAN plan reviews in this run.
  * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[] }} Records
  * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
  */
@@ -559,16 +586,40 @@ const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string"
 const newSlice = (slice, planned) => ({
   slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
+  countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [],
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
 export const currentReviews = (s) => s.reviews.filter((r) => s.lastImplAt === null || r.ts > s.lastImplAt);
 
+/** A review's counted status (its own status for a review object without `counted`). @param {Partial<Review>} r @returns {'pass' | 'fail' | null} */
+export const countedStatus = (r) => (r.counted === undefined ? (r.status ?? null) : r.counted);
+
+/**
+ * How a reviewer's stop counts (docs/brief-grammar.md, "Gap cutoff"). A fail counts as a fail with a gap at or above
+ * `gapMin` (a null confidence is 100), a failed answer, or no gap at all; otherwise it counts as a pass (lowConfidence).
+ * @param {'pass' | 'fail' | null} status @param {unknown} gaps @param {Record<string, any>} answers @param {number} gapMin
+ */
+function countReview(status, gaps, answers, gapMin) {
+  const all = arr(gaps);
+  /** @param {any} g */
+  const conf = (g) => (typeof g.confidence === "number" ? g.confidence : 100);
+  const high = all.filter((g) => conf(g) >= gapMin);
+  const failedAnswer = Object.values(answers).some((a) => a && a.verdict === "fail");
+  const low = status === "fail" && all.length > 0 && high.length === 0 && !failedAnswer;
+  /** @type {'pass' | 'fail' | null} */
+  const counted = low ? "pass" : status;
+  /** @type {string[]} */
+  const keys = counted === "fail" ? [...new Set(high.map((g) => g.key).filter((k) => typeof k === "string" && k))] : [];
+  return { counted, lowConfidence: low, keys };
+}
+
 /** @param {SliceState} s */
 function settle(s) {
   const latest = currentReviews(s).at(-1);
-  s.passed = latest?.status === "pass";
-  s.gaveUp = latest?.status === "fail" && s.attempts >= 1 + MAX_RETRIES;
+  const counted = latest ? countedStatus(latest) : null;
+  s.passed = counted === "pass";
+  s.gaveUp = counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
   s.final = s.passed || s.gaveUp;
   s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
 }
@@ -585,11 +636,16 @@ function settle(s) {
  * A start or stop that never gets its pair keeps the run from going stale until a new PLAN REVIEW closes it or the
  * session ends: runs are per session. (A lost SubagentStop is the price of never letting a long foreground worker,
  * whose launch record is only written when it ends, make its run look idle.)
- * @param {Records} records @param {{ now?: number, staleMin?: number, sessionId?: string }} [opts]
+ * Reviews count by the gap cutoff (`gapMin`, else ORCH_GAP_MIN of `env`, else 80) and VALIDATE supersede; each slice
+ * ends with countedFails, stalled and signals (doubtSignals with `env`).
+ * @param {Records} records
+ * @param {{ now?: number, staleMin?: number, sessionId?: string, gapMin?: number, env?: Record<string, string | undefined> }} [opts]
  * @returns {{ runs: Run[], open: Run | null }}
  */
 export function foldRuns(records, opts = {}) {
   const rec = /** @type {Records} */ (records && typeof records === "object" ? records : {});
+  const env = opts.env ?? {};
+  const gapMin = typeof opts.gapMin === "number" && opts.gapMin >= 0 && opts.gapMin <= 100 ? opts.gapMin : gapMinimum(env);
   const staleMs = (opts.staleMin ?? RUN_STALE_MIN_DEFAULT) * 60000;
   const now = opts.now ?? Date.now();
   const sid = opts.sessionId;
@@ -633,7 +689,7 @@ export function foldRuns(records, opts = {}) {
   /** @param {'planned' | 'light'} kind @param {number} ts @returns {Run} */
   const openRun = (kind, ts) => {
     /** @type {Run} */
-    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [] };
+    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [], replans: [] };
     runs.push(run);
     return run;
   };
@@ -687,6 +743,7 @@ export function foldRuns(records, opts = {}) {
         }
         open.kind = "planned";
         open.lastAt = ts;
+        if (replan !== null) open.replans.push(ts);
         if (typeof r.agent_id === "string" && r.agent_id) planRunOf.set(r.agent_id, open);
         const plan = r.plan && typeof r.plan === "object" ? r.plan : {};
         if (plan.constraints && typeof plan.constraints === "object") Object.assign(open.constraints, plan.constraints);
@@ -743,20 +800,53 @@ export function foldRuns(records, opts = {}) {
       const status = r.status === "pass" || r.status === "fail" ? r.status : null;
       const model = typeof r.model === "string" ? r.model : typeof launch?.model === "string" ? launch.model : null;
       const checks = strings(Array.isArray(r.checks) ? r.checks : launch?.checks);
-      s.reviews.push({ ts, status, answers: r.answers && typeof r.answers === "object" ? r.answers : {}, open: Array.isArray(r.open) ? r.open : [], model, checks });
+      const answers = r.answers && typeof r.answers === "object" ? r.answers : {};
+      const validate = launch?.validate === true;
+      // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes.
+      if (validate) {
+        for (const prev of currentReviews(s)) {
+          prev.superseded = true;
+          prev.counted = null;
+        }
+      }
+      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate });
       s.reviewedSince = true;
     }
     settle(s);
     closeIfDone(run);
   }
   if (cur && !cur.closed && idle(cur, now)) cur.stale = true;
+  for (const run of runs) for (const s of Object.values(run.slices)) finish(run, s, env);
   return { runs, open: cur && !cur.closed && !cur.stale ? cur : null };
 }
 
 /**
+ * The derived slice fields at the end of a fold: countedFails, the stall (docs/brief-grammar.md, "Stall gate") and the
+ * doubt signals. @param {Run} run @param {SliceState} s @param {Record<string, string | undefined>} env
+ */
+function finish(run, s, env) {
+  const counted = s.reviews.filter((r) => countedStatus(r) !== null);
+  s.countedFails = counted.filter((r) => countedStatus(r) === "fail").length;
+  s.stalled = false;
+  s.stalledAt = null;
+  s.stallKeys = [];
+  const [a, b] = counted.slice(-2);
+  if (!s.final && counted.length >= 2 && a && b && countedStatus(a) === "fail" && countedStatus(b) === "fail") {
+    const shared = b.keys.filter((k) => a.keys.includes(k));
+    if (shared.length && !run.replans.some((t) => t > b.ts)) {
+      s.stalled = true;
+      s.stalledAt = b.ts;
+      s.stallKeys = shared;
+    }
+  }
+  s.signals = doubtSignals(s, env);
+}
+
+/**
  * Doubt signals for a slice: why it needs a passing opus review after its latest implementer. Empty when ORCH_ESCALATION
- * is off; ["always"] when it is always. Signals: risky, retry (an earlier failed review), read_answer and open_items
- * (in its latest passing review), tests_failed_isolated (for its latest implementer attempt).
+ * is off; ["always"] when it is always. Signals: risky, retry (an earlier counted failed review), read_answer and
+ * open_items (in its latest counted passing review), tests_failed_isolated (for its latest implementer attempt),
+ * low_confidence_fail (a review after its latest implementer reported fail with every gap below the cutoff).
  * @param {SliceState} s @param {Record<string, string | undefined>} [env] @returns {string[]}
  */
 export function doubtSignals(s, env = {}) {
@@ -765,13 +855,15 @@ export function doubtSignals(s, env = {}) {
   if (mode === "always") return ["always"];
   const signals = [];
   if (s.risky) signals.push("risky");
-  if (s.reviews.some((r) => r.status === "fail")) signals.push("retry");
-  const pass = currentReviews(s).filter((r) => r.status === "pass").at(-1);
+  if (s.reviews.some((r) => countedStatus(r) === "fail")) signals.push("retry");
+  const current = currentReviews(s);
+  const pass = current.filter((r) => countedStatus(r) === "pass").at(-1);
   if (pass && Object.values(pass.answers).some((a) => a?.mode === "read")) signals.push("read_answer");
   if (pass && pass.open.length) signals.push("open_items");
   if (s.isolatedTestFailure) signals.push("tests_failed_isolated");
+  if (current.some((r) => r.lowConfidence === true && countedStatus(r) === "pass")) signals.push("low_confidence_fail");
   return signals;
 }
 
-/** A passing review on an opus model after the slice's latest implementer. @param {SliceState} s */
-export const hasOpusPass = (s) => currentReviews(s).some((r) => r.status === "pass" && isOpusModel(r.model));
+/** A review counted as a pass on an opus model after the slice's latest implementer. @param {SliceState} s */
+export const hasOpusPass = (s) => currentReviews(s).some((r) => countedStatus(r) === "pass" && isOpusModel(r.model));

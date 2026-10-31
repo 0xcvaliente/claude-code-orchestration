@@ -52,13 +52,16 @@ export function loadRecords(sessionId, dir = stateDir) {
 
 /**
  * The session's runs: every run, the open one (not closed, not stale) and the latest one (open, closed or stale; the
- * review gate gates the latest run's unreviewed slices even when it went stale).
+ * review gate gates the latest run's unreviewed slices even when it went stale). `env` (default process.env) gives
+ * ORCH_RUN_STALE_MIN, ORCH_GAP_MIN and ORCH_ESCALATION to the fold; slice states carry countedFails, stalled and signals.
  * @param {string} sessionId
  * @param {{ dir?: string, now?: number, env?: Record<string, string | undefined> }} [opts]
  */
 export function sessionRuns(sessionId, opts = {}) {
   const records = loadRecords(sessionId, opts.dir ?? stateDir);
-  const { runs, open } = foldRuns(records, { now: opts.now ?? Date.now(), staleMin: staleMinutes(opts.env ?? process.env), sessionId });
+  const env = opts.env ?? process.env;
+  // env also sets the gap cutoff (ORCH_GAP_MIN) and the escalation mode of each slice's `signals`.
+  const { runs, open } = foldRuns(records, { now: opts.now ?? Date.now(), staleMin: staleMinutes(env), sessionId, env });
   return { records, runs, open, latest: runs.at(-1) ?? null };
 }
 
