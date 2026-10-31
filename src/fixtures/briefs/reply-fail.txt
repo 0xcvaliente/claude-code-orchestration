@@ -1,0 +1,11 @@
+**STATUS: fail**
+
+**GAPS:**
+- the limit is off by one
+C1: fail parse('[') throws SyntaxError
+C2: pass (read) https://example.com/spec#deps
+OPEN:
+- confirm the limit with the user
+- C3 not checked: no fixture for old briefs
+
+EVIDENCE: npm test -> 1 fail

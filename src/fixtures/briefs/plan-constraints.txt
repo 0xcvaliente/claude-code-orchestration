@@ -1,0 +1,20 @@
+PLAN REVIEW
+Task: add a TOML and a CSV reader.
+CONSTRAINTS:
+C1: parsing never throws on malformed input
+c2: no new dependencies
+
+C3: old briefs still parse
+Planned slices:
+SLICE: toml
+FILES: toolkit/toml.py, tests/test_toml.py
+DEPENDS: none
+GOAL: TOML reader
+CHECKS: C1, C2
+
+## SLICE: csv - CSV reader
+FILES: toolkit/csv.py
+DEPENDS: toml
+GOAL: ignored, the inline goal came first
+RISKY: yes
+CHECKS: C3

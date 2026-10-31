@@ -1,0 +1,6 @@
+SLICE: fix-typo
+FILES: README.md
+DEPENDS: none
+PATH: light
+
+Fix the typo in the install section.

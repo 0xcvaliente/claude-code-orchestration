@@ -1,0 +1,4 @@
+STATUS: pass
+CHANGED: a.py
+EVIDENCE: pytest -q -> 3 passed
+OPEN: None.

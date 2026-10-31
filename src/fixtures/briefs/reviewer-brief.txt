@@ -1,0 +1,5 @@
+SLICE: toml
+FOCUS: the error path on malformed input
+CHECKS: C1, C2
+
+Review the toml slice against its goal.
