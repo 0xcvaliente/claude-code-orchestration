@@ -18,6 +18,7 @@ import {
   hasOpusPass,
   isOpusModel,
   isPlanReview,
+  launchRecord,
   modelFromAgentFile,
   normalizeFiles,
   parseHeader,
@@ -26,6 +27,7 @@ import {
   parseStatus,
   sliceOfBrief,
   staleMinutes,
+  stopRecord,
 } from "../.claude/hooks/brief.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,7 +70,10 @@ test("C1: no parser throws on empty, malformed or non-string input; fields come 
   assert.deepEqual(parsePlan(null), { isPlanReview: false, replan: null, constraints: {}, slices: [] });
   assert.deepEqual(parseReply(42), { status: null, open: [], answers: {} });
   assert.deepEqual(foldRuns(/** @type {any} */ ("nope")), { runs: [], open: null });
-  assert.deepEqual(foldRuns(/** @type {any} */ ([null, 3, { phase: "launch" }])), { runs: [], open: null });
+  assert.deepEqual(foldRuns(/** @type {any} */ ({ launches: [null, 3, { ts: {} }], stops: "x", gates: [{ gate: "test" }] })), { runs: [], open: null });
+  assert.deepEqual(foldRuns(/** @type {any} */ ([null, 3])), { runs: [], open: null });
+  launchRecord(42);
+  stopRecord(/** @type {any} */ ("x"));
 });
 
 test("C7: brief.mjs imports only node: built-ins and has no side effects at import", () => {
@@ -282,21 +287,72 @@ test("env: ORCH_RUN_STALE_MIN and ORCH_ESCALATION", () => {
   assert.equal(escalationMode({ ORCH_ESCALATION: "sometimes" }), "auto");
 });
 
-// Run model helpers: minutes from a fixed start.
+// Run model helpers: log records at minutes from a fixed start, in session s1.
+/** @typedef {import("../.claude/hooks/brief.mjs").Records} Records */
+/** @typedef {{ launch?: object, stop?: object, gate?: object }} Item */
 const T0 = Date.parse("2026-10-31T10:00:00Z");
 /** @param {number} min */
 const at = (min) => new Date(T0 + min * 60000).toISOString();
 const PLAN = "PLAN REVIEW\nCONSTRAINTS:\nC1: no throw\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a\nCHECKS: C1\nSLICE: b\nFILES: b.py\nDEPENDS: a\nGOAL: b\nRISKY: yes";
-/** @param {number} min @param {string} prompt @returns {import("../.claude/hooks/brief.mjs").RunEvent} */
-const planLaunch = (min, prompt = PLAN) => ({ ts: at(min), phase: "launch", role: "orchestration:reviewer", prompt });
-/** @param {number} min @param {string} slice @param {string} [extra] @returns {import("../.claude/hooks/brief.mjs").RunEvent} */
-const impl = (min, slice, extra = "") => ({ ts: at(min), phase: "launch", role: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none\n${extra}` });
-/** @param {number} min @param {string} slice @param {string} reply @param {string | null} [model] @returns {import("../.claude/hooks/brief.mjs").RunEvent} */
-const review = (min, slice, reply, model = "sonnet") => ({ ts: at(min), phase: "stop", role: "reviewer", slice, reply, model });
+/** @param {Item[]} items @returns {Records} */
+const R = (...items) => ({
+  launches: items.flatMap((i) => (i.launch ? [i.launch] : [])),
+  stops: items.flatMap((i) => (i.stop ? [i.stop] : [])),
+  gates: items.flatMap((i) => (i.gate ? [i.gate] : [])),
+});
+/** @param {number} min @param {string} [prompt] @returns {Item} */
+const planLaunch = (min, prompt = PLAN) => ({ launch: launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { ts: at(min), sessionId: "s1", agentId: `plan${min}` }) });
+/** @param {number} min @param {string} slice @param {string} [extra] @param {string} [agentId] @returns {Item} */
+const impl = (min, slice, extra = "", agentId = `impl-${slice}-${min}`) => ({
+  launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none\n${extra}` }, { ts: at(min), sessionId: "s1", agentId }),
+});
+/** An implementer stop; the slice is joined from the launch by agent id (a SendMessage resume has no new launch). @param {number} min @param {string} agentId @returns {Item} */
+const implStop = (min, agentId) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "implementer", reply: "STATUS: pass" }) });
+/** A reviewer launched just before `min` and stopping at `min`. @param {number} min @param {string} slice @param {string} reply @param {string | null} [model] @returns {Item[]} */
+const review = (min, slice, reply, model = "sonnet") => {
+  const agentId = `rev-${slice}-${min}`;
+  const input = { subagent_type: "reviewer", prompt: `SLICE: ${slice}\nCHECKS: C1`, ...(model ? { model } : {}) };
+  return [
+    { launch: launchRecord(input, { ts: at(min - 0.5), sessionId: "s1", agentId }) },
+    { stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "reviewer", reply }) },
+  ];
+};
+/** An implementer attempt: launch, stop, review. @param {number} min @param {string} slice @param {string} verdict @param {string} [extra] @returns {Item[]} */
+const attempt = (min, slice, verdict, extra = "") => [impl(min, slice, extra), implStop(min + 1, `impl-${slice}-${min}`), ...review(min + 2, slice, `STATUS: ${verdict}`)];
+
+test("launch and stop records carry parsed fields, never the brief or reply text", () => {
+  const l = launchRecord({ subagent_type: "orchestration:implementer", prompt: "SLICE: a\nFILES: a.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C2\nsecret body text" }, { ts: "t", sessionId: "s", agentId: "x1" });
+  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null });
+  assert.doesNotMatch(JSON.stringify(l), /secret body text/);
+  const p = launchRecord({ subagent_type: "reviewer", model: "opus", prompt: PLAN }, { ts: "t" });
+  assert.equal(p.slice, "plan");
+  assert.equal(p.model, "opus");
+  assert.equal(p.isPlanReview, true);
+  assert.deepEqual(p.plan?.constraints, { C1: "no throw" });
+  assert.deepEqual(p.plan?.slices.map((s) => s.slice), ["a", "b"]);
+  assert.equal(p.agent_id, null);
+  const s = stopRecord({ ts: "t", sessionId: "s", agentId: "r1", role: "orchestration:reviewer", slice: "a", reply: "STATUS: pass\nC1: pass (read) a.py:1\nOPEN: none\nquoted secret" });
+  assert.deepEqual(s, { ts: "t", session_id: "s", agent_id: "r1", role: "reviewer", slice: "a", status: "pass", answers: { C1: { verdict: "pass", mode: "read", detail: "a.py:1" } }, open: [], run: null });
+  assert.equal(stopRecord(/** @type {any} */ (null)).status, null);
+  assert.equal(launchRecord(undefined).agent_type, "");
+});
+
+test("C3: old journal records (no parsed fields, no answers) fold without errors", () => {
+  const f = foldRuns({
+    launches: [
+      { ts: at(0), session_id: "s1", agent_id: "r0", slice: "plan", role: "reviewer" },
+      { ts: at(1), session_id: "s1", agent_id: "i1", slice: "a", role: "implementer" },
+    ],
+    stops: [{ ts: at(2), session_id: "s1", slice: "a", role: "implementer", status: "pass", agent_id: "i1" }],
+  }, { now: T0 + 3 * 60000 });
+  assert.equal(f.open?.kind, "planned");
+  assert.deepEqual(f.open?.planned, []);
+  assert.equal(f.open?.slices.a?.attempts, 1);
+});
 
 test("run model: a PLAN REVIEW opens a planned run; REPLAN extends it; a new PLAN REVIEW closes it", () => {
   const replan = "PLAN REVIEW\nREPLAN: 1\nCONSTRAINTS:\nC2: keep API\nSLICE: c\nFILES: c.py\nDEPENDS: none\nGOAL: c";
-  let f = foldRuns([planLaunch(0), impl(1, "a"), planLaunch(2, replan)], { now: T0 + 3 * 60000 });
+  let f = foldRuns(R(planLaunch(0), impl(1, "a"), planLaunch(2, replan)), { now: T0 + 3 * 60000 });
   assert.equal(f.runs.length, 1);
   const run = /** @type {import("../.claude/hooks/brief.mjs").Run} */ (f.open);
   assert.equal(run.kind, "planned");
@@ -305,91 +361,114 @@ test("run model: a PLAN REVIEW opens a planned run; REPLAN extends it; a new PLA
   assert.equal(run.slices.a?.launches, 1);
   assert.deepEqual(run.slices.a?.checks, ["C1"]);
   assert.equal(run.slices.b?.risky, true);
-  f = foldRuns([planLaunch(0), impl(1, "a"), planLaunch(2)], { now: T0 + 3 * 60000 });
+  f = foldRuns(R(planLaunch(0), impl(1, "a"), planLaunch(2)), { now: T0 + 3 * 60000 });
   assert.equal(f.runs.length, 2);
   assert.equal(f.runs[0]?.closed, true);
   assert.equal(f.open?.id, 2);
   assert.equal(f.open?.slices.a?.launches, 0, "the new run starts its own counts");
-  // A REPLAN with no open run opens one.
-  assert.equal(foldRuns([planLaunch(0, replan)], { now: T0 }).open?.planned.join(), "c");
+  assert.equal(foldRuns(R(planLaunch(0, replan)), { now: T0 }).open?.planned.join(), "c", "a REPLAN with no open run opens one");
+});
+
+test("run model: records of other sessions are dropped when sessionId is given", () => {
+  const other = { launch: launchRecord({ subagent_type: "reviewer", prompt: "PLAN REVIEW\nSLICE: z\nFILES: z" }, { ts: at(1), sessionId: "s2", agentId: "o1" }) };
+  const f = foldRuns(R(planLaunch(0), other), { now: T0 + 2 * 60000, sessionId: "s1" });
+  assert.equal(f.runs.length, 1);
+  assert.deepEqual(f.open?.planned, ["a", "b"]);
+  assert.equal(foldRuns(R(planLaunch(0), other), { now: T0 + 2 * 60000, sessionId: "s3" }).runs.length, 0);
 });
 
 test("run model: a light implementer opens a run only when none is open; other launches outside a run are not tracked", () => {
-  let f = foldRuns([impl(0, "x")], { now: T0 });
+  let f = foldRuns(R(impl(0, "x")), { now: T0 });
   assert.deepEqual([f.runs.length, f.open], [0, null]);
-  f = foldRuns([impl(0, "fix", "PATH: light"), review(1, "fix", "STATUS: pass")], { now: T0 + 2 * 60000 });
+  f = foldRuns(R(...attempt(0, "fix", "pass", "PATH: light")), { now: T0 + 3 * 60000 });
   assert.equal(f.runs[0]?.kind, "light");
   assert.equal(f.runs[0]?.closed, true, "a light run closes when its slice is final");
   assert.equal(f.open, null);
-  f = foldRuns([planLaunch(0), impl(1, "a", "PATH: light")], { now: T0 + 2 * 60000 });
+  f = foldRuns(R(planLaunch(0), impl(1, "a", "PATH: light")), { now: T0 + 2 * 60000 });
   assert.equal(f.runs.length, 1, "a light brief inside an open run joins it");
   assert.equal(f.open?.slices.a?.launches, 1);
-  f = foldRuns([impl(0, "w", "ORCHESTRATION: workflow\nPATH: light")], { now: T0 });
+  f = foldRuns(R(impl(0, "w", "ORCHESTRATION: workflow\nPATH: light")), { now: T0 });
   assert.equal(f.runs.length, 0, "workflow briefs are not part of the run model");
 });
 
-test("run model: a slice is final when its latest review passed, or failed after 1 + MAX_RETRIES launches", () => {
+test("run model: attempts are implementer stops; failed for good after 3 attempts, resumes included", () => {
   assert.equal(MAX_RETRIES, 2);
-  const events = [planLaunch(0), impl(1, "a"), review(2, "a", "STATUS: fail"), impl(3, "a"), review(4, "a", "STATUS: fail")];
-  let f = foldRuns(events, { now: T0 + 5 * 60000 });
-  assert.deepEqual([f.open?.slices.a?.final, f.open?.slices.a?.gaveUp], [false, false], "2 launches: a retry is left");
-  f = foldRuns([...events, impl(5, "a"), review(6, "a", "STATUS: fail")], { now: T0 + 7 * 60000 });
-  assert.deepEqual([f.open?.slices.a?.final, f.open?.slices.a?.gaveUp, f.open?.slices.a?.passed], [true, true, false]);
-  // A review before the latest launch does not count for it.
-  f = foldRuns([planLaunch(0), impl(1, "a"), review(2, "a", "STATUS: pass"), impl(3, "a")], { now: T0 + 4 * 60000 });
-  assert.equal(f.open?.slices.a?.final, false);
-  // The planned run closes once every planned slice is final.
-  f = foldRuns([planLaunch(0), impl(1, "a"), review(2, "a", "STATUS: pass"), impl(3, "b"), review(4, "b", "STATUS: pass")], { now: T0 + 5 * 60000 });
+  const two = [planLaunch(0), ...attempt(1, "a", "fail"), ...attempt(4, "a", "fail")];
+  let f = foldRuns(R(...two), { now: T0 + 7 * 60000 });
+  assert.deepEqual([f.open?.slices.a?.attempts, f.open?.slices.a?.final], [2, false], "2 attempts: a retry is left");
+  f = foldRuns(R(...two, ...attempt(7, "a", "fail")), { now: T0 + 10 * 60000 });
+  assert.deepEqual([f.open?.slices.a?.attempts, f.open?.slices.a?.final, f.open?.slices.a?.gaveUp, f.open?.slices.a?.passed], [3, true, true, false]);
+  // Retries by SendMessage resume the same agent: one launch, three stops (joined by agent id), three failed reviews.
+  f = foldRuns(
+    R(planLaunch(0), impl(1, "a", "", "A"), implStop(2, "A"), ...review(3, "a", "STATUS: fail"), implStop(4, "A"), ...review(5, "a", "STATUS: fail"), implStop(6, "A"), ...review(7, "a", "STATUS: fail")),
+    { now: T0 + 8 * 60000 },
+  );
+  assert.deepEqual([f.open?.slices.a?.launches, f.open?.slices.a?.attempts, f.open?.slices.a?.gaveUp], [1, 3, true]);
+  // A test-gate block makes the implementer stop again before any review: still one attempt.
+  f = foldRuns(R(planLaunch(0), impl(1, "a", "", "A"), implStop(2, "A"), implStop(3, "A"), implStop(4, "A"), ...review(5, "a", "STATUS: fail")), { now: T0 + 6 * 60000 });
+  assert.deepEqual([f.open?.slices.a?.attempts, f.open?.slices.a?.final], [1, false]);
+});
+
+test("run model: only a review after the latest implementer launch or stop counts; a planned run closes when all slices are final", () => {
+  let f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), impl(5, "a")), { now: T0 + 6 * 60000 });
+  assert.equal(f.open?.slices.a?.final, false, "relaunched after its pass");
+  f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), implStop(5, "impl-a-1")), { now: T0 + 6 * 60000 });
+  assert.equal(f.open?.slices.a?.final, false, "resumed after its pass");
+  f = foldRuns(R(planLaunch(0), ...attempt(1, "a", "pass"), ...attempt(4, "b", "pass")), { now: T0 + 7 * 60000 });
   assert.deepEqual([f.runs[0]?.closed, f.open], [true, null]);
-  // A review with no STATUS line is not a pass.
-  f = foldRuns([impl(0, "fix", "PATH: light"), review(1, "fix", "looks fine")], { now: T0 + 2 * 60000 });
-  assert.equal(f.open?.slices.fix?.final, false);
+  f = foldRuns(R(impl(0, "fix", "PATH: light"), implStop(1, "impl-fix-0"), ...review(2, "fix", "looks fine")), { now: T0 + 3 * 60000 });
+  assert.equal(f.open?.slices.fix?.final, false, "a review with no STATUS line is not a pass");
 });
 
 test("run model: a run with no launch or stop for ORCH_RUN_STALE_MIN minutes is stale; a late stop still lands in it", () => {
-  let f = foldRuns([planLaunch(0), impl(1, "a")], { now: T0 + 32 * 60000 });
+  let f = foldRuns(R(planLaunch(0), impl(1, "a")), { now: T0 + 32 * 60000 });
   assert.deepEqual([f.runs[0]?.stale, f.runs[0]?.closed, f.open], [true, false, null]);
-  f = foldRuns([planLaunch(0), impl(1, "a")], { now: T0 + 32 * 60000, staleMin: 60 });
+  f = foldRuns(R(planLaunch(0), impl(1, "a")), { now: T0 + 32 * 60000, staleMin: 60 });
   assert.equal(f.open?.id, 1);
-  // A light launch after a stale run opens a new run; the stale run keeps its unreviewed slice for the review gate.
-  f = foldRuns([planLaunch(0), impl(1, "a"), impl(40, "fix", "PATH: light"), review(41, "a", "STATUS: pass")], { now: T0 + 42 * 60000 });
+  // A light launch after a stale run opens a new run; the stale run keeps its slice for the review gate.
+  f = foldRuns(R(planLaunch(0), impl(1, "a"), impl(40, "fix", "PATH: light"), implStop(41, "impl-a-1"), ...review(42, "a", "STATUS: pass")), { now: T0 + 43 * 60000 });
   assert.equal(f.runs.length, 2);
   assert.equal(f.runs[0]?.stale, true);
-  assert.equal(f.runs[0]?.slices.a?.passed, true, "the late review is recorded in the run that has the slice");
+  assert.equal(f.runs[0]?.slices.a?.passed, true, "the late stops are recorded in the run that has the slice");
   assert.equal(f.open?.kind, "light");
-  // A worker that outlives staleness: its stop revives activity, so the run is not stale at the end.
-  f = foldRuns([planLaunch(0), impl(1, "a"), review(45, "a", "STATUS: pass")], { now: T0 + 46 * 60000 });
+  // A worker that outlives staleness: its stop is activity, so the run is not stale at the end.
+  f = foldRuns(R(planLaunch(0), impl(1, "a"), implStop(44, "impl-a-1"), ...review(45, "a", "STATUS: pass")), { now: T0 + 46 * 60000 });
   assert.equal(f.open?.id, 1);
   assert.equal(f.open?.slices.a?.passed, true);
 });
 
 test("doubt signals: risky, retry, read answer, open items, isolated test failure; ORCH_ESCALATION off/always", () => {
-  const base = [planLaunch(0)];
-  /** @param {import("../.claude/hooks/brief.mjs").RunEvent[]} ev @param {string} slice */
-  const sliceOf = (ev, slice) => {
-    const s = foldRuns(ev, { now: T0 + 10 * 60000 }).runs[0]?.slices[slice];
+  /** @param {Item[]} items @param {string} slice */
+  const sliceOf = (items, slice) => {
+    const s = foldRuns(R(planLaunch(0), ...items), { now: T0 + 20 * 60000 }).runs[0]?.slices[slice];
     assert.ok(s);
     return s;
   };
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), review(2, "a", "STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none")], "a")), []);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "b"), review(2, "b", "STATUS: pass")], "b")), ["risky"]);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a", "RISKY: yes")], "a")), ["risky"], "RISKY on the implementer brief counts too");
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), review(2, "a", "STATUS: fail"), impl(3, "a"), review(4, "a", "STATUS: pass")], "a")), ["retry"]);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), review(2, "a", "STATUS: pass\nC1: pass (read) a.py:3")], "a")), ["read_answer"]);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), review(2, "a", "STATUS: pass\nOPEN: edge case untested")], "a")), ["open_items"]);
-  const gate = /** @type {import("../.claude/hooks/brief.mjs").RunEvent} */ ({ ts: at(2), phase: "gate", slice: "a", reason: "tests_failed_isolated" });
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), gate], "a")), ["tests_failed_isolated"]);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a"), gate, impl(3, "a")], "a")), [], "only for the latest implementer");
-  const risky = sliceOf([...base, impl(1, "b")], "b");
-  assert.deepEqual(doubtSignals(risky, { ORCH_ESCALATION: "off" }), []);
-  assert.deepEqual(doubtSignals(sliceOf([...base, impl(1, "a")], "a"), { ORCH_ESCALATION: "always" }), ["always"]);
-  // An opus pass after the latest implementer satisfies them; one before a relaunch does not.
-  const s = sliceOf([...base, impl(1, "b"), review(2, "b", "STATUS: pass", "claude-opus-5-5")], "b");
-  assert.equal(hasOpusPass(s), true);
-  const relaunched = sliceOf([...base, impl(1, "b"), review(2, "b", "STATUS: pass", "opus"), impl(3, "b")], "b");
+  const ok = (/** @type {string} */ reply) => [impl(1, "a"), implStop(2, "impl-a-1"), ...review(3, "a", reply)];
+  assert.deepEqual(doubtSignals(sliceOf(ok("STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none"), "a")), []);
+  assert.deepEqual(doubtSignals(sliceOf(attempt(1, "b", "pass"), "b")), ["risky"]);
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a", "RISKY: yes")], "a")), ["risky"], "RISKY on the implementer brief counts too");
+  assert.deepEqual(doubtSignals(sliceOf([...attempt(1, "a", "fail"), ...attempt(4, "a", "pass")], "a")), ["retry"]);
+  assert.deepEqual(doubtSignals(sliceOf(ok("STATUS: pass\nC1: pass (read) a.py:3"), "a")), ["read_answer"]);
+  assert.deepEqual(doubtSignals(sliceOf(ok("STATUS: pass\nOPEN: edge case untested"), "a")), ["open_items"]);
+  // Test-gate records name no slice: they join a launch by agent id. Old records have no session_id.
+  /** @param {number} min @param {string} agentId @param {string} [session] @returns {Item} */
+  const gate = (min, agentId, session) => ({ gate: { ts: at(min), gate: "test", decision: "warn", reason: "tests_failed_isolated", agent_type: "implementer", agent_id: agentId, ...(session ? { session_id: session } : {}) } });
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a"), gate(2, "impl-a-1", "s1"), implStop(2, "impl-a-1")], "a")), ["tests_failed_isolated"]);
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a"), implStop(2, "impl-a-1"), gate(2, "impl-a-1")], "a")), ["tests_failed_isolated"], "gate after the stop, no session_id");
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a"), gate(2, "impl-a-1", "s2")], "a")), [], "another session's gate");
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a"), gate(2, "unknown-agent", "s1")], "a")), [], "an agent id with no launch");
+  // Only for the latest attempt: a gate before a failed review belongs to the earlier attempt.
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a", "", "A"), gate(2, "A", "s1"), implStop(2, "A"), ...review(3, "a", "STATUS: fail"), implStop(4, "A")], "a")), ["retry"]);
+  assert.deepEqual(doubtSignals(sliceOf(attempt(1, "b", "pass"), "b"), { ORCH_ESCALATION: "off" }), []);
+  assert.deepEqual(doubtSignals(sliceOf([impl(1, "a")], "a"), { ORCH_ESCALATION: "always" }), ["always"]);
+  // An opus pass after the latest implementer satisfies them; one before a relaunch does not; the model comes from the launch.
+  const opus = sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", "claude-opus-5-5")], "b");
+  assert.equal(hasOpusPass(opus), true);
+  const relaunched = sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", "opus"), impl(4, "b")], "b");
   assert.equal(hasOpusPass(relaunched), false);
   assert.equal(currentReviews(relaunched).length, 0);
-  assert.equal(hasOpusPass(sliceOf([...base, impl(1, "b"), review(2, "b", "STATUS: pass", null)], "b")), false, "unknown model is not opus");
+  assert.equal(hasOpusPass(sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", null)], "b")), false, "unknown model is not opus");
 });
 
 // Parity with today's hooks: brief.mjs must read SLICE, FILES and DEPENDS exactly as plan-check.mjs logs them,
