@@ -199,3 +199,20 @@ Hook input keys: `session_id, transcript_path, cwd, prompt_id, hook_event_name, 
 **Not run.** The slice ran out of turns before this probe. It needs a scratch project with a function-hooks mod (an `agent.spawn` handler that logs the event and returns a changed `model`), a project workflow with one `agent(..., { agentType: 'researcher' })`, a headless `claude -p` run with the mod loaded through `--plugin-dir`, and the subagent's model read from its transcript at SubagentStop (the method of the section 2.3 probe in `docs/research-2026-10-31.md`). The CHANGELOG line saying `agent.spawn` can rewrite a workflow agent's prompt and model has not been checked against a run.
 
 **Consequence:** `dashboard/register.tsx` does not route workflow researchers. The read router covers only Agent tool launches, through `plan-check.mjs`, since a workflow's `agent()` makes no Agent tool call (Check C, and `.claude/rules/agents.md`, "The scripted workflow"). The pane shows the model each researcher runs with: `spawned.model` on its start line and card. Whether that value reflects a PreToolUse `updatedInput` model has not been checked live either.
+
+## Check H: does the read router raise a researcher on a scanned PDF? (Claude Code 2.1.316, 2026-10-31)
+
+**Answer: yes, once, in one manual run.** Recorded for the compare-040 write-up ([../benchmark-compare-040.md](../benchmark-compare-040.md)), where no benchmark run launched a researcher.
+
+Setup: a scratch git repo with this repo's `.claude/` copied in (at 56ec956) and `src/fixtures/files/scanned.pdf` copied as `scanned.pdf`. Command, from the scratch repo:
+
+    ORCH_READ_ROUTER=on claude -p "..." --model sonnet --allowedTools=Agent
+
+The main session launched the project `researcher` with the brief `SLICE: r1 / SOURCES: scanned.pdf / READ: extract / Question: what text is shown on the first page...`.
+
+- `.claude/state/reads-route.jsonl`: `{"agent_type":"researcher","decision":"route","tier":"sonnet","model":"haiku","model_source":"agent_file","raised":true,"to":"sonnet","reasons":["read_extract","pdf_sonnet","pdf_scanned","pdf_hard_pages"],"files":1,"conversions":0,"hard_pages":0}`.
+- `.claude/state/telemetry.jsonl`, the researcher's SubagentStop: models `["claude-sonnet-5-5"]`, 2 turns, tokens `{input 4, output 305, cache_read 6288, cache_write 9658}`. The plan check's model change took effect.
+- The researcher reported no readable text on the page. The fixture page is an image without legible text, so the answer is right.
+- Inconsistency in the log: `hard_pages` is 0 while the reasons include `pdf_hard_pages`.
+
+Not checked: scores or token savings, other file types, and a workflow researcher (Check G).
