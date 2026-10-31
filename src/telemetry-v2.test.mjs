@@ -21,8 +21,8 @@ function project() {
   return dir;
 }
 /** @param {string} dir @param {string} script @param {unknown} payload @param {string[]} [args] */
-const run = (dir, script, payload, args = []) =>
-  spawnSync("node", [join(dir, ".claude", "hooks", script), ...args], { input: typeof payload === "string" ? payload : JSON.stringify(payload), env: { ...process.env, CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+const run = (dir, script, payload, args = [], env = {}) =>
+  spawnSync("node", [join(dir, ".claude", "hooks", script), ...args], { input: typeof payload === "string" ? payload : JSON.stringify(payload), env: { ...process.env, CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: "", ...env }, encoding: "utf8" });
 /** @param {string} dir @param {string} name @returns {any[]} */
 const log = (dir, name) => {
   try {
@@ -93,6 +93,51 @@ test("telemetry: max_turns_hit true at a maxTurns stop, false at end_turn, null 
   }
 });
 
+test("telemetry: with the role's maxTurns known, a tool_result ending is a hit only at the limit (else a killed agent: null)", () => {
+  const dir = project();
+  const plugin = mkdtempSync(join(tmpdir(), "telemetry-v2-plugin-"));
+  try {
+    const agentFile = (/** @type {string} */ d, /** @type {string} */ role, /** @type {number} */ n) => {
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, `${role}.md`), `---\nname: ${role}\nmodel: sonnet\nmaxTurns: ${n}\n---\n\nBody mentioning maxTurns: 99\n`);
+    };
+    agentFile(join(dir, ".claude", "agents"), "reviewer", 2);
+    agentFile(join(dir, ".claude", "agents"), "implementer", 3);
+    agentFile(join(plugin, "agents"), "researcher", 2);
+    agentFile(join(plugin, "agents"), "implementer", 2); // the project's file wins
+    const twoTurns = transcript(dir, "two.jsonl", [brief(), ...assistant("m1", [toolUse("t1")], usage(1, 1)), result("t1"), ...assistant("m2", [toolUse("t2")], usage(1, 1)), result("t2")]);
+    const env = { CLAUDE_PLUGIN_ROOT: plugin };
+    assert.equal(run(dir, "telemetry.mjs", stop(twoTurns, "orchestration:reviewer"), [], env).status, 0); // 2 >= 2: hit
+    assert.equal(run(dir, "telemetry.mjs", stop(twoTurns, "orchestration:implementer"), [], env).status, 0); // 2 < 3: killed
+    assert.equal(run(dir, "telemetry.mjs", stop(twoTurns, "orchestration:researcher"), [], env).status, 0); // plugin root: 2 >= 2
+    assert.equal(run(dir, "telemetry.mjs", stop(twoTurns, "orchestration:integrator"), [], env).status, 0); // no agent file: heuristic
+    assert.deepEqual(log(dir, "telemetry.jsonl").map((r) => r.max_turns_hit), [true, null, true, true]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(plugin, { recursive: true, force: true });
+  }
+});
+
+test("telemetry: each usage field is the maximum over a message's lines, so a partial early line cannot undercount", () => {
+  const dir = project();
+  try {
+    const path = transcript(dir, "partial.jsonl", [
+      brief(),
+      ...assistant("m1", [{ type: "thinking", thinking: "" }], usage(3, 1, 0, 0)),
+      ...assistant("m1", [toolUse("t1")], usage(3, 40, 500, 20)),
+      ...assistant("m1", [{ type: "text", text: "" }], usage(2, 10, 500, 0)),
+      result("t1"),
+      ...assistant("m2", [{ type: "text", text: "STATUS: pass" }], usage(1, 5, 100, 1), "claude-sonnet-x", "end_turn"),
+    ]);
+    assert.equal(run(dir, "telemetry.mjs", stop(path)).status, 0);
+    const [rec] = log(dir, "telemetry.jsonl");
+    assert.deepEqual(rec.tokens, { input: 4, output: 45, cache_read: 600, cache_write: 21 });
+    assert.equal(rec.turns, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("telemetry: a missing transcript and non-stop events leave the new fields out; malformed input exits 0", () => {
   const dir = project();
   try {
@@ -152,15 +197,21 @@ test("journal: files_touched from tool calls in the shared tree, tools+git in an
     ]);
     assert.equal(run(dir, "journal.mjs", stop(iso, "orchestration:implementer", { agent_id: "ag2", cwd: dir })).status, 0);
 
-    // A reviewer stop gets no files fields; a broken transcript path still writes the record without them.
+    // A reviewer stop gets no files fields; malformed input exits 0.
     assert.equal(run(dir, "journal.mjs", stop(shared, "orchestration:reviewer", { agent_id: "ag3" })).status, 0);
     assert.equal(run(dir, "journal.mjs", "not json{").status, 0);
+    // No readable transcript: the shared tree cannot tell (fields left out, not an empty list); a worktree uses git alone.
+    assert.equal(run(dir, "journal.mjs", stop(join(dir, "missing.jsonl"), "orchestration:implementer", { agent_id: "ag4", cwd: dir })).status, 0);
+    assert.equal(run(dir, "journal.mjs", stop(join(dir, "missing.jsonl"), "orchestration:implementer", { agent_id: "ag5", cwd: wt })).status, 0);
 
     const recs = [...log(dir, "journal.jsonl"), ...log(dir, "journal-pending.jsonl")];
     const by = (/** @type {string} */ id) => recs.find((r) => r.agent_id === id);
     assert.deepEqual(by("ag1").files_touched.sort(), ["docs/b.md", "nb.ipynb", "src/a.ts"]);
     assert.equal(by("ag1").files_source, "tools");
     assert.deepEqual(by("ag2").files_touched, ["base.txt", "committed.txt", "src/edited.ts", "untracked.txt"]);
+    assert.ok(by("ag4") && !("files_touched" in by("ag4")) && !("files_source" in by("ag4")), "unknown tool paths in the shared tree");
+    assert.deepEqual(by("ag5").files_touched, ["base.txt", "committed.txt", "untracked.txt"]);
+    assert.equal(by("ag5").files_source, "git");
     assert.equal(by("ag2").files_source, "tools+git");
     assert.ok(!("files_touched" in by("ag3")) && !("files_source" in by("ag3")));
     assert.ok(!JSON.stringify(recs).includes(SECRET), "no brief, reply or file text in journal records");

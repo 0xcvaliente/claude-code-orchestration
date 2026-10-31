@@ -8,7 +8,8 @@
 //   SubagentStop of an implementer or reviewer -> journal.jsonl: a stop record (brief.mjs stopRecord): slice, status
 //     (parseStatus: any STATUS: fail line fails, else the first STATUS line decides, blockquotes ignored), answers,
 //     open and run (the run foldRuns gives the slice at write time); for implementers also files_touched and
-//     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree), left out on
+//     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree, "git" there
+//     without a transcript), left out when unknown or on
 //     any error.
 // An orchestrator asked to resume reads journal.jsonl and skips slices whose last review passed; plan-check.mjs and
 // review-gate.mjs fold both logs into runs (run.mjs).
@@ -91,10 +92,12 @@ if (p.hook_event_name === "PostToolUse") {
  * Files an implementer touched, relative to the project root: the paths of Edit, Write and NotebookEdit calls whose
  * tool_result is not an error, plus, in an isolated worktree (cwd under .claude/worktrees/<name>), what git shows
  * changed there since the fork point from the main worktree's HEAD (committed, uncommitted and untracked). In the
- * shared tree only the tool calls count: git status there mixes slices. Any error returns null (fields left out).
- * @param {any[]} entries transcript entries
+ * shared tree only the tool calls count: git status there mixes slices. With no readable transcript the tool paths are
+ * unknown: a worktree reports git alone (source "git"), the shared tree returns null. Any error returns null (fields
+ * left out), so an empty list always means "touched nothing", never "could not tell".
+ * @param {any[] | null} entries transcript entries, null when the transcript could not be read
  * @param {unknown} hookCwd the payload's cwd, used when no transcript entry carries one
- * @returns {{ files: string[], source: "tools" | "tools+git" } | null}
+ * @returns {{ files: string[], source: "tools" | "tools+git" | "git" } | null}
  */
 function filesTouched(entries, hookCwd) {
   try {
@@ -103,7 +106,7 @@ function filesTouched(entries, hookCwd) {
     /** @type {Set<string>} */
     const ok = new Set();
     let cwd = typeof hookCwd === "string" ? hookCwd : "";
-    for (const e of entries) {
+    for (const e of entries ?? []) {
       if (typeof e?.cwd === "string" && e.cwd) cwd = e.cwd;
       const content = e?.message?.content;
       if (!Array.isArray(content)) continue;
@@ -130,14 +133,14 @@ function filesTouched(entries, hookCwd) {
     /** @type {Set<string>} */
     const files = new Set();
     for (const [id, f] of calls) if (ok.has(id)) files.add(rel(f));
-    if (!wt) return { files: [...files], source: "tools" };
+    if (!wt) return entries ? { files: [...files], source: "tools" } : null;
     /** @param {string} dir @param {string[]} args */
     const git = (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
     const tree = /** @type {string} */ (wt[0]);
     const base = git(tree, ["merge-base", "HEAD", git(projectRoot, ["rev-parse", "HEAD"])]);
     const changed = [...git(tree, ["diff", "--name-only", base]).split("\n"), ...git(tree, ["ls-files", "--others", "--exclude-standard"]).split("\n")];
     for (const f of changed) if (f) files.add(f);
-    return { files: [...files].sort(), source: "tools+git" };
+    return { files: [...files].sort(), source: entries ? "tools+git" : "git" };
   } catch {
     return null;
   }
@@ -149,6 +152,7 @@ const agentId = typeof p.agent_id === "string" && p.agent_id ? p.agent_id : null
 
 /** @type {any[]} */
 let entries = [];
+let transcriptRead = false;
 try {
   entries = readFileSync(p.agent_transcript_path, "utf8")
     .split("\n")
@@ -161,6 +165,7 @@ try {
       }
     })
     .filter(Boolean);
+  transcriptRead = true;
 } catch {
   // no transcript (headless): the slice comes from the launch record
 }
@@ -177,7 +182,7 @@ for (let i = entries.length - 1; report === undefined && i >= 0; i--) {
   if (parseStatus(text) !== null) report = text;
 }
 
-const touched = role === "implementer" ? filesTouched(entries, p.cwd) : null;
+const touched = role === "implementer" ? filesTouched(transcriptRead ? entries : null, p.cwd) : null;
 const rec = stopRecord({ sessionId, agentId, role, slice, reply: report ?? last, run: slice ? runOf(slice) : null, filesTouched: touched?.files });
 append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);
