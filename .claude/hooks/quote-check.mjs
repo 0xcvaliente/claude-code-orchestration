@@ -12,13 +12,14 @@
 //   - text is compared after Unicode NFKC, lower-casing, straight quotes and dashes, dropping *, _ and backticks, and
 //     collapsing whitespace; an ellipsis (... or …) splits a quote into parts that must appear in order.
 // Unverifiable, never unverified: URLs, images and other binaries, missing or unreadable files, a PDF with no usable
-// text layer (a scan), and a quote whose page has no text. Each stop logs { agent_id, slice, total, verified,
+// text layer (a scan), a quote whose page has no text, and any path whose real path (symlinks resolved) is outside the
+// project dir and the read cache: such a file is never read, so the hook says nothing about it. Each stop logs { agent_id, slice, total, verified,
 // unverified, unverifiable, blocked } and the unverified quotes' paths to quotes.jsonl in the state dir (counts and
 // paths only, never quote, reply or file text). When a quote is unverified and quote-check has not blocked this agent
 // before, it exits 2 with the unverified locators, asking the researcher to correct each quote from its source or drop
 // it and list the claim under OPEN; the next stop always passes. Exits early on duplicate(); exits 0 on malformed input.
-import { appendFileSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { appendFileSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
 import { loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
@@ -105,6 +106,19 @@ function locate(locator) {
   return { path: p ? resolve(projectDir, p) : null, page };
 }
 
+/** A real path, or null when it does not resolve. @param {string} p */
+const real = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+};
+// Locators are confined to the project dir and the read cache, after symlinks resolve: anything else is never read.
+const roots = /** @type {string[]} */ ([real(projectDir), real(cacheDir)].filter(Boolean));
+/** @param {string} rp a real path */
+const inside = (rp) => roots.some((r) => rp === r || rp.startsWith(r.endsWith(sep) ? r : `${r}${sep}`));
+
 /** @type {Map<string, { text: string, pages: string[] | null } | null>} */
 const sources = new Map();
 /** Source text of a file, or null when it cannot be checked (scan, image, binary, missing, unreadable). @param {string} abs */
@@ -114,7 +128,7 @@ function sourceText(abs) {
   let src = null;
   try {
     const st = statSync(abs);
-    if (st.isFile() && st.size <= MAX_TEXT_BYTES) {
+    if (inside(realpathSync(abs)) && st.isFile() && st.size <= MAX_TEXT_BYTES) {
       const prof = profileFile(abs, { cacheDir });
       if (prof.kind === "text" || prof.kind === "code") src = { text: readFileSync(abs, "utf8"), pages: null };
       else if (["pdf", "xlsx", "docx", "pptx"].includes(prof.kind) && prof.textPath) {

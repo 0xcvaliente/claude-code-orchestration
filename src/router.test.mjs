@@ -3,9 +3,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -157,10 +157,20 @@ test("router on: an explicit or configured model is never lowered; fable is neve
     writeFileSync(join(dir, ".claude", "agents", "researcher.md"), "---\nname: researcher\n---\n");
     const viaEnv = launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ" }, { ...ON, CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" });
     assert.equal(viaEnv.stdout, "", "CLAUDE_CODE_SUBAGENT_MODEL sonnet is enough for a scan");
-    const unknown = out(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ" }, ON));
-    assert.equal(unknown.updatedInput.model, "sonnet", "an unknown model counts as haiku");
+    const none = launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ" }, ON);
+    assert.equal(none.stdout, "", "no model anywhere: the agent may run on the parent's model, so no routing");
+    writeFileSync(join(dir, ".claude", "agents", "researcher.md"), "---\nname: researcher\nmodel: inherit\n---\n");
+    assert.equal(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: long.pdf\nREAD: judge\nQ" }, ON).stdout, "", "inherit is never routed");
+    assert.equal(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: table.pdf\nREAD: judge\nQ" }, ON).stdout, "", "inherit: no note either");
+    for (const model of ["mystery-model", "us.anthropic.claude-opus-x", "haikuish"]) {
+      assert.equal(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ", model }, ON).stdout, "", `unrankable ${model}`);
+    }
+    assert.equal(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ", model: "claude-opus-5-5" }, ON).stdout, "", "a full opus id is opus");
+    assert.equal(out(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ", model: "claude-haiku-5-5" }, ON)).updatedInput.model, "sonnet", "a full haiku id is haiku");
+    assert.equal(launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nQ", model: "claude-sonnet-5-5" }, ON).stdout, "", "a full sonnet id is enough for a scan");
     const log = logOf(dir, "reads-route.jsonl");
-    assert.deepEqual(log.map((e) => e.model_source), ["call", "call", "call", "agent_file", "env", "unknown"]);
+    assert.deepEqual(log.map((e) => e.model_source), ["call", "call", "call", "agent_file", "env", "unknown", "agent_file", "agent_file", "call", "call", "call", "call", "call", "call"]);
+    assert.deepEqual(log.map((e) => e.reason ?? e.decision), ["keep", "route", "route", "keep", "keep", "model_unranked", "model_unranked", "model_unranked", "model_unranked", "model_unranked", "model_unranked", "keep", "route", "keep"]);
     assert.ok(log.every((e) => e.to !== "haiku"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -365,6 +375,35 @@ test("quote check: URLs, scans, images, missing and unreadable files are unverif
     assert.deepEqual([e.total, e.verified, e.unverified, e.unverifiable, e.blocked], [5, 0, 0, 5, false]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: locators outside the project dir, also through a symlink, are unverifiable and never read", () => {
+  const dir = project();
+  const outside = mkdtempSync(join(tmpdir(), "router-outside-"));
+  try {
+    notes(dir);
+    writeFileSync(join(outside, "secret.txt"), "the vault code is 1234\n");
+    symlinkSync(join(outside, "secret.txt"), join(dir, "link.txt"));
+    symlinkSync(outside, join(dir, "linkdir"));
+    const rel = relative(dir, join(outside, "secret.txt"));
+    const report = [
+      "STATUS: pass",
+      `QUOTE: ${rel} p.1 | the vault code is 1234`,
+      `QUOTE: ${join(outside, "secret.txt")} | the vault code is 9999`,
+      "QUOTE: link.txt:1 | the vault code is 1234",
+      "QUOTE: linkdir/secret.txt:1 | not the code",
+      "QUOTE: ../../../../../../etc/passwd p.1 | root",
+      "QUOTE: /etc/hosts | localhost",
+      "QUOTE: notes.md:3 | the parser never throws",
+    ].join("\n");
+    const r = stop(dir, report);
+    assert.equal(r.status, 0, "nothing outside the project can be unverified, so nothing blocks");
+    const [e] = logOf(dir, "quotes.jsonl");
+    assert.deepEqual([e.total, e.verified, e.unverified, e.unverifiable], [7, 1, 0, 6]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
