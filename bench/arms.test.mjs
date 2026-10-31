@@ -162,3 +162,83 @@ require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify({ args: proce
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ---------- 0.4.0 comparison arms: plugin dir per arm, env per arm ----------
+
+import { BASELINE_030_REF, ensurePluginDir, pluginDirFor } from "./arms.mjs";
+
+test("d2-docs researcher arms: env per arm, .claude/ copied, ORCH_* from the arm survives runEnv", () => {
+  const m = { test_cmd: "python3 tools/check.py" };
+  const haiku = runEnv("all-haiku", m, run, { ORCH_READ_ROUTER: "on", PATH: "/bin" });
+  assert.equal(haiku.ORCH_READ_ROUTER, undefined); // inherited ORCH_* stripped
+  assert.equal(haiku.ORCH_AGENT, "orchestrator");
+  const sonnet = envAdditions("all-sonnet", m, run);
+  assert.equal(sonnet.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, "1");
+  assert.equal(sonnet.CLAUDE_CODE_SUBAGENT_MODEL, "sonnet");
+  assert.match(ARMS["all-sonnet"].label, /every subagent/);
+  assert.equal(runEnv("routed", m, run, { PATH: "/bin" }).ORCH_READ_ROUTER, "on");
+  for (const a of ["all-haiku", "all-sonnet", "routed"]) {
+    assert.equal(ARMS[a].copyClaude, true);
+    assert.equal(command(a, "task", "/tmp/repo", root).args[0], join(root, "scripts", "orchestrate.sh"));
+  }
+});
+
+test("plugin arms: plugin dir per arm, launcher plugin-launch.sh, agent prefix", () => {
+  assert.equal(pluginDirFor("O-mix-plugin", root), join(root, "dist", "plugin"));
+  assert.equal(pluginDirFor("O-mix-030", root, "/cache"), join("/cache", BASELINE_030_REF, "dist", "plugin"));
+  assert.equal(pluginDirFor("O-mix", root), null);
+  const c = command("O-mix-030", "task", "/tmp/repo", root);
+  assert.equal(c.args[0], join(root, "bench", "lib", "plugin-launch.sh"));
+  assert.deepEqual(c.args.slice(1, 4), [root, "task", "/tmp/repo"]);
+  assert.ok(c.args[4].endsWith(join(BASELINE_030_REF, "dist", "plugin")));
+  const env = envAdditions("O-mix-030", meta, run);
+  assert.equal(env.ORCH_AGENT_PREFIX, "orchestration:");
+  assert.equal(env.ORCH_AGENT, "orchestrator");
+  assert.equal(ARMS["O-mix-030"].copyClaude, false);
+});
+
+const hasBaselineRef = spawnSync("git", ["-C", root, "cat-file", "-e", `${BASELINE_030_REF}^{commit}`]).status === 0;
+test("ensurePluginDir: extracts dist/plugin at the 0.3.0 ref with git archive, once", { skip: !hasBaselineRef && "ref not in this clone" }, () => {
+  const base = mkdtempSync(join(tmpdir(), "bench-plugin-"));
+  try {
+    const dir = ensurePluginDir("O-mix-030", root, base);
+    assert.equal(dir, join(base, BASELINE_030_REF, "dist", "plugin"));
+    const manifest = JSON.parse(readFileSync(join(dir, ".claude-plugin", "plugin.json"), "utf8"));
+    assert.equal(manifest.version, "0.3.0");
+    assert.ok(existsSync(join(dir, "agents")));
+    writeFileSync(join(dir, "marker"), "x");
+    assert.equal(ensurePluginDir("O-mix-030", root, base), dir); // reused, not re-extracted
+    assert.ok(existsSync(join(dir, "marker")));
+    assert.equal(ensurePluginDir("O-mix", root, base), null);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("plugin-launch.sh: --plugin-dir first, orchestrate.sh arguments with the prompt restored, built-ins stay blocked", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-plaunch-"));
+  try {
+    const plugin = join(tmp, "plugin");
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), "{}");
+    const repo = join(tmp, "repo");
+    mkdirSync(repo);
+    const bin = join(tmp, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "claude"), `#!/usr/bin/env bash\nprintf 'ARG:%s\\n' "$@"\necho "BUILTIN=$CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS FORK=$CLAUDE_CODE_FORK_SUBAGENT"\n`);
+    chmodSync(join(bin, "claude"), 0o755);
+    const c = command("O-mix-plugin", "line one", repo, root);
+    c.args[4] = plugin;
+    const env = { ...runEnv("O-mix-plugin", meta, run), PATH: `${bin}:${process.env.PATH}` };
+    const r = spawnSync(c.cmd, c.args, { cwd: c.cwd, env, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const args = r.stdout.split("\n").filter((l) => l.startsWith("ARG:")).map((l) => l.slice(4));
+    assert.deepEqual(args.slice(0, 4), ["--plugin-dir", plugin, "-p", "line one"]);
+    assert.equal(args[args.indexOf("--agent") + 1], "orchestration:orchestrator");
+    assert.match(r.stdout, /BUILTIN=1 FORK=0/);
+    const missing = spawnSync(c.cmd, [c.args[0], root, "p", repo, join(tmp, "nope")], { cwd: c.cwd, env, encoding: "utf8" });
+    assert.notEqual(missing.status, 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

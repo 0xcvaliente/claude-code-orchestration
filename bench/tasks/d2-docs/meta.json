@@ -1,0 +1,1 @@
+{"id":"d2-docs","title":"Seven questions over mixed documents (txt, PDF, table, scan, xlsx, chart, long PDF)","tier":"small","shape":"parallel","lang":"python","cap_min":8,"total":7,"test_cmd":"python3 tools/check.py","graded_paths":["answers.json"],"snapshot_every_s":30}
