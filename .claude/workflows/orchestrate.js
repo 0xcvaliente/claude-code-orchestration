@@ -38,7 +38,7 @@ const MAX_RETRIES = (args && args.maxRetries) || 2
 const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
 const CODE = !(args && args.code === false)
 const GIVEN_PLAN = args && args.plan && typeof args.plan === 'object' ? args.plan : null
-const SKIP = new Set(Array.isArray(args && args.skip) ? args.skip.map((x) => String(x)) : [])
+const SKIP_ASKED = new Set(Array.isArray(args && args.skip) ? args.skip.map((x) => String(x)) : [])
 
 const QUESTIONS = {
   type: 'object',
@@ -211,8 +211,26 @@ async function review(s, body, label, phaseName, retry) {
 
 const results = []
 const sharedFiles = []
+// args.skip: ids not in the plan are ignored; a slice is skipped only when every slice it depends on is skipped too
+// (otherwise it runs again). Skipped slices count as passed.
+const planned = new Map(slices.map((s) => [s.id, s]))
+const unknownSkip = [...SKIP_ASKED].filter((id) => !planned.has(id))
+if (unknownSkip.length) log(`skip: ignoring ids not in the plan: ${unknownSkip.join(', ')}`)
+const SKIP = new Set()
+for (let changed = true; changed; ) {
+  changed = false
+  for (const id of SKIP_ASKED) {
+    const s = planned.get(id)
+    if (s && !SKIP.has(id) && (s.dependsOn || []).every((d) => SKIP.has(d))) {
+      SKIP.add(id)
+      changed = true
+    }
+  }
+}
+const rerun = [...SKIP_ASKED].filter((id) => planned.has(id) && !SKIP.has(id))
+if (rerun.length) log(`skip: running again because a slice they depend on is not skipped: ${rerun.join(', ')}`)
 const finished = new Set(SKIP)
-for (const id of SKIP) results.push({ slice: { id, files: [] }, status: 'skipped', attempts: 0, branch: '', gaps: [] })
+for (const s of slices) if (SKIP.has(s.id)) results.push({ slice: s, status: 'skipped', attempts: 0, branch: '', gaps: [] })
 
 // Runs a list of slices in dependency waves. `done` holds ids that count as finished before the first wave.
 async function runSlices(list, done) {
@@ -353,16 +371,35 @@ if (failedForGood.length) {
   const taken = new Set(results.map((r) => r.slice.id))
   const extra = ((replan && replan.slices) || []).filter((s) => s && !taken.has(s.id))
   log(`replan: ${extra.length} slice(s): ${extra.map((s) => s.id).join(', ') || 'none'}`)
-  if (extra.length) {
+  // A replanned slice that depends, directly or through another replanned slice, on a slice that failed for good is
+  // reported failed and never scheduled, so the cycle fallback cannot run it with that dependency unmet.
+  const failedDep = new Map(failedForGood.map((r) => [r.slice.id, r.slice.id]))
+  for (let changed = true; changed; ) {
+    changed = false
+    for (const s of extra) {
+      const d = failedDep.has(s.id) ? undefined : (s.dependsOn || []).find((x) => failedDep.has(x))
+      if (d !== undefined) {
+        failedDep.set(s.id, d)
+        changed = true
+      }
+    }
+  }
+  const runnable = extra.filter((s) => !failedDep.has(s.id))
+  for (const s of extra) {
+    if (!failedDep.has(s.id)) continue
+    log(`${s.id}: not run, depends on failed ${failedDep.get(s.id)}`)
+    results.push({ slice: s, status: 'failed', attempts: 0, branch: '', gaps: [`depends on failed ${failedDep.get(s.id)}`] })
+  }
+  if (runnable.length) {
     for (const r of failedForGood) r.status = 'replanned'
-    log(`plan after replan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices: [...slices.filter((s) => !failedForGood.some((r) => r.slice.id === s.id)), ...extra] })}`)
-    await runSlices(extra, doneIds)
+    log(`plan after replan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices: [...slices.filter((s) => !failedForGood.some((r) => r.slice.id === s.id)), ...runnable] })}`)
+    await runSlices(runnable, doneIds)
   }
 }
 
 return {
   task,
   slices: results.map((r) => ({ id: r.slice.id, status: r.status, attempts: r.attempts, gaps: r.gaps })),
-  passed: results.filter((r) => r.status === 'passed').length,
+  passed: results.filter((r) => r.status === 'passed' || r.status === 'skipped').length,
   failed: results.filter((r) => r.status === 'failed').length,
 }
