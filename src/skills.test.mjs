@@ -246,6 +246,7 @@ test("hint block: names and reason codes only; no line parses as a brief or repl
   const p = picks("implementer", "SLICE: a\nFILES: a.docx\nDEPENDS: none\nSKILLS: nope");
   const block = hintBlock(p);
   assert.ok(block.startsWith(`\n\n${HINT_INTRO}\n`));
+  assert.match(HINT_INTRO, /say so in one line of your report, not under OPEN\.$/, "a skipped suggestion is no OPEN item (a doubt signal)");
   assert.deepEqual(block.split("\n").slice(3), ["- nope (explicit_not_found)", "- anthropic-skills:docx (ext_docx)", "- documents (ext_docx)"]);
   for (const s of CATALOG) if (s.description) assert.ok(!block.includes(s.description.slice(0, 20)), "no description text");
   assert.ok(!/https?:/.test(block));

@@ -194,7 +194,7 @@ export function skillHints(args) {
 }
 
 /** The intro line of the hint block. */
-export const HINT_INTRO = "Suggested skills (plan check): load each with the Skill tool before you start if it fits the slice; ignore one that does not and say so in OPEN.";
+export const HINT_INTRO = "Suggested skills (plan check): load each with the Skill tool before you start if it fits the slice; if one does not fit, skip it and say so in one line of your report, not under OPEN.";
 
 /**
  * The block appended to a brief: a blank line, the intro, one bullet per pick (name and reason code only). "" for no
