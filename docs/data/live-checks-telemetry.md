@@ -23,7 +23,7 @@ ORCH_AGENT=none ORCH_MODEL=sonnet ORCH_SESSION_PERSISTENCE=1 ORCH_BUDGET_TOKENS=
   scripts/orchestrate.sh "<prompt>" <scratch>/persist
 ```
 
-Result: `subtype: success`, `subagent_stats.by_type: {"researcher": 1}`, total cost $0.148. The SubagentStop record in `<scratch>/persist/.claude/state/telemetry.jsonl` (other fields omitted):
+Result: `subtype: success`, `subagent_stats.by_type: {"researcher": 1}`, 130,660 tokens in all (sonnet 68,970, haiku 61,690; input, output, cache read and cache write from the result JSON's modelUsage). The SubagentStop record in `<scratch>/persist/.claude/state/telemetry.jsonl` (other fields omitted):
 
 ```json
 {"agent_type":"researcher","status":"pass","hook_event_name":"SubagentStop",
@@ -41,7 +41,7 @@ ORCH_AGENT=none ORCH_MODEL=sonnet ORCH_BUDGET_TOKENS=1M \
   scripts/orchestrate.sh "<prompt>" <scratch>/default
 ```
 
-Result: `subtype: success`, `subagent_stats.by_type: {"researcher": 1}`, total cost $0.096. In the SubagentStop record in `<scratch>/default/.claude/state/telemetry.jsonl`, `agent_type` is `researcher` and `status` is `pass` (read from `last_assistant_message`). There are no `tokens`, `turns`, `models` or `max_turns_hit` keys, and the file at `agent_transcript_path` does not exist.
+Result: `subtype: success`, `subagent_stats.by_type: {"researcher": 1}`, 109,486 tokens in all (sonnet 68,943, haiku 40,543; same fields). In the SubagentStop record in `<scratch>/default/.claude/state/telemetry.jsonl`, `agent_type` is `researcher` and `status` is `pass` (read from `last_assistant_message`). There are no `tokens`, `turns`, `models` or `max_turns_hit` keys, and the file at `agent_transcript_path` does not exist.
 
 ## Consequence
 
