@@ -1,5 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+// Written by scripts/test-dashboard.mjs from src/fixtures/briefs (the harness lets a test import only its plugin's own code files: no node:fs, no .json).
+import fixtures from '../fixtures/briefs/fixtures'
+import { parseHeader, parsePlan, parseReply, parseStatus } from './register'
+
 const PANE = {
   plugin: 'orchestration-dashboard',
   component: 'Pane',
@@ -296,14 +300,14 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
 })
 
 // The main session's own work: a prompt starts it with no repository and no agents, and the main turn's end finishes it.
-const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown } = {}) => {
+const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model?: (id: string) => string } = {}) => {
   const seen: any[] = []
   const opened: any[] = []
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', (_: unknown, e: any) => (opened.push(e), { value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => (seen.push(e), { text: e.text }))
-  on('agent.spawn', (_: unknown, e: any) => ({ model: 'sonnet', agentId: e.tool_use_id }))
+  on('agent.spawn', (_: unknown, e: any) => ({ model: opts.model?.(e.tool_use_id) ?? 'sonnet', agentId: e.tool_use_id }))
   on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
   if (opts.route) on('tool.call', () => ({ result: opts.route, text: 'ok' }))
   if (!opts.clock) {
@@ -1498,10 +1502,17 @@ test('progress: a re-plan that names slices replaces the plan, one that names no
   expect(t.includes('◌ a1 · one')).toBe(true)
   expect(t.includes('◌ a2 · two')).toBe(true)
   await finish($, 'p3', PASS)
-  await clock.advance(130_000) // nothing runs and no prompt is open: the next spawn starts a new run
-  await spawnWith($, 'b1', brief('z1'), IMPL)
+  // idle time alone no longer ends a run: a spawn long after joins the open run (its slices are not final)
+  await clock.advance(130_000)
+  await spawnWith($, 'b1', brief('a1'), IMPL)
   t = await texts($)
-  expect(t.includes('progress · 0/1 slices · 0% · 1 running')).toBe(true)
+  expect(t.includes('progress · 0/2 slices · 0% · 1 running')).toBe(true)
+  await finish($, 'b1', PASS)
+  // a new plan (a PLAN REVIEW without REPLAN that names slices) closes the run: the old plan and agents go
+  await spawnWith($, 'p4', 'PLAN REVIEW\nSLICE: z1 - zed', REVQ)
+  t = await texts($)
+  expect(t.includes('progress · 0/1 slices · 0%')).toBe(true)
+  expect(t.includes('◌ z1 · zed')).toBe(true)
   expect(t.some(x => /a1|a2/.test(x))).toBe(false)
 })
 
@@ -1566,6 +1577,7 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
   // a new run drops the diagram and the plan, not what the session used
   await finish($, 'b1', PASS)
   await clock.advance(130_000)
+  await s.prompt.submit({ text: 'the next job' }) // nothing runs and no run is open (no plan review): new input is new work
   await spawnWith($, 'b2', brief('s9'), IMPL)
   const t = await texts($)
   expect(t.some(x => /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1$/.test(x))).toBe(false)
@@ -1584,4 +1596,186 @@ test('used in this session: on a narrow pane a row keeps as many names as fit an
     if (columns < 44) expect(/\+\d$/.test(edited)).toBe(true)
   }
   expect(usedOf(await texts($, 100))).toContain('epsilon.ts · delta.ts · gamma.ts · beta.ts · alpha.ts')
+})
+
+// ---- the brief grammar (docs/brief-grammar.md): the dashboard's mirror of brief.mjs, and the run model, STATUS rule and marks built on it ----
+test('brief grammar: the dashboard parser gives expected.json for every fixture in src/fixtures/briefs', async () => {
+  // scripts/test-dashboard.mjs copies src/fixtures/briefs next to hooks/ and adds fixtures.ts: { texts: { name: text }, expected: expected.json }
+  const { texts: sources, expected } = fixtures as unknown as { texts: Record<string, string>; expected: Record<string, any> }
+  const names = Object.keys(sources).sort()
+  expect(names.length).toBeGreaterThan(10)
+  expect(names).toEqual(Object.keys(expected).sort())
+  for (const name of names) {
+    const text = sources[name] as string
+    const want = expected[name]
+    // the fields the pane uses: slice, files, depends, path, risky, checks (and focus, workflow); isPlanReview, replan, constraints and each planned
+    // slice's goal, risky and checks; status, answers and open
+    expect({ name, header: parseHeader(text) }).toEqual({ name, header: want.header })
+    expect({ name, plan: parsePlan(text) }).toEqual({ name, plan: want.plan })
+    expect({ name, reply: parseReply(text) }).toEqual({ name, reply: want.reply })
+    expect({ name, status: parseStatus(text) }).toEqual({ name, status: want.reply.status })
+  }
+  for (const junk of [undefined, null, 42, {}, []]) {
+    expect(parseHeader(junk).slice).toBe(null)
+    expect(parsePlan(junk)).toEqual({ isPlanReview: false, replan: null, constraints: {}, slices: [] })
+    expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {} })
+  }
+})
+
+const RESEARCH = 'orchestration:researcher'
+test('STATUS: any fail line fails, else the first line decides; blockquotes and the template do not count', async ($, on) => {
+  await boot($, on)
+  const replies: [string, string][] = [
+    ['q1', 'STATUS: fail\nfixed it after all\nSTATUS: pass'], // the old last-line rule read pass
+    ['q2', 'STATUS: pass\n> STATUS: fail'], // a quote is not a verdict
+    ['q3', 'STATUS: pass or fail'], // the template: no status
+    ['q4', '**STATUS: pass**\nSTATUS: pass'],
+  ]
+  for (const [id, answer] of replies) {
+    await spawnWith($, id, 'look around', RESEARCH)
+    await finish($, id, answer)
+  }
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /^✖ q1 /.test(x))).toBe(true)
+  expect(t.some(x => /^✔ q2 /.test(x))).toBe(true)
+  expect(t.some(x => /^◆ q3 /.test(x))).toBe(true)
+  expect(t.some(x => /^✔ q4 /.test(x))).toBe(true)
+})
+
+const PLAN1 = 'PLAN REVIEW\nSLICE: s1 - one\nFILES: a.py\nDEPENDS: none'
+test('run: a new prompt does not close an open planned run; once every slice is final the next prompt starts clean', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', PLAN1, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await s.turn.complete(mainDone('answer'))
+  // s1 is built but not reviewed: the run is open, so the prompt (a headless run's background result) keeps it and reopens the main turn
+  await s.prompt.submit({ text: 'background result' })
+  let t = await texts($)
+  expect(t.some(x => /^\S s1 /.test(x))).toBe(true)
+  expect(t.includes('▸ build it')).toBe(true)
+  expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true) // the main turn works again: not signed off
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await s.turn.complete(mainDone('answer'))
+  t = await texts($)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  await s.prompt.submit({ text: 'the next job' }) // every slice is final: the run is closed
+  t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect(t.includes('▸ the next job')).toBe(true)
+})
+
+test('run: a slice whose review failed is final only after 3 implementer attempts', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await spawnWith($, 'p1', PLAN1, REVQ)
+  await finish($, 'p1', PASS)
+  for (const k of [1, 2]) {
+    await spawnWith($, `b${k}`, brief('s1'), IMPL)
+    await finish($, `b${k}`, PASS)
+    await spawnWith($, `r${k}`, 'SLICE: s1', REVQ)
+    await finish($, `r${k}`, FAIL)
+  }
+  await s.prompt.submit({ text: 'what now' }) // 2 attempts, the latest review failed: not final, the run stays
+  expect((await texts($)).some(x => /s1 ↻2/.test(x))).toBe(true)
+  await spawnWith($, 'b3', brief('s1'), IMPL)
+  await finish($, 'b3', PASS)
+  await spawnWith($, 'r3', 'SLICE: s1', REVQ)
+  await finish($, 'r3', FAIL)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'something else' }) // failed for good after 3 attempts: final, the run is closed
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(false)
+})
+
+test('run: a light-path launch opens a run that a prompt keeps until its slice is reviewed', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
+  await finish($, 'b1', PASS)
+  await s.prompt.submit({ text: 'and?' })
+  expect((await texts($)).some(x => /^\S fx /.test(x))).toBe(true)
+  await spawnWith($, 'r1', 'SLICE: fx', REVQ)
+  await finish($, 'r1', PASS)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'new thing' })
+  expect((await texts($)).some(x => /fx/.test(x))).toBe(false)
+})
+
+test('run: REPLAN extends the open run and marks the progress bar; the agents stay', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await spawnWith($, 'p2', 'PLAN REVIEW\nREPLAN: 1\nSLICE: s2 - two, split\nSLICE: s3 - three', REVQ)
+  const t = await texts($, 100, 200)
+  expect(t.includes('progress · 0/3 slices · 0% · 1 running · ↻ replan 1')).toBe(true)
+  expect(t.includes('◌ s2 · two, split')).toBe(true) // a slice named again takes the re-plan's lines
+  expect(t.includes('◌ s3 · three')).toBe(true)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1 /.test(x))).toBe(true) // b1's card is still there
+})
+
+test('waiting: the main turn ended with agents still running reads waiting for N agents, then signs off', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'go' })
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await spawnWith($, 'b2', brief('s2'), IMPL)
+  await s.turn.complete(mainDone('answer'))
+  let t = await texts($)
+  expect(t.filter(x => x === 'waiting for 2 agents').length).toBe(2) // the orchestrator box and the sign-off box
+  await finish($, 'b1', PASS)
+  t = await texts($)
+  expect(t.filter(x => x === 'waiting for 1 agent').length).toBe(2)
+  await finish($, 'b2', PASS)
+  t = await texts($)
+  expect(t.some(x => /waiting for/.test(x))).toBe(false)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+})
+
+test('marks: RISKY, the opus escalation and one constraint tick per check from the latest review', async ($, on) => {
+  await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
+  const plan = ['PLAN REVIEW', 'CONSTRAINTS:', 'C1: parsing never throws', 'C2: no new dependencies', 'C3: old briefs still work',
+    'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'RISKY: yes', 'CHECKS: C1, C2, C3', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none'].join('\n')
+  await spawnWith($, 'p1', plan, REVQ)
+  await finish($, 'p1', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.includes('◌ s1 ⚑ ⇧opus? C1· C2· C3· · one')).toBe(true) // risky asks for an opus review before anything ran
+  expect(t.includes('◌ s2 · two')).toBe(true) // no marks: drawn as before
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1\nCHECKS: C1, C2, C3', REVQ)
+  await finish($, 'r1', 'STATUS: pass\nC1: pass (cmd) npm test -> 3 pass\nC2: pass (read) package.json:12\nC3: fail parse throws\nOPEN: none')
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ ⇧opus? C1✔ C2✓ C3✖ · one')).toBe(true)
+  await spawnWith($, 'o1', 'SLICE: s1\nCHECKS: C1, C2, C3', REVQ)
+  await finish($, 'o1', 'STATUS: pass\nC1: pass (cmd) npm test -> 3 pass\nC2: pass (cmd) git diff package.json -> empty\nC3: pass (cmd) node old.js -> ok')
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ ⇧opus✔ C1✔ C2✔ C3✔ · one')).toBe(true)
+  // no RISKY, but OPEN items in its passing review: escalation alone
+  await spawnWith($, 'b2', brief('s2'), IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s2', REVQ)
+  await finish($, 'r2', 'STATUS: pass\nOPEN: a flaky test')
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s2 ⇧opus? · two')).toBe(true)
+})
+
+test('blocked launches: a gate denial of an Agent call is logged with its reason; another denial is not', async ($, on) => {
+  on('tool.call', (_: unknown, e: any) => ({
+    deny: e.prompt?.includes('s9') ? 'Plan check: slice s9 is not in the plan (not_in_plan). Re-plan with REPLAN first.'
+      : e.prompt?.includes('s8') ? 'Plan check: no plan review has finished in this session. Send the plan to a reviewer.'
+      : e.prompt?.includes('s7') ? 'Review gate: let not_in_plan_gave_up through' : 'The user rejected this tool call',
+  }))
+  await boot($, on)
+  const call = ($ as any).tool.call
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  for (const s of ['s9', 's8', 's7', 's6']) await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief(s), description: s })
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /⊘ blocked not_in_plan · s9 · implementer$/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ blocked no_plan_review · s8 · implementer$/.test(x))).toBe(true)
+  expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(2) // a gave-up form and a person's denial are not gate blocks
 })
