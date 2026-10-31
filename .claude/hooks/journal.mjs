@@ -7,7 +7,9 @@
 //     replan and, for PLAN REVIEW briefs, the parsed plan.
 //   SubagentStop of an implementer or reviewer -> journal.jsonl: a stop record (brief.mjs stopRecord): slice, status
 //     (parseStatus: any STATUS: fail line fails, else the first STATUS line decides, blockquotes ignored), answers,
-//     open and run (the run foldRuns gives the slice at write time).
+//     open and run (the run foldRuns gives the slice at write time); for implementers also files_touched and
+//     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree), left out on
+//     any error.
 // An orchestrator asked to resume reads journal.jsonl and skips slices whose last review passed; plan-check.mjs and
 // review-gate.mjs fold both logs into runs (run.mjs).
 // Headless runs pass --no-session-persistence, so there is no subagent transcript to read the brief from: the slice is
@@ -16,8 +18,9 @@
 // PostToolUse), so an unmatched stop waits in journal-pending.jsonl, with its status, answers and open, and is written
 // when its launch arrives. With a transcript (interactive sessions) the brief is read from it as before.
 // Exits 0 on malformed input.
+import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
@@ -84,6 +87,62 @@ if (p.hook_event_name === "PostToolUse") {
   process.exit(0);
 }
 
+/**
+ * Files an implementer touched, relative to the project root: the paths of Edit, Write and NotebookEdit calls whose
+ * tool_result is not an error, plus, in an isolated worktree (cwd under .claude/worktrees/<name>), what git shows
+ * changed there since the fork point from the main worktree's HEAD (committed, uncommitted and untracked). In the
+ * shared tree only the tool calls count: git status there mixes slices. Any error returns null (fields left out).
+ * @param {any[]} entries transcript entries
+ * @param {unknown} hookCwd the payload's cwd, used when no transcript entry carries one
+ * @returns {{ files: string[], source: "tools" | "tools+git" } | null}
+ */
+function filesTouched(entries, hookCwd) {
+  try {
+    /** @type {Map<string, string>} */
+    const calls = new Map(); // tool_use id -> file path
+    /** @type {Set<string>} */
+    const ok = new Set();
+    let cwd = typeof hookCwd === "string" ? hookCwd : "";
+    for (const e of entries) {
+      if (typeof e?.cwd === "string" && e.cwd) cwd = e.cwd;
+      const content = e?.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const b of content) {
+        if (e.type === "assistant" && b?.type === "tool_use" && ["Edit", "Write", "NotebookEdit"].includes(b.name)) {
+          const f = b.input?.file_path ?? b.input?.notebook_path;
+          if (typeof f === "string" && f && typeof b.id === "string") calls.set(b.id, f);
+        }
+        if (e.type === "user" && b?.type === "tool_result" && b.is_error !== true && typeof b.tool_use_id === "string") ok.add(b.tool_use_id);
+      }
+    }
+    const wt = cwd.match(/^(.*?)[\\/]\.claude[\\/]worktrees[\\/][^\\/]+/);
+    const projectRoot = wt ? /** @type {string} */ (wt[1]) : process.env.CLAUDE_PROJECT_DIR || cwd;
+    /** @param {string} f */
+    const rel = (f) => {
+      const abs = isAbsolute(f) ? f : resolve(cwd || projectRoot, f);
+      for (const base of [wt?.[0], projectRoot]) {
+        if (!base) continue;
+        const r = relative(base, abs);
+        if (r && !r.startsWith("..") && !isAbsolute(r)) return r.split(sep).join("/");
+      }
+      return f;
+    };
+    /** @type {Set<string>} */
+    const files = new Set();
+    for (const [id, f] of calls) if (ok.has(id)) files.add(rel(f));
+    if (!wt) return { files: [...files], source: "tools" };
+    /** @param {string} dir @param {string[]} args */
+    const git = (dir, args) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const tree = /** @type {string} */ (wt[0]);
+    const base = git(tree, ["merge-base", "HEAD", git(projectRoot, ["rev-parse", "HEAD"])]);
+    const changed = [...git(tree, ["diff", "--name-only", base]).split("\n"), ...git(tree, ["ls-files", "--others", "--exclude-standard"]).split("\n")];
+    for (const f of changed) if (f) files.add(f);
+    return { files: [...files].sort(), source: "tools+git" };
+  } catch {
+    return null;
+  }
+}
+
 if (p.hook_event_name !== "SubagentStop" || !STOP_ROLES.includes(bare(p.agent_type))) process.exit(0);
 const role = bare(p.agent_type);
 const agentId = typeof p.agent_id === "string" && p.agent_id ? p.agent_id : null;
@@ -118,6 +177,7 @@ for (let i = entries.length - 1; report === undefined && i >= 0; i--) {
   if (parseStatus(text) !== null) report = text;
 }
 
-const rec = stopRecord({ sessionId, agentId, role, slice, reply: report ?? last, run: slice ? runOf(slice) : null });
-append(slice ? "journal.jsonl" : "journal-pending.jsonl", rec);
+const touched = role === "implementer" ? filesTouched(entries, p.cwd) : null;
+const rec = stopRecord({ sessionId, agentId, role, slice, reply: report ?? last, run: slice ? runOf(slice) : null, filesTouched: touched?.files });
+append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);
