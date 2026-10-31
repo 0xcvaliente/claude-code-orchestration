@@ -20,7 +20,7 @@
 //    retry, read_answer, open_items, tests_failed_isolated; ORCH_ESCALATION=off|always), a passing review by an opus
 //    reviewer must exist after the latest attempt (opus_review_required). A slice that failed for good (latest review
 //    failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
-//    Reviews count by brief.mjs's fold (docs/brief-grammar.md, "Gap cutoff"): a fail whose gaps are all below
+//    Reviews count by brief.mjs's fold (docs/brief-grammar.md, "Review counting"): a fail whose gaps are all below
 //    ORCH_GAP_MIN (default 80; 0 = every fail counts) counts as a pass and adds the doubt signal low_confidence_fail;
 //    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
 //    "off"): a slice whose last two counted failed reviews share a gap key at or above the cutoff, with no REPLAN plan
