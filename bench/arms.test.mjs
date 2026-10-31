@@ -3,16 +3,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { workflowRunsIn } from "./lib/run-exec.mjs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ARMS, command, envAdditions, prepareClaudeDir, runEnv } from "./arms.mjs";
+import { ARMS, NUC_PREFIX, command, envAdditions, prepareClaudeDir, runEnv } from "./arms.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const meta = { test_cmd: "python3 tests/run_public.py" };
 const run = { budget_tokens: null };
+
+test("workflowRunsIn: lists wf_*.json of sessions started in the repo, empty when none", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "bench-wf-"));
+  try {
+    const repo = join(tmp, "my repo");
+    mkdirSync(repo);
+    const projects = join(tmp, "projects");
+    assert.deepEqual(workflowRunsIn(repo, projects), []);
+    const sess = join(projects, realpathSync(repo).replace(/[^A-Za-z0-9]/g, "-"), "sess-1", "workflows");
+    mkdirSync(join(sess, "scripts"), { recursive: true });
+    writeFileSync(join(sess, "wf_b.json"), "{}");
+    writeFileSync(join(sess, "wf_a.json"), "{}");
+    writeFileSync(join(sess, "scripts", "x-wf_a.js"), "");
+    assert.deepEqual(workflowRunsIn(repo, projects), ["wf_a", "wf_b"]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 test("existing arms keep their command line and environment", () => {
   for (const id of ["P-S", "P-O", "O-mix", "O-O", "AUTO"]) {
@@ -25,7 +44,11 @@ test("existing arms keep their command line and environment", () => {
 test("N-UC: native launcher, ultracode prefix, Opus, no agent, Workflow allowed", () => {
   const c = command("N-UC", "do it", "/repo", root);
   assert.equal(c.cmd, "bash");
-  assert.deepEqual(c.args, [join(root, "bench", "lib", "native-launch.sh"), root, "ultracode do it", "/repo"]);
+  assert.deepEqual(c.args, [join(root, "bench", "lib", "native-launch.sh"), root, `${NUC_PREFIX}do it`, "/repo"]);
+  assert.match(NUC_PREFIX, /^ultracode Use a workflow/);
+  assert.equal(ARMS["N-UC"].recordWorkflow, true);
+  assert.equal(ARMS["W-mix"].recordWorkflow, true);
+  assert.equal(ARMS["O-mix"].recordWorkflow, undefined);
   const add = envAdditions("N-UC", meta, run);
   assert.equal(add.ORCH_AGENT, "none");
   assert.equal(add.ORCH_MODEL, "opus");
@@ -78,8 +101,8 @@ test("native-launch.sh: orchestrate.sh's arguments with the real prompt, built-i
 require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), builtins: process.env.CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS ?? null, fork: process.env.CLAUDE_CODE_FORK_SUBAGENT ?? null }));
 `);
     chmodSync(join(bin, "claude"), 0o755);
-    const prompt = "ultracode first line\nsecond line";
-    const c = command("N-UC", prompt.replace(/^ultracode /, ""), repo, root);
+    const prompt = `${NUC_PREFIX}first line\nsecond line`;
+    const c = command("N-UC", "first line\nsecond line", repo, root);
     const env = { ...runEnv("N-UC", meta, run), PATH: `${bin}:${process.env.PATH}`, CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1", CLAUDE_CODE_FORK_SUBAGENT: "0" };
     const r = spawnSync(c.cmd, c.args, { cwd: c.cwd, env, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);

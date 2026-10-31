@@ -6,7 +6,7 @@
 //   AUTO   scripts/auto.sh (triage picks plain, reviewed or the orchestrator); .claude/ copied, settings model sonnet
 //   N-UC   native ultracode: Claude Code as shipped (built-in and fork subagents allowed; launcher "native", bench/lib/native-launch.sh),
 //          no .claude/ copied (user plugins disabled, so the orchestration plugin is not loaded), ORCH_MODEL=opus, prompt prefixed
-//          "ultracode ", Workflow allowed
+//          NUC_PREFIX ("ultracode" plus a plain request for a workflow), Workflow allowed; rows record workflow_runs (N-UC, W-mix)
 //   W-mix  the shipped gated workflow: this repo's .claude/ copied in (agents, hooks, .claude/workflows/orchestrate.js), plain main
 //          thread through scripts/orchestrate.sh, prompt "/orchestrate {task, code, baseRefHead}", Workflow allowed
 //   SDK    the SDK pipeline (npx tsx src/cli.ts --mode orchestrate), no .claude/ copied, no mid-run snapshots (launcher "sdk", bench/lib/sdk.mjs)
@@ -16,14 +16,17 @@ import { join, relative, sep } from "node:path";
 import { mergeSettings } from "./lib/run-core.mjs";
 import { sdkCommand } from "./lib/sdk.mjs";
 
+// "ultracode" alone does not opt in under -p (workflows doc); a plain request does (haiku probe on 2.1.314, bench/README.md).
+export const NUC_PREFIX = "ultracode Use a workflow (the Workflow tool) to orchestrate this task.\n\n";
+
 export const ARMS = {
   "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet" }, copyClaude: false },
   "P-O": { label: "Plain session (Opus)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false },
   "O-mix": { label: "Orchestrator, shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
   "O-O": { label: "Orchestrator, all agents Opus", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, agentModel: "opus" },
   AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, settings: { model: "sonnet" } },
-  "N-UC": { label: "Native ultracode (plugin off, built-ins allowed, Opus)", launcher: "native", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false, extraAllowed: ["Workflow"], prompt: (p) => `ultracode ${p}` },
-  "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none" }, copyClaude: true, extraAllowed: ["Workflow"], prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
+  "N-UC": { label: "Native ultracode (plugin off, built-ins allowed, Opus)", launcher: "native", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `${NUC_PREFIX}${p}` },
+  "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none" }, copyClaude: true, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
   SDK: { label: "SDK pipeline (orchestrate mode)", launcher: "sdk", env: {}, copyClaude: false, snapshots: false },
 };
 
