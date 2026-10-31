@@ -13,7 +13,7 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO"];
+export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO", "N-UC", "W-mix"];
 export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook"];
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },

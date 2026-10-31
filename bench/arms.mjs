@@ -4,6 +4,11 @@
 //   O-mix  orchestrator, agents as shipped (this repo's .claude/ copied in)
 //   O-O    orchestrator, every agent's model: line rewritten to opus
 //   AUTO   scripts/auto.sh (triage picks plain, reviewed or the orchestrator); .claude/ copied, settings model sonnet
+//   N-UC   native ultracode: Claude Code as shipped (built-in and fork subagents allowed; launcher "native", bench/lib/native-launch.sh),
+//          no .claude/ copied (user plugins disabled, so the orchestration plugin is not loaded), ORCH_MODEL=opus, prompt prefixed
+//          NUC_PREFIX ("ultracode" plus a plain request for a workflow), Workflow allowed; rows record workflow_runs (N-UC, W-mix)
+//   W-mix  the shipped gated workflow: this repo's .claude/ copied in (agents, hooks, .claude/workflows/orchestrate.js), plain main
+//          thread through scripts/orchestrate.sh, prompt "/orchestrate {task, code, baseRefHead}", Workflow allowed
 //   SDK    the SDK pipeline (npx tsx src/cli.ts --mode orchestrate), no .claude/ copied, no mid-run snapshots (launcher "sdk", bench/lib/sdk.mjs)
 // Every run repo gets .claude/settings.json with "enabledPlugins": {<each user-enabled plugin>: false}.
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -11,12 +16,17 @@ import { join, relative, sep } from "node:path";
 import { mergeSettings } from "./lib/run-core.mjs";
 import { sdkCommand } from "./lib/sdk.mjs";
 
+// "ultracode" alone does not opt in under -p (workflows doc); a plain request does (haiku probe on 2.1.314, bench/README.md).
+export const NUC_PREFIX = "ultracode Use a workflow (the Workflow tool) to orchestrate this task.\n\n";
+
 export const ARMS = {
   "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet" }, copyClaude: false },
   "P-O": { label: "Plain session (Opus)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false },
   "O-mix": { label: "Orchestrator, shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
   "O-O": { label: "Orchestrator, all agents Opus", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, agentModel: "opus" },
   AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, settings: { model: "sonnet" } },
+  "N-UC": { label: "Native ultracode (plugin off, built-ins allowed, Opus)", launcher: "native", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `${NUC_PREFIX}${p}` },
+  "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none" }, copyClaude: true, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
   SDK: { label: "SDK pipeline (orchestrate mode)", launcher: "sdk", env: {}, copyClaude: false, snapshots: false },
 };
 
@@ -33,7 +43,7 @@ export function envAdditions(armId, meta, run) {
   if (arm.launcher === "sdk") return add; // flags, not ORCH_* variables (see sdkCommand); ANTHROPIC_* passes through runEnv
   if (meta.test_cmd) add.ORCH_TEST_CMD = meta.test_cmd;
   if (run.budget_tokens != null) add.ORCH_BUDGET_TOKENS = String(run.budget_tokens);
-  add.ORCH_EXTRA_ALLOWED_TOOLS = "Bash(date*)";
+  add.ORCH_EXTRA_ALLOWED_TOOLS = ["Bash(date*)", ...(arm.extraAllowed ?? [])].join("\n");
   add.ORCH_NO_NUDGE = "1";
   return add;
 }
@@ -48,7 +58,9 @@ export function runEnv(armId, meta, run, base = process.env) {
 export function command(armId, prompt, runRepo, root, opts = {}) {
   const arm = armOf(armId);
   if (arm.launcher === "sdk") return sdkCommand({ prompt, runRepo, root, ...opts });
-  return { cmd: "bash", args: [join(root, "scripts", arm.script), prompt, runRepo], cwd: root };
+  const p = arm.prompt ? arm.prompt(prompt) : prompt; // N-UC and W-mix wrap the task prompt
+  if (arm.launcher === "native") return { cmd: "bash", args: [join(root, "bench", "lib", "native-launch.sh"), root, p, runRepo], cwd: root };
+  return { cmd: "bash", args: [join(root, "scripts", arm.script), p, runRepo], cwd: root };
 }
 
 // Writes the run repo's .claude/: a copy of root/.claude (without state/ and worktrees/) for orchestrator arms,
