@@ -1,9 +1,10 @@
 // Builds the plugin with --out into temp dirs: the workflow ships with namespaced agent types, evals/ is copied only
-// when present, the judge hooks are registered only when their files exist, and dist/ is never touched.
+// when present, the judge hooks are registered only when their files exist, and dist/ is never touched. Then checks the
+// committed plugin against .claude/settings.json: the 0.4.0 hooks, timeouts, the fail-closed judge and userConfig.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,21 +93,118 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     const hb = hooksJson(outBare).hooks;
     assert.ok(!/judge-hook|prompt-capture/.test(commands(hb)), "no judge hooks without their files");
     assert.equal(hb.UserPromptSubmit, undefined);
-    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task"]);
+    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch"]);
     assert.ok(!existsSync(join(bare, "dist")), "a build with --out writes no dist/");
 
     build(full, outFull);
     assert.equal(readFileSync(join(outFull, "plugin", "evals", "cases", "one.json"), "utf8"), '{"id":"one"}\n');
     const hf = hooksJson(outFull).hooks;
-    const judge = hf.PreToolUse.find((/** @type {any} */ h) => h.matcher === "Bash");
-    assert.ok(judge, "judge-hook on PreToolUse Bash");
-    assert.equal(judge.hooks[0].command, 'node "${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs" --plugin');
+    const judge = hf.PreToolUse.find((/** @type {any} */ h) => /judge-hook/.test(commands(h)));
+    assert.equal(judge?.matcher, "Bash", "judge-hook on PreToolUse Bash");
+    assert.equal(judge.hooks.length, 1);
+    assert.equal(judge.hooks[0].command, `sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node "$0" "$@"' "\${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs" --plugin`);
+    assert.deepEqual([judge.hooks[0].onFailure, judge.hooks[0].timeout], ["block", 120]);
     assert.deepEqual(hf.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/prompt-capture.mjs" --plugin' }] }]);
     assert.ok(existsSync(join(outFull, "plugin", "hooks", "judge-hook.mjs")));
     assert.ok(existsSync(join(outFull, "plugin", "workflows", "orchestrate.js")));
   } finally {
     for (const d of [bare, full, outBare, outFull]) rmSync(d, { recursive: true, force: true });
   }
+});
+
+// The committed plugin (dist/plugin) next to the project settings: the 0.4.0 hooks, timeouts, the judge's onFailure,
+// and userConfig for every switch state.mjs bridges.
+/** @param {string} p */
+const read = (p) => JSON.parse(readFileSync(join(root, p), "utf8"));
+/** @param {any} h @param {string} event @param {string} script @returns {any} */
+const entry = (h, event, script) =>
+  (h.hooks[event] ?? []).find((/** @type {any} */ e) => e.hooks.some((/** @type {any} */ c) => c.command.includes(`/${script}`)));
+
+test("0.4.0 hooks are registered with the same matchers in the project settings and the plugin, and ship", () => {
+  const project = read(".claude/settings.json");
+  const plugin = read("dist/plugin/hooks/hooks.json");
+  const shared = [
+    ["PostToolUse", "read-log.mjs", "Read|WebFetch"],
+    ["PreToolUse", "researcher-guard.mjs", "Bash"],
+    ["PreToolUse", "egress-guard.mjs", "WebFetch"],
+    ["SessionStart", "compact-context.mjs", "compact"],
+    ["PreToolUse", "judge-hook.mjs", "Bash"],
+    ["PreToolUse", "plan-check.mjs", "Agent|Task"],
+  ];
+  for (const [event, script, matcher] of shared) {
+    for (const h of [project, plugin]) assert.equal(entry(h, String(event), String(script))?.matcher, matcher, `${event} ${script}`);
+  }
+  // SubagentStop gates with an agent matcher: project and plugin matchers are disjoint, so no agent's stop reaches both.
+  for (const [script, role] of [["verify.sh", "implementer"], ["quote-check.mjs", "researcher"]]) {
+    const p = new RegExp(entry(project, "SubagentStop", String(script)).matcher);
+    const q = new RegExp(entry(plugin, "SubagentStop", String(script)).matcher);
+    assert.ok(p.test(String(role)) && !p.test(`orchestration:${role}`), `project ${script}`);
+    assert.ok(q.test(`orchestration:${role}`) && !q.test(String(role)), `plugin ${script}`);
+    for (const other of ["reviewer", "orchestration:reviewer"]) assert.ok(!p.test(other) && !q.test(other));
+  }
+  const files = ["read-log", "researcher-guard", "egress-guard", "compact-context", "quote-check", "file-profile", "bugfix-check"];
+  for (const f of files) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", `${f}.mjs`)), `${f}.mjs ships`);
+});
+
+test("explicit timeouts, and only the judge fails closed", () => {
+  for (const h of [read(".claude/settings.json"), read("dist/plugin/hooks/hooks.json")]) {
+    assert.equal(entry(h, "SubagentStop", "verify.sh").hooks[0].timeout, 900);
+    assert.equal(entry(h, "PreToolUse", "plan-check.mjs").hooks[0].timeout, 30);
+    const judge = entry(h, "PreToolUse", "judge-hook.mjs").hooks;
+    assert.equal(judge.length, 1, "the judge has an entry of its own");
+    assert.deepEqual([judge[0].onFailure, judge[0].timeout], ["block", 120]);
+    const all = Object.values(h.hooks).flatMap((/** @type {any} */ l) => l.flatMap((/** @type {any} */ e) => e.hooks));
+    assert.deepEqual(all.filter((/** @type {any} */ c) => c.onFailure), judge);
+  }
+});
+
+test("the judge command exits 0 without node, so onFailure never blocks every Bash command, and runs the hook with node", () => {
+  const dir = mkdtempSync(join(tmpdir(), "build-plugin-judge-"));
+  try {
+    const stub = "process.stderr.write(process.argv.slice(2).join(' ')); process.exit(2);\n";
+    for (const d of [join(dir, ".claude", "hooks"), join(dir, "plugin", "hooks")]) {
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "judge-hook.mjs"), stub);
+    }
+    const noNode = join(dir, "bin"); // a PATH with sh but no node
+    mkdirSync(noNode);
+    symlinkSync("/bin/sh", join(noNode, "sh")); // a link, not a copy: macOS kills a copied system binary
+    const env = { CLAUDE_PROJECT_DIR: dir, CLAUDE_PLUGIN_ROOT: join(dir, "plugin") };
+    const cases = [
+      [entry(read(".claude/settings.json"), "PreToolUse", "judge-hook.mjs").hooks[0].command, ""],
+      [entry(read("dist/plugin/hooks/hooks.json"), "PreToolUse", "judge-hook.mjs").hooks[0].command, "--plugin"],
+    ];
+    for (const [command, args] of cases) {
+      const missing = spawnSync("/bin/sh", ["-c", command], { env: { ...env, PATH: noNode }, input: "{}", encoding: "utf8" });
+      assert.equal(missing.status, 0, `${command}: ${missing.stderr}`);
+      const real = spawnSync("/bin/sh", ["-c", command], { env: { ...env, PATH: process.env.PATH }, input: "{}", encoding: "utf8" });
+      assert.deepEqual([real.status, real.stderr], [2, args], command);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("userConfig declares every bridged switch with a type, title and a description naming its ORCH_ variable", () => {
+  const manifest = read("dist/plugin/.claude-plugin/plugin.json");
+  assert.equal(manifest.version, read("package.json").version);
+  assert.equal(manifest.version, "0.4.0");
+  const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
+  const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
+  const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
+  assert.equal(keys.length, 14);
+  assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
+  const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
+  assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
+  /** @type {Record<string, string>} */
+  const numbers = { judge_timeout_ms: "number", gap_min: "number", run_stale_min: "number" };
+  for (const [key, opt] of Object.entries(manifest.userConfig)) {
+    assert.equal(opt.type, numbers[key] ?? "string", key);
+    assert.ok(opt.title && opt.description, key);
+    assert.ok(opt.description.includes(`ORCH_${key.toUpperCase()}`), `${key} names its variable`);
+  }
+  const defaults = Object.entries(manifest.userConfig).filter(([, o]) => "default" in o).map(([k, o]) => [k, o.default]);
+  assert.deepEqual(Object.fromEntries(defaults), { gap_min: 80, run_stale_min: 30, baseline: "inform" });
 });
 
 test("--out without a directory fails", () => {
