@@ -1,0 +1,5 @@
+The worker reported:
+> STATUS: pass
+> C1: pass (cmd) npm test -> ok
+
+No verdict of my own yet.
