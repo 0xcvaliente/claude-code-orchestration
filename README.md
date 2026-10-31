@@ -68,6 +68,8 @@ The triager reports five facts about a task of any kind: how many files it will 
   <img alt="A risky task goes to the reviewed route when it is small, otherwise to the pipeline. A task that is not risky goes to the pipeline when it touches 12 or more files or splits into parallel slices, and to a plain session otherwise. The fifth fact, code, sets the file count for parallel slices (10 for code, 4 otherwise); it also decides whether git worktrees are used and, in headless runs, whether web tools are allowed." src="docs/diagrams/triage-light.svg">
 </picture>
 
+*Small* is at most 3 files, at most 200 lines and one slice. *Parallel* is 2 or more independent slices and either 10 or more files (4 or more when the task changes no code) or 1,500 or more lines. In full:
+
 | Facts | Route |
 |---|---|
 | risky, at most 3 files, at most 200 lines, one slice | reviewed |
@@ -76,7 +78,7 @@ The triager reports five facts about a task of any kind: how many files it will 
 | 2 or more independent slices and (10 or more files for code, 4 or more for work that changes no code, or 1,500 or more lines) | pipeline: parallel slices pay off |
 | anything else | plain (a large but sequential change stays in one context) |
 
-The thresholds are `TRIAGE` in `src/config.ts`. They were tuned on coding benchmarks only; nothing has been measured for research, writing, analysis or operations. `minParallelFilesCode` was raised from 4 to 10 after the benchmark in [docs/benchmarks.md](docs/benchmarks.md) (2 runs per setup, so a direction rather than a measurement): triage had sent 5 of 14 small and medium runs to the pipeline, which used 1.1x to 2.8x the tokens of a plain Sonnet session that scored the same 100%. Work that changes no code keeps 4 (`minParallelFilesNonCode`), since the benchmark measured none. Without a checkout at `~/claude-code-orchestration` (or `$ORCH_HOME`), the `/route` skill sizes the task in-session with the same rules. A failed or malformed triage falls back to the pipeline. Every decision is appended to `routes.jsonl` (`.claude/state/` in a repo that registers the hooks itself, the plugin's per-user state dir otherwise, `runs/` for the SDK).
+The thresholds are `TRIAGE` in `src/config.ts` (`bigLines` 1500 and `reviewedMaxLines` 200 are the line limits). They were tuned on coding benchmarks only; nothing has been measured for research, writing, analysis or operations. `minParallelFilesCode` was raised from 4 to 10 after the benchmark in [docs/benchmarks.md](docs/benchmarks.md) (2 runs per setup, so a direction rather than a measurement): triage had sent 5 of 14 small and medium runs to the pipeline, which used 1.1x to 2.8x the tokens of a plain Sonnet session that scored the same 100%. Work that changes no code keeps 4 (`minParallelFilesNonCode`), since the benchmark measured none. Without a checkout at `~/claude-code-orchestration` (or `$ORCH_HOME`), the `/route` skill sizes the task in-session with the same rules. A failed or malformed triage falls back to the pipeline. Every decision is appended to `routes.jsonl` (`.claude/state/` in a repo that registers the hooks itself, the plugin's per-user state dir otherwise, `runs/` for the SDK).
 
 ## The pipeline
 
