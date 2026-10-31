@@ -1,10 +1,10 @@
 # What Claude Code ships vs what this plugin adds
 
-Claude Code already runs subagents in the background, scripts multi-agent workflows, forks the conversation into helpers, reviews diffs and gates risky commands in auto mode. This page compares each area with what the orchestration plugin (0.3.0) adds on top, why that is worth having, and how it is measured. Claude Code facts link to its docs; plugin facts point to the file that implements them; numbers come from the plugin's own logs and the benchmark.
+Claude Code already runs subagents in the background, scripts multi-agent workflows, forks the conversation into helpers, reviews diffs and gates risky commands in auto mode. This page compares each area with what the orchestration plugin (0.4.0) adds on top, why that is worth having, and how it is measured. Claude Code facts link to its docs; plugin facts point to the file that implements them; numbers come from the plugin's own logs and the benchmark.
 
 **Where the plugin does not win.** Raw score is not its advantage. With Claude Code's built-in subagents allowed, plain Opus scored 99.7% on `k2-stdlib-toolkit-xl` by delegating to `general-purpose` itself (an earlier campaign, different plugin version; [README](../README.md#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked)). What the plugin adds is verification (gates that do not take the agent's word), routing cost (a plain session when the task does not split), safety (role limits and denies) and resumability (a run journal across sessions). The hypotheses H9 to H13 ([bench/HYPOTHESES.md](../bench/HYPOTHESES.md)) were written before any run of 0.2.0 to test exactly those claims.
 
-The three items planned for 0.3.0 (a gated workflow, a native judge hook, an eval suite) shipped in 0.3.0; they are marked **shipped (0.3.0)** below. The eval suite has not been smoke-run yet ([native-mode.md, Known limitations](native-mode.md#known-limitations)).
+The three items planned for 0.3.0 (a gated workflow, a native judge hook, an eval suite) shipped in 0.3.0; they are marked **shipped (0.3.0)** below. The eval suite has not been smoke-run yet ([native-mode.md, Known limitations](native-mode.md#known-limitations)). What 0.4.0 added is marked **0.4.0**; the details are in [native-mode.md, What 0.4.0 adds](native-mode.md#what-040-adds). The 0.4.0 comparison run (compare-040) shows direction only and did not exercise the read router ([bench/README.md](../bench/README.md#comparison-run-for-040-compare-040), [results](benchmark-compare-040.md)).
 
 ## Background agents and the review gate
 
@@ -38,9 +38,9 @@ The three items planned for 0.3.0 (a gated workflow, a native judge hook, an eva
 | | |
 |---|---|
 | Claude Code ships | `/code-review` checks a diff for correctness bugs ([code review](https://code.claude.com/docs/en/code-review-local.md)). |
-| The plugin adds | A constraints ledger: the orchestrator writes the task's hard rules as `C1: <text>` lines in the PLAN REVIEW brief, each slice names the ids its files can break (`CHECKS:`), and reviewers answer each id with `C1: pass (cmd) ...`, `C1: pass (read) ...` or `C1: fail ...` ([brief-grammar.md](brief-grammar.md)). The Stop gate blocks a passing review that leaves a checked id unanswered (`constraints_unchecked`) and requires a passing opus review when a doubt signal fires (`opus_review_required`: RISKY, a retry, a `(read)` answer, OPEN items, an isolated test failure; `ORCH_ESCALATION`). A test gate runs the project's tests before an implementer may finish (`.claude/hooks/verify.sh`). |
+| The plugin adds | A constraints ledger: the orchestrator writes the task's hard rules as `C1: <text>` lines in the PLAN REVIEW brief, each slice names the ids its files can break (`CHECKS:`), and reviewers answer each id with `C1: pass (cmd) ...`, `C1: pass (read) ...` or `C1: fail ...` ([brief-grammar.md](brief-grammar.md)). The Stop gate blocks a passing review that leaves a checked id unanswered (`constraints_unchecked`) and requires a passing opus review when a doubt signal fires (`opus_review_required`: RISKY, a retry, a `(read)` answer, OPEN items, an isolated test failure; `ORCH_ESCALATION`). A test gate runs the project's tests before an implementer may finish (`.claude/hooks/verify.sh`). **0.4.0**: reviewers give each gap a confidence (`GAP: <0-100>`), and a fail whose gaps are all below 80 counts as a pass with a doubt signal (opus review); before a retry a `VALIDATE: gaps` reviewer re-checks the gaps against the diff; the third attempt is a fresh opus implementer; a stall gate (`replan_required`, native only) asks for a replan when a retry fails on the same gap; the test gate names failures the base commit also has (`ORCH_BASELINE`, inform by default) and checks a `KIND: bugfix` slice's reproduction test (`bugfix-check.mjs`). |
 | Why it is better | A spec rule is not a bug in a diff. On k2 at a 10-minute cap the shipped orchestrator (O-mix) scored 92.4% strict with 2 false successes, both from one spec rule (`tomlparse` imported `re`) its reviewers missed; the all-Opus orchestrator (O-O) scored 99.8% ([README](../README.md#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked)). The ledger makes such rules explicit and the escalation sends doubtful slices to an opus reviewer without paying for opus on every slice. |
-| Measured by | **H10**: O-mix 0.2+ median strict score at least 97% with 0 false successes. **H11**: O-mix 0.2+ within 2 points of O-O's 99.8% at no more than 0.9x O-O's median tokens. **Measured (2026-10-31 short run)**: O-mix 0.3.0 scored 99.6% strict (equal to its lenient score) with 0 false successes at 4.44M tokens. Direction consistent with H10; for H11 the campaign has no O-O run, and the earlier O-O median (99.8%, 6.34M) comes from a different campaign. One run per arm, one task, 10-minute cap: direction only, inconclusive under the verdict rules ([benchmark-short-k2.md](benchmark-short-k2.md)). |
+| Measured by | **H15–H17** (0.4.0: opus on the last attempt, gap cutoff plus refute, stall replan) on k2 from the run journals; compare-040 ran one k2 pair (0.4.0 98.98% strict at 5.03M tokens and 412 s, 0.3.0 99.72% at 5.23M and 453 s), direction only and without the journal counts the hypotheses need. **H10**: O-mix 0.2+ median strict score at least 97% with 0 false successes. **H11**: O-mix 0.2+ within 2 points of O-O's 99.8% at no more than 0.9x O-O's median tokens. **Measured (2026-10-31 short run)**: O-mix 0.3.0 scored 99.6% strict (equal to its lenient score) with 0 false successes at 4.44M tokens. Direction consistent with H10; for H11 the campaign has no O-O run, and the earlier O-O median (99.8%, 6.34M) comes from a different campaign. One run per arm, one task, 10-minute cap: direction only, inconclusive under the verdict rules ([benchmark-short-k2.md](benchmark-short-k2.md)). |
 
 ## Routing cost
 
@@ -56,7 +56,7 @@ The three items planned for 0.3.0 (a gated workflow, a native judge hook, an eva
 | | |
 |---|---|
 | Claude Code ships | Auto mode weighs the user's intent for soft-deny actions, but allows ordinary pushes to the working repository by default, and reads its rules only from user and managed settings, not from project settings or plugins ([auto mode config](https://code.claude.com/docs/en/auto-mode-config.md), [permission modes](https://code.claude.com/docs/en/permission-modes.md)). |
-| The plugin adds | Headless runs pass push, remote, `sudo` and `rm -rf` as `--disallowedTools` (`UNSAFE_BASH`, `scripts/orchestrate.sh`). SDK workers use an opus Bash judge with the user's request as the only authority ([bash-judge.md](bash-judge.md)). **Shipped (0.3.0), opt-in**: with `ORCH_JUDGE=native`, a deny-only judge hook for native sessions, project copy or plugin: a floor with no model call (the `sudo`/`su` family, catastrophic `rm`, unreadable commands, `rm` targets that are symlinks or resolve outside the working folder), and `git push`, remote changes and recursive `rm` judged by `claude -p --model opus` with the person's typed prompts as the only authority; fail closed, decides within 45 s, logged to `gates.jsonl` ([bash-judge.md, Native hook](bash-judge.md#native-hook-030)). |
+| The plugin adds | Headless runs pass push, remote, `sudo` and `rm -rf` as `--disallowedTools` (`UNSAFE_BASH`, `scripts/orchestrate.sh`). SDK workers use an opus Bash judge with the user's request as the only authority ([bash-judge.md](bash-judge.md)). **Shipped (0.3.0), opt-in**: with `ORCH_JUDGE=native`, a deny-only judge hook for native sessions, project copy or plugin: a floor with no model call (the `sudo`/`su` family, catastrophic `rm`, unreadable commands, `rm` targets that are symlinks or resolve outside the working folder), and `git push`, remote changes and recursive `rm` judged by `claude -p --model opus` with the person's typed prompts as the only authority; fail closed, decides within 45 s, logged to `gates.jsonl` ([bash-judge.md, Native hook](bash-judge.md#native-hook-030)). **0.4.0**: registered with Claude Code's `onFailure: "block"`, so a crash or timeout of the hook refuses the command; a missing `node` exits 0 and blocks nothing. |
 | Why it is better | A plugin cannot add auto-mode rules, so a hook is the only way it can hold a push or recursive delete to the user's request. Being deny-only, it never loosens what auto mode or the permission rules decide. |
 | Measured by | **H13**: on a fixed command corpus the native judge hook allows 0 push, remote or recursive-delete commands without a matching request. **Measured (2026-10-31, live, Claude Code 2.1.314)**: 0 allowed over the 28-entry corpus, 0 false denies, 28 of 28 as expected, 10 model calls: supported ([data](data/judge-corpus-live-2026-10-31.json)). |
 
@@ -64,10 +64,55 @@ The three items planned for 0.3.0 (a gated workflow, a native judge hook, an eva
 
 | | |
 |---|---|
-| Claude Code ships | A plugin's `settings.json` applies only the `agent` and `subagentStatusLine` keys ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)). |
-| The plugin adds | Gates as hooks (`hooks.json`), which a plugin can ship. Permission denies (`Agent(fork)`, the built-ins, push and delete rules) and `worktree.baseRef: "head"` cannot ship in a plugin: the README says what to add to your own settings, and the orchestrator checks `baseRef` before a parallel wave. |
-| Why it is better | It is not; it is the boundary. Known gap: settings load from the folder a session started in, so a session started elsewhere does not see this repo's `.claude/settings.json` ([native-mode.md, Known limitations](native-mode.md#known-limitations)). |
-| Measured by | Nothing; stated so nobody assumes the denies ship. |
+| Claude Code ships | A plugin's `settings.json` applies only the `agent` and `subagentStatusLine` keys ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)). A plugin can declare typed `userConfig` settings, shown in `/config` and passed to its hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` ([research, 6.6](research-2026-10-31.md#66-claude-code-features-to-use), **doc**). A `WorktreeCreate` hook can replace how isolated worktrees are made ([live checks, Check F](data/live-checks-2026-10-31.md#probes-for-040-slice-e-guards-claude-code-21316-2026-10-31)). |
+| The plugin adds | Gates as hooks (`hooks.json`), which a plugin can ship. Permission denies (`Agent(fork)`, the built-ins, push and delete rules) and `worktree.baseRef: "head"` cannot ship in a plugin: the README says what to add to your own settings, and the orchestrator checks `baseRef` before a parallel wave. **0.4.0**: 15 `userConfig` settings, one per gate switch; the hooks read `ORCH_<KEY>` first, so an environment variable still wins ([native-mode.md, Switches](native-mode.md#switches-and-plugin-settings-040)). No WorktreeCreate hook: the probe showed that any hook failure stops every isolated launch and that hook-made worktrees are not removed, so `worktree.baseRef: "head"` stays the documented way. |
+| Why it is better | Settings in `/config` instead of environment variables. The rest is the boundary. Known gap: settings load from the folder a session started in, so a session started elsewhere does not see this repo's `.claude/settings.json` ([native-mode.md, Known limitations](native-mode.md#known-limitations)). |
+| Measured by | Nothing; stated so nobody assumes the denies ship. `src/build-plugin.test.mjs` checks the `userConfig` block. |
+
+## Reading documents and choosing the reading model (0.4.0)
+
+| | |
+|---|---|
+| Claude Code ships | The Read tool reads text, images and PDFs. A subagent runs on the model its definition or the launch names; nothing looks at what it is asked to read ([research, section 2](research-2026-10-31.md#2-choosing-the-reading-model-by-file-type)). |
+| The plugin adds | An opt-in read router (`ORCH_READ_ROUTER=on`) in `plan-check.mjs`: for a researcher brief with `SOURCES:` it profiles each file with local tools (`file-profile.mjs`, no model call), raises the researcher's model when a file needs it (a scan, tables, formulas, a long document with a judge question), never lowers it, and adds cached text conversions to the brief. Researchers back facts with `QUOTE:` lines, and `quote-check.mjs` blocks once when a quote is not in its source. |
+| Why it is better | The premise ([research, 2.1](research-2026-10-31.md#21-why-it-pays)): one model for every read either pays a large model for clean text or gives a small model scans and tables. Not shown by a benchmark yet. |
+| Measured by | **H14** on `d2-docs`. **Untested**: in compare-040 every d2-docs run took the light path and launched no researcher, so the router never fired; all three arms scored 100% (2 runs each). The router was verified by one live check (a scanned-PDF researcher raised from haiku to sonnet, telemetry showed `claude-sonnet-5-5`). Workflow researchers are not routed (the `agent.spawn` probe was not run). |
+
+## Skills (0.4.0)
+
+| | |
+|---|---|
+| Claude Code ships | Skills on disk, plugins' skills and the Skill tool; a session loads a skill when it judges that the skill's description fits the task. |
+| The plugin adds | A `SKILLS:` brief line the orchestrator writes when a slice clearly needs an installed skill, and a suggestion block the plan check appends to implementer, researcher and reviewer launches: at most 3 installed skills (1 for a reviewer), names and reason codes only, from the file types in FILES or SOURCES, the role and the goal (`skill-catalog.mjs`, `skill-hint.mjs`). Researcher and reviewer got the `Skill` tool. |
+| Why it is better | A worker starts with a one-line pointer to the skill a document or UI slice needs, instead of depending on it noticing the skill itself. |
+| Measured by | Unit tests only (`src/skills.test.mjs`). Limits: the catalog misses `--plugin-dir` plugins and skills bundled with Claude Code, and workflow agents get no hints. |
+
+## Context after compaction (0.4.0)
+
+| | |
+|---|---|
+| Claude Code ships | Automatic compaction, and hook events around it (`PostCompact`, and `SessionStart` with source `compact`). |
+| The plugin adds | `compact-context.mjs`: after a compaction it puts the open run's planned slices, their states and the constraint texts back in context, about 1,500 characters. It uses `SessionStart` with matcher `compact`, because PostCompact cannot add context. |
+| Why it is better | The orchestrator's plan lives in the conversation; a summary can drop which slices passed and which rules apply. |
+| Measured by | Unit tests only. |
+
+## Role guards and outbound access (0.4.0)
+
+| | |
+|---|---|
+| Claude Code ships | Per-agent `tools` lists, permission rules and modes, and a sandbox for Bash with a network allowlist ([research, 6.5](research-2026-10-31.md#65-security)). A pattern like `Bash(ls*)` in an agent's `tools` did not stop a researcher in auto mode from writing a file with a heredoc and running `python3` (**verified**, [research, section 3 item 4](research-2026-10-31.md#3-other-improvements-ranked)). |
+| The plugin adds | `researcher-guard.mjs` holds the researcher to its read-only Bash list on every segment of a command; `egress-guard.mjs` lets a reviewer fetch only hosts named in its brief or its slice's planned files. Both deny-only, off with `ORCH_GUARDS=off`. |
+| Why it is better | The reviewer reads untrusted content, sees the repository and can send data out; the egress guard narrows the last part. It is not a boundary: Bash can still reach the network, so the README recommends Claude Code's sandbox with a network allowlist for implementer and reviewer Bash. |
+| Measured by | Unit tests (`src/guards.test.mjs`); the transcript shapes the egress guard reads were probed live (Check E). |
+
+## Cost per role (0.4.0)
+
+| | |
+|---|---|
+| Claude Code ships | `/cost` and OpenTelemetry give session totals; with `OTEL_LOG_TOOL_DETAILS=1` the metrics carry agent names ([research, 3 item 1 and 6.6](research-2026-10-31.md#66-claude-code-features-to-use)). |
+| The plugin adds | Telemetry v2: tokens, turns, models and max-turn hits per subagent, read from its transcript at SubagentStop; a read log (`reads.jsonl`, never content); a file trail per slice from tool calls and git; a per-role table in `npm run report`. |
+| Why it is better | It splits cost by role and slice without an OTel collector. |
+| Measured by | Unit tests (`src/telemetry-v2.test.mjs`). Headless runs keep no subagent transcripts, so these fields are empty there, benchmark runs included. |
 
 ## Evaluation
 
