@@ -14,7 +14,8 @@
       "Agent(Explore)",
       "Agent(Plan)",
       "Agent(claude-code-guide)",
-      "Agent(statusline-setup)"
+      "Agent(statusline-setup)",
+      "Agent(fork)"
     ]
   },
   "hooks": {
