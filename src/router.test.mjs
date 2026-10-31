@@ -38,7 +38,7 @@ function run(dir, script, payload, env = {}) {
   for (const k of ENV_KEYS) delete base[k];
   return spawnSync(process.execPath, [join(dir, ".claude", "hooks", script)], {
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
-    env: { ...base, CLAUDE_PROJECT_DIR: dir, ...env },
+    env: { ...base, CLAUDE_PROJECT_DIR: dir, ORCH_SKILL_HINTS: "off", ...env }, // skill hints off: the exact assertions stay machine-independent
     encoding: "utf8",
   });
 }
