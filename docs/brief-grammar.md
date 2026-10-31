@@ -2,7 +2,7 @@
 
 Normative spec for the lines the orchestrator writes in its briefs, the lines workers write in their replies, and the run model the hooks and the dashboard derive from them. One implementation: `.claude/hooks/brief.mjs` (ESM, Node built-ins only, no side effects at import). Fixtures for every form are in `src/fixtures/briefs/` with their parse results in `expected.json`; `src/brief.test.mjs` checks both and each rule below.
 
-Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip. The same holds for the 0.4.0 lines (`SOURCES`, `READ`, `KIND`, `VALIDATE` in briefs; `GAP`, `QUOTE` in replies): every one is optional, and a brief or reply without them parses exactly as before, with the new fields empty.
+Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip. The same holds for the 0.4.0 lines (`SOURCES`, `READ`, `KIND`, `VALIDATE` and `SKILLS` in briefs; `GAP`, `QUOTE` in replies): every one is optional, and a brief or reply without them parses exactly as before, with the new fields empty.
 
 ## Line rule
 
@@ -23,7 +23,7 @@ CHECKS: C1, C3       (optional: constraint ids this slice must satisfy)
 
 `SLICE`, `FILES` and `DEPENDS` are required by the plan check; `PATH` is `light` when its value starts with the word `light`. A brief with a line `ORCHESTRATION: workflow` (the scripted workflow) is skipped by the plan check and by the run model.
 
-`parseHeader(text)` returns `{ slice, files, depends, path: 'light'|null, risky, checks, focus, workflow, sources, read, kind, validate }`.
+`parseHeader(text)` returns `{ slice, files, depends, path: 'light'|null, risky, checks, focus, workflow, sources, read, kind, validate, skills }`.
 
 ## Optional brief lines (0.4.0)
 
@@ -34,6 +34,7 @@ SOURCES: docs/research.md, https://example.com/spec.html   (paths or URLs the wo
 READ: extract                                              (lookup, extract or judge: how the sources are read)
 KIND: bugfix                                               (the kind of work; only bugfix will have behaviour)
 VALIDATE: gaps                                             (a validation review: re-check the listed gaps against the diff, keep only those that stand)
+SKILLS: anthropic-skills:docx, orchestration:route         (skills the worker should load before it starts)
 ```
 
 | Line | Field | Parse |
@@ -42,6 +43,9 @@ VALIDATE: gaps                                             (a validation review:
 | `READ: <mode>` | `read: 'lookup'\|'extract'\|'judge'\|null` | the first word of the value (quotes, backticks, `*`, `_` and trailing `.,;:!?` removed), case-insensitive; any other word, or no line, is `null` |
 | `KIND: <kind>` | `kind: string\|null` | the first word, cleaned the same way, lower-cased (`KIND: Bugfix: crash` gives `bugfix`); empty or no line is `null` |
 | `VALIDATE: gaps` | `validate: boolean` | `true` only when the first word is `gaps` (any case); anything else is `false` |
+| `SKILLS: <names>` | `skills: string[]` | comma-separated, read like `FILES` (trimmed, outer quotes or backticks and a leading `./` removed, empty entries and `none` dropped); an entry that is not a skill name is dropped; duplicates dropped keeping the first; at most 8 names, the first 8 kept |
+
+**SKILLS.** Optional, on any worker's brief (implementer, reviewer, researcher, integrator). The orchestrator writes it to name the skills the worker should load with its Skill tool before it starts, for example a file-format skill for a document slice. A skill name is a letter or digit followed by letters, digits, `_`, `.`, `/` or `-`, optionally namespaced with `:` parts each of the same form (`docx`, `anthropic-skills:docx`, `orchestration:route`, `a:b:c`), at most 100 characters; anything else (a phrase such as `use the pdf skill`, `:x`, `x:`) is dropped, so the field never carries brief text. No gate reads it. The plan check may later add skill suggestions of its own; that is specified in a later slice, not here. A brief without the line parses exactly as before, with `skills: []`.
 
 **URLs in a brief.** `briefUrls(text)` returns the `http://` and `https://` URLs anywhere in the text (header or body): unique (exact string), in order of first appearance, at most 50. A URL ends at whitespace, `<`, `>`, a quote or a backtick; trailing `).,;:'"]>` characters are then stripped, except a `)` or `]` that closes one opened inside the URL (`https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)`). A scheme with no host (`https://`, `https://?x`) is not a URL.
 
@@ -184,6 +188,7 @@ Hooks log parsed fields only, never brief or reply text. Readers accept older re
 | `isPlanReview`, `replan` | `parsePlan` |
 | `plan` | PLAN REVIEW briefs only: `{ constraints, slices }` from `parsePlan` |
 | `read`, `kind`, `validate` | `parseHeader` (0.4.0) |
+| `skills` | `parseHeader`'s `skills`: skill names only (0.4.0) |
 | `sources` | `parseHeader`'s `sources` with each `http://` or `https://` entry replaced by its host (`new URL(u).host`, port included; an entry that does not parse is dropped); paths stay as they are (0.4.0) |
 | `urls` | the hosts of `briefUrls` of the prompt (`new URL(u).host`), deduplicated, in order of first appearance; invalid URLs skipped (0.4.0) |
 

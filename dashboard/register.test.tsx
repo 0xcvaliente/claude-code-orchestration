@@ -1608,7 +1608,7 @@ test('brief grammar: the dashboard parser gives expected.json for every fixture 
   for (const name of names) {
     const text = sources[name] as string
     const want = expected[name]
-    // the fields the pane uses: slice, files, depends, path, risky, checks (and focus, workflow, sources, read, kind, validate); isPlanReview, replan,
+    // the fields the pane uses: slice, files, depends, path, risky, checks (and focus, workflow, sources, read, kind, validate, skills); isPlanReview, replan,
     // constraints and each planned slice's goal, risky and checks; status, answers, open, gaps and quotes
     expect({ name, header: parseHeader(text) }).toEqual({ name, header: want.header })
     expect({ name, plan: parsePlan(text) }).toEqual({ name, plan: want.plan })
@@ -1619,10 +1619,10 @@ test('brief grammar: the dashboard parser gives expected.json for every fixture 
     expect(parseHeader(junk).slice).toBe(null)
     expect(parsePlan(junk)).toEqual({ isPlanReview: false, replan: null, constraints: {}, slices: [] })
     expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {}, gaps: [], quotes: [] })
-    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false })
+    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] })
   }
-  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE; GAP, QUOTE) have fixtures of their own, so the loop above covers them
-  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt']) expect(names.includes(name)).toBe(true)
+  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE, SKILLS; GAP, QUOTE) have fixtures of their own, so the loop above covers them
+  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt', 'impl-skills.txt', 'impl-skills-malformed.txt']) expect(names.includes(name)).toBe(true)
 })
 
 const RESEARCH = 'orchestration:researcher'

@@ -12,7 +12,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -43,7 +44,8 @@
       "sources": [],
       "read": null,
       "kind": "bugfix",
-      "validate": true
+      "validate": true,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -74,7 +76,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -103,7 +106,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -134,7 +138,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -165,7 +170,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -197,7 +203,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -235,7 +242,85 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": []
+    }
+  },
+  "impl-skills-malformed.txt": {
+    "header": {
+      "slice": "many",
+      "files": [
+        "a.md"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [
+        "docx",
+        "a:b:c",
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "s5",
+        "s6"
+      ]
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": []
+    }
+  },
+  "impl-skills.txt": {
+    "header": {
+      "slice": "deck",
+      "files": [
+        "out/deck.pptx"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [
+        "anthropic-skills:pptx",
+        "orchestration:route",
+        "tdd"
+      ]
     },
     "plan": {
       "isPlanReview": false,
@@ -266,7 +351,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -301,7 +387,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": true,
@@ -365,7 +452,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -394,7 +482,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": true,
@@ -427,7 +516,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": true,
@@ -471,7 +561,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -502,7 +593,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -531,7 +623,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -574,7 +667,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -626,7 +720,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -655,7 +750,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -684,7 +780,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -729,7 +826,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -771,7 +869,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -802,7 +901,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -844,7 +944,8 @@
       ],
       "read": "extract",
       "kind": "survey",
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -873,7 +974,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
@@ -905,7 +1007,8 @@
       "sources": [],
       "read": null,
       "kind": null,
-      "validate": false
+      "validate": false,
+      "skills": []
     },
     "plan": {
       "isPlanReview": false,
