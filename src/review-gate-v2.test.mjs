@@ -25,6 +25,8 @@ const REPLAN = "PLAN REVIEW\nREPLAN: 1\nCONSTRAINTS:\nC1: no throw\nSLICE: a\nFI
 const R = (...items) => ({ launches: items.flatMap((i) => (i.launch ? [i.launch] : [])), stops: items.flatMap((i) => (i.stop ? [i.stop] : [])) });
 /** @param {number} min @param {string} [prompt] @returns {Item} */
 const planLaunch = (min, prompt = PLAN) => ({ launch: launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { ts: at(min), sessionId: "s1", agentId: `plan${min}` }) });
+/** The plan reviewer `agentId` (plan<launch min>) stops at `min`. @param {number} min @param {string} agentId @returns {Item} */
+const planStop = (min, agentId) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "reviewer", slice: "plan", reply: "STATUS: pass" }) });
 /** @param {number} min @param {string} slice @returns {Item[]} */
 const implAttempt = (min, slice) => {
   const agentId = `impl-${slice}-${min}`;
@@ -128,7 +130,7 @@ test("VALIDATE: gaps supersedes the earlier reviews of the same attempt, and onl
   assert.deepEqual(e.signals, ["retry"]);
 });
 
-test("stall: the last two counted fails share a gap key at or above the cutoff, and no REPLAN started since", () => {
+test("stall: the last two counted fails share a gap key at or above the cutoff, and no REPLAN finished since", () => {
   const two = [...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 Crashes on empty input"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 85 crashes on EMPTY input!\nGAP: 90 other")];
   const s = sliceOf(two, "a");
   assert.deepEqual([s.stalled, s.stallKeys, s.stalledAt, s.countedFails, s.final], [true, [gapKey("crashes on empty input")], Date.parse(at(4)), 2, false]);
@@ -142,9 +144,17 @@ test("stall: the last two counted fails share a gap key at or above the cutoff, 
   // A low-confidence fail between two same-key fails counts as a pass between them.
   assert.equal(sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 one"), ...review(3, "a", "STATUS: fail\nGAP: 40 meh"), ...implAttempt(4, "a"), ...review(5, "a", "STATUS: fail\nGAP: 90 one")], "a").stalled, false);
 
-  // A REPLAN plan review started after the second fail clears it; one before it does not.
-  assert.equal(sliceOf([...two, planLaunch(5, REPLAN)], "a").stalled, false);
-  assert.equal(sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 one"), planLaunch(2.5, REPLAN), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 90 one")], "a").stalled, true);
+  // A REPLAN plan review whose reviewer stopped after the second fail clears it; one still running does not, nor one
+  // that finished before the stall. The REPLAN need not name the slice (replacement slices get new ids).
+  assert.equal(sliceOf([...two, planLaunch(5, REPLAN)], "a").stalled, true, "a REPLAN still running keeps the stall");
+  assert.equal(sliceOf([...two, planLaunch(5, REPLAN), planStop(6, "plan5")], "a").stalled, false, "a finished REPLAN clears it");
+  const other = "PLAN REVIEW\nREPLAN: 1\nSLICE: a2\nFILES: a.py\nDEPENDS: none\nGOAL: a, split";
+  assert.equal(sliceOf([...two, planLaunch(5, other), planStop(6, "plan5")], "a").stalled, false, "a REPLAN with a replacement slice id clears it too");
+  assert.equal(sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 one"), planLaunch(2.5, REPLAN), planStop(2.7, "plan2.5"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 90 one")], "a").stalled, true);
+  // Launched before the second fail, finished after it: it finished after the stall, so it clears it.
+  assert.equal(sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 one"), planLaunch(2.5, REPLAN), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 90 one"), planStop(5, "plan2.5")], "a").stalled, false);
+  // A plan reviewer stop of a plain plan review (no REPLAN) does not count.
+  assert.equal(sliceOf([...two, planStop(5, "plan0")], "a").stalled, true);
   // A plain PLAN REVIEW (no REPLAN) opens a new run, where the slice starts fresh.
   const f = foldRuns(R(planLaunch(0), ...two, planLaunch(5)), { now: T0 + 30 * 60000 });
   assert.deepEqual([f.runs[0]?.slices.a?.stalled, f.runs[1]?.slices.a?.stalled], [true, false]);
@@ -163,6 +173,13 @@ test("stall: two same-gap fails of one attempt (a second opinion) do not stall; 
   // A pass in the retry's attempt sits between them: no stall.
   const passed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 x"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: pass"), ...review(5, "a", "STATUS: fail\nGAP: 90 x")], "a");
   assert.equal(passed.stalled, false);
+});
+
+test("VALIDATE: a validation reply with no STATUS supersedes nothing, so a stall stays", () => {
+  const items = [...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 x"), ...implAttempt(3, "a"), ...review(4, "a", "STATUS: fail\nGAP: 90 x"), ...review(5, "a", "I looked at it.", { validate: true })];
+  const s = sliceOf(items, "a");
+  assert.deepEqual(s.reviews.map((r) => [r.status, r.counted, r.superseded]), [["fail", "fail", false], ["fail", "fail", false], [null, null, false]]);
+  assert.deepEqual([s.stalled, s.countedFails], [true, 2]);
 });
 
 test("stall: three failed attempts still end the slice for good, which is never stalled", () => {
@@ -191,13 +208,22 @@ function session(extraEnv = {}) {
     run,
     /** @param {string} type @param {string} prompt @param {string} reply @param {string} [model] */
     agent(type, prompt, reply, model) {
+      const id = s.launch(type, prompt, model);
+      s.stop(id, type, reply);
+      return id;
+    },
+    /** Launch an agent in the background; returns its agent id. @param {string} type @param {string} prompt @param {string} [model] */
+    launch(type, prompt, model) {
       const id = `ag${++n}${type.replace(/\W/g, "")}`;
       run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: id, agent_type: type });
       run("journal.mjs", { hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: { subagent_type: type, prompt, ...(model ? { model } : {}) }, tool_response: { status: "async_launched", agentId: id } });
+      return id;
+    },
+    /** @param {string} id @param {string} type @param {string} reply */
+    stop(id, type, reply) {
       const p = { hook_event_name: "SubagentStop", agent_id: id, agent_type: type, last_assistant_message: reply };
       run("telemetry.mjs", p);
       run("journal.mjs", p);
-      return id;
     },
     plan(text = PLAN) {
       s.agent("orchestration:reviewer", text, "STATUS: pass");
@@ -249,11 +275,15 @@ test("Stop gate: a stalled slice blocks with replan_required twice, then gives u
   assert.doesNotMatch(readFileSync(join(s.dir, ".claude", "state", "gates.jsonl"), "utf8"), /crashes|empty input/i);
 });
 
-test("Stop gate: a REPLAN plan review clears the stall; ORCH_STALL_GATE=off gates as 0.3.0 (last_reviewer_failed)", () => {
+test("Stop gate: a finished REPLAN plan review clears the stall, a running one does not; ORCH_STALL_GATE=off gates as 0.3.0", () => {
   const s = stalled();
-  s.plan(REPLAN);
+  const replan = s.launch("orchestration:reviewer", REPLAN);
+  // background_tasks [] so the gate does not defer for the running reviewer: the stall is what is judged.
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  assert.equal(s.last().reason, "replan_required", "a REPLAN still running keeps the stall");
+  s.stop(replan, "orchestration:reviewer", "STATUS: pass");
   assert.equal(s.gate().status, 2);
-  assert.equal(s.last().reason, "last_reviewer_failed");
+  assert.equal(s.last().reason, "last_reviewer_failed", "a finished REPLAN clears it");
 
   const off = stalled({ ORCH_STALL_GATE: "off" });
   assert.equal(off.gate().status, 2);
@@ -326,10 +356,13 @@ test("plan check: a stalled slice's implementer launch blocks with replan_requir
   assert.equal(s.lastCheck().reason, "ok");
 });
 
-test("plan check: after a REPLAN plan review, or with ORCH_STALL_GATE=off, the launch goes through", () => {
+test("plan check: after a finished REPLAN plan review, or with ORCH_STALL_GATE=off, the launch goes through", () => {
   const s = stalled();
   assert.equal(s.check("a").status, 2);
-  s.plan(REPLAN);
+  const replan = s.launch("orchestration:reviewer", REPLAN);
+  assert.equal(s.check("a").status, 2, "a REPLAN still running keeps the stall");
+  assert.equal(s.lastCheck().reason, "replan_required");
+  s.stop(replan, "orchestration:reviewer", "STATUS: pass");
   const r = s.check("a");
   assert.equal(r.status, 0, r.stderr);
   assert.equal(s.lastCheck().reason, "ok");

@@ -565,7 +565,7 @@ export function stopRecord(ctx) {
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
  * files: the slice's FILES in the plan (PLAN REVIEW and REPLAN entries, merged), [] when it was not planned.
  * countedFails: reviews whose counted status is fail. stalled: not final, its last two counted reviews are fails of
- * different implementer attempts that share a key (stallKeys) and no REPLAN plan review started in the run after the second (stalledAt, its time); the
+ * different implementer attempts that share a key (stallKeys) and no REPLAN plan review finished in the run after the second (stalledAt, its time); the
  * fold reports it whatever ORCH_STALL_GATE says, the gates read the switch. signals: doubtSignals with the fold's env.
  * @typedef {{
  *   id: number, kind: 'planned' | 'light', openedAt: number, lastAt: number, closed: boolean, stale: boolean,
@@ -573,7 +573,8 @@ export function stopRecord(ctx) {
  *   planReviewed: boolean, running: string[], replans: number[]
  * }} Run
  * planReviewed: a reviewer of this run's PLAN REVIEW (or REPLAN) brief has stopped. running: agent ids that started
- * (SubagentStart) in this run and have not stopped yet. replans: launch times of the REPLAN plan reviews in this run.
+ * (SubagentStart) in this run and have not stopped yet. replans: times the reviewers of this run's REPLAN plan reviews
+ * stopped (a REPLAN still running is not in it).
  * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[] }} Records
  * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
  */
@@ -746,7 +747,6 @@ export function foldRuns(records, opts = {}) {
         }
         open.kind = "planned";
         open.lastAt = ts;
-        if (replan !== null) open.replans.push(ts);
         if (typeof r.agent_id === "string" && r.agent_id) planRunOf.set(r.agent_id, open);
         const plan = r.plan && typeof r.plan === "object" ? r.plan : {};
         if (plan.constraints && typeof plan.constraints === "object") Object.assign(open.constraints, plan.constraints);
@@ -785,7 +785,10 @@ export function foldRuns(records, opts = {}) {
     if (!run) continue;
     if (kind === 1) run.lastAt = Math.max(run.lastAt, ts);
     if (kind === 1 && role === "reviewer" && slice === "plan") {
-      (planRunOf.get(String(r.agent_id)) ?? run).planReviewed = true;
+      const planRun = planRunOf.get(String(r.agent_id)) ?? run;
+      planRun.planReviewed = true;
+      // A REPLAN plan review finished: it clears stalls that began before this time (finish()).
+      if (typeof launch?.replan === "number") planRun.replans.push(ts);
       continue;
     }
     const s = slice ? run.slices[slice] : undefined;
@@ -805,8 +808,9 @@ export function foldRuns(records, opts = {}) {
       const checks = strings(Array.isArray(r.checks) ? r.checks : launch?.checks);
       const answers = r.answers && typeof r.answers === "object" ? r.answers : {};
       const validate = launch?.validate === true;
-      // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes.
-      if (validate) {
+      // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes, but only
+      // with a verdict of its own: a validation reply with no STATUS supersedes nothing.
+      if (validate && status !== null) {
         for (const prev of currentReviews(s)) {
           prev.superseded = true;
           prev.counted = null;
