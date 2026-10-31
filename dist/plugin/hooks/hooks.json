@@ -19,6 +19,15 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/plan-check.mjs\" --plugin"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs\" --plugin"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -75,6 +84,16 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/review-gate.mjs\" --plugin"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt-capture.mjs\" --plugin"
           }
         ]
       }

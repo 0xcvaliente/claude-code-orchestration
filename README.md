@@ -11,10 +11,20 @@ It runs two ways with the same roles: as a TypeScript pipeline on the Claude Age
 
 ## Contents
 
-- [Benchmark: orchestrator vs plain sessions](#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked) · [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
+- [What 0.3.0 adds](#what-030-adds) · [Benchmark: orchestrator vs plain sessions](#benchmark-orchestrator-vs-plain-sessions-built-in-subagents-blocked) · [Why a router](#why-a-router) · [Quick start](#quick-start) · [How it works](#how-it-works)
 - [The pipeline](#the-pipeline) · [Choosing a route](#choosing-a-route-triage) · [Two ways to run it](#two-ways-to-run-it) · [Gates, runs and briefs](#gates-runs-and-briefs)
 - [What Claude Code ships vs what this adds](#what-claude-code-ships-vs-what-this-adds) · [Resilience](#resilience-retry-resume-replan) · [Bash judge](#bash-judge-sdk-workers) · [Safety and limits](#safety-and-limits)
 - [Reference](#reference) · [Repository layout](#repository-layout) · [Development](#development)
+
+## What 0.3.0 adds
+
+- **The gated workflow.** `.claude/workflows/orchestrate.js` now ships in the plugin: run it as `/orchestration:orchestrate` (project copy: `/orchestrate`), for example `/orchestration:orchestrate {"task":"...","code":true,"baseRefHead":true}`. You start it: Claude Code runs a workflow only on the person's explicit request ([workflows](https://code.claude.com/docs/en/workflows.md)), so the route skill, the nudge and the orchestrator suggest it and never start it unasked. The script fixes the order: plan with a CONSTRAINTS ledger, explore, build, review (an opus reviewer when a doubt signal fires; at once for RISKY slices), one replan of slices that failed for good, and a merge of isolated code branches. Arguments: `task`, `code`, `baseRefHead`, `plan`, `skip`. A workflow run resumes only within its session; to resume in a new one, pass the logged `plan: <JSON>` back as `args.plan` and the passed slice ids as `args.skip`. In a plugin workflow `agentType` must be namespaced (`orchestration:<role>`; a probe showed bare names are "not found"), and `npm run build-plugin` rewrites it. Details: [docs/native-mode.md](docs/native-mode.md#scripted-flow-the-gated-workflow-030).
+- **The native judge hook (opt-in, `ORCH_JUDGE=native`).** A deny-only PreToolUse hook on `Bash`, project copy or plugin. With no model call it denies the `sudo`/`su` family, catastrophic `rm`, commands it cannot read, and `rm` targets that are symlinks or resolve outside the working folder. `git push`, git remote changes and recursive `rm` go to `claude -p --model opus`, with the prompts you typed as the only authority (captured locally to the plugin's state dir, and only while the hook is on). It fails closed, decides within 45 s so it beats Claude Code's default hook timeout, and logs each decision to `gates.jsonl`. Details: [docs/bash-judge.md](docs/bash-judge.md#native-hook-030).
+- **An eval suite.** `npm run eval` runs `claude plugin eval` on `dist/plugin` (paid, with a cost ceiling): four cases from the bench tasks t2, t1, c1 and d1 (`evals/`), free graders, and the delta between sessions with and without the plugin. It has not been smoke-run yet: in an isolated worktree a guard read `claude plugin eval` as the shell's `eval` and refused it, so the first run is left to you. Bounded smoke run: `npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2`.
+- **New bench arms.** `N-UC` is native workflow orchestration with no plugin, opted in by a direct request in the prompt, because the `ultracode` keyword does not opt in under `-p` ([workflows](https://code.claude.com/docs/en/workflows.md)). `W-mix` is this repo's gated workflow. Each run records the workflow runs it really made. The short matrix `bench/matrix/short-k2.json` runs both against `O-mix` ([bench/README.md](bench/README.md#short-documentation-run)).
+- **Maintenance.** The SDK pipeline is frozen (maintenance only). The plan check no longer lets records from before the latest run own files in it.
+
+The live checks behind these claims (Claude Code 2.1.314) are in [docs/data/live-checks-2026-10-31.md](docs/data/live-checks-2026-10-31.md).
 
 ## Benchmark: orchestrator vs plain sessions, built-in subagents blocked
 
@@ -249,7 +259,7 @@ Known limitations of the gates (a long-lived teammate keeps the review gate wait
 
 ### The plugin
 
-The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract and the `/route` skill, but not permission denies (headless runs deny push, remote, `sudo` and `rm -rf` on the command line; for interactive sessions add the denies you want to your own settings, including `Agent(general-purpose)`, the other built-in subagents and `Agent(fork)`, which this repo blocks; headless runs also set `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`) and not this repo's `worktree` setting. A plugin's own settings can set only `agent` and `subagentStatusLine` ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)). Without those denies the plan check still blocks fork and built-in launches while a run is open (`builtin_agent_in_run`).
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract, the `/route` skill and, since 0.3.0, the gated workflow (`workflows/`), the eval suite (`evals/`) and the opt-in judge hooks, but not permission denies (headless runs deny push, remote, `sudo` and `rm -rf` on the command line; for interactive sessions add the denies you want to your own settings, including `Agent(general-purpose)`, the other built-in subagents and `Agent(fork)`, which this repo blocks; headless runs also set `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`) and not this repo's `worktree` setting. A plugin's own settings can set only `agent` and `subagentStatusLine` ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)). Without those denies the plan check still blocks fork and built-in launches while a run is open (`builtin_agent_in_run`).
 
 **Parallel code slices need `baseRef: "head"`.** Only code in a git repository runs slices in worktrees, and Claude Code starts a worktree from the remote default branch unless told otherwise, so a parallel slice would not see your unpushed or feature-branch commits. For parallel slices of unpushed or feature-branch work, add this to your own `.claude/settings.json` (or `~/.claude/settings.json`):
 
@@ -303,7 +313,7 @@ After changing anything under `.claude/` or `dashboard/`, run `npm run build-plu
 
 ## What Claude Code ships vs what this adds
 
-Claude Code already runs subagents in the background, scripts multi-agent workflows (resumable within a session), forks the conversation into helpers, reviews diffs with `/code-review` and weighs intent in auto mode. This plugin does not beat that on raw score: with the built-ins allowed, plain Opus scored 99.7% on k2 by delegating to them itself (see the benchmark above). What it adds is verification (a review gate per slice that waits for running agents, a constraints ledger, opus escalation, a test gate), routing cost (a plain session when a task does not split), safety (role limits, fork and built-in denies) and resumability (a run journal that outlives the session). [docs/native-vs-plugin.md](docs/native-vs-plugin.md) compares each area, with Claude Code's documentation as the source, and names the pre-registered hypotheses (H9 to H13 in [bench/HYPOTHESES.md](bench/HYPOTHESES.md)) that will measure each claim; a shipped gated workflow, a deny-only judge hook for native sessions and an eval suite are planned for 0.3.0, not shipped.
+Claude Code already runs subagents in the background, scripts multi-agent workflows (resumable within a session), forks the conversation into helpers, reviews diffs with `/code-review` and weighs intent in auto mode. This plugin does not beat that on raw score: with the built-ins allowed, plain Opus scored 99.7% on k2 by delegating to them itself (see the benchmark above). What it adds is verification (a review gate per slice that waits for running agents, a constraints ledger, opus escalation, a test gate), routing cost (a plain session when a task does not split), safety (role limits, fork and built-in denies) and resumability (a run journal that outlives the session). [docs/native-vs-plugin.md](docs/native-vs-plugin.md) compares each area, with Claude Code's documentation as the source, and names the pre-registered hypotheses (H9 to H13 in [bench/HYPOTHESES.md](bench/HYPOTHESES.md)) that will measure each claim. 0.3.0 adds the three items that were planned: the gated workflow (next to Claude Code's native workflows and `ultracode`), a deny-only judge hook for native sessions (auto mode allows ordinary pushes and takes no rules from plugins) and an eval suite for `claude plugin eval` (not smoke-run yet).
 
 ## Resilience: retry, resume, replan
 
@@ -344,7 +354,7 @@ The audit log has one JSON line per judged decision (command, decision, reason, 
 
 ## Safety and limits
 
-- Pushes and deletes. The **native** path is unchanged: `orchestrate.sh` passes `UNSAFE_BASH` (`git push`, `git remote`, `sudo` and the `rm -rf` spellings) to every headless run as `--disallowedTools`, which beats any allow rule; the agents are told never to push; and project settings deny the same list except `git push` (`policy.test.ts` keeps them in step), so an interactive session in this repo can push when its permission mode allows: default mode asks you first. **SDK workers** no longer deny push, remotes or recursive `rm` by rule: `sudo` is denied by rule and by the guard, and the other commands go through the [Bash judge](#bash-judge-sdk-workers), which with `ORCH_JUDGE=off` goes back to the old denial.
+- Pushes and deletes. The **native** path is unchanged: `orchestrate.sh` passes `UNSAFE_BASH` (`git push`, `git remote`, `sudo` and the `rm -rf` spellings) to every headless run as `--disallowedTools`, which beats any allow rule; the agents are told never to push; and project settings deny the same list except `git push` (`policy.test.ts` keeps them in step), so an interactive session in this repo can push when its permission mode allows: default mode asks you first. **SDK workers** no longer deny push, remotes or recursive `rm` by rule: `sudo` is denied by rule and by the guard, and the other commands go through the [Bash judge](#bash-judge-sdk-workers), which with `ORCH_JUDGE=off` goes back to the old denial. **Native sessions** can opt in to the deny-only judge hook with `ORCH_JUDGE=native` (see [What 0.3.0 adds](#what-030-adds)); it can refuse a command but never allows one the session's rules would not.
 - The Bash judge is best-effort defence in depth, not a sandbox, and an LLM judge can be wrong. It does not see scripts (`./deploy.sh`, `bash x.sh`), interpreter strings (`python -c`, `perl -e`, `node -e`), `git clean -fdx`, `shred`, `unlink`, `rmdir`, `mv x /dev/null`, truncation, `dd of=`, `gh pr create`, `ssh host cmd`, `make` targets, existing git aliases, variables set in an earlier call, or git pointed at planted config (`GIT_DIR`, `HOME=... git`, `git -C`). It also misses `su`, `pkexec` and `runuser` after shell keywords or unlisted wrappers (`if true; then su root; fi`, `exec -a foo su`), which need a password a headless worker lacks. It over-blocks on purpose: `echo rm -rf x`, `grep rm -r src`, `nice rm file`, `ls r*`, `ls s*`, `ls p*` and `rm *.o` are denied. It does not cover the Edit and Write tools. Full list: [docs/bash-judge.md](docs/bash-judge.md#11-limits).
 - Worktrees isolate git state, not the whole filesystem. Since 2026 Claude Code blocks a worktree agent's Edit, Write and NotebookEdit into the main checkout, Bash commands run from it and git commands redirected into it, but not non-git shell writes into it, such as `cp` or `>` ([worktrees: How Claude Code enforces isolation](https://code.claude.com/docs/en/worktrees.md)). Run in a container or VM for untrusted repos.
 - The review gate waits while Stop's `background_tasks` lists a running teammate, so a long-lived agent-team teammate keeps it deferring; other limits of the gates are in [docs/native-mode.md](docs/native-mode.md#known-limitations).
@@ -397,7 +407,8 @@ Invalid numbers exit 2; a failed plan exits 1.
 | `ORCH_RUN_STALE_MIN` | `review-gate.mjs`, `plan-check.mjs` | Minutes with nothing running and no launch, stop or agent start after which a run is stale (default 30); also the age past which an unpaired SubagentStart no longer makes the review gate wait |
 | `ORCH_MODEL` | `orchestrate.sh` | Passes `--model` (for example `sonnet` or `opus`), used for plain-model baselines |
 | `ORCH_EXTRA_ALLOWED_TOOLS` | `orchestrate.sh`, `auto.sh` | Extra permission rules, one per line, appended to the default allowlist (`ORCH_ALLOWED_TOOLS` replaces it). `auto.sh` adds `WebSearch` and `WebFetch` when the task changes no code (the triage fact `code`; with no facts, when the folder is neither a git work tree nor has a test runner) |
-| `ORCH_JUDGE` | SDK | `off`, `0` or `false` turns the Bash judge off: SDK workers deny push, remotes, `sudo` and `rm -rf` by rule again. Default on |
+| `ORCH_JUDGE` | SDK, `judge-hook.mjs` | `off`, `0` or `false` turns the Bash judge off: SDK workers deny push, remotes, `sudo` and `rm -rf` by rule again. Default on. `native` also turns on the deny-only native judge hook and prompt capture (`judge-hook.mjs`, `prompt-capture.mjs`); any other value leaves them off |
+| `ORCH_JUDGE_TIMEOUT_MS` | `judge-hook.mjs` | The native judge's model-call timeout, default 40000, capped at 45000 so the hook decides before Claude Code's default hook timeout; a timeout denies. `ORCH_JUDGE_MODEL` (default `opus`) and `ORCH_JUDGE_CLAUDE_BIN` (default `claude`) set its model and binary |
 | `ORCH_MODEL_JUDGE` | SDK | The Bash judge's model (default `claude-opus-5-5`) |
 | `ORCH_JUDGE_AUDIT` | SDK | Audit file for the judge when the run sets none (default `runs/judge-audit.jsonl`; a normal run writes `runs/<id>/judge-audit.jsonl`) |
 | `ORCH_SANDBOX` | SDK | `on` runs Bash roles inside the SDK's OS sandbox (opt-in; smoke-tested on macOS only) |
@@ -422,6 +433,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
 | `npm run install-statusline` | Copy `statusline/statusline.sh` to `~/.claude/statusline.sh` and print the `statusLine` setting to add |
 | `npm run orchestrate`, `npm run test-dashboard` | Interactive `claude --agent orchestrator` with the live dashboard pane loaded; run the dashboard's own test (`claude plugin test`, skipped when the CLI is missing) |
+| `npm run eval` | `claude plugin eval` on `dist/plugin` with the cases in `evals/` (paid; `--max-cost-usd 10`); not smoke-run yet |
 | `npm run report` | HTML timeline from `.claude/state/`, or from the plugin's per-user state dir for that repo |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md), results in [docs/benchmarks.md](docs/benchmarks.md)): `bench -- --matrix bench/matrix/<name>.json` runs a campaign (flags `--campaign`, `--resume`, `--dry-run`, `--only`, `--parallel-blocks`, `--seed`); `bench:validate` checks every task's graders with no model calls; `bench:grade`, `bench:analyze` and `bench:report` grade snapshots, summarise and render. Cost is reported in tokens |
 
@@ -450,9 +462,11 @@ src/
                                   plan-check.mjs, journal.mjs,
                                   telemetry.mjs, state.mjs, nudge.mjs,
                                   brief.mjs (the brief and reply parser),
-                                  run.mjs (loads the run model for the gates)
+                                  run.mjs (loads the run model for the gates),
+                                  judge-hook.mjs, judge-core.mjs,
+                                  prompt-capture.mjs (opt-in native judge)
   skills/                         route, orchestration-conventions
-  workflows/orchestrate.js        the scripted flow
+  workflows/orchestrate.js        the gated workflow (/orchestration:orchestrate)
   settings.json, rules/           gates, permission denies, editing rules
 .claude-plugin/marketplace.json   makes the repo installable
 dist/plugin/, dist/dashboard/     the built plugin, and the dashboard mod alone (committed)
@@ -461,8 +475,9 @@ statusline/                       statusline.sh, the status line script (install
 scripts/                          auto.sh, orchestrate.sh, build-plugin.mjs,
                                   test-dashboard.mjs, report.mjs,
                                   sandbox-smoke.mjs
+evals/                            the plugin eval suite (npm run eval), shipped in dist/plugin
 bench/                            the benchmark: run, grade, analyze, report, tasks/, matrix/
-docs/                             benchmarks.md, native-mode.md, brief-grammar.md, dashboard.md,
+docs/                             data/ (live-check records), benchmarks.md, native-mode.md, brief-grammar.md, dashboard.md,
                                   native-vs-plugin.md, bash-judge.md, diagrams/ (incl. the
                                   original architecture diagram, orchestration.html)
 .github/workflows/ci.yml          CI: npm run check
