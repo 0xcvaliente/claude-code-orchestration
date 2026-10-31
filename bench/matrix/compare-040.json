@@ -1,0 +1,21 @@
+{
+  "name": "compare-040",
+  "seed": 40,
+  "parallel_blocks": 2,
+  "expected_wall_min": 25,
+  "note": "30-minute budget, direction only (H14-H17 in bench/HYPOTHESES.md). Block 1: k2 at cap10, O-mix on the current plugin build vs the 0.3.0 plugin (both via --plugin-dir), 2 runs together, about 11 min including setup and kill grace. Blocks 2-3: d2-docs at cap6, all-haiku vs all-sonnet vs routed, 3 runs together per rep, 2 reps, run back to back in the second worker slot while k2 runs: about 13 min. parallel_blocks 2 keeps at most 5 sessions live. Wall time about 14 min for the runs plus about 8 min of grading (k2 dominates) and analysis: about 25 min, under the 30-minute budget.",
+  "groups": [
+    {
+      "tasks": ["k2-stdlib-toolkit-xl"],
+      "arms": ["O-mix-plugin", "O-mix-030"],
+      "cells": [{ "id": "cap10", "cap_min": 10 }],
+      "reps": 1
+    },
+    {
+      "tasks": ["d2-docs"],
+      "arms": ["all-haiku", "all-sonnet", "routed"],
+      "cells": [{ "id": "cap6", "cap_min": 6 }],
+      "reps": 2
+    }
+  ]
+}

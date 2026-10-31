@@ -199,7 +199,8 @@ async function worker() {
 // SIGINT, SIGTERM or a crash: TERM every live run's process group, KILL what is left after 8 s, exit non-zero.
 installInterruptHandlers({ log });
 log(`campaign ${campaign}: ${runs.length} runs in ${blocks.length} blocks, seed ${seed}`);
-const parallel = Math.max(1, Number(opt("parallel-blocks", "1")) || 1);
+// A matrix may set parallel_blocks (compare-040.json does); --parallel-blocks overrides it.
+const parallel = Math.max(1, Number(opt("parallel-blocks", String(matrix.parallel_blocks ?? 1))) || 1);
 // A worker that finds the queue empty stops; a requeued run is picked up by any worker still looping, so keep
 // starting workers until the queue stays empty.
 while (queue.length && !interrupted()) await Promise.all(Array.from({ length: Math.min(parallel, queue.length) }, worker));
