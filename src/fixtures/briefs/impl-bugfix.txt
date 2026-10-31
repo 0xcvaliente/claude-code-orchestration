@@ -1,0 +1,7 @@
+- **SLICE:** crash
+- **FILES:** src/parse.ts
+- **DEPENDS:** none
+- **KIND:** Bugfix: the parser crashes on empty input
+- **VALIDATE:** GAPS
+
+Fix the crash. A SOURCES: key in mid-line does not count.
