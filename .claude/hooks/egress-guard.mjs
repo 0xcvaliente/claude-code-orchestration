@@ -132,6 +132,9 @@ export function egressDecision(input, opts = {}) {
       files = [];
     }
   }
+  // Known limit (review GAP 25): planned files are read from the reviewer's cwd (else the project dir). A file that so
+  // far exists only on an isolated slice's branch (its worktree) is not seen there, so its URLs do not count. This fails
+  // safe: such a fetch is denied, never allowed, and the brief can name the URL itself.
   const base = typeof input.cwd === "string" && input.cwd ? input.cwd : env.CLAUDE_PROJECT_DIR || process.cwd();
   const allowed = allowedHosts(brief, files, base);
   if (host && allowed.has(host)) return { decision: "allow", host };
