@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // Helper of the test gate (verify.sh calls it; it is not a hook of its own). Two jobs, both judged against the base of
 // the agent's tree: HEAD for the shared tree, the fork point from the main worktree's HEAD for an isolated worktree.
-//   baseline  (stdin: the failing test output; ORCH_BASELINE=off in verify.sh skips the call) -- when the tree has
-//             changes against its base, run the same test command in a clean detached worktree of the base and allow
-//             (warn, tests_failed_baseline) only when every failing test of the working-tree run, qualified by its
-//             file or package, is also failing on the base. Never when a working-tree failure cannot be qualified or
-//             is a suite-level crash (suite failed to run, collection or import error, build failure), never when
-//             the base run timed out or failed without parsable names: those keep the block.
+//   baseline  (stdin: the failing test output; --mode from ORCH_BASELINE; off in verify.sh skips the call) -- when the
+//             tree has changes against its base, run the same test command in a clean detached worktree of the base.
+//             inform (default): never allows; the gate still blocks with tests_failed, and the block message lists
+//             the qualified failing tests that also fail on the base as probably pre-existing (counts are logged).
+//             allow (opt-in, HEURISTIC): warn with tests_failed_baseline when every failing test of the working-tree
+//             run, qualified by its file or package, also fails on the base. Runner output cannot be parsed
+//             completely, so a failure that never shows as a named test can slip through; the guards are: never
+//             when a failure is unqualified or a runner-level crash marker is present (suite failed to run,
+//             collection or import error, build failure, go FAIL <pkg> without a named test, panics, vitest
+//             unhandled errors, cargo binary crash or signal, jest coverage threshold), never when the base run
+//             timed out, could not use the main worktree's dependencies, or failed without parsable names.
 //   bugfix    (stdin: the SubagentStop event; ORCH_BUGFIX_CHECK=off skips it) -- for an implementer whose brief says
 //             KIND: bugfix, after the tests passed: at least one test file must be changed or added against the base,
 //             and the base run with those files copied in must show at least one new qualified failing test that
@@ -14,14 +19,16 @@
 //             such blocks for the agent it allows with bugfix_unverified_gave_up.
 // Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed; each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
-// a branch. A base run is limited to ORCH_BASE_TIMEOUT_S seconds (default 300); a timeout counts as "no baseline".
+// a branch. node_modules is symlinked from the main worktree only, and only when the base's lock files match the main
+// worktree's; otherwise there is no base run. A base run runs in its own process group, limited to
+// ORCH_BASE_TIMEOUT_S seconds (default 300); on timeout the group is killed and it counts as "no baseline".
 // The hook needs a timeout of at least 2 x ORCH_BASE_TIMEOUT_S plus the test run (bugfix may run the base twice).
-// Base results are cached per base commit and command in <state>/baseline-cache.json, only when the run finished in
-// time and either passed or failed with fully parsable names (an environment failure is never cached).
+// Base results are cached per base commit, command and run subdirectory in <state>/baseline-cache.json, only when the
+// run finished in time and either passed or failed with fully parsable names (an environment failure is never cached).
 // Output protocol (stdout, empty means "no opinion", verify.sh then decides as before): line 1 the decision (allow,
-// warn, block), line 2 the reason, line 3 extra JSON fields for the gate record (counts only, may be empty), then the
-// message for the agent. Any error prints nothing and exits 0.
-import { spawnSync } from "node:child_process";
+// warn, block, or inform: keep the block and add the message), line 2 the reason, line 3 extra JSON fields for the
+// gate record (counts only, may be empty), then the message for the agent. Any error prints nothing and exits 0.
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,6 +61,7 @@ const real = (p) => {
 // ---------------------------------------------------------------------------------------------------------------
 /** @typedef {{ names: string[], unqualified: string[], crash: boolean }} Failures */
 
+// Runner-level failures that no test name stands for: their presence makes a run incomplete.
 const CRASH_RE = [
   /Test suite failed to run/,
   /errors? during collection/i,
@@ -61,6 +69,12 @@ const CRASH_RE = [
   /^_+ ERROR collecting /,
   /error: could not compile/,
   /\[(build|setup) failed\]/,
+  /Unhandled (?:Errors?|Rejections?)\b/, // vitest
+  /process didn't exit successfully/, // cargo: a test binary crashed
+  /\bsignal: \d+, SIG[A-Z]+/, // cargo: killed by a signal
+  /coverage threshold/i, // jest
+  /^error: test failed\b/, // cargo
+  /^panic: /, // go
 ];
 
 /** @param {unknown} text @param {string} [root] @returns {Failures} */
@@ -122,6 +136,12 @@ export function parseFailures(text, root = "") {
       if (specSummary >= 0 && i < specSummary) continue; // listed again, with its file, in the summary
       add(specFile, m[1]);
       specFile = null;
+    } else if ((m = /^FAIL\t(\S+)/.exec(line) ?? /^FAIL\s+(\S+)\s+[\d.]+s$/.exec(line))) {
+      // go's package line ("FAIL\t<pkg>\t0.01s"): it qualifies the pending "--- FAIL" names; with none pending the
+      // package failed without a named test (init panic, build or setup failure, TestMain exit).
+      if (goPending.length === 0) res.crash = true;
+      for (const n of goPending) add(m[1], n);
+      goPending = [];
     } else if ((m = /^\s*FAIL\s+(\S.*)$/.exec(line))) {
       const rest = m[1] ?? "";
       if (goPending.length) {
@@ -254,28 +274,90 @@ export const baseTimeoutMs = () => {
   return (Number.isFinite(s) && s > 0 ? s : 300) * 1000;
 };
 
+/** The run folder relative to the tree's top ("" for the top or anything outside it). @param {string} top @param {string} cwd */
+export function subdirOf(top, cwd) {
+  const sub = relative(real(top), real(cwd));
+  return sub && !sub.startsWith("..") ? sub : "";
+}
+
+const LOCKS = ["package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"];
+
 /**
- * Run `cmd` in a fresh detached worktree of `base` (OS temp dir), with node_modules symlinked in from the tree or the
- * main worktree when one exists; `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S; the worktree is
- * always removed.
+ * Run `cmd` with bash in its own process group; on timeout the whole group is killed. Output is capped at 16 MB.
+ * @param {string} cmd @param {string} cwd @param {number} ms
+ * @returns {Promise<{ rc: number, timedOut: boolean, out: string }>}
+ */
+export function runGroup(cmd, cwd, ms) {
+  return new Promise((resolve) => {
+    let out = "";
+    let timedOut = false;
+    let done = false;
+    /** @type {NodeJS.Timeout | undefined} */
+    let grace;
+    const child = spawn("bash", ["-c", cmd], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const take = (/** @type {Buffer} */ b) => {
+      if (out.length < 16 * 1024 * 1024) out += b.toString("utf8");
+    };
+    child.stdout?.on("data", take);
+    child.stderr?.on("data", take);
+    /** @param {number} rc */
+    const finish = (rc) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (grace) clearTimeout(grace);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      resolve({ rc, timedOut, out });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+      grace = setTimeout(() => finish(1), 2000); // a process that left the group may hold the pipes
+    }, ms);
+    child.on("error", () => finish(1));
+    child.on("close", (code) => finish(code ?? 1));
+  });
+}
+
+/**
+ * Run `cmd` in a fresh detached worktree of `base` (OS temp dir). node_modules comes from the main worktree only, and
+ * only when the base's lock files match the main worktree's (otherwise the base would run against other dependencies,
+ * so there is no base run: null). `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S, run in its own
+ * process group; the worktree is always removed.
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd
  * @param {(wt: string) => void} [prepare]
- * @returns {{ rc: number, timedOut: boolean, failures: Failures } | null}
+ * @returns {Promise<{ rc: number, timedOut: boolean, failures: Failures } | null>}
  */
-export function runInBase(info, cwd, cmd, prepare) {
+export async function runInBase(info, cwd, cmd, prepare) {
+  const sub = subdirOf(info.top, cwd);
+  const nmDirs = [...new Set(["", sub])].filter((d) => existsSync(join(info.main, d, "node_modules")));
+  for (const d of nmDirs) {
+    for (const lock of LOCKS) {
+      const rel = d ? `${d}/${lock}` : lock;
+      // Compare blob ids: the base's lock file against the main worktree's file on disk (missing on one side differs).
+      const onBase = git(info.top, ["rev-parse", "--verify", "-q", `${info.base}:${rel}`])?.trim() ?? null;
+      const inMain = existsSync(join(info.main, rel)) ? (git(info.main, ["hash-object", "--no-filters", "--", rel])?.trim() ?? "?") : null;
+      if (onBase !== inMain) return null;
+    }
+  }
   pruneStale(info.top);
   const dir = mkdtempSync(join(tmpdir(), BASE_PREFIX));
   const wt = join(dir, "wt");
   try {
     if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return null;
-    const nm = [join(info.top, "node_modules"), join(info.main, "node_modules")].find((p) => existsSync(p));
-    if (nm && !existsSync(join(wt, "node_modules"))) symlinkSync(nm, join(wt, "node_modules"));
+    for (const d of nmDirs) {
+      const target = join(wt, d, "node_modules");
+      if (existsSync(join(wt, d)) && !existsSync(target)) symlinkSync(join(info.main, d, "node_modules"), target);
+    }
     if (prepare) prepare(wt);
-    const sub = relative(real(info.top), real(cwd));
-    const runDir = sub && !sub.startsWith("..") && existsSync(join(wt, sub)) ? join(wt, sub) : wt;
-    const r = spawnSync("bash", ["-c", cmd], { cwd: runDir, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: baseTimeoutMs(), killSignal: "SIGKILL" });
-    const timedOut = /** @type {NodeJS.ErrnoException | undefined} */ (r.error)?.code === "ETIMEDOUT" || (r.status === null && r.signal !== null);
-    return { rc: r.status ?? 1, timedOut, failures: parseFailures(`${r.stdout ?? ""}${r.stderr ?? ""}`, wt) };
+    const runDir = sub && existsSync(join(wt, sub)) ? join(wt, sub) : wt;
+    const r = await runGroup(cmd, runDir, baseTimeoutMs());
+    return { rc: r.rc, timedOut: r.timedOut, failures: parseFailures(r.out, wt) };
   } finally {
     git(info.top, ["worktree", "remove", "--force", wt]);
     rmSync(dir, { recursive: true, force: true });
@@ -284,10 +366,11 @@ export function runInBase(info, cwd, cmd, prepare) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Cache of base runs: <state>/baseline-cache.json, { "<base sha> <cmd hash>": { rc, names } }, newest 50 kept.
+// Cache of base runs: <state>/baseline-cache.json, { "<base sha> <cmd hash>": { rc, names } }, newest 50 kept. The
+// hash covers the command and the run subdirectory.
 // ---------------------------------------------------------------------------------------------------------------
-/** @param {string} base @param {string} cmd */
-export const cacheKey = (base, cmd) => `${base} ${createHash("sha256").update(cmd).digest("hex").slice(0, 16)}`;
+/** @param {string} base @param {string} cmd @param {string} [sub] */
+export const cacheKey = (base, cmd, sub = "") => `${base} ${createHash("sha256").update(`${sub}\0${cmd}`).digest("hex").slice(0, 16)}`;
 
 /** @param {string} state @returns {Record<string, { rc: number, names: string[] }>} */
 function readCache(state) {
@@ -317,13 +400,13 @@ function writeCache(state, key, value) {
 /**
  * The plain base run (cached): usable only when it finished in time and passed, or failed with complete names.
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd @param {string} state
- * @returns {{ rc: number, names: string[] } | null}
+ * @returns {Promise<{ rc: number, names: string[] } | null>}
  */
-function plainBase(info, cwd, cmd, state) {
-  const key = cacheKey(info.base, cmd);
+async function plainBase(info, cwd, cmd, state) {
+  const key = cacheKey(info.base, cmd, subdirOf(info.top, cwd));
   const hit = readCache(state)[key];
   if (hit && typeof hit.rc === "number" && Array.isArray(hit.names)) return hit;
-  const run = runInBase(info, cwd, cmd);
+  const run = await runInBase(info, cwd, cmd);
   if (!run || run.timedOut) return null;
   if (run.rc !== 0 && !complete(run.failures)) return null;
   const res = { rc: run.rc, names: run.rc === 0 ? [] : run.failures.names };
@@ -332,19 +415,33 @@ function plainBase(info, cwd, cmd, state) {
 }
 
 /**
- * @param {{ cwd: string, cmd: string, isolated: boolean, state: string, output: string }} o
- * @returns {{ decision: string, reason: string, extra: string, message: string } | null}
+ * Baseline after a failing test run. mode "allow" (opt-in, heuristic): warn with tests_failed_baseline when the run is
+ * complete and every failing test also fails on the base. Any other mode ("inform", the default): never allow; return
+ * decision "inform" with counts and, when some failing tests also fail on the base, a note for the block message.
+ * @param {{ cwd: string, cmd: string, isolated: boolean, state: string, output: string, mode?: string }} o
+ * @returns {Promise<{ decision: string, reason: string, extra: string, message: string } | null>}
  */
-export function baseline({ cwd, cmd, isolated, state, output }) {
-  if (!complete(parseFailures(output))) return null; // unqualified names, a crash or no names: keep the block
+export async function baseline({ cwd, cmd, isolated, state, output, mode = "inform" }) {
+  const quick = parseFailures(output);
+  if (quick.names.length === 0) return null; // nothing qualified to compare
+  const allow = mode === "allow";
+  if (allow && !complete(quick)) return null; // unqualified names or a crash: keep the block
   const info = baseInfo(cwd, isolated);
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
-  const base = plainBase(info, cwd, cmd, state);
+  const base = await plainBase(info, cwd, cmd, state);
   if (!base) return null;
   const onBase = new Set(base.names);
-  if (!cur.names.every((n) => onBase.has(n))) return null;
-  return { decision: "warn", reason: "tests_failed_baseline", extra: `"failing":${cur.names.length},"base_failing":${onBase.size}`, message: "" };
+  const shared = cur.names.filter((n) => onBase.has(n));
+  if (allow && shared.length === cur.names.length) {
+    return { decision: "warn", reason: "tests_failed_baseline", extra: `"failing":${cur.names.length},"base_failing":${onBase.size}`, message: "" };
+  }
+  const listed = shared.slice(0, 20).map((n) => `  - ${n}`);
+  if (shared.length > 20) listed.push(`  - ... and ${shared.length - 20} more`);
+  const message = shared.length
+    ? `These failing tests also fail on the base ${info.base.slice(0, 8)} (probably pre-existing; do not fix them unless your slice touches them; say so in your report):\n${listed.join("\n")}`
+    : "";
+  return { decision: "inform", reason: "tests_failed", extra: `"failing":${cur.names.length},"on_base":${shared.length}`, message };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -413,9 +510,9 @@ export function changedTestFiles(top, base) {
 
 /**
  * @param {{ cwd: string, cmd: string, isolated: boolean, state: string, event: any }} o
- * @returns {{ decision: string, reason: string, extra: string, message: string } | null}
+ * @returns {Promise<{ decision: string, reason: string, extra: string, message: string } | null>}
  */
-export function bugfix({ cwd, cmd, isolated, state, event }) {
+export async function bugfix({ cwd, cmd, isolated, state, event }) {
   if (agentKind(state, event) !== "bugfix") return null;
   const id = typeof event?.agent_id === "string" ? event.agent_id : "";
   const blocks = id
@@ -437,9 +534,9 @@ export function bugfix({ cwd, cmd, isolated, state, event }) {
   }
   const unusable = (/** @type {string} */ what) =>
     block("bugfix_base_unusable", `KIND: bugfix: unverified. The test run on ${short} ${what}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`);
-  const plain = plainBase(info, cwd, cmd, state);
+  const plain = await plainBase(info, cwd, cmd, state);
   if (!plain) return unusable("timed out or failed without parsable test names");
-  const withTests = runInBase(info, cwd, cmd, (wt) => {
+  const withTests = await runInBase(info, cwd, cmd, (wt) => {
     for (const t of tests) {
       mkdirSync(dirname(join(wt, t)), { recursive: true });
       copyFileSync(join(info.top, t), join(wt, t));
@@ -481,7 +578,7 @@ async function main() {
   const common = { cwd: process.cwd(), cmd: f.cmd ?? "", isolated: f.isolated === "1", state: f.state ?? "" };
   if (!common.cmd || !common.state) return;
   let res = null;
-  if (mode === "baseline") res = baseline({ ...common, output: input });
+  if (mode === "baseline") res = await baseline({ ...common, output: input, mode: f.mode ?? "inform" });
   else if (mode === "bugfix") {
     let event;
     try {
@@ -490,7 +587,7 @@ async function main() {
       return;
     }
     if (!event || typeof event !== "object") return;
-    res = bugfix({ ...common, event });
+    res = await bugfix({ ...common, event });
   }
   if (res) process.stdout.write(`${res.decision}\n${res.reason}\n${res.extra}\n${res.message}\n`);
 }
