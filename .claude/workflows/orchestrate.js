@@ -171,7 +171,15 @@ const normPath = (p) => {
   return x
 }
 // Equal paths, or one a folder prefix of the other at a path-segment boundary.
-const pathsOverlap = (a, b) => a === b || a === '.' || b === '.' || b.startsWith(a + '/') || a.startsWith(b + '/')
+// A glob counts as its literal prefix (as in plan-check.mjs), so src/** and src/*.ts overlap src/a.ts; an empty prefix
+// is the whole folder.
+const globBase = (p) => (p === '.' ? '' : p.replace(/\*.*$/, '').replace(/\/+$/, ''))
+const pathsOverlap = (a, b) => {
+  const x = globBase(a)
+  const y = globBase(b)
+  if (!x || !y) return true
+  return x === y || y.startsWith(x + '/') || x.startsWith(y + '/')
+}
 // Checks a list of slices and returns a fixed copy plus each problem found and the fix applied to it. `external` holds
 // ids that exist outside the list (finished slices on a replan): a slice may depend on them.
 function checkPlan(list, external) {
@@ -419,7 +427,8 @@ async function refute(s, gaps, label) {
         ? 'Look at the changes (git diff HEAD and git status if this folder is a git work tree, otherwise the files above)'
         : "Read the slice's files") +
       ' and try to refute each gap: a gap stands only when the changes really show the problem. Return one entry per gap: n (its number), stands, and the reason.\n',
-    { label, phase: 'Build', agentType: 'reviewer', schema: REFUTED },
+    // A risky slice's gaps include the opus reviewer's, so only an opus verdict may refute them.
+    { label, phase: 'Build', agentType: 'reviewer', model: s.risky ? 'opus' : undefined, schema: REFUTED },
   )
   if (!r) {
     log(`${s.id}: the refute pass returned nothing; every gap stands`)

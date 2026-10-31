@@ -578,3 +578,22 @@ test("every new switch can be turned off and restores the old behaviour", async 
   assert.deepEqual(labels(all.calls), ["plan:questions", "explore:q", "plan:slices", "build:a#1", "review:a#1", "build:a#2", "review:a#2", "plan:replan"]);
   assert.match(implementers(all.calls)[1].prompt, /Fix:\nold string gap\n/, "a plain string gap still counts");
 });
+
+test("plan check: a glob counts as its literal prefix, as in plan-check.mjs", async () => {
+  /** @param {string} fa @param {string} fb */
+  const deps = async (fa, fb) => planLogged(await run({ slices: [slice("a", { files: [fa] }), slice("b", { files: [fb] })] })).slices[1].dependsOn;
+  assert.deepEqual(await deps("src/**", "src/x.ts"), ["a"]);
+  assert.deepEqual(await deps("src/*.ts", "src/a.ts"), ["a"]);
+  assert.deepEqual(await deps("src/lib/**/*.ts", "./src/lib/"), ["a"]);
+  assert.deepEqual(await deps("**/*.md", "docs/a.md"), ["a"], "an empty prefix is the whole folder");
+  assert.deepEqual(await deps("src/*.ts", "test/a.ts"), []);
+  assert.deepEqual(await deps("src/x/**", "src/xy.ts"), [], "the prefix still ends at a path-segment boundary");
+});
+
+test("refute pass: a risky slice's gaps are refuted by an opus reviewer", async () => {
+  const gap = { pass: false, gaps: [{ text: "g", confidence: 90 }], evidence: "", answers: [], open: "" };
+  const risky = await run({ slices: [slice("a", { risky: true })], verdict: (l) => (l.startsWith("review:a#1") ? gap : answered([])) });
+  assert.equal(risky.calls.find((c) => c.opts.label === "refute:a#1").opts.model, "opus");
+  const plain = await run({ slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? gap : answered([])) });
+  assert.equal(plain.calls.find((c) => c.opts.label === "refute:a#1").opts.model, undefined);
+});
