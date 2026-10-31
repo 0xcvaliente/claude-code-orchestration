@@ -13,8 +13,8 @@ import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } fro
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO", "N-UC", "W-mix", "O-mix-plugin", "O-mix-030", "all-haiku", "all-sonnet", "routed"];
-export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook", "d2-docs"];
+export const ARMS = ["P-S", "P-O", "O-mix", "O-O", "O-next", "SDK", "AUTO", "N-UC", "W-mix", "O-mix-plugin", "O-mix-030", "all-haiku", "all-sonnet", "routed", "reader-haiku", "reader-sonnet", "reader-routed"];
+export const TASKS = ["t1-parallel", "t2-single", "h1-query-engine", "h2-scheduler", "k1-stdlib-toolkit", "h3-sql-engine", "k2-stdlib-toolkit-xl", "c1-unit-registry", "d1-handbook", "d2-docs"]; // d3-reader is left out on purpose: the hypothesis loops over TASKS would add entries to old summaries
 export const TASK_META = {
   "t1-parallel": { tier: "small", shape: "parallel" },
   "t2-single": { tier: "small", shape: "single" },
@@ -24,7 +24,7 @@ export const TASK_META = {
   "h3-sql-engine": { tier: "large", shape: "monolithic" },
   "k2-stdlib-toolkit-xl": { tier: "large", shape: "splittable" },
 };
-export const CELLS = ["main", "cap6", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
+export const CELLS = ["main", "cap6", "cap8", "cap10", "cap60", "budget1M", "budget3M", "budget8M"];
 const CLAIMS = new Set(["success", "partial", "failure", "unclear", "none"]);
 export const EXCLUDED_REASONS = new Set(["rate_limited", "error"]);
 const BOOT_ITERATIONS = 10_000;
@@ -195,6 +195,72 @@ export function gatesOf(rows) {
   return out;
 }
 
+// ---------- d3-reader: researcher tokens, launches and validity (H14 amendment for d3-reader) ----------
+
+export const READER_ARMS = ["reader-haiku", "reader-sonnet", "reader-routed"];
+// Document kinds the read router profiles as sonnet; same list as bench/tasks/d3-reader/score.mjs HARD (a test keeps them equal).
+export const READER_HARD = ["pdf-table", "pdf-scan", "chart", "xlsx-formula", "docx"];
+// Paired differences B - A for the reader arms (same machinery as PAIRS), with the reader metrics added.
+export const READER_PAIRS = [
+  ["reader-haiku", "reader-routed"],
+  ["reader-sonnet", "reader-routed"],
+  ["reader-haiku", "reader-sonnet"],
+];
+export const READER_METRICS = ["score_pct", "pass", "tokens", "researcher_tokens", "hard_pct"];
+
+const isReaderRun = (row) => READER_ARMS.includes(row.arm) || row.task === "d3-reader";
+const tokenSum = (t) => ["input", "output", "cache_read", "cache_write"].reduce((s, k) => s + (typeof t?.[k] === "number" && Number.isFinite(t[k]) ? t[k] : 0), 0);
+const hasTokens = (e) => e?.tokens && typeof e.tokens === "object" && ["input", "output", "cache_read", "cache_write"].some((k) => typeof e.tokens[k] === "number");
+
+// Per run: researcher launches (distinct agent ids of researcher SubagentStart records, else of SubagentStop records),
+// researcher tokens (input + output + cache read + cache write of the `tokens` field, from the LAST SubagentStop per agent:
+// a stop the quote check blocks is followed by a second stop whose transcript usage already includes the first), the
+// models those agents ran on, the router's reads-route.jsonl decisions, accuracy on the hard and easy document kinds
+// (from the final grade's by_cat), and validity. Invalid: fewer researcher launches than questions, or (reader-routed)
+// no reads-route.jsonl decision. researcher_tokens is null when no researcher stop carries tokens (no transcripts).
+export function readerOf(events, routeRecords, { questions = null, routed = false, byCat = null } = {}) {
+  const researcher = (e) => agentType(e) === "researcher";
+  const starts = events.filter((e) => eventName(e) === "SubagentStart" && researcher(e));
+  const stops = events.filter((e) => eventName(e) === "SubagentStop" && researcher(e));
+  const startIds = new Set(starts.map((e, i) => e.agent_id ?? `start#${i}`));
+  const lastStop = new Map();
+  stops.forEach((e, i) => lastStop.set(e.agent_id ?? `stop#${i}`, e));
+  const launches = startIds.size || lastStop.size;
+  const withTokens = [...lastStop.values()].filter(hasTokens);
+  const models = {};
+  for (const e of lastStop.values()) for (const m of Array.isArray(e.models) ? e.models : []) models[stripModel(m)] = (models[stripModel(m)] ?? 0) + 1;
+  const decisions = (routeRecords ?? []).filter((r) => r && typeof r === "object" && typeof r.decision === "string");
+  const kindPct = (want) => {
+    if (!byCat || typeof byCat !== "object") return null;
+    let p = 0;
+    let t = 0;
+    for (const [cat, v] of Object.entries(byCat)) {
+      if (READER_HARD.includes(cat) !== want || !Array.isArray(v)) continue;
+      p += Number(v[0]) || 0;
+      t += Number(v[1]) || 0;
+    }
+    return t > 0 ? r2((100 * p) / t) : null;
+  };
+  const invalid = [];
+  if (typeof questions === "number" && launches < questions) invalid.push(`researcher_launches ${launches} < ${questions} questions`);
+  if (routed && !decisions.length) invalid.push("no reads-route.jsonl decisions");
+  return {
+    researcher_launches: launches,
+    researcher_stops: stops.length,
+    researcher_tokens: withTokens.length ? withTokens.reduce((s, e) => s + tokenSum(e.tokens), 0) : null,
+    researcher_output_tokens: withTokens.length ? withTokens.reduce((s, e) => s + (Number(e.tokens.output) || 0), 0) : null,
+    researchers_with_tokens: withTokens.length,
+    researcher_models: models,
+    route_decisions: decisions.length,
+    routed_launches: decisions.filter((r) => r.decision === "route").length,
+    raised: decisions.filter((r) => r.raised === true).length,
+    hard_pct: kindPct(true),
+    easy_pct: kindPct(false),
+    questions,
+    invalid,
+  };
+}
+
 // Graded paths are prefixes ("src/") or globs ("lib/**/*.py", "*.js").
 const globRe = (p) =>
   new RegExp(
@@ -256,6 +322,10 @@ export function analyzeRun(row, grades, campaign) {
     ? readFileSync(join(runDir, "diff-files.txt"), "utf8").split("\n").map((l) => l.trim()).filter(Boolean)
     : [];
   const sum = (f) => results.reduce((a, d) => a + (typeof d?.[f] === "number" ? d[f] : 0), 0);
+  // d3-reader runs only: researcher metrics and validity; an invalid run is excluded like a rate-limited one.
+  const reader = isReaderRun(row)
+    ? readerOf(events, readJsonl(join(runDir, "state", "reads-route.jsonl")), { questions: meta?.total ?? g.final?.total ?? null, routed: row.arm === "reader-routed", byCat: g.final?.by_cat ?? null })
+    : null;
   return {
     run_id: row.run_id,
     campaign: campaign.manifest.campaign ?? campaign.dir,
@@ -267,7 +337,8 @@ export function analyzeRun(row, grades, campaign) {
     cap_min: capMin,
     budget_tokens: row.budget_tokens ?? null,
     end_reason: row.end_reason,
-    excluded: EXCLUDED_REASONS.has(row.end_reason),
+    excluded: EXCLUDED_REASONS.has(row.end_reason) || Boolean(reader?.invalid.length),
+    ...(reader ? { reader } : {}),
     exit_code: row.exit_code ?? null,
     error: row.error ?? null,
     wall_s: wallS,
@@ -606,7 +677,10 @@ export const PAIRS = [
 ];
 
 const metricOf = (r, metric) => {
-  const v = metric === "pass" ? (r.pass === null || r.pass === undefined ? null : r.pass ? 1 : 0) : metric === "tokens" ? r.tokens?.total ?? null : r[metric];
+  const v = metric === "pass" ? (r.pass === null || r.pass === undefined ? null : r.pass ? 1 : 0)
+    : metric === "tokens" ? r.tokens?.total ?? null
+      : metric === "researcher_tokens" || metric === "hard_pct" ? r.reader?.[metric] ?? null
+        : r[metric];
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 };
 
@@ -692,7 +766,41 @@ export function buildPaired(runs) {
       if (d.n_pairs) out.push(d);
     }
   }
+  // d3-reader arms: the same machinery, with researcher tokens and hard-kind accuracy as extra metrics.
+  for (const [a, b] of READER_PAIRS) {
+    for (const metric of READER_METRICS) {
+      const d = pairedDiff(runs, a, b, { metric });
+      if (d.n_pairs) out.push(d);
+    }
+  }
   return out;
+}
+
+// The summary's reader section (only when a campaign has d3-reader runs): invalid runs (listed, already excluded from
+// cells, comparisons and paired differences), and per-cell medians over the valid runs of researcher tokens, accuracy
+// (score_pct), hard-kind accuracy and researcher launches. Paired reader differences are in summary.paired.
+export function buildReader(all, included) {
+  const readerRuns = all.filter((r) => r.reader);
+  const invalid = readerRuns.filter((r) => r.reader.invalid.length).map(({ run_id, campaign, task, arm, cell, rep, reader }) => ({ run_id, campaign, task, arm, cell, rep, reasons: reader.invalid }));
+  const groups = new Map();
+  for (const r of included.filter((x) => x.reader)) {
+    const k = key(r.task, r.arm, r.cell);
+    (groups.get(k) ?? groups.set(k, []).get(k)).push(r);
+  }
+  const cells = [...groups.entries()].map(([k, rs]) => {
+    const [task, arm, cell] = k.split("|");
+    return {
+      task, arm, cell, n: rs.length, direction_only: rs.length < DIRECTION_ONLY_N,
+      researcher_tokens_median: r2(median(rs.map((r) => r.reader.researcher_tokens))),
+      researcher_output_tokens_median: r2(median(rs.map((r) => r.reader.researcher_output_tokens))),
+      score_median: r2(median(rs.map((r) => r.score_pct))),
+      hard_pct_median: r2(median(rs.map((r) => r.reader.hard_pct))),
+      easy_pct_median: r2(median(rs.map((r) => r.reader.easy_pct))),
+      researcher_launches_median: r2(median(rs.map((r) => r.reader.researcher_launches))),
+      route_decisions_median: r2(median(rs.map((r) => r.reader.route_decisions))),
+    };
+  }).sort((x, y) => order(x) - order(y));
+  return { runs: readerRuns.length, valid: readerRuns.length - invalid.length, invalid, cells };
 }
 
 // ---------- top level ----------
@@ -731,7 +839,8 @@ export function analyze(dirs, opts = {}) {
   const retriesByReason = {};
   for (const r of retries) retriesByReason[r.end_reason ?? "unknown"] = (retriesByReason[r.end_reason ?? "unknown"] ?? 0) + 1;
   const included = all.filter((r) => !r.excluded);
-  const excluded = all.filter((r) => r.excluded).map(({ run_id, task, arm, cell, rep, end_reason, error, campaign }) => ({ run_id, campaign, task, arm, cell, rep, end_reason, error }));
+  const excluded = all.filter((r) => r.excluded).map(({ run_id, task, arm, cell, rep, end_reason, error, campaign, reader }) => ({ run_id, campaign, task, arm, cell, rep, end_reason, error, ...(reader?.invalid.length ? { invalid: reader.invalid } : {}) }));
+  const hasReader = all.some((r) => r.reader);
   const cells = buildCells(included, all);
   for (const cell of cells) cell.retries = retries.filter((r) => r.task === cell.task && r.arm === cell.arm && r.cell === cell.cell).length;
   return {
@@ -745,6 +854,7 @@ export function analyze(dirs, opts = {}) {
       error: excluded.filter((e) => e.end_reason === "error").length,
       retries: retries.length,
       retries_by_reason: retriesByReason,
+      ...(hasReader ? { invalid: excluded.filter((e) => e.invalid).length } : {}),
     },
     retries,
     runs: all,
@@ -754,6 +864,7 @@ export function analyze(dirs, opts = {}) {
     hypotheses: evaluateHypotheses(included),
     paired: buildPaired(included),
     pass_k: passK(included),
+    ...(hasReader ? { reader: buildReader(all, included) } : {}),
   };
 }
 
@@ -785,4 +896,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const f = (x) => (x === null ? "n/a" : x.toFixed(2));
   for (const d of summary.paired) console.log(`paired ${d.arm_b} - ${d.arm_a} (${d.metric}): ${f(d.mean_diff)} (task-clustered SE ${f(d.se_clustered)}; ${d.n_pairs} pairs, ${d.n_tasks} tasks${d.direction_only ? ", direction only" : ""})`);
   for (const p of summary.pass_k) console.log(`pass^${p.k} ${p.task} ${p.arm} ${p.cell}: ${f(p.pass_hat_k)} (${p.c}/${p.n} passed)`);
+  if (summary.reader) {
+    for (const x of summary.reader.invalid) console.log(`invalid ${x.run_id}: ${x.reasons.join("; ")}`);
+    for (const c of summary.reader.cells) console.log(`reader ${c.task} ${c.arm} ${c.cell}: n=${c.n}, researcher tokens median ${c.researcher_tokens_median ?? "n/a"}, score median ${c.score_median ?? "n/a"}, hard median ${c.hard_pct_median ?? "n/a"}${c.direction_only ? ", direction only" : ""}`);
+  }
 }
