@@ -52,10 +52,11 @@ export function researcherViolation(command) {
 
 /** @param {string[]} w */
 function allowedWords(w) {
-  if (["wc", "ls", "du"].includes(w[0])) return true;
-  if (w[0] !== "git") return false;
+  const first = w[0] ?? "";
+  if (["wc", "ls", "du"].includes(first)) return true;
+  if (first !== "git") return false;
   const rest = w[1] === "-C" && w.length >= 4 ? w.slice(3) : w.slice(1);
-  if (GIT_SUBS.has(rest[0])) return true;
+  if (GIT_SUBS.has(rest[0] ?? "")) return true;
   return rest.length === 2 && rest[0] === "branch" && rest[1] === "--show-current";
 }
 
