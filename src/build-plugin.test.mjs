@@ -203,7 +203,6 @@ test("the judge command exits 0 without node, so onFailure never blocks every Ba
 test("userConfig declares every bridged switch with a type, title and a description naming its ORCH_ variable", () => {
   const manifest = read("dist/plugin/.claude-plugin/plugin.json");
   assert.equal(manifest.version, read("package.json").version);
-  assert.equal(manifest.version, "0.4.0");
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));

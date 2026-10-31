@@ -1,6 +1,6 @@
 # Claude Code orchestrator
 
-Split a task (code, research, writing, analysis or operations) across specialised agents when that pays off, and keep it in one plain session when it does not. A router sizes each task and picks the cheapest of three routes: a plain session, a plain session plus an independent reviewer, or a pipeline that plans the task, builds independent slices in parallel and has a fresh-context reviewer check each one, behind hooks that block a launch or a reply until the checks hold. It runs natively inside Claude Code (agents, hooks, skills and a workflow, shipped as a plugin), which takes any task, and as a TypeScript pipeline on the Claude Agent SDK, which takes code in a git repository only and has been frozen (maintenance only) since 0.3.0. This README describes version 0.4.0.
+Split a task (code, research, writing, analysis or operations) across specialised agents when that pays off, and keep it in one plain session when it does not. A router sizes each task and picks the cheapest of three routes: a plain session, a plain session plus an independent reviewer, or a pipeline that plans the task, builds independent slices in parallel and has a fresh-context reviewer check each one, behind hooks that block a launch or a reply until the checks hold. It runs natively inside Claude Code (agents, hooks, skills and a workflow, shipped as a plugin), which takes any task, and as a TypeScript pipeline on the Claude Agent SDK, which takes code in a git repository only and has been frozen (maintenance only) since 0.3.0. This README describes version 1.1.0, the first stable release.
 
 ## Contents
 
@@ -11,6 +11,8 @@ Split a task (code, research, writing, analysis or operations) across specialise
 - [Benchmarks](#benchmarks) · [Known limitations](#known-limitations) · [Safety](#safety) · [SDK pipeline](#sdk-pipeline) · [Reference](#reference) · [Development](#development)
 
 ## Install and quick start
+
+**Releases.** Versions are tagged from `v1.1.0` onward, and the changes in each are listed in [CHANGELOG.md](CHANGELOG.md).
 
 **Install the Claude Code plugin** (agents, gates, the `/route` skill, the gated workflow, the session nudge and the dashboard pane):
 
