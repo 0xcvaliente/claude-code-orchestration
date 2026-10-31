@@ -425,7 +425,7 @@ test("plan check: ORCH_SKILL_HINTS=off and a failed module load behave exactly a
   const before = session({ hooks: HOOKS.filter((h) => !h.startsWith("skill-")) });
   assert.ok(before.rs.every(([, stdout]) => stdout === ""));
   assert.equal(before.rs[3]?.[0], 2, "the second light slice is still blocked");
-  for (const env of [{ ORCH_SKILL_HINTS: "off" }, { ORCH_SKILL_HINTS: " OFF " }, { CLAUDE_PLUGIN_OPTION_SKILL_HINTS: "off" }]) {
+  for (const env of /** @type {Record<string, string>[]} */ ([{ ORCH_SKILL_HINTS: "off" }, { ORCH_SKILL_HINTS: " OFF " }, { CLAUDE_PLUGIN_OPTION_SKILL_HINTS: "off" }])) {
     assert.deepEqual(session({ env }), before, JSON.stringify(env));
   }
   const broken = session({ mutate: (dir) => writeFileSync(join(dir, ".claude", "hooks", "skill-hint.mjs"), "export const x = ;\n") });
