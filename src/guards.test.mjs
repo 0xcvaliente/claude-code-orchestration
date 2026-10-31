@@ -86,7 +86,7 @@ test("researcher guard: everything else is denied with a reason", () => {
   }
 });
 
-const bash = (/** @type {string} */ command, /** @type {string | undefined} */ agentType = "researcher") => ({
+const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
 });
 
@@ -110,7 +110,7 @@ test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.
 });
 
 test("researcher guard hook: other agent types, the main thread, ORCH_GUARDS=off and malformed input pass untouched", () => {
-  for (const t of ["implementer", "reviewer", "orchestration:implementer", undefined]) {
+  for (const t of ["implementer", "reviewer", "orchestration:implementer", null]) {
     const r = run(RESEARCHER, bash("python3 x.py", t));
     assert.deepEqual([r.code, r.stdout], [0, ""], String(t));
   }
@@ -195,7 +195,7 @@ test("egress guard hook: exit codes, gates.jsonl holds the host only, no decisio
   assert.equal(deny.stdout, "");
   const unv = run(EGRESS, fetchInput("https://any.example/p?token=abc", "agone"));
   assert.deepEqual([unv.code, unv.stdout], [0, ""]);
-  const wf = run(EGRESS, fetchInput("https://www.wf.example/x", "orchestration-x".replace("orchestration-x", "awf1"), "orchestration:reviewer"));
+  const wf = run(EGRESS, fetchInput("https://www.wf.example/x", "awf1", "orchestration:reviewer"));
   assert.deepEqual([wf.code, wf.stdout], [0, ""]);
   const off = run(EGRESS, fetchInput("https://evil.example/", "afg1"), { ORCH_GUARDS: "off" });
   assert.deepEqual([off.code, off.stdout, off.stderr], [0, "", ""]);
@@ -258,9 +258,6 @@ test("compact-context: open run → SessionStart additionalContext with slices, 
     const q = spawnSync(process.execPath, [COMPACT], { input: typeof input === "string" ? input : JSON.stringify(input), env: { ...env(), CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
     assert.deepEqual([q.status, q.stdout], [0, ""], JSON.stringify(input));
   }
-  // A closed run (every slice final) is silent too.
-  const closed = [...stops, stopRecord({ sessionId: sid, agentId: "x", role: "reviewer", slice: "zzz", reply: "STATUS: pass", ts: at(7) })];
-  assert.ok(closed.length);
 });
 
 test("compact-context: no state at all → silent; the context is capped", () => {
@@ -280,4 +277,55 @@ test("no hook source prints an allow or ask permission decision (C6)", () => {
     const src = readFileSync(hook(f), "utf8");
     assert.doesNotMatch(src, /permissionDecision|"ask"|decision:\s*"approve"/, f);
   }
+});
+
+test("plugin copies exit early on duplicate() when the project registers the same script (C4)", () => {
+  const dup = join(scratch, "dup-project");
+  mkdirSync(join(dup, ".claude", "hooks"), { recursive: true });
+  const scripts = ["researcher-guard.mjs", "egress-guard.mjs", "compact-context.mjs"];
+  for (const s of scripts) writeFileSync(join(dup, ".claude", "hooks", s), "");
+  writeFileSync(join(dup, ".claude", "settings.json"), JSON.stringify({ hooks: scripts.map((s) => `node .claude/hooks/${s}`) }));
+  /** @param {string} script @param {unknown} input */
+  const plugin = (script, input) => spawnSync(process.execPath, [script, "--plugin"], { input: JSON.stringify(input), env: { ...env(), CLAUDE_PROJECT_DIR: dup }, encoding: "utf8" });
+  const r1 = plugin(RESEARCHER, bash("python3 x.py"));
+  assert.deepEqual([r1.status, r1.stdout, r1.stderr], [0, "", ""]);
+  const r2 = plugin(EGRESS, fetchInput("https://evil.example/", "afg1"));
+  assert.deepEqual([r2.status, r2.stdout, r2.stderr], [0, "", ""]);
+  // Without the project registration the plugin copy does act.
+  const lone = join(scratch, "lone-project");
+  mkdirSync(lone, { recursive: true });
+  const r3 = spawnSync(process.execPath, [RESEARCHER, "--plugin"], { input: JSON.stringify(bash("python3 x.py")), env: { ...env(), CLAUDE_PROJECT_DIR: lone }, encoding: "utf8" });
+  assert.equal(r3.status, 2);
+});
+
+test("compact-context: a closed run and a stale run are silent", () => {
+  const sid = "sess-closed";
+  const dir = join(scratch, "closed-project");
+  const sdir = join(dir, ".claude", "state");
+  mkdirSync(sdir, { recursive: true });
+  const t0 = Date.now() - 60_000;
+  const at = (/** @type {number} */ s) => new Date(t0 + s * 1000).toISOString();
+  const onePlan = "PLAN REVIEW\nCONSTRAINTS:\nC1: tests pass\nSLICE: a\nFILES: src/a.ts\nDEPENDS: none\nGOAL: a\n";
+  const launches = [
+    launchRecord({ subagent_type: "reviewer", prompt: onePlan }, { sessionId: sid, agentId: "p1", ts: at(0) }),
+    launchRecord({ subagent_type: "implementer", prompt: "SLICE: a\nFILES: src/a.ts\nDEPENDS: none" }, { sessionId: sid, agentId: "i1", ts: at(2) }),
+    launchRecord({ subagent_type: "reviewer", prompt: "SLICE: a" }, { sessionId: sid, agentId: "r1", ts: at(4) }),
+  ];
+  const stops = [
+    stopRecord({ sessionId: sid, agentId: "p1", role: "reviewer", slice: "plan", reply: "STATUS: pass", ts: at(1) }),
+    stopRecord({ sessionId: sid, agentId: "i1", role: "implementer", slice: "a", reply: "STATUS: pass", ts: at(3) }),
+    stopRecord({ sessionId: sid, agentId: "r1", role: "reviewer", slice: "a", reply: "STATUS: pass", ts: at(5) }),
+  ];
+  const jsonl = (/** @type {unknown[]} */ rs) => rs.map((l) => JSON.stringify(l)).join("\n") + "\n";
+  writeFileSync(join(sdir, "journal-launches.jsonl"), jsonl(launches));
+  writeFileSync(join(sdir, "journal.jsonl"), jsonl(stops));
+  const call = (/** @type {Record<string, string>} */ extra = {}) =>
+    spawnSync(process.execPath, [COMPACT], { input: JSON.stringify({ session_id: sid, source: "compact" }), env: { ...env(extra), CLAUDE_PROJECT_DIR: dir }, encoding: "utf8" });
+  const closed = call();
+  assert.deepEqual([closed.status, closed.stdout], [0, ""]);
+  // Drop the review: the run is open again, and stale with ORCH_RUN_STALE_MIN=0.25 after 55 s of quiet.
+  writeFileSync(join(sdir, "journal.jsonl"), jsonl(stops.slice(0, 2)));
+  assert.match(call().stdout, /- a: building or reviewing/);
+  const stale = call({ ORCH_RUN_STALE_MIN: "0.25" });
+  assert.deepEqual([stale.status, stale.stdout], [0, ""]);
 });

@@ -24,7 +24,7 @@ function sliceState(s) {
 }
 
 /** @param {string} text @param {number} max */
-const cap = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 15).trimEnd()}\n[... truncated]`);
+const cap = (text, max) => (text.length <= max ? text : `${text.slice(0, max - 16).trimEnd()}\n[... truncated]`);
 
 /**
  * The context text for an open run, or null when there is none.

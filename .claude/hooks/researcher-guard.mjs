@@ -42,7 +42,7 @@ export function researcherViolation(command) {
     const words = /** @type {any[]} */ (c.words);
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
     if (words.some((w) => w.assign)) return { reason: "a variable assignment", word: words[0]?.text };
-    if (words.some((w) => w.dynamic)) return { reason: "a variable or other expansion", word: words[0]?.text };
+    if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command`, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
