@@ -665,7 +665,20 @@ const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
 // A run opens at a PLAN REVIEW launch without REPLAN (closing the previous one) or at a light-path implementer launch when none is open; REPLAN extends
 // the open run; it closes when every slice is final. A new prompt never closes it (headless runs deliver background results as a new prompt).
 const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed review is final
-type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer> }
+// Review counting (brief.mjs countReview): a fail whose gaps are all below the cutoff, with no failed answer, counts as a pass carrying a doubt
+// (`doubt`); a counted fail keeps the keys of its gaps at or above the cutoff (`gapKeys`, brief.mjs gapKey's normalised text before the hash) for
+// the stall check. The pane cannot read ORCH_GAP_MIN, so it uses the default cutoff. `replan` marks a PLAN REVIEW with REPLAN.
+const GAP_MIN = 80
+type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; replan?: boolean }
+const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
+export const countedOf = (reply: Reply): { status: 'pass' | 'fail' | null; doubt: boolean; keys: string[] } => {
+  const high = reply.gaps.filter(g => (g.confidence ?? 100) >= GAP_MIN)
+  const failedAnswer = Object.values(reply.answers).some(a => a.verdict === 'fail')
+  const doubt = reply.status === 'fail' && reply.gaps.length > 0 && !high.length && !failedAnswer
+  const status = doubt ? 'pass' : reply.status
+  return { status, doubt, keys: status === 'fail' ? [...new Set(high.map(g => gapText(g.text)))] : [] }
+}
+type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean; stalled: boolean }
 const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number]): SliceRun => {
   const mine = list.filter(a => a.slice === id)
   const impls = mine.filter(a => a.role === 'implementer')
@@ -690,10 +703,23 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
     ...(reviews.some(r => r.status === 'fail') ? ['retry'] : []),
     ...(pass && Object.values(pass.answers ?? {}).some(a => a.mode === 'read') ? ['read_answer'] : []),
     ...(pass?.open?.length ? ['open_items'] : []),
+    ...(current.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
   ]
+  const final = latest?.status === 'pass' || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
+  // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
+  // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one.
+  const implAt = (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
+  const counted = reviews.filter(r => r.status === 'pass' || r.status === 'fail').sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
+  const b = counted[counted.length - 1] as Rec | undefined
+  const ai = b ? counted.findLastIndex(r => implAt(r) !== implAt(b)) : -1
+  const a = (ai >= 0 ? counted[ai] : undefined) as Rec | undefined
+  const shared = a && b && a.status === 'fail' && counted.slice(ai + 1).every(r => r.status === 'fail') ? (b.gapKeys ?? []).filter(k => (a.gapKeys ?? []).includes(k)) : []
+  const replanned = !!b && list.some(x => (x as Rec).replan && x.endedAt !== undefined && x.endedAt > (b.endedAt as number))
   return {
     attempts,
-    final: latest?.status === 'pass' || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES),
+    final,
+    doubt: current.some(r => (r as Rec).doubt),
+    stalled: !final && shared.length > 0 && !replanned,
     risky,
     signals,
     opusPass: current.some(r => r.status === 'pass' && family(r.model) === 'opus'),
@@ -846,11 +872,12 @@ export const register: Register = on => {
     const parsed = plan ? parsePlan(e.prompt) : undefined
     const header = parseHeader(e.prompt)
     const slice = plan ? undefined : sliceOf(e.prompt) // a plan review is a stage of its own, whatever SLICE line its brief carries
-    const agent: Agent = {
+    const agent: Rec = {
       id: spawned.agentId, role, model: spawned.model, slice, label: slice ?? (plan ? 'plan review' : e.description),
       deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
       tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
       ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
+      ...(parsed && parsed.replan !== null ? { replan: true } : {}),
     }
     const t = agent.startedAt
     const before = await read($, agents)
@@ -996,7 +1023,11 @@ export const register: Register = on => {
       const outT = u?.output_tokens ?? 0
       const cacheT = (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0)
       const reply = parseReply(e.answer)
-      const status: Agent['status'] = reply.status ?? 'done'
+      const raw: Agent['status'] = reply.status ?? 'done'
+      // A reviewer's verdict as the gates count it: a fail with only low-confidence gaps is a pass with doubt.
+      const counted = countedOf(reply)
+      const review = (a: Agent) => (a.role === 'reviewer' ? { doubt: counted.doubt || undefined, gapKeys: counted.keys.length ? counted.keys : undefined } : {})
+      const statusOf = (a: Agent): Agent['status'] => (a.role === 'reviewer' && counted.doubt ? 'pass' : raw)
       // the constraint answers and OPEN items of this report (absent on an old-style reply, so its record is as before)
       const said = { ...(Object.keys(reply.answers).length ? { answers: reply.answers } : {}), ...(reply.open.length ? { open: reply.open } : {}) }
       const result = resultOf(e.answer)
@@ -1008,21 +1039,23 @@ export const register: Register = on => {
         if (!a) return l
         if (a.endedAt === undefined) {
           // the run this record opened ends
-          const upd = { ...a, status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
+          const status = statusOf(a)
+          const upd = { ...a, ...review(a), status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
           hold.one = upd
           return l.map((x, j) => (j === i ? upd : x))
         }
         // a turn ends for a record that already ended (a resume that fires no agent.spawn): the old run stays as history, the resumed run is a new record.
         // It starts when the old one ended, or after the last other end in its slice, so a retry after a reviewer's verdict starts after that verdict.
         const from = Math.max(a.endedAt, ...l.filter(x => a.slice && x.slice === a.slice && x !== a).map(x => x.endedAt ?? 0))
-        const again = { ...a, startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
+        const status = statusOf(a)
+        const again = { ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
         hold.one = again
         hold.resumed = true
         return [...l, again].slice(-80)
       })
       const one = hold.one
       if (one) {
-        const entry: LogEntry = { at: now, kind: status, role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
+        const entry: LogEntry = { at: now, kind: one.status, role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
         const note = hold.resumed ? startNote(list, one) : undefined
         if (note) await update($, log, l => [...l, { at: one.startedAt, kind: 'start', role: one.role, label: one.label, model: one.model, note } as LogEntry].slice(-60))
         await update($, log, l => [...l, entry].slice(-60))
@@ -1064,7 +1097,8 @@ export const register: Register = on => {
     // Progress through the orchestrator's plan: the planned slices in plan order, then any slice that started outside the plan, each at its latest
     // attempt (a failure made good counts as done). A slice is done once it passed review, or was built with no reviewer.
     const goals = new Map((plan?.slices ?? []).map(s => [s.id, s.goal]))
-    // Marks after a slice id, each only when it applies (an old-style plan and reply show none): ⚑ RISKY; ⇧opus✔ or ⇧opus? when a doubt signal
+    // Marks after a slice id, each only when it applies (an old-style plan and reply show none): ⚑ RISKY; ↻replan when the slice is stalled (it needs
+    // a REPLAN plan review); doubt when a review passed only because its gaps were all low-confidence; ⇧opus✔ or ⇧opus? when a doubt signal
     // (RISKY, a failed review before, a (read) answer or OPEN items in its passing review) asks for an opus review, and whether one passed; then one
     // tick per constraint from its latest review: C1✔ passed by a command, C1✓ passed by reading, C1✖ failed, C1· not answered.
     const marksOf = (id: string) => {
@@ -1074,7 +1108,7 @@ export const register: Register = on => {
         const a = sr.answers[c]
         return `${c}${!a ? '·' : a.verdict === 'fail' ? '✖' : a.mode === 'read' ? '✓' : '✔'}`
       })
-      return [...(sr.risky ? ['⚑'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
+      return [...(sr.risky ? ['⚑'] : []), ...(sr.stalled ? ['↻replan'] : []), ...(sr.doubt ? ['doubt'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
     }
     const steps = [...new Set([...(plan?.slices ?? []).map(s => s.id), ...[...map.values()].map(n => n.slice)])].map(id => {
       const n = resolve(map, id)

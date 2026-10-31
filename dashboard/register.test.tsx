@@ -1767,6 +1767,37 @@ test('marks: RISKY, the opus escalation and one constraint tick per check from t
   expect(t.includes('✔ s2 ⇧opus? · two')).toBe(true)
 })
 
+test('counted reviews: low-confidence gaps read as a pass with doubt; the same gap failing twice reads as a stall until a REPLAN', async ($, on) => {
+  await boot($, on, { model: id => (id.startsWith('q') ? 'claude-sonnet-5-5' : 'haiku') })
+  const plan = ['PLAN REVIEW', 'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none'].join('\n')
+  await spawnWith($, 'p1', plan, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 40 a variable name could be clearer\nOPEN: none')
+  let t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 doubt ⇧opus? · one')).toBe(true) // counted as a pass, with a doubt that asks for an opus review
+  await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s2', REVQ)
+  await finish($, 'r2', 'STATUS: fail\nGAP: 90 missing null check in parse()')
+  await spawnWith($, 'b3', 'SLICE: s2\nFILES: b.py\nDEPENDS: none', IMPL)
+  await finish($, 'b3', PASS)
+  await spawnWith($, 'r3', 'SLICE: s2', REVQ)
+  await finish($, 'r3', 'STATUS: fail\nGAP: 95 Missing null-check in parse()!')
+  t = await texts($, 100, 200)
+  expect(t.includes('✖ s2 ↻replan ⇧opus? · two')).toBe(true)
+  await spawnWith($, 'p2', `PLAN REVIEW\nREPLAN: 1\n${plan}`, REVQ)
+  await finish($, 'p2', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => x.includes('↻replan'))).toBe(false) // the REPLAN plan review cleared the stall
+  // A researcher's start line names the model it runs with (the read router may have raised it).
+  await spawnWith($, 'q1', 'SOURCES: scan.pdf\nREAD: extract\nWhat is the total?', 'orchestration:researcher')
+  t = await texts($, 100, 200)
+  expect(t.some(x => /q1 started · sonnet-5-5/.test(x))).toBe(true)
+})
+
 test('blocked launches: a gate denial of an Agent call is logged with its reason; another denial is not', async ($, on) => {
   on('tool.call', (_: unknown, e: any) => ({
     deny: e.prompt?.includes('s9') ? 'Plan check: slice s9 is not in the plan (not_in_plan). Re-plan with REPLAN first.'
