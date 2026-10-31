@@ -1,0 +1,46 @@
+{
+  "title": "Worker launch: how plan-check.mjs shapes a launch before the worker starts",
+  "description": "Every Agent launch passes plan-check.mjs first. A launch that breaks a plan rule is blocked and the reason goes back to the orchestrator. An allowed launch of the plugin's researcher that names SOURCES goes through the read router when it is switched on: each file is profiled with local tools, the cheapest adequate tier is picked, and the model is raised to that tier, never lowered. An allowed launch of the plugin's implementer, researcher or reviewer gets skill hints: from the user, synced, project and plugin skills found on disk, up to 3 suggestions (1 for a reviewer) are appended to the brief as names and reason codes. Both changes go out in one updatedInput with an allow. Built-ins, fork and the integrator, and launches with nothing to add, start unchanged.",
+  "width": 1000, "height": 1040,
+  "regions": [
+    {"id": "r-router", "label": "Read router (opt-in)", "x": 20, "y": 450, "w": 380, "h": 356},
+    {"id": "r-hints", "label": "Skill hints (on by default)", "x": 600, "y": 450, "w": 370, "h": 356}
+  ],
+  "nodes": [
+    {"id": "launch", "label": "Agent launch", "detail": "Agent type and brief", "x": 380, "y": 20, "w": 240, "h": 64, "status": "observed", "sources": [".claude/settings.json (PreToolUse, matcher Agent|Task)"]},
+    {"id": "rules", "label": "Plan-check rules", "shape": "decision", "x": 380, "y": 114, "w": 240, "h": 120, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (checks, in order)"]},
+    {"id": "blocked", "label": "Blocked", "detail": "Exit 2, with the reason", "x": 764, "y": 138, "w": 216, "h": 72, "status": "observed", "sources": [".claude/hooks/plan-check.mjs decide()"]},
+    {"id": "allowed", "label": "Allowed", "detail": "Which agent?", "x": 380, "y": 284, "w": 240, "h": 60, "status": "observed"},
+    {"id": "unchanged", "label": "Launch unchanged", "detail": "Built-ins, fork, the integrator, or nothing to add", "x": 720, "y": 280, "w": 240, "h": 96, "status": "observed", "sources": [".claude/rules/agents.md (the plan check's single allow exception)"]},
+    {"id": "profile", "label": "File profile", "detail": "Each SOURCES file, with local tools, no model", "x": 40, "y": 490, "w": 340, "h": 72, "status": "observed", "sources": [".claude/hooks/file-profile.mjs profileSources"]},
+    {"id": "tier", "label": "Tier", "detail": "The cheapest adequate one: haiku, sonnet or opus", "x": 40, "y": 602, "w": 340, "h": 72, "status": "observed", "sources": ["src/config.ts READ_TIERS", ".claude/hooks/file-profile.mjs"]},
+    {"id": "raise", "label": "Model raise", "detail": "Only when the tier ranks higher; never lower", "x": 40, "y": 714, "w": 340, "h": 72, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (read router: a model is never lowered)"]},
+    {"id": "catalog", "label": "Skill catalog", "detail": "User, synced, project and plugin skills on disk", "x": 620, "y": 490, "w": 330, "h": 72, "status": "observed", "sources": [".claude/hooks/skill-catalog.mjs"]},
+    {"id": "pick", "label": "Suggestions", "detail": "Up to 3 (1 for a reviewer), from file types, role and goal", "x": 620, "y": 602, "w": 330, "h": 72, "status": "observed", "sources": [".claude/hooks/skill-hint.mjs skillHints"]},
+    {"id": "block", "label": "Appended block", "detail": "Skill names and reason codes only", "x": 620, "y": 714, "w": 330, "h": 72, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (skill hints)"]},
+    {"id": "update", "label": "One updatedInput", "detail": "Allow, with the raised model and the added text", "x": 300, "y": 846, "w": 400, "h": 72, "emphasis": true, "status": "observed", "sources": [".claude/hooks/plan-check.mjs allowWith()"]},
+    {"id": "worker", "label": "Worker starts", "x": 380, "y": 958, "w": 240, "h": 56, "status": "observed"}
+  ],
+  "edges": [
+    {"id": "w-check", "from": "launch", "to": "rules", "points": [[500,84],[500,114]], "status": "observed"},
+    {"id": "w-block", "from": "rules", "to": "blocked", "points": [[620,174],[764,174]], "label": "breaks a rule", "label_at": [628,142], "label_w": 130, "status": "observed"},
+    {"id": "w-allow", "from": "rules", "to": "allowed", "points": [[500,234],[500,284]], "label": "passes", "label_at": [466,246], "label_w": 68, "status": "observed"},
+    {"id": "w-unchanged", "from": "allowed", "to": "unchanged", "points": [[620,314],[720,314]], "status": "observed"},
+    {"id": "w-router", "from": "allowed", "to": "profile", "points": [[420,344],[420,380],[210,380],[210,490]], "label": "researcher with SOURCES", "label_at": [100,400], "label_w": 230, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (only this plugin's researcher, only with SOURCES)"]},
+    {"id": "w-hints", "from": "allowed", "to": "catalog", "points": [[580,344],[580,380],[785,380],[785,490]], "label": "implementer, researcher, reviewer", "label_at": [640,400], "label_w": 300, "status": "observed", "sources": [".claude/hooks/plan-check.mjs (implementer only on ok or light_path)"]},
+    {"id": "w-tier", "from": "profile", "to": "tier", "points": [[210,562],[210,602]], "status": "observed"},
+    {"id": "w-raise", "from": "tier", "to": "raise", "points": [[210,674],[210,714]], "status": "observed"},
+    {"id": "w-pick", "from": "catalog", "to": "pick", "points": [[785,562],[785,602]], "status": "observed"},
+    {"id": "w-append", "from": "pick", "to": "block", "points": [[785,674],[785,714]], "status": "observed"},
+    {"id": "w-merge-router", "from": "raise", "to": "update", "points": [[210,786],[210,882],[300,882]], "status": "observed"},
+    {"id": "w-merge-hints", "from": "block", "to": "update", "points": [[785,786],[785,882],[700,882]], "status": "observed"},
+    {"id": "w-start", "from": "update", "to": "worker", "points": [[500,918],[500,958]], "status": "observed"},
+    {"id": "w-start-plain", "from": "unchanged", "to": "worker", "points": [[960,320],[985,320],[985,986],[620,986]], "status": "observed"}
+  ],
+  "notes": [
+    "Plan rules block implementer briefs (missing lines, file overlap, dependency cycle, no plan review, not in the plan, a stalled slice: replan_required) and built-ins or fork while a run is open. Researchers and reviewers are never blocked.",
+    "Hints reach an implementer only when its launch is allowed outright (ok or light_path), never after a gate gave up. An explicit SKILLS: line still reaches the worker; names not found on disk pass through, marked.",
+    "plan-check.mjs is the only hook that returns an allow, and a permissions.deny rule still wins. The scripted workflow makes no Agent call, so its agents never reach this check.",
+    "Switches (maintainer-facing): ORCH_READ_ROUTER=on turns the router on; ORCH_SKILL_HINTS=off turns the hints off."
+  ]
+}
