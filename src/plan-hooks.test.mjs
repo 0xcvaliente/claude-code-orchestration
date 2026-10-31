@@ -359,3 +359,54 @@ test("plan check: while a run is open, built-in and fork agents are blocked (bui
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("plan check: records without a run id (older plan check) own files only when newer than the latest run's opening", () => {
+  /** A record as an older plan check logged it: no `run` field. @param {string} dir @param {string} slice @param {string} file @param {number} at */
+  const legacy = (dir, slice, file, at) => {
+    mkdirSync(join(dir, ".claude", "state"), { recursive: true });
+    const e = { ts: new Date(at).toISOString(), session_id: "s1", decision: "allow", reason: "ok", slice, files: [file], depends: [], agent_type: "orchestration:implementer" };
+    writeFileSync(join(dir, ".claude", "state", "plan-check.jsonl"), `${JSON.stringify(e)}\n`, { flag: "a" });
+  };
+  const old = Date.now() - 3_600_000;
+  // No runs at all: no cutoff, legacy records still own their files (as in 0.2.0).
+  let dir = project();
+  try {
+    legacy(dir, "A1", "shared.py", old);
+    const r = launch(dir, "SLICE: b\nFILES: shared.py\nDEPENDS: none");
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /shared\.py \(owned by A1\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // Legacy records before a new PLAN REVIEW do not own files in it; ones newer than its opening do.
+  dir = project({ reviewed: false });
+  try {
+    legacy(dir, "A1", "shared.py", old);
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nTask: one");
+    assert.equal(launch(dir, "SLICE: b\nFILES: shared.py\nDEPENDS: none").status, 0, "older legacy record dropped");
+    legacy(dir, "A2", "late.py", Date.now() + 60_000);
+    const r = launch(dir, "SLICE: c\nFILES: late.py\nDEPENDS: none");
+    assert.equal(r.status, 2, "a legacy record newer than the run's opening still counts");
+    assert.match(r.stderr, /late\.py \(owned by A2\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // No run open but earlier runs exist (scope none-<k>): older legacy records and the earlier run's records drop.
+  dir = project({ reviewed: false });
+  try {
+    legacy(dir, "A1", "shared.py", old);
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a");
+    assert.equal(s.slice("SLICE: a\nFILES: a.py\nDEPENDS: none").status, 0, "run 1 closes when a passes");
+    const z = "SLICE: z\nFILES: shared.py, a.py\nDEPENDS: none";
+    // No run open: no plan review in scope none-1, so two no_plan_review blocks, then the file checks run.
+    assert.equal(launch(dir, z).status, 2);
+    assert.equal(launch(dir, z).status, 2);
+    const r = launch(dir, z);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastCheck(dir).run, "none-1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

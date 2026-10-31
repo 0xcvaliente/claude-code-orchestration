@@ -23,7 +23,8 @@
 //   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS.
 //   dependency_cycle      DEPENDS closes a cycle.
 // Same slice id again (a retry) keeps its own files. Every decision goes to plan-check.jsonl in the state dir with
-// the run it was scoped to (`run`); entries of older versions carry no `run` and count in every scope.
+// the run it was scoped to (`run`); entries of older versions carry no `run` and count in a scope only when newer than
+// the latest run's opening (in every scope when the session has no runs).
 // A wave's launches arrive at the same time, so read-decide-append runs under a lock (an exclusive mkdir); a lock
 // older than STALE_MS is taken over, and after WAIT_MS without it the hook decides unlocked rather than stall.
 // A brief with an ORCHESTRATION: workflow line (the scripted workflow) is not checked. Exits 0 on malformed input.
@@ -105,7 +106,12 @@ const k = runs.length;
 const lightBrief = h.path === "light";
 const runKey = open ? String(open.id) : lightBrief && role === "implementer" ? String(k + 1) : `none-${k}`;
 const scope = open ? [runKey] : lightBrief ? [`none-${k}`, runKey] : [runKey];
-const scoped = prior.filter((e) => e.run === undefined || scope.includes(String(e.run)));
+// A record without a run id (logged by an older plan check) counts only when it is newer than the latest run's opening;
+// otherwise it would own files in every later run. With no runs at all there is no cutoff.
+const cutoff = runs.at(-1)?.openedAt ?? null;
+/** @param {unknown} ts */
+const tsMs = (ts) => (typeof ts === "number" ? ts : Date.parse(String(ts ?? "")) || 0);
+const scoped = prior.filter((e) => (e.run === undefined ? cutoff === null || tsMs(e.ts) > cutoff : scope.includes(String(e.run))));
 /** @type {string[]} */
 const gaveUp = [];
 /** @type {string[]} */
