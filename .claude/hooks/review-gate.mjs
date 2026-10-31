@@ -20,6 +20,11 @@
 //    retry, read_answer, open_items, tests_failed_isolated; ORCH_ESCALATION=off|always), a passing review by an opus
 //    reviewer must exist after the latest attempt (opus_review_required). A slice that failed for good (latest review
 //    failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
+//    Reviews count by brief.mjs's fold (docs/brief-grammar.md, "Gap cutoff"): a fail whose gaps are all below
+//    ORCH_GAP_MIN (default 80; 0 = every fail counts) counts as a pass and adds the doubt signal low_confidence_fail;
+//    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
+//    "off"): a slice whose last two counted failed reviews share a gap key at or above the cutoff, with no REPLAN plan
+//    review started since, blocks with replan_required instead of last_reviewer_failed.
 // 3. Fallback, the old rule, when the session's last implementer has no slice in the run model (workflow agents, old
 //    briefs, launches outside a run): a reviewer must have finished after the last implementer (telemetry.jsonl) with
 //    STATUS: pass. Status is brief.mjs parseStatus (telemetry.mjs and journal.mjs both use it).
@@ -28,7 +33,7 @@
 // unverified, so giving up is never silent. Exits 0 on malformed input.
 import { appendFileSync, existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { currentReviews, doubtSignals, hasOpusPass, staleMinutes } from "./brief.mjs";
+import { countedStatus, currentReviews, doubtSignals, hasOpusPass, staleMinutes, stallGateOn } from "./brief.mjs";
 import { readJsonl, sessionRuns, sliceOfAgent } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -36,7 +41,7 @@ const MAX_BLOCKS = 2; // per reason since the last implementer finished; a new i
 const ACTIVE_TYPES = new Set(["subagent", "workflow", "teammate"]);
 const ACTIVE_STATUS = new Set(["running", "pending", "queued"]);
 // Reasons that existed before slice A1 give up as "max_blocks_reached" (as before); the new ones as <reason>_gave_up.
-const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required"]);
+const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required"]);
 let sessionId = "";
 /** @param {string} decision @param {string} reason @param {number} code @param {Record<string, unknown>} [extra] @returns {never} */
 function decide(decision, reason, code, extra = {}) {
@@ -158,14 +163,24 @@ for (const { run, s } of gated.values()) {
     problems.push({ slice: s.slice, reason: "no_reviewer_after_last_implementer", message: `Review gate: ${name}: an implementer finished but no reviewer has run since. Send the result to a reviewer (brief starting SLICE: ${s.slice}) before replying.` });
     continue;
   }
-  if (review.status === "fail") {
+  const counted = countedStatus(review);
+  if (counted === "fail" && s.stalled && stallGateOn(process.env)) {
+    problems.push({
+      slice: s.slice,
+      reason: "replan_required",
+      message: `Review gate: ${name}: its last two failed reviews report the same gap, so another retry is unlikely to fix it. Send the plan to the plan reviewer in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, before retrying; or report the slice as failed with the reviewer's gaps.`,
+    });
+    continue;
+  }
+  if (counted === "fail") {
     problems.push({ slice: s.slice, reason: "last_reviewer_failed", message: `Review gate: ${name}: the last reviewer reported STATUS: fail. Retry the implementer with the gaps, or report the slice as failed with evidence.` });
     continue;
   }
-  if (review.status !== "pass") {
+  if (counted !== "pass") {
     problems.push({ slice: s.slice, reason: "last_reviewer_no_status", message: `Review gate: ${name}: the last reviewer returned no STATUS line. Rerun the review, or report the slice as failed.` });
     continue;
   }
+  if (review.lowConfidence) skips.push(`last_reviewer_failed:${s.slice}:low_confidence`);
   if (!review.checks.length) skips.push(`constraints_unchecked:${s.slice}:no_checks`);
   else {
     const missing = review.checks.filter((id) => !review.answers[id]);

@@ -4,7 +4,7 @@
 //   SLICE: <id>    FILES: <owned files, comma-separated>    DEPENDS: <slice ids, or none>
 // Every check is scoped to a run, not to the session: the open run (not closed, not stale), or, with no run open,
 // the launches since the last run (a PATH: light launch with no run open opens the next run and sees both). Checks,
-// in order; the first four block (exit 2, reason on stderr) at most twice and then let the launch through with a logged
+// in order; the first five block (exit 2, reason on stderr) at most twice and then let the launch through with a logged
 // <reason>_gave_up, so a slip never stalls a run; the last two block every time, as they always have:
 //   builtin_agent_in_run  while a run is open, an Agent launch whose subagent_type is fork or a Claude Code built-in
 //                         (general-purpose, which a missing subagent_type also means, claude, Explore, Plan,
@@ -16,7 +16,10 @@
 //                         slice ran in scope is light_path_multi. Counted per slice; giving up opens the gate for the
 //                         run (no_plan_review_gave_up). A session whose log has a plan reviewer stop but no launch
 //                         records (older journal.mjs) counts as reviewed, as before.
-//   not_in_plan           in a planned run whose plan has parseable slice lines: the SLICE must be planned (or added
+//   replan_required       the open run's slice is stalled: its last two counted failed reviews share a gap key at or
+//                         above ORCH_GAP_MIN and no REPLAN plan review started since (docs/brief-grammar.md, "Stall
+//                         gate"). Counted per slice since the stall began. ORCH_STALL_GATE=off turns it off.
+//   not_in_plan          in a planned run whose plan has parseable slice lines: the SLICE must be planned (or added
 //                         by a REPLAN) and its FILES a subset of the planned FILES (normalizeFiles against the project
 //                         dir; a planned folder or glob covers what is under it). Without plan slice lines, or for a
 //                         planned slice without FILES, this skips with a logged reason. Counted per slice.
@@ -30,7 +33,7 @@
 // A brief with an ORCHESTRATION: workflow line (the scripted workflow) is not checked. Exits 0 on malformed input.
 import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { normalizeFiles, parseHeader } from "./brief.mjs";
+import { normalizeFiles, parseHeader, stallGateOn } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -175,6 +178,21 @@ if (!reviewed && !light) {
     decide("block", "no_plan_review", "Plan check: no plan review has finished in this run. Send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, fix the plan, then launch the implementers. Only the light path (a single slice) skips this, with the line PATH: light in the brief.");
   }
   gaveUp.push("no_plan_review_gave_up");
+}
+
+// Stall gate: the slice's last two counted failed reviews share a gap at or above ORCH_GAP_MIN and no REPLAN plan
+// review started since (brief.mjs foldRuns sets `stalled`). Blocks counted since the stall began.
+const st = open?.slices[slice];
+if (open && st?.stalled && stallGateOn(process.env)) {
+  const since = st.stalledAt ?? -Infinity;
+  if (blocks("replan_required", (e) => e.slice === slice && tsMs(e.ts) > since) < MAX_BLOCKS) {
+    decide(
+      "block",
+      "replan_required",
+      `Plan check: slice ${slice} is stalled in run ${open.id}: its last two failed reviews report the same gap. Send the plan to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, then launch it again; or report the slice as failed. ORCH_STALL_GATE=off turns this check off.`,
+    );
+  }
+  gaveUp.push("replan_required_gave_up");
 }
 
 // A glob counts as its literal prefix; two paths overlap when equal or when one is a folder of the other.
