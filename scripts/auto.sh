@@ -22,6 +22,8 @@ set -uo pipefail
 
 task="${1:?usage: auto.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
+# Absolute before the cd to the plugin root below: route.ts would resolve a relative path against that root.
+repo="$(cd "$repo" 2>/dev/null && pwd)" || { echo "repo folder not found: ${2:-$PWD}" >&2; exit 1; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
 requested="${ORCH_MODE:-auto}"

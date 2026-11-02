@@ -296,6 +296,39 @@ test("waves: orders by dependency and breaks cycles instead of hanging", () => {
   assert.deepEqual(waves([mk("x", ["y"]), mk("y", ["x"])]).map((w) => w.map((s) => s.id)), [["x", "y"]]);
 });
 
+test("waves: a cycle only frees its own members; a slice depending on a cycle keeps its dependency", () => {
+  const mk = (id: string, dependsOn: string[]): Slice => ({ id, goal: "", files: [], acceptance: "", dependsOn });
+  const out = waves([mk("a", ["b"]), mk("b", ["a"]), mk("c", ["a"])]);
+  assert.deepEqual(out.map((w) => w.map((s) => s.id)), [["a", "b"], ["c"]]);
+  assert.deepEqual(out[1]![0]!.dependsOn, ["a"]);
+});
+
+test("waves: a slice whose dependency never finished keeps that dependency, so runSlice can skip it", () => {
+  const mk = (id: string, dependsOn: string[]): Slice => ({ id, goal: "", files: [], acceptance: "", dependsOn });
+  const out = waves([mk("c", ["b"])], new Set(["a"]));
+  assert.deepEqual(out.map((w) => w.map((s) => [s.id, s.dependsOn])), [[["c", ["b"]]]]);
+});
+
+test("waves: a dependency that already passed does not count as unfinished when a cycle is broken", () => {
+  const mk = (id: string, dependsOn: string[]): Slice => ({ id, goal: "", files: [], acceptance: "", dependsOn });
+  const ids = (w: Slice[][]) => w.map((x) => x.map((s) => s.id));
+  assert.deepEqual(ids(waves([mk("a", []), mk("b", ["a", "c"]), mk("c", ["b"])])), [["a"], ["b", "c"]]);
+  assert.deepEqual(ids(waves([mk("a", []), mk("b", ["c"]), mk("c", ["b"]), mk("d", ["a", "b"])])), [["a"], ["b", "c"], ["d"]]);
+  assert.deepEqual(ids(waves([mk("b", ["p", "c"]), mk("c", ["b"])], new Set(["p"]))), [["b", "c"]]);
+  assert.deepEqual(ids(waves([mk("a", []), mk("b", ["x"]), mk("c", ["b"])])), [["a"], ["b"], ["c"]], "a failed external dependency still reaches runSlice");
+});
+
+test("a planner slice named result cannot collide with the integration branch", async () => {
+  const repo = await tempRepo();
+  const { run } = fake([slice("result")]);
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run });
+
+  assert.ok(report.slices.every((s) => s.id !== "result"));
+  assert.deepEqual(report.slices.map((s) => s.status), ["passed"]);
+  assert.ok(report.resultBranch, "integration succeeded");
+  assert.equal(report.error, undefined);
+});
+
 /** The fake, but the planner answers each `slices` request from `plans` in turn and verdicts follow `passes(cwd)`. */
 function scripted(plans: unknown[][], passes: (cwd: string) => boolean) {
   const inner = fake([]);

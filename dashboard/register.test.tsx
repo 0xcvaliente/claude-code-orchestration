@@ -1694,6 +1694,22 @@ test('run: a slice whose review failed is final only after 3 implementer attempt
   expect((await texts($)).some(x => /s1/.test(x))).toBe(false)
 })
 
+test('run: a last review with no STATUS line is no verdict (brief.mjs null): the slice is not final and the run stays open', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await spawnWith($, 'p1', PLAN1, REVQ)
+  await finish($, 'p1', PASS)
+  for (const k of [1, 2, 3]) {
+    await spawnWith($, `b${k}`, brief('s1'), IMPL)
+    await finish($, `b${k}`, PASS)
+    await spawnWith($, `r${k}`, 'SLICE: s1', REVQ)
+    await finish($, `r${k}`, k < 3 ? FAIL : 'I ran out of turns')
+  }
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'something else' })
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+})
+
 test('run: a light-path launch opens a run that a prompt keeps until its slice is reviewed', async ($, on) => {
   await boot($, on)
   const s = $ as any
@@ -1833,4 +1849,17 @@ test('blocked launches: a gate denial of an Agent call is logged with its reason
   expect(t.some(x => /⊘ blocked not_in_plan · s9 · implementer$/.test(x))).toBe(true)
   expect(t.some(x => /⊘ blocked no_plan_review · s8 · implementer$/.test(x))).toBe(true)
   expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(2) // a gave-up form and a person's denial are not gate blocks
+})
+
+test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as done; an implementer reply with none still is', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'i1', brief('s1'), IMPL)
+  await finish($, 'i1', 'built it')
+  let t = await texts($, 100, 200)
+  expect(t.some(x => /^◆ s1 /.test(x))).toBe(true) // an implementer with no STATUS line keeps the 'done' default
+  await spawnWith($, 'r1', brief('s1'), REVQ)
+  await finish($, 'r1', 'I read the diff and ran out of turns')
+  t = await texts($, 100, 200)
+  expect(t.some(x => /^✖ s1 /.test(x))).toBe(true)
+  expect(t.some(x => /^[◆✔] s1 /.test(x))).toBe(false)
 })

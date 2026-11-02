@@ -44,8 +44,8 @@ export const meta = {
 // session can resume with args.plan and args.skip.
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
-const MAX_SLICES = (args && args.maxSlices) || 6
-const MAX_RETRIES = (args && args.maxRetries) || 2
+const MAX_SLICES = args && typeof args.maxSlices === 'number' && args.maxSlices > 0 ? args.maxSlices : 6
+const MAX_RETRIES = args && typeof args.maxRetries === 'number' && args.maxRetries >= 0 ? args.maxRetries : 2
 // true only for a git repository whose settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
 const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
 const CODE = !(args && args.code === false)

@@ -94,7 +94,7 @@ const slug = (id: unknown) =>
 /** `known` are ids of slices that already exist (a replan): new ids avoid them and may depend on them. */
 function parseSlices(x: unknown, known: ReadonlySet<string> = new Set()): Slice[] {
   if (!isRecord(x) || !Array.isArray(x.slices)) return [];
-  const taken = new Set<string>(known);
+  const taken = new Set<string>([...known, "result"]); // "result" is the integration branch and worktree
   const finalId = new Map<string, string>(); // planner's id (normalised) -> final id
   const out: Slice[] = [];
   const rawDeps: string[][] = [];
@@ -122,7 +122,27 @@ export function waves(slices: Slice[], already: ReadonlySet<string> = new Set())
   const out: Slice[][] = [];
   while (left.length > 0) {
     let ready = left.filter((s) => s.dependsOn.every((d) => done.has(d)));
-    if (ready.length === 0) ready = left.map((s) => ({ ...s, dependsOn: [] })); // cycle: run what remains
+    if (ready.length === 0) {
+      // A dependency outside what is left never finished (it failed): keep it, runSlice skips the slice.
+      const ids = new Set(left.map((s) => s.id));
+      ready = left.filter((s) => s.dependsOn.some((d) => !ids.has(d) && !done.has(d)));
+      if (ready.length === 0) {
+        // Only slices on a cycle lose their deps; a slice that merely depends on a cycle waits for it.
+        const onCycle = (s: Slice) => {
+          const seen = new Set<string>();
+          const stack = [...s.dependsOn];
+          while (stack.length > 0) {
+            const d = stack.pop()!;
+            if (d === s.id) return true;
+            if (seen.has(d)) continue;
+            seen.add(d);
+            stack.push(...(left.find((x) => x.id === d)?.dependsOn ?? []));
+          }
+          return false;
+        };
+        ready = left.filter(onCycle).map((s) => ({ ...s, dependsOn: [] }));
+      }
+    }
     out.push(ready);
     for (const s of ready) done.add(s.id);
     const ids = new Set(ready.map((s) => s.id));

@@ -415,7 +415,9 @@ const stateOf = (n: Node): State => {
   if (!n.agents.length) return 'queued'
   if (n.agents.some(a => a.status === 'running')) return 'running'
   const review = lastOf(n, 'reviewer')
-  if (review) return review.status
+  // A reviewer reply with no STATUS line (it hit maxTurns) is stored as 'done' and gave no verdict: show it as failed, not green. This is done here
+  // and not in statusOf because sliceRunOf must keep seeing 'done' (neither pass nor fail, as brief.mjs counts it) so the pane never signs off before the gate.
+  if (review) return review.status === 'done' ? 'fail' : review.status
   const build = lastOf(n, 'implementer')
   if (build) return build.status === 'fail' ? 'fail' : 'done'
   return (n.agents[n.agents.length - 1] as Agent).status // a research or merge slice: its own report decides

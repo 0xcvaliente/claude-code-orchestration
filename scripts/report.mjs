@@ -66,7 +66,7 @@ const tokenCell = (r) => {
   return `≈${formatTokens(Math.round(r.cost_usd * TOKENS_PER_USD))}`;
 };
 const runRows = runs
-  .map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.task)}</td><td>${r.ok ? "ok" : "failed"}</td><td>${esc(tokenCell(r))}</td><td>${esc(r.turns ?? "n/a")}</td><td>${esc(Object.entries(r.subagents).map(([k, v]) => `${k}:${v}`).join(" "))}</td></tr>`)
+  .map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.task)}</td><td>${r.ok ? "ok" : "failed"}</td><td>${esc(tokenCell(r))}</td><td>${esc(r.turns ?? "n/a")}</td><td>${esc(Object.entries(r.subagents ?? {}).map(([k, v]) => `${k}:${v}`).join(" "))}</td></tr>`)
   .join("");
 
 const sessions = [...bySession.entries()]

@@ -798,3 +798,15 @@ test("parity: parseHeader matches plan-check.mjs, sliceOfBrief matches journal.m
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("fold: slice ids named like Object.prototype members are ordinary slices, not inherited keys", () => {
+  for (const id of ["constructor", "toString", "valueOf", "__proto__"]) {
+    const launch = launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${id}\nFILES: a.py\nDEPENDS: none` }, { ts: "2026-11-02T10:00:00Z", sessionId: "s1", agentId: "i1" });
+    const stop = stopRecord({ ts: "2026-11-02T10:01:00Z", sessionId: "s1", agentId: "i1", role: "implementer", reply: "STATUS: pass" });
+    const { runs } = foldRuns({ launches: [{ ...launch, path: "light" }], stops: [stop] }, { now: Date.parse("2026-11-02T10:02:00Z") });
+    const s = Object.values(runs[0]?.slices ?? {})[0];
+    assert.ok(s, `${id}: folded`);
+    assert.equal(s.slice, id);
+    assert.equal(s.attempts, 1);
+  }
+});

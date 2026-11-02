@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -32,4 +35,22 @@ test("statusline prints only the model line before any rate limit is reported", 
   const lines = plain(r.stdout).trimEnd().split("\n");
   assert.equal(lines.length, 2);
   assert.match(lines[1] ?? "", /^\[ctx\] .* 0%$/);
+});
+
+test("statusline without jq prints a fallback line and exits 0", () => {
+  // a PATH holding the basics but no jq
+  const dir = mkdtempSync(join(tmpdir(), "nojq-"));
+  try {
+    for (const t of ["bash", "cat", "git", "date", "cut", "wc", "tr", "dirname"]) {
+      const p = spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout.trim();
+      if (p) symlinkSync(p, join(dir, t));
+    }
+    const input = JSON.stringify({ model: { display_name: "Opus" }, workspace: { current_dir: "/a/b" }, context_window: { used_percentage: 40 } });
+    const r = spawnSync(join(dir, "bash"), [script], { input, encoding: "utf8", cwd: "/", env: { PATH: dir } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(plain(r.stdout), /jq/);
+    assert.equal(r.stderr, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -2,6 +2,26 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Bug fixes from a read-only audit of the hooks, the SDK pipeline, the scripts and the dashboard. Each fix has a test that failed before it.
+
+### Fixed
+
+- Hooks: a slice id that names an `Object.prototype` property (`constructor`, `__proto__`, `toString`) no longer throws in the run fold, and the Stop gate blocks instead of exiting 1 and letting the reply through when the run state cannot be read. `test-cmd.sh` detects `scripts.test`, not the word "test" anywhere in `package.json`.
+- SDK pipeline: `waves()` breaks only real cycles and keeps a dependency that failed or is still pending, so a slice no longer runs without its dependency's work; a planner slice named `result` no longer collides with the integration branch; a bare 500/502/503/504 in error text is no longer retried as transient.
+- Bash judge: `git config` keys that run programs (`difftool.*.cmd`, `mergetool.*.cmd`, `sendemail.*`, `web.browser`, `interactive.difffilter`, `init.templatedir`) are denied like the existing ones, in `src/judge.ts` and `.claude/hooks/judge-core.mjs`.
+- Scripts: `scripts/auto.sh` resolves a relative repo path against the caller's folder (a missing folder is an error) and `scripts/report.mjs` reads legacy `runs.jsonl` rows without `subagents`.
+- Workflow and UI: `maxRetries: 0` means no retries in the gated workflow; the status line prints a fallback when `jq` is missing; the dashboard progress step no longer shows a reviewer reply without a STATUS line as done (display only, run sign-off is unchanged).
+
+### Known and not fixed
+
+- The token budget restarts on `--resume` and is not applied to the plain and reviewed routes; the judge's own tokens are outside every budget.
+- The bash judge does not read the shell string passed to `parallel`, `flock -c` or `script -c`, and still lets through `difftool.<n>.path`, `mergetool.<n>.path` and `browser.<n>.cmd`.
+- The `/route` skill passes `$ARGUMENTS` inside double quotes, so a task containing quotes or `$(...)` is expanded by the shell.
+- CI does not run or typecheck the dashboard.
+- In the dashboard, the pipeline review cells and the phase state still read a reviewer reply without STATUS as done; `docs/dashboard.md` still says it shows as done.
+
 ## [1.1.0] - 2026-10-31
 
 1.1.0 is the first stable release and the first tagged one. It is 0.4.0 plus the follow-ups listed under Fixed and Added. There was no 1.0.0 tag, and the versions before this one were not tagged.

@@ -132,7 +132,16 @@ const failedForGood = [];
 const skips = [];
 
 // 2. Per slice of the current run.
-const { runs, records } = sessionRuns(sessionId, { now, env: process.env });
+/** @type {ReturnType<typeof sessionRuns>["runs"]} */
+let runs = [];
+/** @type {ReturnType<typeof sessionRuns>["records"]} */
+let records = { launches: [], stops: [], gates: [], starts: [] };
+try {
+  ({ runs, records } = sessionRuns(sessionId, { now, env: process.env }));
+} catch {
+  // A fold that throws on the log's data must not approve the reply: block (with the usual loop guard) instead.
+  problems.push({ reason: "run_state_unreadable", message: "Review gate: the run state could not be folded from the logs, so the work cannot be shown reviewed. Send the result to a reviewer before replying, or say in your reply that it is unverified." });
+}
 const latest = runs.at(-1);
 /** @type {Map<string, { run: import("./brief.mjs").Run, s: import("./brief.mjs").SliceState }>} */
 const gated = new Map();
