@@ -308,6 +308,17 @@ test("Stop gate: three failed attempts with the same gap still end as slice_fail
   assert.deepEqual([s.last().reason, s.last().failed_for_good], ["slice_failed_for_good", ["a"]]);
 });
 
+test("Stop gate: a slice id like constructor or __proto__ does not crash the gate; the unreviewed slice still blocks", () => {
+  for (const id of ["constructor", "__proto__"]) {
+    const s = session({ ORCH_ESCALATION: "off" });
+    s.agent("orchestration:implementer", `SLICE: ${id}\nPATH: light\nFILES: a.py\nDEPENDS: none`, "STATUS: pass");
+    const r = s.gate();
+    assert.equal(r.status, 2, `${id}: ${r.stderr}`);
+    assert.equal(s.last().reason, "no_reviewer_after_last_implementer");
+    assert.match(r.stderr, new RegExp(`slice ${id} \\(run 1\\)`));
+  }
+});
+
 test("Stop gate: a low-confidence fail counts as a pass, asks for an opus review, and ORCH_GAP_MIN=0 restores the fail", () => {
   const s = session();
   s.plan();

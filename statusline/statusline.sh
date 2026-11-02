@@ -3,9 +3,15 @@
 # Turn it on with the statusLine setting; see README "Statusline" or run `npm run install-statusline`.
 input=$(cat)
 
+if ! command -v jq > /dev/null 2>&1; then
+  echo "statusline: jq not found (install jq to see the model, branch and context bar)"
+  exit 0
+fi
+
 MODEL=$(echo "$input" | jq -r '.model.display_name')
 DIR=$(echo "$input" | jq -r '.workspace.current_dir')
 PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+case "$PCT" in ''|*[!0-9]*) PCT=0 ;; esac
 ADDED=$(echo "$input" | jq -r '.cost.total_lines_added // 0')
 REMOVED=$(echo "$input" | jq -r '.cost.total_lines_removed // 0')
 

@@ -41,6 +41,13 @@ test("detect: each runner, and nothing for an empty project", () => {
   assert.equal(detect({ "go.mod": "" }, { ORCH_TEST_CMD: "custom run" }), "custom run");
 });
 
+test("detect: npm test needs scripts.test, not the word test anywhere in package.json", () => {
+  assert.equal(detect({ "package.json": '{"keywords":["test"],"scripts":{"build":"x"}}' }), "");
+  assert.equal(detect({ "package.json": '{"name":"test"}' }), "");
+  assert.equal(detect({ "package.json": "not json \"test\"" }), "");
+  assert.equal(detect({ "package.json": '{"keywords":["test"],"scripts":{"test":"x"}}' }), "npm test --silent");
+});
+
 test("allow rules per runner", () => {
   assert.deepEqual(rules("python3 -m pytest -q"), ["Bash(python3 *)", "Bash(pytest*)"]);
   assert.deepEqual(rules("python3 -m unittest discover -q"), ["Bash(python3 *)"]);
