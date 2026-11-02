@@ -17,9 +17,11 @@ test("auto.sh passes an absolute --repo to route.ts when given a relative folder
     // A fake npx records its arguments and prints a decision that forces the orchestrator route.
     writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
     chmodSync(join(scratch, "bin", "npx"), 0o755);
+    // ORCH_AGENT_PREFIX skips orchestrate.sh's "is the plugin enabled here" check, so the test does not depend on
+    // whether the machine running it has the plugin installed (a CI runner does not).
     const r = spawnSync("bash", [join(scripts, "auto.sh"), "task", "proj"], {
       cwd: scratch,
-      env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_MODE: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" },
+      env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_AGENT_PREFIX: "orchestration:", ORCH_MODE: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" },
       encoding: "utf8",
     });
     assert.equal(r.status, 0, r.stderr);
