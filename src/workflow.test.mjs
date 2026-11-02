@@ -164,6 +164,14 @@ test("a failing review retries with the gaps, then reports failed after maxRetri
   assert.equal(r.result.failed, 1);
 });
 
+test("maxRetries: 0 means no retries; a non-positive maxSlices keeps the default of 6", async () => {
+  const r = await run({ args: { maxRetries: 0 }, slices: [slice("a")], verdict: () => ({ pass: false, gaps: ["g"], evidence: "x" }) });
+  assert.equal(implementers(r.calls).length, 1, "one attempt, no retry");
+  assert.equal(r.result.slices[0].attempts, 1);
+  const z = await run({ args: { maxSlices: 0 }, slices: [slice("a")] });
+  assert.equal(z.calls.find((c) => c.opts.label === "plan:slices").opts.schema.properties.slices.maxItems, 6);
+});
+
 test("risky slices get an extra opus review; a review that fails then passes ends passed on attempt 2", async () => {
   let n = 0;
   const r = await run({ slices: [slice("a", { risky: true })], verdict: () => (++n <= 2 ? { pass: false, gaps: ["g"], evidence: "" } : { pass: true, gaps: [], evidence: "" }) });

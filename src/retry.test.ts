@@ -17,6 +17,10 @@ test("isTransient: service errors yes, task failures and our own limits no", () 
   for (const text of ["429 Too Many Requests", "API Error: overloaded_error", "rate limit reached", "502 Bad Gateway", "read ECONNRESET", "stream ended unexpectedly"]) {
     assert.equal(isTransient(res({ ok: false, subtype: "exception", text })), true, text);
   }
+  for (const text of ["API Error: 500", "status 503", "HTTP 502", "503 Service Unavailable", "HTTP/1.1 504 Gateway Timeout"]) {
+    assert.equal(isTransient(res({ ok: false, subtype: "exception", text })), true, text);
+  }
+  assert.equal(isTransient(res({ ok: false, subtype: "exception", text: "expected 500 lines, got 3" })), false, "a bare number is not a status");
   assert.equal(isTransient(res({ ok: true })), false);
   assert.equal(isTransient(res({ ok: false, subtype: "timeout", text: "429" })), false, "our own timeout is never retried");
   assert.equal(isTransient(res({ ok: false, subtype: "error_max_turns", text: "" })), false);
