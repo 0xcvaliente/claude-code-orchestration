@@ -721,7 +721,7 @@ export function foldRuns(records, opts = {}) {
   /** @param {'planned' | 'light'} kind @param {number} ts @returns {Run} */
   const openRun = (kind, ts) => {
     /** @type {Run} */
-    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: {}, planReviewed: false, running: [], replans: [] };
+    const run = { id: runs.length + 1, kind, openedAt: ts, lastAt: ts, closed: false, stale: false, constraints: {}, planned: [], slices: Object.create(null), planReviewed: false, running: [], replans: [] };
     runs.push(run);
     return run;
   };
@@ -731,7 +731,7 @@ export function foldRuns(records, opts = {}) {
     if (ids.length && ids.every((id) => run.slices[id]?.final)) run.closed = true;
   };
   /** @param {string} slice */
-  const runWith = (slice) => (slice ? runs.findLast((r) => slice in r.slices) : undefined);
+  const runWith = (slice) => (slice ? runs.findLast((r) => Object.hasOwn(r.slices, slice)) : undefined);
   /** Idle: nothing of the run is running and nothing happened in it for staleMs. @param {Run} run @param {number} ts */
   const idle = (run, ts) => run.running.length === 0 && ts - run.lastAt > staleMs;
   /** @type {Map<string, Run>} the run each PLAN REVIEW reviewer (by agent id) belongs to */
