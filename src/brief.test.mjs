@@ -276,6 +276,11 @@ test("reviewer model: tool_input.model, else project agent file, else plugin age
   assert.equal(isOpusModel("opus"), true);
   assert.equal(isOpusModel("claude-opus-5-5"), true);
   assert.equal(isOpusModel("Claude-OPUS"), true);
+  // 1.2.0: opus or a stronger tier meets the escalation rule.
+  assert.equal(isOpusModel("fable"), true);
+  assert.equal(isOpusModel("claude-fable-5-2"), true);
+  assert.equal(isOpusModel("claude-mythos-5-2"), true);
+  assert.equal(isOpusModel("haiku"), false);
   assert.equal(isOpusModel("sonnet"), false);
   assert.equal(isOpusModel(null), false);
 });
@@ -760,6 +765,8 @@ test("doubt signals: risky, retry, read answer, open items, isolated test failur
   // An opus pass after the latest implementer satisfies them; one before a relaunch does not; the model comes from the launch.
   const opus = sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", "claude-opus-5-5")], "b");
   assert.equal(hasOpusPass(opus), true);
+  const fable = sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", "fable")], "b");
+  assert.equal(hasOpusPass(fable), true, "a review on a stronger tier meets the opus rule (1.2.0)");
   const relaunched = sliceOf([impl(1, "b"), implStop(2, "impl-b-1"), ...review(3, "b", "STATUS: pass", "opus"), impl(4, "b")], "b");
   assert.equal(hasOpusPass(relaunched), false);
   assert.equal(currentReviews(relaunched).length, 0);

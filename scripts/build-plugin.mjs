@@ -82,6 +82,8 @@ const hooks = {
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs"), timeout: 60 }] },
       { matcher: "Bash", hooks: [{ type: "command", command: run("researcher-guard.mjs") }] },
       { matcher: "WebFetch", hooks: [{ type: "command", command: run("egress-guard.mjs") }] },
+      // Before a worker's report is delivered (auto mode): its format, and a researcher's quotes. Both filter by agent type.
+      { matcher: "SubagentHandback", hooks: [{ type: "command", command: run("handback-check.mjs") }, { type: "command", command: run("quote-check.mjs") }] },
     ],
     PostToolUse: [
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("journal.mjs") }] },
@@ -133,6 +135,7 @@ const OPTIONS = [
   ["quote_check", "string", "Quote check", "Empty: on; off skips checking researcher QUOTE lines against their sources (ORCH_QUOTE_CHECK)."],
   ["gate_isolated", "string", "Test gate in worktrees", "Test gate in isolated worktrees: warn (default), block or skip (ORCH_GATE_ISOLATED)."],
   ["skill_hints", "string", "Skill hints", "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."],
+  ["handback_check", "string", "Report check", "Empty: on; off skips sending a worker's report back once when it has no STATUS line or leaves a checked id unanswered (ORCH_HANDBACK_CHECK)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(
@@ -144,6 +147,13 @@ writeFileSync(
   `${JSON.stringify({ name: NAME, version, description: "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
 );
 
+// Plugin settings.json: a plugin may set two keys, `agent` and `subagentStatusLine` (every other key is dropped at
+// load). This one rewrites the row of each of this plugin's workers under the prompt (subagent-statusline.mjs); a
+// `subagentStatusLine` in the user's or the project's own settings takes its place.
+if (has("subagent-statusline.mjs")) {
+  writeFileSync(join(out, "settings.json"), `${JSON.stringify({ subagentStatusLine: { type: "command", command: run("subagent-statusline.mjs") } }, null, 2)}\n`);
+}
+
 cpSync(join(dashSrc, "register.tsx"), join(dash, "hooks", "register.tsx"));
 cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));
 writeFileSync(join(dash, "hooks", "hooks.json"), `${JSON.stringify({ modules: ["./register.tsx"] }, null, 2)}\n`);
@@ -153,7 +163,8 @@ writeFileSync(
 );
 if (check) {
   const stale = ["plugin", "dashboard"].flatMap((name) => {
-    const d = spawnSync("diff", ["-r", join(outRoot, name), join(committedRoot, name)], { encoding: "utf8" });
+    // `claude plugin eval` writes its reports to dist/plugin/evals/results (ignored by git): not part of the build.
+    const d = spawnSync("diff", ["-r", "-x", "results", join(outRoot, name), join(committedRoot, name)], { encoding: "utf8" });
     return d.status === 0 ? [] : [`dist/${name} is out of date; run npm run build-plugin\n${d.stdout}${d.stderr}`];
   });
   rmSync(outRoot, { recursive: true, force: true });

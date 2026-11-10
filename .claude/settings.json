@@ -51,6 +51,13 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/egress-guard.mjs\"" }
         ]
+      },
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/handback-check.mjs\"" },
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/quote-check.mjs\"" }
+        ]
       }
     ],
     "UserPromptSubmit": [

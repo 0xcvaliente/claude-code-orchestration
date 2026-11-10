@@ -93,7 +93,8 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     const hb = hooksJson(outBare).hooks;
     assert.ok(!/judge-hook|prompt-capture/.test(commands(hb)), "no judge hooks without their files");
     assert.equal(hb.UserPromptSubmit, undefined);
-    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch"]);
+    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch", "SubagentHandback"]);
+    assert.ok(existsSync(join(outBare, "plugin", "settings.json")), "the subagent status line setting ships with its script");
     assert.ok(!existsSync(join(bare, "dist")), "a build with --out writes no dist/");
 
     build(full, outFull);
@@ -206,7 +207,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 15);
+  assert.equal(keys.length, 16);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
@@ -219,6 +220,24 @@ test("userConfig declares every bridged switch with a type, title and a descript
   }
   const defaults = Object.entries(manifest.userConfig).filter(([, o]) => "default" in o).map(([k, o]) => [k, o.default]);
   assert.deepEqual(Object.fromEntries(defaults), { gap_min: 80, run_stale_min: 30, baseline: "inform" });
+});
+
+test("1.2.0: reports are checked at SubagentHandback in the project and the plugin, and the plugin ships the subagent status line", () => {
+  for (const [h, tail] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), ""], [read("dist/plugin/hooks/hooks.json"), " --plugin"]])) {
+    const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
+    assert.ok(e, "a SubagentHandback entry");
+    const cmds = e.hooks.map((/** @type {any} */ c) => String(c.command));
+    assert.equal(cmds.length, 2);
+    assert.ok(cmds[0].includes("handback-check.mjs") && cmds[1].includes("quote-check.mjs"));
+    for (const c of cmds) assert.ok(c.endsWith(`.mjs"${tail}`), c);
+    // Deny-only hooks: neither fails closed, so a crash never holds a report back.
+    assert.ok(e.hooks.every((/** @type {any} */ c) => c.onFailure === undefined));
+  }
+  for (const f of ["handback-check.mjs", "subagent-statusline.mjs"]) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", f)), `${f} ships`);
+  // A plugin may set only `agent` and `subagentStatusLine`: the file holds exactly the one key.
+  assert.deepEqual(read("dist/plugin/settings.json"), { subagentStatusLine: { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-statusline.mjs" --plugin' } });
+  // The project's own settings do not set it: the plugin's default, or the person's own row, applies there.
+  assert.equal(read(".claude/settings.json").subagentStatusLine, undefined);
 });
 
 test("--out without a directory fails", () => {

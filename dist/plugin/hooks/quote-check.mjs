@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 // SubagentStop quote check for researchers (0.4.0; design: docs/research-2026-10-31.md section 2.5). Registered for the
 // researcher; it also returns at once for any other bare agent_type. ORCH_QUOTE_CHECK=off disables it.
+// Since 1.2.0 it is also registered on PreToolUse for the SubagentHandback tool, where the report is
+// tool_input.message and exit 2 keeps the report from being delivered until the researcher sends it again; records
+// written there carry `at: "handback"`, and the SubagentStop that follows such a record exits at once.
 // It reads the researcher's final report (the last assistant text block or SubagentHandback message of
 // agent_transcript_path, as telemetry.mjs finds it; else last_assistant_message), takes its QUOTE lines with brief.mjs
 // parseReply, and looks each quote's text up in the locator's file:
@@ -70,7 +73,14 @@ function reportFromTranscript(path) {
   return undefined;
 }
 
-const report = reportFromTranscript(input.agent_transcript_path) ?? (typeof input.last_assistant_message === "string" ? input.last_assistant_message : "");
+// 1.2.0: registered on PreToolUse for SubagentHandback too. In auto mode the report is that call's message, and a
+// SubagentStop block comes after it was delivered; checked here, an unverified quote is corrected before delivery.
+const atHandback = input.tool_name === "SubagentHandback" && typeof input.tool_input?.message === "string";
+if (input.tool_name !== undefined && !atHandback) process.exit(0); // a tool call that carries no report
+const reportAgentId = typeof input.agent_id === "string" && input.agent_id ? input.agent_id : null;
+// The stop that follows a checked handback has nothing new to check.
+if (!atHandback && reportAgentId && readJsonl(stateDir, LOG).some((e) => e.agent_id === reportAgentId && e.at === "handback")) process.exit(0);
+const report = atHandback ? String(input.tool_input.message) : (reportFromTranscript(input.agent_transcript_path) ?? (typeof input.last_assistant_message === "string" ? input.last_assistant_message : ""));
 const quotes = parseReply(report).quotes;
 const projectDir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
 const cacheDir = `${stateDir}/read-cache`;
@@ -201,18 +211,23 @@ try {
 } catch {
   // no journal: no slice
 }
-const blockedBefore = agentId ? readJsonl(stateDir, LOG).some((e) => e.agent_id === agentId && e.blocked === true) : input.stop_hook_active === true;
+// At a hand-back a refusal must be provably the only one: a refused report is not delivered until the researcher sends
+// it again, and after three refusals it is never delivered. So there the hook blocks only with an agent id (without
+// one a second report cannot be told from the first) and only once the record of the refusal is written and readable.
+const blockedBefore = agentId ? readJsonl(stateDir, LOG).some((e) => e.agent_id === agentId && e.blocked === true) : atHandback ? true : input.stop_hook_active === true;
 const block = counts.unverified > 0 && !blockedBefore;
+let recorded = false;
 try {
   ensureStateDir();
   appendFileSync(
     `${stateDir}/${LOG}`,
-    `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_id: agentId, slice, total: quotes.length, ...counts, blocked: block, ...(unverifiedPaths.length ? { unverified_paths: unverifiedPaths } : {}) })}\n`,
+    `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_id: agentId, slice, total: quotes.length, ...counts, blocked: block, ...(atHandback ? { at: "handback" } : {}), ...(unverifiedPaths.length ? { unverified_paths: unverifiedPaths } : {}) })}\n`,
   );
+  recorded = !atHandback || !block || readJsonl(stateDir, LOG).some((e) => e.agent_id === agentId && e.blocked === true && e.at === "handback");
 } catch {
-  // logging must never change the decision
+  // at SubagentStop logging never changes the decision; at a hand-back an unrecorded refusal is not made (below)
 }
-if (block) {
+if (block && (recorded || !atHandback)) {
   const list = unverifiedLocators.map((l) => `- ${l}`).join("\n");
   try {
     process.stderr.write(

@@ -81,9 +81,11 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
     ok: false, text, tokens: 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
   });
 
-  // Bash roles: every Bash call passes the guard first. Plain `Bash` is pre-approved, so a hook that throws, times out or
-  // returns nothing would let the command run: bashGuard denies on any throw and HOOK_TIMEOUT_S is above the judge's own
-  // timeout. With the judge off the guard still denies the judged classes, on top of UNSAFE_BASH in disallowedTools.
+  // Bash roles: every Bash call passes the guard first. Plain `Bash` is pre-approved, so a guard that failed without
+  // blocking would let the command run. Three layers keep that from happening: bashGuard denies on any throw of its
+  // own, HOOK_TIMEOUT_S is above the judge's own timeout (and a PreToolUse callback that does time out blocks the call,
+  // Claude Code 2.1.210 and later), and the matcher's onFailure "block" below covers what is left.
+  // With the judge off the guard still denies the judged classes, on top of UNSAFE_BASH in disallowedTools.
   // The judge's own tokens are NOT part of the worker's `tokens` (they are a separate query() inside the hook).
   let hooks: Options["hooks"];
   if (cfg.tools.includes("Bash")) {
@@ -92,7 +94,10 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
       role: req.role, brief: req.prompt, task: req.task ?? "", cwd: req.cwd,
       enabled: judgeEnabled(env), deps: (deps.judgeDeps ?? defaultJudgeDeps)(auditFile),
     });
-    const matcher: HookCallbackMatcher = { matcher: "Bash", timeout: HOOK_TIMEOUT_S, hooks: [guard] };
+    // onFailure "block" (Agent SDK 0.3.317): a guard that throws, returns nothing or returns invalid output blocks the
+    // command instead of letting it reach the pre-approved Bash rule. bashGuard already denies on its own errors; this
+    // closes the cases outside it. The SDK refuses to start the query on a Claude Code that does not honor the option.
+    const matcher: HookCallbackMatcher = { matcher: "Bash", timeout: HOOK_TIMEOUT_S, onFailure: "block", hooks: [guard] };
     hooks = { PreToolUse: [matcher] };
   }
   const sandbox = cfg.tools.includes("Bash") ? sandboxFor(env, req.cwd) : undefined;
