@@ -4,6 +4,12 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-10
+
+### Fixed
+
+- `npm run report` counted an agent once per stop record. An agent stops more than once (the test gate sends an implementer back, a resume, the stops around a hand-back) and each record carries its running total from the transcript, so the role table, and the cost table added in 1.2.0, counted such an agent's tokens two or three times: in the logs of 2026-11-01 to 11-03 implementer cache reads came out 72% to 76% too high. Both tables now take each agent's last stop record, and "Agents" counts agents. The figures in [docs/research-2026-11-10.md](docs/research-2026-11-10.md) that came from the same sums are corrected.
+
 ## [1.2.0] - 2026-11-10
 
 1.2.0 follows Claude Code 2.1.317 to 2.1.322 and closes three gaps found while researching it ([docs/research-2026-11-10.md](docs/research-2026-11-10.md), probes in [docs/data/live-checks-2026-11-10.md](docs/data/live-checks-2026-11-10.md)). It also carries the bug fixes from a read-only audit of the hooks, the SDK pipeline, the scripts and the dashboard, merged after 1.1.0; each of those has a test that failed before it. The brief and reply grammar, the gate reason names and the agent names are unchanged; one gate reason and one setting are new.
@@ -100,5 +106,6 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.2.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.1
 [1.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.0
 [1.1.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.1.0
