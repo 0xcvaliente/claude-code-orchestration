@@ -64,7 +64,7 @@ test("report: cost by role and model at list prices, cache rewrites, unpriced st
     assert.match(html, /<h2>Estimated cost by role and model<\/h2>/);
     // The costlier row first: implementer on Sonnet 5.5 at $6.80, then the reviewer on Opus 5.5 at 1 + 1 + 2 = $4.00.
     assert.match(html, /<td>implementer<\/td><td>claude-sonnet-5-5<\/td><td>1<\/td><td>\$6\.80<\/td><td>\$6\.80<\/td>.*<td>2 \(300k\)<\/td>.*<td>reviewer<\/td><td>claude-opus-5-5<\/td><td>1<\/td><td>\$4\.00<\/td><td>\$4\.00<\/td>/s);
-    assert.match(html, /Total \$10\.80 at list prices as of \d{4}-\d{2}-\d{2}.*not a bill.*2 agent stops not priced/);
+    assert.match(html, /Total \$10\.80 at list prices as of \d{4}-\d{2}-\d{2}.*not a bill.*2 agents not priced/);
     assert.match(html, /Started and never stopped \(turn limit, killed, or still running\): implementer 1, researcher 2\./);
     assert.match(html, /<h2>Agents by role<\/h2>/, "the role table stays");
 
@@ -72,8 +72,49 @@ test("report: cost by role and model at list prices, cache rewrites, unpriced st
     writeFileSync(join(state, "telemetry.jsonl"), `${JSON.stringify(stop("r3", "reviewer", { status: "pass" }))}\n`);
     assert.equal(spawnSync("node", [join(root, "scripts", "report.mjs"), dir], { encoding: "utf8" }).status, 0);
     const bare = readFileSync(join(state, "report.html"), "utf8");
-    assert.match(bare, /No priced agent stops yet/);
+    assert.match(bare, /No priced agents yet/);
     assert.doesNotMatch(bare, /Started and never stopped/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report: an agent that stops several times is counted once, with its last record (each record is a running total)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-once-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    const M = 1_000_000;
+    /** @param {string} session @param {string} id @param {string} type @param {number} scale @param {object} [rest] */
+    const stop = (session, id, type, scale, rest = {}) => ({
+      ts: "t", session_id: session, hook_event_name: "SubagentStop", agent_id: id, agent_type: type,
+      tokens: { input: 0, output: 0.1 * M * scale, cache_read: 10 * M * scale, cache_write: 0 }, turns: 10 * scale, models: ["claude-sonnet-5-5"], max_turns_hit: false, ...rest,
+    });
+    const tel = [
+      // One implementer, three stops: the test gate sent it back once, then it was resumed. Each record is the total so far.
+      stop("s1", "i1", "implementer", 1),
+      stop("s1", "r1", "reviewer", 1),
+      stop("s1", "i1", "implementer", 2),
+      stop("s1", "i1", "orchestration:implementer", 3, { cache_rewrites: { requests: 1, tokens: 50000 } }),
+      // The same agent id in another session is another agent.
+      stop("s2", "i1", "implementer", 1),
+      // Records with no agent id (older logs) cannot be joined: each counts on its own.
+      { ...stop("s1", "", "integrator", 1), agent_id: undefined },
+      { ...stop("s1", "", "integrator", 1), agent_id: undefined },
+    ];
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const r = spawnSync("node", [join(root, "scripts", "report.mjs"), dir], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const html = readFileSync(join(state, "report.html"), "utf8");
+    // Role table: 2 implementers (not 4 stop records), output 0.3M + 0.1M, cache read 30M + 10M, turns 30 + 10.
+    assert.match(html, /<td>implementer<\/td><td>2<\/td><td>2<\/td><td>0<\/td><td>400k<\/td><td>40\.0M<\/td><td>0<\/td><td>40<\/td>/);
+    assert.match(html, /<td>integrator<\/td><td>2<\/td><td>2<\/td>/);
+    // Cost: the three-stop implementer once at its last total (0.3M out, 30M read on Sonnet 5.5 = $3 + $3), plus the
+    // other session's (1 + 1): $8.00 over 2 agents. Summing every record gave $14.00 over 4 for this row.
+    assert.match(html, /<td>implementer<\/td><td>claude-sonnet-5-5<\/td><td>2<\/td><td>\$8\.00<\/td><td>\$4\.00<\/td><td>400k<\/td><td>40\.0M<\/td><td>0<\/td><td>1 \(50k\)<\/td>/);
+    assert.doesNotMatch(html, /<td>implementer<\/td><td>claude-sonnet-5-5<\/td><td>4<\/td>/);
+    // With the reviewer ($2) and the two integrator records ($2 each).
+    assert.match(html, /Total \$14\.00 at list prices/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
