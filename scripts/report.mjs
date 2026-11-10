@@ -79,14 +79,29 @@ const sessions = [...bySession.entries()]
   })
   .join("");
 
-// Telemetry v2 per role, from SubagentStop records (telemetry.mjs). Older records lack tokens, turns, models and
-// max_turns_hit: they count as agents only, and "With usage" says how many stops the sums cover.
+// One stop record per agent: its last. An agent stops more than once (the test gate sends an implementer back, a
+// SendMessage resume, the stop before and after a hand-back), and telemetry.mjs reads the whole transcript at every
+// stop, so each record carries the agent's running total. Summing every record counted such an agent's tokens two or
+// three times: in the logs of 2026-11-01 to 11-03 implementer cache reads came out 72% to 76% too high. A record
+// without an agent id (older logs) cannot be joined to another, so it counts on its own.
+/** @type {Map<string, any>} */
+const lastStops = new Map();
+let anonymous = 0;
+for (const e of events) {
+  if (e.hook_event_name !== "SubagentStop") continue;
+  const id = typeof e.agent_id === "string" && e.agent_id ? `${e.session_id ?? ""}\n${e.agent_id}` : `\n#${anonymous++}`;
+  lastStops.delete(id); // re-insert, so the map keeps the order of each agent's last stop
+  lastStops.set(id, e);
+}
+const finalStops = [...lastStops.values()];
+
+// Telemetry v2 per role, from each agent's last SubagentStop record (telemetry.mjs). Older records lack tokens, turns,
+// models and max_turns_hit: they count as agents only, and "With usage" says how many agents the sums cover.
 /** @param {unknown} t */
 const bareType = (t) => String(t ?? "").split(":").pop() || "unknown";
 /** @type {Map<string, { agents: number, withUsage: number, input: number, output: number, cache_read: number, cache_write: number, turns: number, models: Set<string>, maxHits: number, maxKnown: number }>} */
 const roles = new Map();
-for (const e of events) {
-  if (e.hook_event_name !== "SubagentStop") continue;
+for (const e of finalStops) {
   const role = bareType(e.agent_type);
   let r = roles.get(role);
   if (!r) roles.set(role, (r = { agents: 0, withUsage: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, turns: 0, models: new Set(), maxHits: 0, maxKnown: 0 }));
@@ -106,15 +121,15 @@ for (const e of events) {
 const roleRows = [...roles].map(([role, r]) => [role, r.agents, r.withUsage, formatTokens(r.input), formatTokens(r.output), formatTokens(r.cache_read), formatTokens(r.cache_write), r.turns, [...r.models].join(", ") || "n/a", r.maxKnown ? `${r.maxHits} of ${r.maxKnown}` : "n/a"]);
 const roleTable = roleRows.length ? table(["Role", "Agents", "With usage", "Input", "Output", "Cache read", "Cache write", "Turns", "Models", "Max-turn hits"], roleRows) : "<p>No agent stops logged yet.</p>";
 
-// Estimated cost by role and model (1.2.0), from the same stop records at list prices (scripts/prices.mjs). A stop is
-// priced only when it used exactly one model with a listed price; the rest are counted as unpriced. "Cache rewrites"
+// Estimated cost by role and model (1.2.0), from each agent's last stop record at list prices (scripts/prices.mjs). An
+// agent is priced only when it used exactly one model with a listed price; the rest are counted as unpriced. "Cache rewrites"
 // are requests after an agent's first that wrote most of their context to the cache again (telemetry.mjs
 // cache_rewrites): a cache that went cold in mid-run, paid for at the write rate.
 /** @type {Map<string, { role: string, model: string, agents: number, cost: number, output: number, cache_read: number, cache_write: number, rewrites: number, rewriteTokens: number }>} */
 const costs = new Map();
 let unpriced = 0;
-for (const e of events) {
-  if (e.hook_event_name !== "SubagentStop" || !e.tokens || typeof e.tokens !== "object") continue;
+for (const e of finalStops) {
+  if (!e.tokens || typeof e.tokens !== "object") continue;
   const model = Array.isArray(e.models) && e.models.length === 1 ? e.models[0] : null;
   const cost = costOf(e.tokens, model);
   if (cost === null) {
@@ -137,10 +152,10 @@ const costRows = [...costs.values()]
   .sort((a, b) => b.cost - a.cost)
   .map((c) => [c.role, c.model, c.agents, formatUsd(c.cost), formatUsd(c.cost / c.agents), formatTokens(c.output), formatTokens(c.cache_read), formatTokens(c.cache_write), c.rewrites ? `${c.rewrites} (${formatTokens(c.rewriteTokens)})` : "0"]);
 const costTotal = [...costs.values()].reduce((a, c) => a + c.cost, 0);
-const unpricedNote = unpriced ? ` ${unpriced} agent stop${unpriced === 1 ? "" : "s"} not priced (several models in one run, or a model without a listed price).` : "";
+const unpricedNote = unpriced ? ` ${unpriced} agent${unpriced === 1 ? "" : "s"} not priced (several models in one run, or a model without a listed price).` : "";
 const costTable = costRows.length
   ? `${table(["Role", "Model", "Agents", "Est. cost", "Per agent", "Output", "Cache read", "Cache write", "Cache rewrites"], costRows)}<p>Total ${esc(formatUsd(costTotal))} at list prices as of ${PRICES_AS_OF}: an estimate for comparing roles and models, not a bill (a subscription is not billed per token).${unpricedNote}</p>`
-  : `<p>No priced agent stops yet: the estimate needs a stop record with tokens and one model that has a listed price.${unpricedNote}</p>`;
+  : `<p>No priced agents yet: the estimate needs a stop record with tokens and one model that has a listed price.${unpricedNote}</p>`;
 
 // Agents that started and logged no stop (1.2.0). A subagent that runs out of turns or is killed fires no SubagentStop,
 // so this is where a turn-limit stop shows; an agent still running when the report is written is listed too.
