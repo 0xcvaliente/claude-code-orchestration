@@ -1,6 +1,6 @@
 {
   "name": "claude-code-orchestration",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -27,7 +27,7 @@
     "eval": "claude plugin eval dist/plugin --scaffold --trust-plugin --no-publish --max-cost-usd 10 --threshold 0 --json evals-result.json --allow-tools Bash Write Edit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.296"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.322"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
