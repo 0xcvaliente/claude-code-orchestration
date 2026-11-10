@@ -378,8 +378,13 @@ export function normalizeFiles(files, baseDir) {
   return out;
 }
 
-/** A model counts as opus when its name contains "opus" (any case). @param {unknown} model */
-export const isOpusModel = (model) => typeof model === "string" && model.toLowerCase().includes("opus");
+/**
+ * A model counts as opus when it is opus or a stronger tier: its name contains "opus", "fable" or "mythos" (any case).
+ * The escalation rule asks for an opus review; one on a stronger model meets it too (1.2.0, when the Agent tool began to
+ * accept `model: "fable"`). The name and the gate reason `opus_review_required` stay as they are.
+ * @param {unknown} model
+ */
+export const isOpusModel = (model) => typeof model === "string" && /opus|fable|mythos/i.test(model);
 
 /** The `model:` line of an agent file's frontmatter, or null. @param {unknown} text @returns {string | null} */
 export function modelFromAgentFile(text) {

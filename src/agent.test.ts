@@ -68,6 +68,7 @@ test("judge on: Bash roles carry the PreToolUse hook with a timeout above the ju
     assert.equal(m.length, 1);
     assert.equal(m[0]!.matcher, "Bash");
     assert.equal(m[0]!.timeout, HOOK_TIMEOUT_S);
+    assert.equal(m[0]!.onFailure, "block", "a guard that fails blocks the command (Agent SDK 0.3.317)");
     assert.ok(HOOK_TIMEOUT_S * 1000 > JUDGE_TIMEOUT_MS);
     assert.deepEqual(o.disallowedTools, SDK_DENIED_BASH);
     assert.ok(o.allowedTools!.includes("Bash"));

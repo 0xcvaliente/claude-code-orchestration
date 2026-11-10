@@ -50,6 +50,20 @@ const ALLOWED = [
   "git rev-parse HEAD && git rev-list --count HEAD",
   "ls -la src; du -sh .",
   "wc -l src/*.ts",
+  // 1.2.0: read-only search and paging (the Grep and Glob tools are absent for an agent that also lists Bash).
+  "grep -rn \"foo bar\" src --include='*.ts'",
+  "grep -rnE 'a|b' . --exclude-dir=node_modules -A 3 | head -20",
+  "git ls-files | grep -c test",
+  "grep -rl SubagentHandback .claude/hooks/",
+  "tail --lines=5 a.txt",
+  "head --bytes=100 a.txt | wc -c",
+  "cat a.txt /dev/null",
+  "rg -n --glob '*.mjs' tokenize .claude/hooks",
+  "find . -name '*.md' -type f",
+  "find src -maxdepth 2 -newer package.json | wc -l",
+  "head -50 README.md",
+  "tail -n 20 CHANGELOG.md",
+  "cat package.json",
 ];
 const DENIED = [
   ["cat > notes.md <<'EOF'\nhello\nEOF", /heredoc|redirection/],
@@ -77,6 +91,41 @@ const DENIED = [
   ["ls <<<'text'", /here-string|heredoc/],
   ["git log | wc -l <<X\nx\nX", /heredoc/],
   ["ls \\'<f \\'", /redirection/],
+  // 1.2.0: the search and paging commands, in the forms that write a file, run a program or never end.
+  ["find . -name '*.tmp' -delete", /find -delete/],
+  ["find . -type f -exec rm {} +", /find -exec/],
+  ["find . -fprint out.txt", /find -fprint/],
+  ["grep --filter='gz:zcat' foo .", /grep --filter/],
+  ["grep --pager=less foo .", /grep --pager/],
+  ["grep ---myconf foo .", /not an allowed option/],
+  ["rg --pre cat foo", /rg --pre/],
+  ["tail -f log.txt", /never ends/],
+  ["tail --follow=name log.txt", /tail --follow is not an allowed option/],
+  // Review of 2026-11-10: a lone `--` can be the value of an option, so it never ends the check.
+  ["rg -e -- --pre=/bin/sh foo .", /rg --pre/],
+  ["rg --regexp -- --pre=sh x .", /rg --pre/],
+  ["grep -e -- --filter=sh foo .", /grep --filter/],
+  ["grep -c -- --filter notes.md", /grep --filter/], // harmless, refused all the same: the price of that rule
+  // ripgrep's -z starts decompression programs; ugrep's -Q opens an interactive screen.
+  ["rg -z foo .", /-z starts decompression/],
+  ["rg -nz foo .", /-z starts decompression/],
+  ["rg --search-zip foo .", /rg --search-zip/],
+  ["grep -Q foo", /-Q opens an interactive screen/],
+  // tail's historic syntax and GNU's shortened long options also follow.
+  ["tail -5f a.txt", /never ends/],
+  ["tail -F a.txt", /never ends/],
+  ["tail --fol a.txt", /tail --fol is not an allowed option/],
+  ["tail --retry a.txt", /tail --retry/],
+  // bfs's own name for -delete, and devices that never end.
+  ["find . -name '*.tmp' -rm", /find -rm/],
+  ["cat /dev/zero", /device that may never end/],
+  ["head /dev/urandom", /device that may never end/],
+  ["grep x /dev/zero", /device that may never end/],
+  ["tail /dev/zero", /device that may never end/],
+  ["grep foo . > out.txt", /redirection/],
+  ["cat a.txt | sh", /`sh`/],
+  ["/usr/bin/grep foo .", /not an allowed command/],
+  ["sed -n 1,5p a.txt", /`sed`/],
 ];
 
 test("researcher guard: allowlisted commands pass", () => {

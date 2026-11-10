@@ -263,8 +263,10 @@ const clock = (ms: number) => {
 }
 const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 const short = (m: string) => m.replace(/^claude-/, '')
-const family = (m: string) => (m.match(/opus|sonnet|haiku|fable/i)?.[0] ?? m).toLowerCase()
-const FAMILY_COLOR: Record<string, string> = { opus: 'magenta', sonnet: 'yellow', haiku: 'cyan', fable: 'green' }
+const family = (m: string) => (m.match(/opus|sonnet|haiku|fable|mythos/i)?.[0] ?? m).toLowerCase()
+const FAMILY_COLOR: Record<string, string> = { opus: 'magenta', sonnet: 'yellow', haiku: 'cyan', fable: 'green', mythos: 'green' }
+// Opus or a stronger tier: a passing review on any of these meets the escalation rule (brief.mjs isOpusModel).
+const SENIOR = new Set(['opus', 'fable', 'mythos'])
 const familyColor = (m: string) => FAMILY_COLOR[family(m)] ?? 'white'
 // Share bar: ▰ for the part of the maximum, ▱ for the rest.
 const share = (n: number, max: number, w: number) => {
@@ -714,7 +716,7 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
   ]
   // Final (brief.mjs settle): failed for good, or the latest review passed and the escalation rule is met: an opus pass after the latest attempt or
   // no doubt signal. The pane cannot read ORCH_ESCALATION, so it uses the default (signals on, opus only when one fired).
-  const opusPass = current.some(r => r.status === 'pass' && family(r.model) === 'opus')
+  const opusPass = current.some(r => r.status === 'pass' && SENIOR.has(family(r.model)))
   const final = (latest?.status === 'pass' && (opusPass || signals.length === 0)) || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
   // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
   // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one.

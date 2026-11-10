@@ -81,6 +81,8 @@ function maxTurnsOf(role) {
   return null;
 }
 
+const REWRITE_MIN = 20000; // a cache write this large after the first request, with little read, is a context paid for again
+
 /**
  * Telemetry v2 from the subagent transcript: token usage, turns, models and whether the agent stopped at maxTurns.
  * Claude Code writes one transcript line per content block, each carrying the message's usage, so each usage field
@@ -92,6 +94,11 @@ function maxTurnsOf(role) {
  * without a known maxTurns the ending alone decides. A normal finish ends on an assistant message with stop_reason
  * end_turn, or on the tool_result of a tool that ends the turn (SubagentHandback, toolEndsTurn: true). Anything else
  * (no messages, a user text message last, a max_tokens stop) is null: it cannot tell.
+ * 1.2.0 adds two cost fields. tokens.cache_write_1h: the part of cache_write written at the one-hour lifetime
+ * (usage.cache_creation.ephemeral_1h_input_tokens), which the API bills at 2x input instead of 1.25x.
+ * cache_rewrites: requests after the agent's first that wrote at least REWRITE_MIN tokens to the cache while reading
+ * less than a quarter of that from it, with their cache_write tokens summed. That is the mark of a cache that went
+ * cold in mid-run (a pause longer than its lifetime, a compaction): the context is paid for again at the write rate.
  * Only numbers and model names are returned, never message text.
  * @param {string} path
  * @param {string} role bare agent type
@@ -99,7 +106,7 @@ function maxTurnsOf(role) {
 function usageFromTranscript(path, role) {
   try {
     const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
-    /** @type {Map<string, { input: number, output: number, cache_read: number, cache_write: number }>} */
+    /** @type {Map<string, { input: number, output: number, cache_read: number, cache_write: number, cache_write_1h: number }>} */
     const perMessage = new Map();
     /** @type {Set<string>} */
     const models = new Set();
@@ -126,16 +133,24 @@ function usageFromTranscript(path, role) {
       const id = typeof m.id === "string" && m.id ? m.id : `#${n++}`;
       if (typeof m.model === "string" && m.model) models.add(m.model);
       const u = m.usage && typeof m.usage === "object" ? m.usage : {};
-      const prev = perMessage.get(id) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+      const prev = perMessage.get(id) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 };
       perMessage.set(id, {
         input: Math.max(prev.input, num(u.input_tokens)),
         output: Math.max(prev.output, num(u.output_tokens)),
         cache_read: Math.max(prev.cache_read, num(u.cache_read_input_tokens)),
         cache_write: Math.max(prev.cache_write, num(u.cache_creation_input_tokens)),
+        cache_write_1h: Math.max(prev.cache_write_1h, num(u.cache_creation?.ephemeral_1h_input_tokens)),
       });
     }
-    const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
-    for (const t of perMessage.values()) for (const k of /** @type {const} */ (["input", "output", "cache_read", "cache_write"])) tokens[k] += t[k];
+    const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 };
+    for (const t of perMessage.values()) for (const k of /** @type {const} */ (["input", "output", "cache_read", "cache_write", "cache_write_1h"])) tokens[k] += t[k];
+    // A Map keeps insertion order, so this is the order of the requests.
+    const cacheRewrites = { requests: 0, tokens: 0 };
+    [...perMessage.values()].forEach((t, i) => {
+      if (i === 0 || t.cache_write < REWRITE_MIN || t.cache_read >= t.cache_write / 4) return;
+      cacheRewrites.requests++;
+      cacheRewrites.tokens += t.cache_write;
+    });
     const turns = perMessage.size;
     /** @type {boolean | null} */
     let maxTurnsHit = null;
@@ -150,7 +165,7 @@ function usageFromTranscript(path, role) {
         maxTurnsHit = limit === null ? true : turns >= limit ? true : null;
       }
     }
-    return { tokens, turns, models: [...models], max_turns_hit: maxTurnsHit };
+    return { tokens, turns, models: [...models], max_turns_hit: maxTurnsHit, cache_rewrites: cacheRewrites };
   } catch {
     return undefined; // missing or unreadable transcript: the fields are left out
   }
