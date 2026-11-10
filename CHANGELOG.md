@@ -4,10 +4,27 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
-Bug fixes from a read-only audit of the hooks, the SDK pipeline, the scripts and the dashboard. Each fix has a test that failed before it.
+## [1.2.0] - 2026-11-10
+
+1.2.0 follows Claude Code 2.1.317 to 2.1.322 and closes three gaps found while researching it ([docs/research-2026-11-10.md](docs/research-2026-11-10.md), probes in [docs/data/live-checks-2026-11-10.md](docs/data/live-checks-2026-11-10.md)). It also carries the bug fixes from a read-only audit of the hooks, the SDK pipeline, the scripts and the dashboard, merged after 1.1.0; each of those has a test that failed before it. The brief and reply grammar, the gate reason names and the agent names are unchanged; one gate reason and one setting are new.
+
+### Added
+
+- Review gate: `implementer_unfinished`. A subagent that stops at its turn limit fires no SubagentStop (probed on Claude Code 2.1.322), so the test gate never ran for it and the journal counted no attempt: a turn-limited implementer could leave partial work that no gate saw, and with no other implementer the gate allowed with `no_implementer_in_session`. The gate now blocks while an implementer launched with the Agent tool has a SubagentStart and no later SubagentStop, until it is resumed and stops or a later implementer stop takes its slice over; two blocks, then `implementer_unfinished_gave_up` ([README, The gates](README.md#the-gates), [docs/brief-grammar.md, Gates](docs/brief-grammar.md#gates-slice-a1)).
+- `handback-check.mjs` (PreToolUse on `SubagentHandback`, auto mode). A worker's report is read before it is delivered and sent back once when it has no `STATUS` line, or when a reviewer's pass leaves an id of its `CHECKS` line unanswered. `quote-check.mjs` runs on the same event, so an unverified quote is corrected before the orchestrator sees the report instead of after. Setting `handback_check` (`ORCH_HANDBACK_CHECK=off`), the 16th.
+- Estimated cost in `npm run report`: cost by role and model at list prices (`scripts/prices.mjs`), the agents that started and never stopped, and cache rewrites. Telemetry records `tokens.cache_write_1h` and `cache_rewrites` (numbers only).
+- A subagent status line shipped by the plugin (`subagent-statusline.mjs` through the plugin's `settings.json`): each worker's row shows its slice, attempt, model, tokens and progress.
+
+### Changed
+
+- The researcher's Bash list includes read-only search and paging: `grep`, `rg`, `find`, `head`, `tail` and `cat`, held by `researcher-guard.mjs` to forms that cannot write a file or start a program. On macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose tools also name Bash, so a researcher launched from a plain session could not search at all: the logs since 2026-11-01 show 43 guard denials in about 26 researcher runs.
+- A passing review on opus or a stronger model (`fable`) meets `opus_review_required`. The escalation still launches on opus by default.
+- SDK pipeline (maintenance): Agent SDK 0.3.296 to 0.3.322, and the Bash judge's hook is registered with `onFailure: "block"`, so a guard that throws or returns nothing blocks the command.
+- The orchestrator, the route skill and the nudge tell the session how to answer `implementer_unfinished` and never to accept a partial result as finished; the implementer waits for a command that was moved to the background before it reports.
 
 ### Fixed
 
+- `npm run check-plugin` no longer fails after `npm run eval`: the eval writes its reports to `dist/plugin/evals/results` (ignored by git), which the comparison with a fresh build now leaves out.
 - Hooks: a slice id that names an `Object.prototype` property (`constructor`, `__proto__`, `toString`) no longer throws in the run fold, and the Stop gate blocks instead of exiting 1 and letting the reply through when the run state cannot be read. `test-cmd.sh` detects `scripts.test`, not the word "test" anywhere in `package.json`.
 - SDK pipeline: `waves()` breaks only real cycles and keeps a dependency that failed or is still pending, so a slice no longer runs without its dependency's work; a planner slice named `result` no longer collides with the integration branch; a bare 500/502/503/504 in error text is no longer retried as transient.
 - Bash judge: `git config` keys that run programs (`difftool.*.cmd`, `mergetool.*.cmd`, `sendemail.*`, `web.browser`, `interactive.difffilter`, `init.templatedir`) are denied like the existing ones, in `src/judge.ts` and `.claude/hooks/judge-core.mjs`.
@@ -83,4 +100,5 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.0
 [1.1.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.1.0

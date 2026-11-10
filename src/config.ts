@@ -56,7 +56,11 @@ export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
       "Bash(git show*)", "Bash(git branch --show-current)",
       "Bash(git -C * log*)", "Bash(git -C * ls-files*)", "Bash(git -C * rev-list*)", "Bash(git -C * rev-parse*)",
       "Bash(git -C * status*)", "Bash(git -C * show*)", "Bash(git -C * branch --show-current)",
-      "Bash(wc*)", "Bash(ls*)", "Bash(du*)", "WebSearch", "WebFetch", "Skill",
+      "Bash(wc*)", "Bash(ls*)", "Bash(du*)",
+      // Read-only search and paging (1.2.0). On macOS and Linux Claude Code leaves Grep and Glob out of an agent whose
+      // tools also name Bash, so the researcher searches through Bash; researcher-guard.mjs holds each to read-only forms.
+      "Bash(grep*)", "Bash(rg*)", "Bash(find*)", "Bash(head*)", "Bash(tail*)", "Bash(cat*)",
+      "WebSearch", "WebFetch", "Skill",
     ],
   },
   implementer: { disallowedTools: ["Agent"] },

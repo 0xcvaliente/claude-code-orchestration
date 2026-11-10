@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
+import { PRICES_AS_OF, costOf, formatUsd } from "./prices.mjs";
 import { TOKENS_PER_USD, formatTokens } from "./tokens.mjs";
 
 const repo = resolve(process.argv[2] ?? process.cwd());
@@ -105,6 +106,58 @@ for (const e of events) {
 const roleRows = [...roles].map(([role, r]) => [role, r.agents, r.withUsage, formatTokens(r.input), formatTokens(r.output), formatTokens(r.cache_read), formatTokens(r.cache_write), r.turns, [...r.models].join(", ") || "n/a", r.maxKnown ? `${r.maxHits} of ${r.maxKnown}` : "n/a"]);
 const roleTable = roleRows.length ? table(["Role", "Agents", "With usage", "Input", "Output", "Cache read", "Cache write", "Turns", "Models", "Max-turn hits"], roleRows) : "<p>No agent stops logged yet.</p>";
 
+// Estimated cost by role and model (1.2.0), from the same stop records at list prices (scripts/prices.mjs). A stop is
+// priced only when it used exactly one model with a listed price; the rest are counted as unpriced. "Cache rewrites"
+// are requests after an agent's first that wrote most of their context to the cache again (telemetry.mjs
+// cache_rewrites): a cache that went cold in mid-run, paid for at the write rate.
+/** @type {Map<string, { role: string, model: string, agents: number, cost: number, output: number, cache_read: number, cache_write: number, rewrites: number, rewriteTokens: number }>} */
+const costs = new Map();
+let unpriced = 0;
+for (const e of events) {
+  if (e.hook_event_name !== "SubagentStop" || !e.tokens || typeof e.tokens !== "object") continue;
+  const model = Array.isArray(e.models) && e.models.length === 1 ? e.models[0] : null;
+  const cost = costOf(e.tokens, model);
+  if (cost === null) {
+    unpriced++;
+    continue;
+  }
+  const role = bareType(e.agent_type);
+  const key = `${role}\n${model}`;
+  let c = costs.get(key);
+  if (!c) costs.set(key, (c = { role, model, agents: 0, cost: 0, output: 0, cache_read: 0, cache_write: 0, rewrites: 0, rewriteTokens: 0 }));
+  c.agents++;
+  c.cost += cost;
+  for (const k of /** @type {const} */ (["output", "cache_read", "cache_write"])) c[k] += typeof e.tokens[k] === "number" ? e.tokens[k] : 0;
+  if (e.cache_rewrites && typeof e.cache_rewrites === "object") {
+    c.rewrites += typeof e.cache_rewrites.requests === "number" ? e.cache_rewrites.requests : 0;
+    c.rewriteTokens += typeof e.cache_rewrites.tokens === "number" ? e.cache_rewrites.tokens : 0;
+  }
+}
+const costRows = [...costs.values()]
+  .sort((a, b) => b.cost - a.cost)
+  .map((c) => [c.role, c.model, c.agents, formatUsd(c.cost), formatUsd(c.cost / c.agents), formatTokens(c.output), formatTokens(c.cache_read), formatTokens(c.cache_write), c.rewrites ? `${c.rewrites} (${formatTokens(c.rewriteTokens)})` : "0"]);
+const costTotal = [...costs.values()].reduce((a, c) => a + c.cost, 0);
+const unpricedNote = unpriced ? ` ${unpriced} agent stop${unpriced === 1 ? "" : "s"} not priced (several models in one run, or a model without a listed price).` : "";
+const costTable = costRows.length
+  ? `${table(["Role", "Model", "Agents", "Est. cost", "Per agent", "Output", "Cache read", "Cache write", "Cache rewrites"], costRows)}<p>Total ${esc(formatUsd(costTotal))} at list prices as of ${PRICES_AS_OF}: an estimate for comparing roles and models, not a bill (a subscription is not billed per token).${unpricedNote}</p>`
+  : `<p>No priced agent stops yet: the estimate needs a stop record with tokens and one model that has a listed price.${unpricedNote}</p>`;
+
+// Agents that started and logged no stop (1.2.0). A subagent that runs out of turns or is killed fires no SubagentStop,
+// so this is where a turn-limit stop shows; an agent still running when the report is written is listed too.
+/** @type {Map<string, { role: string, start: boolean, stop: boolean }>} */
+const lifecycles = new Map();
+for (const e of events) {
+  if (typeof e.agent_id !== "string" || !e.agent_id || (e.hook_event_name !== "SubagentStart" && e.hook_event_name !== "SubagentStop")) continue;
+  const a = lifecycles.get(e.agent_id) ?? { role: bareType(e.agent_type), start: false, stop: false };
+  if (e.hook_event_name === "SubagentStart") a.start = true;
+  else a.stop = true;
+  lifecycles.set(e.agent_id, a);
+}
+/** @type {Map<string, number>} */
+const noStop = new Map();
+for (const a of lifecycles.values()) if (a.start && !a.stop) noStop.set(a.role, (noStop.get(a.role) ?? 0) + 1);
+const noStopLine = noStop.size ? `<p>Started and never stopped (turn limit, killed, or still running): ${esc([...noStop].map(([role, count]) => `${role} ${count}`).join(", "))}.</p>` : "";
+
 // Reads by kind and role (reads.jsonl from read-log.mjs; a WebFetch counts as kind "web", a main-thread read as "main").
 /** @type {Map<string, Map<string, number>>} */
 const readCounts = new Map();
@@ -130,7 +183,8 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #8884;padding:.4rem .6rem;text-align:left;font-size:13px}th{font-weight:600}</style></head>
 <body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
-<h2>Agents by role</h2>${roleTable}
+<h2>Agents by role</h2>${roleTable}${noStopLine}
+<h2>Estimated cost by role and model</h2>${costTable}
 <h2>Reads by kind and role</h2>${readTable}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}

@@ -401,3 +401,116 @@ test("hooks exit 0 on malformed input with the new switches set", () => {
     assert.equal(r.status, 0, name);
   }
 });
+
+// ---- 1.2.0: implementer_unfinished. A subagent that runs out of turns fires no SubagentStop, so its implementer has a
+// SubagentStart and a launch record and nothing else: no test gate ran and the fold counts no attempt. ----
+const IMPL = "orchestration:implementer";
+/** @param {string} slice @param {string} [extra] */
+const implBrief = (slice, extra = "") => `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none${extra}`;
+
+test("Stop gate: an implementer that started and never stopped blocks with implementer_unfinished, then gives up", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.launch(IMPL, implBrief("a"));
+  // Still listed as running: the gate defers, as before.
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [{ id, type: "subagent", status: "running", agent_type: IMPL }] }).status, 0);
+  assert.equal(s.last().reason, "agents_running");
+  // Nothing runs any more and it never stopped: the turn limit, or a kill.
+  let r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["implementer_unfinished", "a"]);
+  assert.match(r.stderr, new RegExp(`slice a: its implementer \\(agent ${id}\\) started and never finished.*SendMessage \\(to: ${id}\\)`));
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 0);
+  assert.equal(s.last().reason, "implementer_unfinished_gave_up");
+  assert.match(JSON.parse(r.stdout).systemMessage, /gave up after 2 blocks \(implementer_unfinished\).*slice a is unverified/);
+});
+
+test("Stop gate: the light path's only implementer, unfinished, is no longer no_implementer_in_session", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  const id = s.launch(IMPL, implBrief("solo", "\nPATH: light"));
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["implementer_unfinished", "solo"]);
+  // Resumed with SendMessage, it starts again and stops: now the usual review rule gates the slice.
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: id, agent_type: IMPL });
+  s.stop(id, IMPL, "STATUS: pass");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  assert.equal(s.last().reason, "no_reviewer_after_last_implementer");
+  s.review("solo", "STATUS: pass");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("Stop gate: a fresh implementer that finishes the slice takes an unfinished one over; another slice's stop does not", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.launch(IMPL, implBrief("a"));
+  s.impl("b"); // a sibling slice finishing later does not cover slice a
+  s.review("b", "STATUS: pass", { model: "opus" });
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  assert.deepEqual([s.last().reason, s.last().slice], ["implementer_unfinished", "a"]);
+  s.impl("a"); // a fresh implementer for the same slice
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  assert.deepEqual([s.last().reason, s.last().slice], ["no_reviewer_after_last_implementer", "a"]);
+  s.review("a", "STATUS: pass\nC1: pass (cmd) pytest -> 3 passed");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("Stop gate: an implementer start with no launch record (a workflow agent) is left to its script", () => {
+  const s = session();
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: "wf-impl-1", agent_type: "implementer" });
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(s.last().reason, "no_implementer_in_session");
+  // The same for a launch whose brief carries the workflow marker.
+  const t = session();
+  t.launch(IMPL, `ORCHESTRATION: workflow\n${implBrief("a")}`);
+  assert.equal(t.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(t.last().reason, "no_implementer_in_session");
+});
+
+test("Stop gate: an unfinished implementer is gated once for the session: two blocks, one give-up, then left alone", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const orphan = s.launch(IMPL, implBrief("a"));
+  const stop = () => s.run("review-gate.mjs", { background_tasks: [] });
+  assert.deepEqual([stop().status, stop().status], [2, 2]);
+  assert.deepEqual(s.last().unfinished, [orphan], "each block records the agents it named");
+  assert.equal(stop().status, 0);
+  assert.deepEqual([s.last().reason, s.last().unfinished], ["implementer_unfinished_gave_up", [orphan]]);
+  // After the give-up it is silent, with no systemMessage.
+  const quiet = stop();
+  assert.deepEqual([quiet.status, quiet.stdout, s.last().reason], [0, "", "no_implementer_in_session"]);
+  // Later work in the session is judged on its own: a new implementer stop does not bring the old one back.
+  s.impl("b");
+  assert.equal(stop().status, 2);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["no_reviewer_after_last_implementer", "b", undefined]);
+  s.review("b", "STATUS: pass", { model: "opus" });
+  assert.equal(stop().status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("Stop gate: an unfinished implementer next to another open problem is named in every block and still given up on once", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const orphan = s.launch(IMPL, implBrief("a"));
+  s.impl("b");
+  s.review("b", "STATUS: fail\nGAP: 90 broken");
+  const stop = () => s.run("review-gate.mjs", { background_tasks: [] });
+  // The unfinished implementer comes first; the failed review is listed with it.
+  const first = stop();
+  assert.equal(first.status, 2);
+  assert.equal(s.last().reason, "implementer_unfinished");
+  assert.match(first.stderr, /never finished.*Also: slice b.*STATUS: fail/s);
+  assert.equal(stop().status, 2);
+  // Its two blocks are spent: the failed review of b now carries the block, still naming the unfinished one.
+  assert.equal(stop().status, 2);
+  assert.deepEqual([s.last().reason, s.last().unfinished], ["last_reviewer_failed", [orphan]]);
+  assert.equal(stop().status, 2);
+  const gaveUp = stop();
+  assert.equal(gaveUp.status, 0);
+  assert.match(JSON.parse(gaveUp.stdout).systemMessage, /gave up after 2 blocks \(implementer_unfinished, last_reviewer_failed\)/);
+  assert.deepEqual(s.last().unfinished, [orphan]);
+});

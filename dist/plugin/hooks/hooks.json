@@ -49,6 +49,19 @@
         ]
       },
       {
+        "matcher": "SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/handback-check.mjs\" --plugin"
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/quote-check.mjs\" --plugin"
+          }
+        ]
+      },
+      {
         "matcher": "Bash",
         "hooks": [
           {

@@ -49,6 +49,36 @@ const noise = [{ type: "api-request", id: "r", params: SECRET }, { type: "attach
 
 const stop = (/** @type {string} */ path, type = "orchestration:reviewer", extra = {}) => ({ hook_event_name: "SubagentStop", session_id: "s1", agent_id: "ag1", agent_type: type, last_assistant_message: "", agent_transcript_path: path, ...extra });
 
+test("telemetry 1.2.0: one-hour cache writes and mid-run cache rewrites are counted", () => {
+  const dir = project();
+  try {
+    const oneHour = (/** @type {number} */ cw, /** @type {number} */ h) => ({ ...usage(1, 10, 0, cw), cache_creation: { ephemeral_5m_input_tokens: cw - h, ephemeral_1h_input_tokens: h } });
+    const path = transcript(dir, "t.jsonl", [
+      brief(),
+      // The first request always writes its context: never a rewrite.
+      ...assistant("m1", [toolUse("t1")], oneHour(60000, 60000)),
+      result("t1"),
+      // Warm: mostly read.
+      ...assistant("m2", [toolUse("t2")], usage(1, 10, 60000, 900)),
+      result("t2"),
+      // Cold in mid-run: the whole context written again, almost nothing read.
+      ...assistant("m3", [toolUse("t3")], usage(1, 10, 2000, 61000)),
+      result("t3"),
+      // A large write next to a larger read is ordinary growth, not a rewrite; a small cold write is below the floor.
+      ...assistant("m4", [toolUse("t4")], usage(1, 10, 121000, 25000)),
+      result("t4"),
+      ...assistant("m5", [{ type: "text", text: "STATUS: pass" }], usage(1, 10, 0, 19999), "claude-sonnet-x", "end_turn"),
+    ]);
+    assert.equal(run(dir, "telemetry.mjs", stop(path)).status, 0);
+    const [rec] = log(dir, "telemetry.jsonl");
+    assert.equal(rec.tokens.cache_write, 60000 + 900 + 61000 + 25000 + 19999);
+    assert.equal(rec.tokens.cache_write_1h, 60000);
+    assert.deepEqual(rec.cache_rewrites, { requests: 1, tokens: 61000 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("telemetry: tokens deduped by message id, turns, models and a normal SubagentHandback finish", () => {
   const dir = project();
   try {
@@ -66,7 +96,8 @@ test("telemetry: tokens deduped by message id, turns, models and a normal Subage
     ]);
     assert.equal(run(dir, "telemetry.mjs", stop(path)).status, 0);
     const [rec] = log(dir, "telemetry.jsonl");
-    assert.deepEqual(rec.tokens, { input: 13, output: 125, cache_read: 6000, cache_write: 57 });
+    assert.deepEqual(rec.tokens, { input: 13, output: 125, cache_read: 6000, cache_write: 57, cache_write_1h: 0 });
+    assert.deepEqual(rec.cache_rewrites, { requests: 0, tokens: 0 });
     assert.equal(rec.turns, 3);
     assert.deepEqual(rec.models.sort(), ["claude-opus-x", "claude-sonnet-x"]);
     assert.equal(rec.max_turns_hit, false);
@@ -131,7 +162,7 @@ test("telemetry: each usage field is the maximum over a message's lines, so a pa
     ]);
     assert.equal(run(dir, "telemetry.mjs", stop(path)).status, 0);
     const [rec] = log(dir, "telemetry.jsonl");
-    assert.deepEqual(rec.tokens, { input: 4, output: 45, cache_read: 600, cache_write: 21 });
+    assert.deepEqual(rec.tokens, { input: 4, output: 45, cache_read: 600, cache_write: 21, cache_write_1h: 0 });
     assert.equal(rec.turns, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });

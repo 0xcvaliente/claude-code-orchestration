@@ -16,6 +16,7 @@ const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 export const OPTION_KEYS = Object.freeze([
   "TEST_CMD", "ESCALATION", "JUDGE", "JUDGE_TIMEOUT_MS", "READ_ROUTER", "GAP_MIN", "STALL_GATE", "GUARDS",
   "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED", "SKILL_HINTS",
+  "HANDBACK_CHECK",
 ]);
 
 /**

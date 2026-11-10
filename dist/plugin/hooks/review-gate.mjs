@@ -12,6 +12,14 @@
 //    (running, pending or queued) defers. Without `background_tasks` (older Claude Code): a SubagentStart in
 //    telemetry.jsonl with no later SubagentStop for its agent_id defers, but only a start younger than
 //    ORCH_RUN_STALE_MIN minutes, so a lost stop cannot defer forever.
+// 1b. Implementers that started and never stopped (1.2.0): implementer_unfinished. A subagent that runs out of turns
+//    (maxTurns) or is killed fires no SubagentStop (seen on Claude Code 2.1.322: the only subagent starts without a
+//    stop in the logs are the ones that hit the turn limit), so the test gate never ran for it and the journal has no
+//    stop record: the fold counts no attempt and nothing below would gate its slice. Once nothing is running (step 1),
+//    an implementer of this session whose latest SubagentStart has no later SubagentStop, and that has a launch record
+//    (an Agent tool launch, so workflow agents are left to their script), blocks until it is resumed and stops, or a
+//    later implementer stop of the same slice (any later implementer stop when its brief named no slice) takes over.
+//    Its loop guard is per agent for the whole session: two blocks that name it, one give-up, then it is left alone.
 // 2. Per slice of the current run (run.mjs folds journal-launches.jsonl, journal.jsonl, gates.jsonl and telemetry.jsonl
 //    with brief.mjs foldRuns): every slice of the latest run with an implementer attempt, and the slice of the session's
 //    last implementer, needs its latest review after its latest attempt to pass (no_reviewer_after_last_implementer,
@@ -41,7 +49,7 @@ const MAX_BLOCKS = 2; // per reason since the last implementer finished; a new i
 const ACTIVE_TYPES = new Set(["subagent", "workflow", "teammate"]);
 const ACTIVE_STATUS = new Set(["running", "pending", "queued"]);
 // Reasons that existed before slice A1 give up as "max_blocks_reached" (as before); the new ones as <reason>_gave_up.
-const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required"]);
+const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required", "implementer_unfinished"]);
 let sessionId = "";
 /** @param {string} decision @param {string} reason @param {number} code @param {Record<string, unknown>} [extra] @returns {never} */
 function decide(decision, reason, code, extra = {}) {
@@ -112,18 +120,58 @@ if (!existsSync(join(stateDir, "telemetry.jsonl"))) decide("allow", "no_telemetr
 const stops = telemetry.filter((e) => e.hook_event_name === "SubagentStop");
 const implStops = stops.filter((e) => role(e) === "implementer");
 const lastImpl = implStops.at(-1);
-if (!lastImpl) decide("allow", "no_implementer_in_session", 0);
+// 1b. Implementer agents whose latest SubagentStart has no later SubagentStop (step 1 found nothing running).
+/** @type {Map<string, { id: string, start: number, stop: number }>} */
+const implAgents = new Map();
+for (const e of telemetry) {
+  if (role(e) !== "implementer" || typeof e.agent_id !== "string" || !e.agent_id) continue;
+  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity };
+  if (e.hook_event_name === "SubagentStart") a.start = Math.max(a.start, time(e.ts));
+  if (e.hook_event_name === "SubagentStop") a.stop = Math.max(a.stop, time(e.ts));
+  implAgents.set(e.agent_id, a);
+}
+const neverStopped = [...implAgents.values()].filter((a) => a.start > a.stop);
+if (!lastImpl && !neverStopped.length) decide("allow", "no_implementer_in_session", 0);
 
-// Count only blocks after the last implementer finished. Counting the whole session would stop gating for good
-// after MAX_BLOCKS, so later work in a long session would go out unreviewed. A record with no ts counts them all.
-const since = time(lastImpl.ts);
-const priorBlocks = readJsonl(stateDir, "gates.jsonl").filter(
-  (g) => g.gate === "review" && g.decision === "block" && g.session_id === sessionId && Date.parse(g.ts) >= since,
-);
+/** @type {ReturnType<typeof sessionRuns>["runs"]} */
+let runs = [];
+/** @type {ReturnType<typeof sessionRuns>["records"]} */
+let records = { launches: [], stops: [], gates: [], starts: [] };
+let foldFailed = false;
+try {
+  ({ runs, records } = sessionRuns(sessionId, { now, env: process.env }));
+} catch {
+  foldFailed = true;
+}
+// This session's review-gate records. An unfinished implementer is gated for its own lifetime, not per window: two
+// blocks that name it, one give-up that names it, and then it is left alone, so an implementer the person stopped
+// early in a long session does not block every later piece of work again.
+const sessionGates = readJsonl(stateDir, "gates.jsonl").filter((g) => g.gate === "review" && g.session_id === sessionId);
+/** @param {any} g @param {string} id */
+const names = (g, id) => Array.isArray(g.unfinished) && g.unfinished.includes(id);
+/** @param {string} id */
+const unfinishedBlocks = (id) => sessionGates.filter((g) => g.decision === "block" && names(g, id)).length;
+// Only an Agent tool launch (it has a launch record) counts, and only while no later implementer stop took the slice over.
+const unfinished = neverStopped.flatMap((a) => {
+  if (!records.launches.some((l) => l.agent_id === a.id && !l.workflow)) return [];
+  if (sessionGates.some((g) => g.decision === "allow" && names(g, a.id))) return []; // the gate already gave up on it
+  const slice = sliceOfAgent(records, a.id);
+  const takenOver = slice
+    ? records.stops.some((st) => role(st) === "implementer" && st.slice === slice && st.agent_id !== a.id && time(st.ts) > a.start)
+    : implStops.some((e) => e.agent_id !== a.id && time(e.ts) > a.start);
+  return takenOver ? [] : [{ ...a, slice }];
+});
+if (!lastImpl && !unfinished.length) decide("allow", "no_implementer_in_session", 0);
+
+// Count only blocks after the last implementer finished (or, later than that, an unfinished one started). Counting the
+// whole session would stop gating for good after MAX_BLOCKS, so later work in a long session would go out unreviewed.
+// A record with no ts counts them all.
+const since = Math.max(lastImpl ? time(lastImpl.ts) : 0, ...unfinished.map((u) => u.start));
+const priorBlocks = sessionGates.filter((g) => g.decision === "block" && Date.parse(g.ts) >= since);
 /** @param {string} reason */
 const blocksFor = (reason) => priorBlocks.filter((g) => g.reason === undefined || g.reason === reason).length;
 
-/** @typedef {{ reason: string, message: string, slice?: string }} Problem */
+/** @typedef {{ reason: string, message: string, slice?: string, agent?: string }} Problem */
 /** @type {Problem[]} */
 const problems = [];
 /** @type {string[]} */
@@ -131,28 +179,29 @@ const failedForGood = [];
 /** @type {string[]} */
 const skips = [];
 
-// 2. Per slice of the current run.
-/** @type {ReturnType<typeof sessionRuns>["runs"]} */
-let runs = [];
-/** @type {ReturnType<typeof sessionRuns>["records"]} */
-let records = { launches: [], stops: [], gates: [], starts: [] };
-try {
-  ({ runs, records } = sessionRuns(sessionId, { now, env: process.env }));
-} catch {
-  // A fold that throws on the log's data must not approve the reply: block (with the usual loop guard) instead.
-  problems.push({ reason: "run_state_unreadable", message: "Review gate: the run state could not be folded from the logs, so the work cannot be shown reviewed. Send the result to a reviewer before replying, or say in your reply that it is unverified." });
+// A fold that throws on the log's data must not approve the reply: block (with the usual loop guard) instead.
+if (foldFailed) problems.push({ reason: "run_state_unreadable", message: "Review gate: the run state could not be folded from the logs, so the work cannot be shown reviewed. Send the result to a reviewer before replying, or say in your reply that it is unverified." });
+for (const u of unfinished) {
+  problems.push({
+    ...(u.slice ? { slice: u.slice } : {}),
+    agent: u.id,
+    reason: "implementer_unfinished",
+    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
+  });
 }
+
+// 2. Per slice of the current run.
 const latest = runs.at(-1);
 /** @type {Map<string, { run: import("./brief.mjs").Run, s: import("./brief.mjs").SliceState }>} */
 const gated = new Map();
 if (latest) for (const s of Object.values(latest.slices)) if (s.attempts > 0) gated.set(`${latest.id}:${s.slice}`, { run: latest, s });
-const lastSlice = sliceOfAgent(records, lastImpl.agent_id);
+const lastSlice = lastImpl ? sliceOfAgent(records, lastImpl.agent_id) : null;
 const lastRun = lastSlice ? runs.findLast((r) => (r.slices[lastSlice]?.attempts ?? 0) > 0) : undefined;
 const lastState = lastRun && lastSlice ? lastRun.slices[lastSlice] : undefined;
 if (lastRun && lastState) gated.set(`${lastRun.id}:${lastSlice}`, { run: lastRun, s: lastState });
 
 // 3. Fallback: the last implementer is not in the run model, so the old session-wide rule decides for it.
-if (!lastState) {
+if (lastImpl && !lastState) {
   skips.push(lastSlice ? "last_implementer_outside_run" : "last_implementer_no_slice");
   const reviews = stops.slice(stops.lastIndexOf(lastImpl) + 1).filter((e) => role(e) === "reviewer");
   const last = reviews.at(-1);
@@ -215,12 +264,16 @@ for (const { run, s } of gated.values()) {
 }
 
 // Block on the first problem whose reason has blocks left; the message lists every open problem.
-const live = problems.find((p) => blocksFor(p.reason) < MAX_BLOCKS);
+/** Blocks already spent on a problem: per agent for an unfinished implementer, per reason in the window otherwise. @param {Problem} p */
+const spent = (p) => (p.agent ? unfinishedBlocks(p.agent) : blocksFor(p.reason));
+// Every block message names all open problems, so each block and each give-up records the unfinished agents it named.
+const unfinishedIds = problems.flatMap((p) => (p.agent ? [p.agent] : []));
+const live = problems.find((p) => spent(p) < MAX_BLOCKS);
 if (live) {
   const others = problems.filter((p) => p !== live).map((p) => p.message.replace(/^Review gate: /, ""));
-  const last = blocksFor(live.reason) === MAX_BLOCKS - 1 ? " This is the last block: if no reviewer can pass the work, say in your reply that it is unverified and report the slice as failed." : "";
+  const last = spent(live) === MAX_BLOCKS - 1 ? " This is the last block: if no reviewer can pass the work, say in your reply that it is unverified and report the slice as failed." : "";
   say(2, `${live.message}${others.length ? ` Also: ${others.join(" ")}` : ""}${last}`);
-  decide("block", live.reason, 2, { ...(live.slice ? { slice: live.slice } : {}), ...(skips.length ? { skips } : {}) });
+  decide("block", live.reason, 2, { ...(live.slice ? { slice: live.slice } : {}), ...(unfinishedIds.length ? { unfinished: unfinishedIds } : {}), ...(skips.length ? { skips } : {}) });
 }
 
 const notes = [];
@@ -232,7 +285,7 @@ if (problems.length) {
   say(1, JSON.stringify({ systemMessage: notes.join(" ") }));
   say(2, notes.join(" "));
   const first = /** @type {string} */ (reasons[0]);
-  decide("allow", NEW_REASONS.has(first) ? `${first}_gave_up` : "max_blocks_reached", 0, { gave_up: reasons, ...(failedForGood.length ? { failed_for_good: failedForGood } : {}), ...(skips.length ? { skips } : {}) });
+  decide("allow", NEW_REASONS.has(first) ? `${first}_gave_up` : "max_blocks_reached", 0, { gave_up: reasons, ...(unfinishedIds.length ? { unfinished: unfinishedIds } : {}), ...(failedForGood.length ? { failed_for_good: failedForGood } : {}), ...(skips.length ? { skips } : {}) });
 }
 if (failedForGood.length) {
   say(1, JSON.stringify({ systemMessage: notes.join(" ") }));
