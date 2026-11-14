@@ -88,12 +88,12 @@ The diagram shows the flow for code in a git repository in the native orchestrat
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/pipeline-dark.svg">
-  <img alt="Pipeline: Opus plans, Haiku explores, Sonnet writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and the same gap twice stalls the slice until one replan." src="docs/diagrams/pipeline-light.svg">
+  <img alt="Pipeline: Fable plans, Sonnet explores, Opus writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and the same gap twice stalls the slice until one replan." src="docs/diagrams/pipeline-light.svg">
 </picture>
 
 Why each step is shaped this way:
 
-- **Strongest model plans, cheap models read, mid-tier writes.** The expensive model only decides; Haiku answers narrow questions in parallel; Sonnet builds the slices.
+- **Strongest model plans, Opus does the tasks, Sonnet does the rest.** Fable only decides; Opus builds the slices and runs a plain session; Sonnet answers narrow questions in parallel, reviews, integrates and sizes the task. Haiku is not used: a launch of one of these agents on a haiku model is raised to sonnet unless you allow it (`ORCH_ALLOW_HAIKU=1`).
 - **Fresh contexts.** Workers start with no history. They get a brief and return a short report, so the orchestrator's context stays small.
 - **A gate that does not trust the agent.** The test gate runs the tests in a hook, judged from `git status`, never from the agent's word.
 - **A reviewer that did not write the work.** It sees the diff (the output files, for work that is not code) and the goal, not the implementer's reasoning.
@@ -113,12 +113,13 @@ One slice's life:
 
 | Role | Model, effort | Tools | Job |
 |---|---|---|---|
-| Orchestrator / planner | Opus, high | read-only; natively it can only delegate | Plans slices, writes briefs, sends reviews and retries |
-| Researcher / explorer | Haiku, low | read-only, read-only `git`, `WebSearch`, `WebFetch`, `Skill` | Answers one narrow question with evidence: file paths, or URLs for web sources |
-| Implementer / writer | Sonnet, medium | every tool except `Agent` | Builds one slice: code, a document, an analysis or an operation |
+| Orchestrator / planner | Fable, high | read-only; natively it can only delegate | Plans slices, writes briefs, sends reviews and retries |
+| Researcher / explorer | Sonnet, low | read-only, read-only `git`, `WebSearch`, `WebFetch`, `Skill` | Answers one narrow question with evidence: file paths, or URLs for web sources |
+| Implementer / writer | Opus, medium | every tool except `Agent` | Builds one slice: code, a document, an analysis or an operation |
 | Reviewer / verifier | Sonnet, medium | read, bash, `WebSearch`, `WebFetch`, `Skill`; never edits | Independent check of one slice or result |
 | Integrator | Sonnet, low | read, bash | Code in git only: checkpoint commits, merges passing branches, runs the acceptance check, never resolves conflicts |
 | Triager | Sonnet, low | read-only | Sizes a task for the router |
+| Plain session (`npm run auto`) / solo | Opus, medium | as the session allows | Does a small task alone, with no agents |
 
 Models, effort, turn caps and the tool policy live in `src/config.ts`, the single source of truth; `npm run sync-agents` copies them into `.claude/agents/*.md`. No worker can start another agent. Claude Code's six built-in subagents and fork subagents are denied in this repo's settings (`DENIED_AGENTS`), and headless runs export `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`.
 
@@ -195,6 +196,7 @@ It reads the built-in subagent types from the installed Claude Code and fails wh
 
 `plan-check.mjs` is the only hook that ever returns an allow. For two features it rewrites a launch with `permissionDecision: "allow"` and `updatedInput` (which takes effect only with allow or ask, and ask cannot be answered headless), combined into one `updatedInput` when both apply. It does so only for this plugin's or project's implementer (when its own checks allow the launch), researcher and reviewer: never for the integrator, a built-in, fork or a launch it blocks. A `permissions.deny` rule still wins.
 
+- **No Haiku (on by default, `ORCH_ALLOW_HAIKU=1` to allow it).** A launch of any of this plugin's agents whose model is in the haiku family, from the call or from an older agent file, is raised to sonnet in the same `updatedInput`.
 - **Read router (opt-in, `ORCH_READ_ROUTER=on`).** For a researcher brief that names `SOURCES:`, it profiles each file with local tools (poppler, unzip, no model call) and picks the cheapest adequate tier: a PDF with a good text layer is haiku; scans, tables, multi-column pages or figures make it sonnet; a 50-page or longer PDF with `READ: judge` is one read on opus. The launch's model is raised to the tier, never lowered. Text conversions are cached under the state dir and listed in the brief. It was checked once live (a scanned PDF raised a researcher from haiku to sonnet) and benchmarked once on `d3-reader` ([route-040](#read-router-benchmark-route-040)): direction only, with the model raise and the converted-text notes confounded. It stays off until H14 is decided.
 - **Skill suggestions (on by default, `ORCH_SKILL_HINTS=off` to drop).** The plan check appends one block naming at most 3 installed skills (1 for a reviewer), names and reason codes only, picked from the brief's `SKILLS:` names, the file types in FILES or SOURCES, the role and the goal's words. Installed skills are found on disk: `~/.claude/skills` (synced skills as `anthropic-skills:<name>`), the project's `.claude/skills` and enabled plugins' skills. A worker loads what fits with the Skill tool and reports a skipped suggestion in one line of its report, not under OPEN, because a non-empty OPEN is a doubt signal.
 
@@ -230,7 +232,7 @@ The orchestrator's briefs and the workers' replies follow one spec, [docs/brief-
 
 ## Switches and plugin settings
 
-The plugin declares 16 settings as `userConfig`, shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; the hooks copy it to `ORCH_<KEY>` only when that variable is unset, so an environment variable wins over `/config`. The project copy of the hooks reads only the environment. Switches are named only in maintainer text, never in agent prompts, skills or the nudge (`src/contracts.test.ts` checks this).
+The plugin declares 17 settings as `userConfig`, shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; the hooks copy it to `ORCH_<KEY>` only when that variable is unset, so an environment variable wins over `/config`. The project copy of the hooks reads only the environment. Switches are named only in maintainer text, never in agent prompts, skills or the nudge (`src/contracts.test.ts` checks this).
 
 | Key | Environment | Default | Effect |
 |---|---|---|---|
@@ -249,6 +251,7 @@ The plugin declares 16 settings as `userConfig`, shown in `/config`. Claude Code
 | `quote_check` | `ORCH_QUOTE_CHECK` | on | `off` skips the quote check |
 | `gate_isolated` | `ORCH_GATE_ISOLATED` | `warn` | Test gate in isolated worktrees: `warn` (run, log, never block), `block` or `skip` |
 | `skill_hints` | `ORCH_SKILL_HINTS` | on | `off` drops the suggested-skills block; an explicit `SKILLS:` line still reaches the worker |
+| `allow_haiku` | `ORCH_ALLOW_HAIKU` | haiku raised to sonnet | `1` lets a launch of this plugin's agents run on a haiku model |
 | `handback_check` | `ORCH_HANDBACK_CHECK` | on | `off` skips the report check at a worker's hand-back |
 
 The remaining environment variables (headless runs, the SDK, the nudge) are in [Reference](#environment).
@@ -465,7 +468,7 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_AGENT`, `ORCH_AGENT_PREFIX` | `orchestrate.sh` | Agent to run (`none` is a plain session); `orchestration:` always runs the plugin's agents |
 | `ORCH_ADD_DIR`, `ORCH_ADVISOR`, `ORCH_DRY_RUN` | `orchestrate.sh` | Extra readable dir, experimental advisor model, print arguments and exit |
 | `ORCH_SESSION_PERSISTENCE` | `orchestrate.sh` (so also `auto.sh` and `npm run native`) | `1` omits `--no-session-persistence`, so session and subagent transcripts are written and telemetry v2 records per-agent tokens, turns and models. Unset (default): no transcripts, those fields empty |
-| `ORCH_MODEL` | `orchestrate.sh` | Passes `--model`, for plain-model baselines |
+| `ORCH_MODEL` | `orchestrate.sh`, `auto.sh` | Passes `--model`. `npm run auto` runs its plain session on `opus` unless this names another model; `npm run native` passes it only when set |
 | `ORCH_BASE_TIMEOUT_S` | `bugfix-check.mjs` | Time limit of a test-baseline base run, default 300 |
 | `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | The read router's profiling budget, default 15000 |
 | `ORCH_JUDGE_MODEL`, `ORCH_JUDGE_CLAUDE_BIN` | `judge-hook.mjs` | The native judge's model (default `opus`) and binary |

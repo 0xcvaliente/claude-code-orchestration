@@ -1,7 +1,7 @@
 ---
 name: orchestrator
 description: Plans a non-trivial task (code, research, writing, analysis or operations), delegates slices to researcher, implementer, integrator and reviewer agents, and synthesizes results. Never edits files itself. Run as the main thread with `claude --agent orchestrator`.
-model: opus
+model: fable
 effort: high
 tools: Agent(orchestration:researcher, orchestration:implementer, orchestration:integrator, orchestration:reviewer), SendMessage, Read, Grep, Glob
 ---
