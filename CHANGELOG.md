@@ -4,6 +4,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-14
+
+1.3.0 changes which model each role runs on, keeps Haiku out unless you allow it, and fixes the run log of headless runs. Upgrading: the plugin has one new setting, `allow_haiku` (empty by default), and no existing setting changed. Runs cost more than on 1.2.2, because the orchestrator and the implementer each moved up one model; one small two-part task measured $1.08 at list price against $0.81 before.
+
 ### Changed
 
 - **Models: Fable plans, Opus does the tasks, Sonnet does the rest, and no Haiku.** The orchestrator (SDK planner) runs on Fable 5.2 (was Opus). The implementer (SDK writer) and the plain session (`npm run auto`'s plain route, the SDK's solo role) run on Opus (were Sonnet; the plain session used to run on whatever model Claude Code defaulted to). The researcher (SDK explorer) runs on Sonnet (was Haiku). The reviewer, integrator and triager stay on Sonnet, and the Bash judge and the escalated reviews stay on Opus. The third and last attempt of a slice is still a fresh implementer on Opus, which is now the same model as the first attempt. Cost per run goes up: the benchmark figures in the README were measured with the earlier models and the triage thresholds were set against a plain Sonnet session, and neither was measured again. `ORCH_MODEL_<ROLE>` and `ORCH_MODEL` still override each default.
@@ -135,6 +139,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.3.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.3.0
 [1.2.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.2
 [1.2.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.1
 [1.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.0
