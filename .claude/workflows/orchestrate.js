@@ -63,6 +63,9 @@ const QUESTIONS = {
   properties: { questions: { type: 'array', items: { type: 'string' }, maxItems: 4 } },
   required: ['questions'],
 }
+// A slice's optional skills: names of installed skills its implementer and reviewers load, passed through as written.
+const MAX_SKILLS = 5
+const SKILL_NAME = /^[A-Za-z0-9_.:-]+$/
 const SLICES = {
   type: 'object',
   properties: {
@@ -84,6 +87,7 @@ const SLICES = {
           risky: { type: 'boolean' },
           checks: { type: 'array', items: { type: 'string' } },
           kind: { type: 'string', enum: KINDS },
+          skills: { type: 'array', items: { type: 'string' }, maxItems: MAX_SKILLS },
         },
         required: ['id', 'goal', 'files', 'acceptance', 'dependsOn', 'risky', 'checks', 'kind'],
       },
@@ -159,9 +163,10 @@ const VERDICT = {
   required: ['pass', 'gaps', 'evidence', 'answers', 'open'],
 }
 
+const SKILL_RULE = `A slice may add skills: at most ${MAX_SKILLS} names of installed skills, exactly as the Skill tool lists them, that the slice clearly needs; leave it out otherwise.`
 const PLAN_RULES = CODE
-  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none.`
-  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (a runnable command if the slice runs code, otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none.`
+  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
+  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (a runnable command if the slice runs code, otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
 
 // Plan check (args.planCheck). Paths lose a leading ./ and a trailing /; '.' is the whole folder.
 const normPath = (p) => {
@@ -356,6 +361,13 @@ log(`${slices.length} slice(s): ${slices.map((s) => s.id).join(', ') || 'none'}`
 if (slices.length === 0) return { task, slices: [], note: 'planner returned no slices' }
 log(`plan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices })}`)
 
+// The SKILLS line (docs/brief-grammar.md) for a slice's implementer and reviewer briefs: valid names only, deduplicated,
+// at most MAX_SKILLS; '' for a slice without skills, so its briefs stay as they were.
+const skillsOf = (s) => [...new Set((Array.isArray(s.skills) ? s.skills : []).filter((n) => typeof n === 'string').map((n) => n.trim()).filter((n) => n && n.length <= 100 && SKILL_NAME.test(n)))].slice(0, MAX_SKILLS)
+const skillLine = (s) => {
+  const names = skillsOf(s)
+  return names.length ? `SKILLS: ${names.join(', ')}\n` : ''
+}
 const checksOf = (s) => [...new Set((Array.isArray(s.checks) ? s.checks : []).map(upper).filter(Boolean))]
 // The CHECKS line and the constraint texts in the brief grammar (docs/brief-grammar.md): `CHECKS: C1, C2` then `C1: <text>`.
 const checkLines = (s) => {
@@ -400,7 +412,7 @@ async function review(s, body, label, phaseName, retry) {
     s.kind === 'bugfix'
       ? 'KIND: bugfix. Check that the reproduction test fails without the fix and passes with it: run it now, and run it against the code before the fix without discarding the changes (for example in a temporary copy), or compare the failing output the implementer recorded.\n'
       : ''
-  const prompt = checkLines(s) + bugfix + body + (ids.length ? ANSWER_RULE : '') + OPEN_RULE
+  const prompt = checkLines(s) + skillLine(s) + bugfix + body + (ids.length ? ANSWER_RULE : '') + OPEN_RULE
   const ask = (model) =>
     agent(prompt, { label: `${label}${model ? ':' + model : ''}`, phase: phaseName, agentType: 'reviewer', model, schema: VERDICT })
   const logLow = (low) => {
@@ -513,7 +525,7 @@ async function runSlices(list, done) {
         const last = ESCALATE_LAST && attempt > 1 && attempt === MAX_RETRIES + 1
         if (last) log(`${s.id}: last attempt ${attempt} runs on opus`)
         work = await agent(
-          `ORCHESTRATION: workflow\n${s.kind === 'bugfix' ? 'KIND: bugfix\n' : ''}Slice ${s.id}\n${checkLines(s)}Goal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
+          `ORCHESTRATION: workflow\n${s.kind === 'bugfix' ? 'KIND: bugfix\n' : ''}Slice ${s.id}\n${checkLines(s)}${skillLine(s)}Goal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
             (checksOf(s).length ? 'Meet every constraint in CHECKS and say in evidence how each is met.\n' : '') +
             (s.kind === 'bugfix'
               ? 'This slice fixes a bug. First write a test that reproduces it, run it and record its failing output in evidence; then fix the bug; then run the test again and show it passing.\n'

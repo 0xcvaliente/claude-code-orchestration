@@ -7,7 +7,10 @@
 //     replan and, for PLAN REVIEW briefs, the parsed plan.
 //   SubagentStop of an implementer or reviewer -> journal.jsonl: a stop record (brief.mjs stopRecord): slice, status
 //     (parseStatus: any STATUS: fail line fails, else the first STATUS line decides, blockquotes ignored), answers,
-//     open and run (the run foldRuns gives the slice at write time); for implementers also files_touched and
+//     open and run (the run foldRuns gives the slice at write time), and draft ({ name, branch } of a skill slice's
+//     DRAFT: <name> <branch> line; left out when the reply has none), skills_used and skills_skipped (the skill names
+//     of the SKILLS-USED and SKILLS-SKIPPED lines, at most 8 each; each left out when empty, so a reply without them
+//     gives the record it gave before); for implementers also files_touched and
 //     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree, "git" there
 //     without a transcript), left out when unknown or on
 //     any error.

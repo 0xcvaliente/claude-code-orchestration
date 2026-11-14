@@ -605,3 +605,49 @@ test("refute pass: a risky slice's gaps are refuted by an opus reviewer", async 
   const plain = await run({ slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? gap : answered([])) });
   assert.equal(plain.calls.find((c) => c.opts.label === "refute:a#1").opts.model, undefined);
 });
+
+test("skills: a slice's skills become a SKILLS line after the existing header lines of its implementer and reviewer briefs", async () => {
+  const dir = hookProject();
+  try {
+    const skills = ["anthropic-skills:docx", "frontend-design", "frontend-design", "bad name", "x;rm", 7, "a_b.c-d", "s4", "s5", "s6"];
+    const r = await run({ constraints: C, slices: [slice("a", { checks: ["C1"], kind: "bugfix", skills }), slice("b")], verdict: (l) => (l.startsWith("review:a") ? answered(["C1"]) : answered([])) });
+    const [ia, ib] = implementers(r.calls).map((c) => c.prompt);
+    const line = "SKILLS: anthropic-skills:docx, frontend-design, a_b.c-d, s4, s5\n";
+    assert.match(ia, /^ORCHESTRATION: workflow\nKIND: bugfix\nSlice a\nCHECKS: C1\nC1: parsing never throws\nSKILLS: anthropic-skills:docx, frontend-design, a_b\.c-d, s4, s5\nGoal: goal a\n/);
+    assert.doesNotMatch(ib, /SKILLS/, "a slice without skills gets no line");
+    const [ra, rb] = reviewers(r.calls).map((c) => c.prompt);
+    assert.match(ra, /^CHECKS: C1\nC1: parsing never throws\nSKILLS: anthropic-skills:docx, frontend-design, a_b\.c-d, s4, s5\nKIND: bugfix\. /);
+    assert.doesNotMatch(rb, /SKILLS/);
+    // The brief with the line removed is the brief of the same slice without skills.
+    const plain = await run({ constraints: C, slices: [slice("a", { checks: ["C1"], kind: "bugfix" }), slice("b")], verdict: (l) => (l.startsWith("review:a") ? answered(["C1"]) : answered([])) });
+    assert.equal(ia.replace(line, ""), implementers(plain.calls)[0].prompt);
+    assert.equal(ra.replace(line, ""), reviewers(plain.calls)[0].prompt);
+    const res = launch(dir, ia);
+    assert.equal(res.status, 0, res.stderr);
+    assert.equal(res.stderr, "", "the plan check still skips the workflow brief");
+    const planCall = r.calls.find((c) => c.opts.label === "plan:slices");
+    const props = planCall.opts.schema.properties.slices.items;
+    assert.deepEqual(props.properties.skills, { type: "array", items: { type: "string" }, maxItems: 5 });
+    assert.ok(!props.required.includes("skills"), "skills is optional");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("skills: empty, missing or all-invalid skills leave every brief exactly as before", async () => {
+  const base = await run({ slices: [slice("a"), slice("b", { risky: true })] });
+  for (const skills of [[], ["bad name", "", 3, "x/y"], undefined, "frontend-design"]) {
+    const r = await run({ slices: [slice("a", { skills }), slice("b", { risky: true, skills })] });
+    const briefs = (/** @type {any} */ x) => [...implementers(x.calls), ...reviewers(x.calls)].map((c) => c.prompt);
+    assert.deepEqual(briefs(r), briefs(base), `skills ${JSON.stringify(skills)}`);
+  }
+});
+
+test("skills: an isolated slice's merged-result review carries its SKILLS line", async () => {
+  const r = await run({ args: { baseRefHead: true }, slices: [slice("a", { skills: ["tdd"] }), slice("b")] });
+  const ra = r.calls.filter((c) => c.opts.label === "review:a");
+  assert.equal(ra.length, 1);
+  assert.match(ra[0].prompt, /^SKILLS: tdd\nGoal: goal a\n/);
+  const ia = implementers(r.calls).find((c) => c.opts.label === "build:a#1");
+  assert.match(ia.prompt, /^ORCHESTRATION: workflow\nSlice a\nSKILLS: tdd\nGoal: goal a\n/);
+});

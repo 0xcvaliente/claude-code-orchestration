@@ -1618,11 +1618,12 @@ test('brief grammar: the dashboard parser gives expected.json for every fixture 
   for (const junk of [undefined, null, 42, {}, []]) {
     expect(parseHeader(junk).slice).toBe(null)
     expect(parsePlan(junk)).toEqual({ isPlanReview: false, replan: null, constraints: {}, slices: [] })
-    expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {}, gaps: [], quotes: [] })
-    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] })
+    expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] })
+    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] })
   }
-  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE, SKILLS; GAP, QUOTE) have fixtures of their own, so the loop above covers them
-  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt', 'impl-skills.txt', 'impl-skills-malformed.txt']) expect(names.includes(name)).toBe(true)
+  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE, SKILLS; GAP, QUOTE) and the skill-slice lines (SKILL, TARGET, UPDATE, DRAFTS; DRAFT, SKILLS-USED, SKILLS-SKIPPED) have
+  // fixtures of their own, so the loop above covers them
+  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt', 'impl-skills.txt', 'impl-skills-malformed.txt', 'impl-skill.txt', 'impl-skill-malformed.txt', 'plan-skill.txt', 'reply-draft.txt', 'reply-skills.txt']) expect(names.includes(name)).toBe(true)
 })
 
 const RESEARCH = 'orchestration:researcher'

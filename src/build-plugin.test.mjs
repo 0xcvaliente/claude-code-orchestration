@@ -207,7 +207,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 17);
+  assert.equal(keys.length, 20);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
@@ -244,4 +244,24 @@ test("--out without a directory fails", () => {
   const r = spawnSync("node", [script, "--out"], { cwd: root, encoding: "utf8" });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--out needs a directory/);
+});
+
+test("the skill gate sits beside verify.sh with the same disjoint matchers, and both skill files ship", () => {
+  for (const [h, plugin] of /** @type {[any, boolean][]} */ ([[read(".claude/settings.json"), false], [read("dist/plugin/hooks/hooks.json"), true]])) {
+    const gate = entry(h, "SubagentStop", "skill-gate.mjs");
+    assert.ok(gate, "the skill gate is registered");
+    assert.equal(gate, entry(h, "SubagentStop", "verify.sh"), "in the same entry as verify.sh");
+    const cmds = gate.hooks.map((/** @type {any} */ c) => String(c.command));
+    assert.ok(cmds[0].includes("verify.sh") && cmds[1].includes("skill-gate.mjs"), "verify.sh first, then the skill gate");
+    assert.equal(gate.hooks[1].timeout, 120);
+    assert.equal(gate.hooks[1].onFailure, undefined, "deny-only: a crash never blocks");
+    assert.equal(cmds[1].endsWith(" --plugin"), plugin);
+    const m = new RegExp(gate.matcher);
+    assert.equal(m.test("implementer"), !plugin);
+    assert.equal(m.test("orchestration:implementer"), plugin);
+    for (const other of ["reviewer", "orchestration:reviewer", "researcher"]) assert.ok(!m.test(other), other);
+  }
+  for (const f of ["skill-gate.mjs", "skill-seal.mjs"]) {
+    assert.equal(readFileSync(join(root, "dist", "plugin", "hooks", f), "utf8"), readFileSync(join(root, ".claude", "hooks", f), "utf8"), `${f} ships unchanged`);
+  }
 });

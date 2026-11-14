@@ -32,6 +32,10 @@ const ANSWER_RE = /^[\s*_#`-]*(C\d+)[\s*_`]*:[\s*_`]*(pass|fail)(?![A-Za-z0-9])(
 const NOTHING = new Set(['', 'none', '-', 'n/a', 'nothing'])
 const GAP_RE = /^[\s*_#`-]*GAP[\s*_`]*:[\s*_`]*(.*)$/i
 const QUOTE_RE = /^[\s*_#`-]*QUOTE[\s*_`]*:[\s*_`]*(.*)$/i
+const DRAFT_RE = /^[\s*_#`-]*DRAFT[\s*_`]*:[\s*_`]*(.*)$/i
+const SKILLS_USED_RE = /^[\s*_#`-]*SKILLS-USED[\s*_`]*:[\s*_`]*(.*)$/i
+const SKILLS_SKIPPED_RE = /^[\s*_#`-]*SKILLS-SKIPPED[\s*_`]*:[\s*_`]*(.*)$/i
+const TARGETS = new Set(['private', 'public'])
 const READ_MODES = new Set(['lookup', 'extract', 'judge'])
 const QUOTE_PAIRS = ['""', "''", '“”', '‘’', '``']
 const str = (text: unknown) => (typeof text === 'string' ? text : '')
@@ -51,6 +55,24 @@ const word = (v: string | undefined) => ((v ?? '').replace(/[`'"*_]/g, '').trim(
 // SKILLS: names read like FILES, only skill names (an optional `ns:` prefix, at most 100 characters), deduplicated, at most 8.
 const SKILL_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/
 const skillNames = (v: string | undefined) => [...new Set(listOf(v).filter(s => s.length <= 100 && SKILL_RE.test(s)))].slice(0, 8)
+// SKILLS-USED and SKILLS-SKIPPED: read like SKILLS after trailing emphasis goes and each entry loses a trailing reason after a space.
+const replySkillNames = (v: string) =>
+  skillNames(
+    v
+      .replace(/[*_`]+$/, '')
+      .split(',')
+      .map(e => e.trim().replace(/(?:\s+[(\u2013\u2014]|\s+-\s|:\s).*$/, '').replace(/:$/, ''))
+      .join(','),
+  )
+// A new skill's name (SKILL, DRAFTS, DRAFT): lower-case words of letters and digits joined by single hyphens, at most 64 characters.
+const isSkillName = (n: unknown): n is string => typeof n === 'string' && n.length <= 64 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(n)
+const newSkillName = (v: string | undefined) => {
+  const w = (v ?? '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0] ?? ''
+  return isSkillName(w) ? w : null
+}
+type Target = 'private' | 'public'
+const targetOf = (v: string | undefined): Target | null => (TARGETS.has(word(v)) ? (word(v) as Target) : null)
+const draftNames = (v: string | undefined) => [...new Set(listOf(v).filter(isSkillName))].slice(0, 8)
 
 export type ReadMode = 'lookup' | 'extract' | 'judge'
 export type Header = {
@@ -67,6 +89,10 @@ export type Header = {
   kind: string | null
   validate: boolean
   skills: string[]
+  skill: string | null
+  target: Target | null
+  update: boolean
+  drafts: string[]
 }
 export const parseHeader = (text: unknown): Header => {
   const t = str(text)
@@ -84,15 +110,29 @@ export const parseHeader = (text: unknown): Header => {
     kind: word(field(t, 'KIND')) || null,
     validate: word(field(t, 'VALIDATE')) === 'gaps',
     skills: skillNames(field(t, 'SKILLS')),
+    skill: newSkillName(field(t, 'SKILL')),
+    target: targetOf(field(t, 'TARGET')),
+    update: yes(field(t, 'UPDATE')),
+    drafts: draftNames(field(t, 'DRAFTS')),
   }
 }
 // The brief starts with PLAN REVIEW (leading whitespace allowed, upper case), not any later line.
 export const isPlanReview = (text: unknown) => /^\s*PLAN REVIEW\b/.test(str(text))
 
-export type PlannedSlice = { slice: string; files: string[]; depends: string[]; goal: string | null; risky: boolean; checks: string[] }
+export type PlannedSlice = {
+  slice: string
+  files: string[]
+  depends: string[]
+  goal: string | null
+  risky: boolean
+  checks: string[]
+  kind: string | null
+  skill: string | null
+  target: Target | null
+}
 export type ParsedPlan = { isPlanReview: boolean; replan: number | null; constraints: Record<string, string>; slices: PlannedSlice[] }
 // The orchestrator's plan, from its PLAN REVIEW brief: REPLAN, the CONSTRAINTS block and every SLICE line (bullets, bold and a heading pass) as a
-// planned slice, in order, filled by the FILES, DEPENDS, GOAL, RISKY and CHECKS lines under it. Its goal is the rest of the SLICE line, else the
+// planned slice, in order, filled by the FILES, DEPENDS, GOAL, RISKY, CHECKS, KIND, SKILL and TARGET lines under it. Its goal is the rest of the SLICE line, else the
 // first GOAL line. "plan" is the review's own SLICE line, not a slice; a repeated id continues its first entry.
 export const parsePlan = (text: unknown): ParsedPlan => {
   const t = str(text)
@@ -123,7 +163,7 @@ export const parsePlan = (text: unknown): ParsedPlan => {
       const id = (s[1] ?? '').replace(/[:,;.]+$/, '')
       const own = !!id && id.toLowerCase() !== 'plan'
       cur = own ? (plan.slices.find(x => x.slice === id) ?? null) : null
-      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [] }))
+      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }))
       const rest = (s[2] ?? '').replace(/^[\s*`_:|—–-]+/, '').trim()
       if (cur && rest && !cur.goal) cur.goal = rest
       continue
@@ -139,6 +179,12 @@ export const parsePlan = (text: unknown): ParsedPlan => {
     if (risky !== undefined) cur.risky = yes(risky)
     const checks = lineValue(l, 'CHECKS')
     if (checks !== undefined) cur.checks = checkIds(checks)
+    const kind = lineValue(l, 'KIND')
+    if (kind !== undefined) cur.kind = word(kind) || null
+    const skill = lineValue(l, 'SKILL')
+    if (skill !== undefined) cur.skill = newSkillName(skill)
+    const target = lineValue(l, 'TARGET')
+    if (target !== undefined) cur.target = targetOf(target)
   }
   return plan
 }
@@ -152,7 +198,8 @@ export const parseStatus = (text: unknown): 'pass' | 'fail' | null => {
 }
 export type Gap = { confidence: number | null; text: string }
 export type Quote = { locator: string; text: string }
-export type Reply = { status: 'pass' | 'fail' | null; open: string[]; answers: Record<string, Answer>; gaps: Gap[]; quotes: Quote[] }
+export type Draft = { name: string; branch: string }
+export type Reply = { status: 'pass' | 'fail' | null; open: string[]; answers: Record<string, Answer>; gaps: Gap[]; quotes: Quote[]; draft: Draft | null; skillsUsed: string[]; skillsSkipped: string[] }
 // A GAP value: `<0-100> <text>` (a trailing % allowed); a missing or out-of-range number gives null and the whole rest as text; no text or the
 // template `<0-100> ...` is no gap.
 const gapOf = (v: string): Gap | null => {
@@ -172,12 +219,20 @@ const quoteOf = (v: string): Quote | null => {
   if (t.length >= 2 && QUOTE_PAIRS.includes(`${t[0]}${t.slice(-1)}`)) t = t.slice(1, -1).trim()
   return locator && t ? { locator, text: t } : null
 }
+// A DRAFT value: `<name> <branch>`, a valid skill name and a plain branch name (no `..`, at most 200 characters), nothing after them; else no draft.
+const draftOf = (v: string): Draft | null => {
+  const parts = v.replace(/[`*_]+(?=\s|$)|(?<=^|\s)[`*_]+/g, '').trim().split(/\s+/)
+  if (parts.length !== 2) return null
+  const [name, branch] = parts as [string, string]
+  const okBranch = branch.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) && !branch.includes('..') && !branch.endsWith('/') && !branch.endsWith('.lock')
+  return isSkillName(name) && okBranch ? { name, branch } : null
+}
 // A worker's reply: STATUS, the OPEN items (its inline value and the list lines right below it), one answer per checked constraint id
 // (`C1: pass (cmd) <command> -> <result>`, `C1: pass (read) <where>`, `C1: fail <reason>`; the first line for an id decides, a later fail overrides a pass),
-// and its GAP and QUOTE lines (blockquoted ones do not count).
+// its GAP and QUOTE lines, its first valid DRAFT line and its first SKILLS-USED and SKILLS-SKIPPED lines (blockquoted ones do not count).
 export const parseReply = (text: unknown): Reply => {
   const all = str(text).split(/\r?\n/)
-  const reply: Reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [] }
+  const reply: Reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] }
   const at = all.findIndex(l => OPEN_RE.test(l))
   if (at !== -1) {
     const addItem = (item: string) => {
@@ -219,7 +274,13 @@ export const parseReply = (text: unknown): Reply => {
     const q = QUOTE_RE.exec(l)
     const quote = q ? quoteOf(q[1] ?? '') : null
     if (quote) reply.quotes.push(quote)
+    const d = reply.draft ? null : DRAFT_RE.exec(l)
+    if (d) reply.draft = draftOf(d[1] ?? '')
   }
+  const used = all.map(l => SKILLS_USED_RE.exec(l)).find(m => m)
+  if (used) reply.skillsUsed = replySkillNames(used[1] ?? '')
+  const skipped = all.map(l => SKILLS_SKIPPED_RE.exec(l)).find(m => m)
+  if (skipped) reply.skillsSkipped = replySkillNames(skipped[1] ?? '')
   return reply
 }
 // ---- end of the mirror ----

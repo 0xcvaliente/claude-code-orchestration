@@ -94,6 +94,21 @@
       "type": "string",
       "title": "Report check",
       "description": "Empty: on; off skips sending a worker's report back once when it has no STATUS line or leaves a checked id unanswered (ORCH_HANDBACK_CHECK)."
+    },
+    "skill_create": {
+      "type": "string",
+      "title": "Skill creation",
+      "description": "Empty: on; off blocks a KIND: skill implementer launch, so a run creates no skill (ORCH_SKILL_CREATE)."
+    },
+    "skills_repo_private": {
+      "type": "string",
+      "title": "Private skills repository",
+      "description": "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."
+    },
+    "skills_repo_public": {
+      "type": "string",
+      "title": "Public skills repository",
+      "description": "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."
     }
   }
 }

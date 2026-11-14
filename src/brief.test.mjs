@@ -69,9 +69,9 @@ test("C1: no parser throws on empty, malformed or non-string input; fields come 
     normalizeFiles(v, "/base");
     agentModel(v, { projectDir: "/nonexistent", pluginRoot: "/nonexistent" });
   }
-  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
+  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] });
   assert.deepEqual(parsePlan(null), { isPlanReview: false, replan: null, constraints: {}, slices: [] });
-  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [] });
+  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
   assert.deepEqual(briefUrls(42), []);
   assert.equal(gapKey(null), gapKey(""));
   assert.deepEqual(foldRuns(/** @type {any} */ ("nope")), { runs: [], open: null });
@@ -165,8 +165,8 @@ test("plan: REPLAN number, constraints block and per-slice lines", () => {
   assert.equal(p.replan, 3);
   assert.deepEqual(p.constraints, { C1: "first", C2: "second" });
   assert.deepEqual(p.slices, [
-    { slice: "a", files: ["a.py"], depends: [], goal: "the parser", risky: false, checks: ["C1"] },
-    { slice: "b", files: [], depends: ["a"], goal: null, risky: true, checks: ["C2"] },
+    { slice: "a", files: ["a.py"], depends: [], goal: "the parser", risky: false, checks: ["C1"], kind: null, skill: null, target: null },
+    { slice: "b", files: [], depends: ["a"], goal: null, risky: true, checks: ["C2"], kind: null, skill: null, target: null },
   ]);
   assert.equal(parsePlan("PLAN REVIEW\nREPLAN: soon").replan, null);
   assert.equal(parsePlan("PLAN REVIEW\nREPLAN: 0").replan, 0);
@@ -177,7 +177,7 @@ test("C3: old-style plans, briefs and replies parse to empty values", () => {
   assert.deepEqual(parsePlan("PLAN REVIEW\nSplit it into a parser and a CLI."), { isPlanReview: true, replan: null, constraints: {}, slices: [] });
   const h = parseHeader("SLICE: s1\nFILES: a.py\nDEPENDS: none\nDo it.");
   assert.deepEqual([h.risky, h.checks, h.focus, h.path], [false, [], null, null]);
-  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {}, gaps: [], quotes: [] });
+  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
 });
 
 test("STATUS: same rule as scripts/auto.sh (src/verify.test.ts cases); no STATUS line is null", () => {
@@ -383,9 +383,9 @@ test("header: SKILLS is a list of skill names, namespaced or not, deduplicated, 
 test("C3: old-style briefs and replies parse as before, with the new fields empty", () => {
   const brief = "SLICE: s1\nFILES: app.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C1\nBody: see https://example.com.";
   const h = parseHeader(brief);
-  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
+  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] });
   const r = parseReply("STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none");
-  assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [] });
+  assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
   assert.equal(parseStatus("STATUS: pass\nGAP: 90 something"), "pass", "a GAP line does not change the status");
 });
 

@@ -46,6 +46,8 @@ test("native tool policy: the implementer cannot spawn agents, the orchestrator 
   assert.equal(NATIVE_TOOLS.implementer.tools, undefined);
   const orchestrator = NATIVE_TOOLS.orchestrator.tools ?? [];
   assert.ok(orchestrator.includes("Agent(researcher, implementer, integrator, reviewer)"));
+  assert.deepEqual(orchestrator, ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob", "Skill"], "the orchestrator's tools: workers, SendMessage, read-only tools and Skill");
+  assert.ok(!(NATIVE_TOOLS.integrator.tools ?? []).includes("Skill"), "the integrator gets no Skill");
   for (const agent of ["orchestrator", "researcher", "reviewer", "integrator"] as const) {
     const tools = NATIVE_TOOLS[agent].tools ?? [];
     assert.ok(tools.length > 0, `${agent} must keep an explicit tools list`);

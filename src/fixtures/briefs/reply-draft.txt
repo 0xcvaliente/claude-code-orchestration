@@ -1,0 +1,9 @@
+Built the skill in the draft worktree.
+> DRAFT: quoted-skill skill/quoted-skill
+DRAFT: Bad_Name skill/bad
+DRAFT: release-notes skill/../escape
+DRAFTS: release-notes
+- **DRAFT:** `release-notes` `skill/release-notes`
+DRAFT: second-one skill/second-one
+STATUS: pass
+OPEN: none
