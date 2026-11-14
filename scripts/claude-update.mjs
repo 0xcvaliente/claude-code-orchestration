@@ -33,7 +33,7 @@ import { BUILTIN_AGENTS, FORK, OWN_AGENTS, learnedBuiltins, learnedFile } from "
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Options scripts/orchestrate.sh and .claude/hooks/judge-hook.mjs pass that `claude --help` lists. */
 export const HEADLESS_FLAGS = Object.freeze([
-  "--agent", "--output-format", "--permission-mode", "--no-session-persistence", "--max-budget-usd", "--model",
+  "--agent", "--output-format", "--verbose", "--permission-mode", "--no-session-persistence", "--max-budget-usd", "--model",
   "--add-dir", "--disallowedTools", "--allowedTools", "--setting-sources", "--tools", "--strict-mcp-config",
 ]);
 /** Options they pass that the help does not list (so the help cannot confirm them). */

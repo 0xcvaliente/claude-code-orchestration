@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Headless native orchestration: run the orchestrator agent non-interactively, print its JSON,
-# and log tokens and turns to <repo>/.claude/state/runs.jsonl.
+# Headless native orchestration: run the orchestrator agent non-interactively, print its JSON (the session's last
+# result, plus orch_totals: the results, turns and wall time of the whole run; scripts/run-result.mjs),
+# and log tokens, turns and duration to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
 # code work that uses worktrees. Which agent runs (not ORCH_AGENT=none):
@@ -105,7 +106,9 @@ export CLAUDE_CODE_FORK_SUBAGENT=0
 
 args=(-p "$task")
 [ "$agent" != none ] && args+=(--agent "$agent")
-args+=(--output-format json --permission-mode dontAsk)
+# The event stream, not --output-format json: a session that waits for agents produces one result per wake-up, and
+# json prints the last one only. scripts/run-result.mjs reduces the stream to that last result plus the run's totals.
+args+=(--output-format stream-json --verbose --permission-mode dontAsk)
 # Without transcripts telemetry v2's per-agent tokens, turns and models stay empty; ORCH_SESSION_PERSISTENCE=1 keeps them.
 [ "${ORCH_SESSION_PERSISTENCE:-}" = 1 ] || args+=(--no-session-persistence)
 [ -n "$budget_usd" ] && args+=(--max-budget-usd "$budget_usd")
@@ -125,8 +128,13 @@ if [ -n "${ORCH_DRY_RUN:-}" ]; then
   exit 0
 fi
 
+stream="$(mktemp "${TMPDIR:-/tmp}/orch-run.XXXXXX")" || exit 1
+trap 'rm -f "$stream"' EXIT
+start_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
 code=0
-out="$(claude "${args[@]}")" || code=$?
+claude "${args[@]}" > "$stream" || code=$?
+# One JSON document, as before: the last result, with orch_totals (results, turns, wall_ms) for the whole run.
+out="$(node "$here/run-result.mjs" "$stream" "$start_ms")" || out="$(cat "$stream")"
 
 printf '%s\n' "$out"
 printf '%s' "$out" | node "$here/log-run.mjs" "$task" || true
