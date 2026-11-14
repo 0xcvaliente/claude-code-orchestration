@@ -20,6 +20,7 @@
     "test-dashboard": "node scripts/test-dashboard.mjs",
     "install-statusline": "bash scripts/install-statusline.sh",
     "claude-update": "node scripts/claude-update.mjs",
+    "skill-publish": "node scripts/skill-publish.mjs",
     "bench": "node bench/run.mjs",
     "bench:validate": "node bench/validate.mjs",
     "bench:grade": "node bench/grade.mjs",

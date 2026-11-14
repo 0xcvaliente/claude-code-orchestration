@@ -326,7 +326,7 @@ test("compact-context: no state at all → silent; the context is capped", () =>
 });
 
 test("no hook source prints an allow or ask permission decision (C6)", () => {
-  for (const f of ["researcher-guard.mjs", "egress-guard.mjs", "compact-context.mjs", "worktree-head.mjs"]) {
+  for (const f of ["researcher-guard.mjs", "egress-guard.mjs", "compact-context.mjs", "worktree-head.mjs", "skill-gate.mjs", "skill-seal.mjs"]) {
     if (!existsSync(hook(f))) continue;
     const src = readFileSync(hook(f), "utf8");
     assert.doesNotMatch(src, /permissionDecision|"ask"|decision:\s*"approve"/, f);

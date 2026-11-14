@@ -42,14 +42,17 @@ export const DENIED_AGENTS = [...BUILTIN_AGENTS.map((a) => `Agent(${a})`), `Agen
 // out here means the agent file must not have that line. The implementer inherits every tool except Agent, so it cannot
 // nest subagents (Claude Code already removes the Workflow tool from every subagent). These are the role boundaries:
 // never loosen a list without a reason. The researcher and the reviewer have `Skill` so they can load the skills a brief
-// names (SKILLS line or the plan check's suggestions); the integrator does not.
+// names (SKILLS line or the plan check's suggestions); the integrator does not. The orchestrator has `Skill` so it can
+// load, before planning, at most two installed skills that shape the plan itself (domain rules, architecture, a threat
+// model); every other fitting skill goes to the workers by name. A main-thread agent whose tools name Skill sees the
+// installed skills and can load one (checked live on Claude Code 2.1.325).
 export interface ToolPolicy {
   tools?: string[];
   disallowedTools?: string[];
 }
 export type NativeAgent = "orchestrator" | "researcher" | "implementer" | "reviewer" | "integrator";
 export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
-  orchestrator: { tools: ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob"] },
+  orchestrator: { tools: ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob", "Skill"] },
   researcher: {
     tools: [
       "Read", "Grep", "Glob",

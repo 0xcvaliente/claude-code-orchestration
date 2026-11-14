@@ -23,6 +23,12 @@ const NOTHING = new Set(["", "none", "-", "n/a", "nothing"]);
 // GAP and QUOTE are reply lines too: list and emphasis characters may come before the key, a blockquote never.
 const GAP_RE = /^[\s*_#`-]*GAP[\s*_`]*:[\s*_`]*(.*)$/i;
 const QUOTE_RE = /^[\s*_#`-]*QUOTE[\s*_`]*:[\s*_`]*(.*)$/i;
+// DRAFT is a skill slice's reply line (`DRAFT: <name> <branch>`), read like GAP and QUOTE; DRAFTS: does not match it.
+const DRAFT_RE = /^[\s*_#`-]*DRAFT[\s*_`]*:[\s*_`]*(.*)$/i;
+// SKILLS-USED and SKILLS-SKIPPED are a worker's reply lines naming the skills it loaded or left out; SKILLS: does not match them.
+const SKILLS_USED_RE = /^[\s*_#`-]*SKILLS-USED[\s*_`]*:[\s*_`]*(.*)$/i;
+const SKILLS_SKIPPED_RE = /^[\s*_#`-]*SKILLS-SKIPPED[\s*_`]*:[\s*_`]*(.*)$/i;
+const TARGETS = new Set(["private", "public"]);
 const READ_MODES = new Set(["lookup", "extract", "judge"]);
 /** At most this many URLs come back from briefUrls. */
 const MAX_URLS = 50;
@@ -97,15 +103,20 @@ const word = (v) => ((v ?? "").replace(/[`'"*_]/g, "").trim().split(/\s+/)[0] ??
  *   read: 'lookup' | 'extract' | 'judge' | null,
  *   kind: string | null,
  *   validate: boolean,
- *   skills: string[]
+ *   skills: string[],
+ *   skill: string | null,
+ *   target: 'private' | 'public' | null,
+ *   update: boolean,
+ *   drafts: string[]
  * }} Header
  */
 
 /**
  * Header lines of an implementer or reviewer brief: SLICE, FILES, DEPENDS, PATH, RISKY, CHECKS, FOCUS, the scripted
  * workflow's ORCHESTRATION: workflow marker, and the optional SOURCES (a list, read like FILES), READ (lookup, extract
- * or judge, else null), KIND (its first word, lower-cased), VALIDATE (true only for "gaps") and SKILLS (skillNames).
- * Missing lines give null, [] or false.
+ * or judge, else null), KIND (its first word, lower-cased), VALIDATE (true only for "gaps") and SKILLS (skillNames),
+ * and a skill slice's SKILL (a valid new skill name, else null), TARGET (private or public, else null), UPDATE (yes) and
+ * DRAFTS (valid skill names, deduplicated, at most 8). Missing lines give null, [] or false.
  * @param {unknown} text @returns {Header}
  */
 export function parseHeader(text) {
@@ -124,7 +135,35 @@ export function parseHeader(text) {
     kind: word(field(t, "KIND")) || null,
     validate: word(field(t, "VALIDATE")) === "gaps",
     skills: skillNames(field(t, "SKILLS")),
+    skill: newSkillName(field(t, "SKILL")),
+    target: targetOf(field(t, "TARGET")),
+    update: yes(field(t, "UPDATE")),
+    drafts: draftNames(field(t, "DRAFTS")),
   };
+}
+
+// The name of a skill a skill slice creates: lower-case words of letters and digits joined by single hyphens, at most 64
+// characters (the skills repositories' folder rule).
+const NEW_SKILL_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** A valid name for a new skill (NEW_SKILL_RE, at most 64 characters). @param {unknown} name @returns {name is string} */
+export const isSkillName = (name) => typeof name === "string" && name.length <= 64 && NEW_SKILL_RE.test(name);
+
+/** SKILL value: its first word without quotes, backticks or asterisks when it is a valid skill name, else null. @param {string | undefined} v */
+function newSkillName(v) {
+  const w = (v ?? "").replace(/[`'"*]/g, "").trim().split(/\s+/)[0] ?? "";
+  return isSkillName(w) ? w : null;
+}
+
+/** TARGET value: private or public (its first word, any case), else null. @param {string | undefined} v @returns {'private' | 'public' | null} */
+function targetOf(v) {
+  const w = word(v);
+  return TARGETS.has(w) ? /** @type {'private' | 'public'} */ (w) : null;
+}
+
+/** DRAFTS value: comma-separated names read like FILES, only valid skill names, deduplicated, at most 8. @param {string | undefined} v */
+function draftNames(v) {
+  return [...new Set(list(v).filter(isSkillName))].slice(0, MAX_SKILLS);
 }
 
 /** At most this many skill names come back from a SKILLS line. */
@@ -141,6 +180,19 @@ const SKILL_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/;
 function skillNames(v) {
   const names = list(v).filter((s) => s.length <= 100 && SKILL_RE.test(s));
   return [...new Set(names)].slice(0, MAX_SKILLS);
+}
+
+/**
+ * A SKILLS-USED or SKILLS-SKIPPED value: read like SKILLS (skillNames) after trailing emphasis is removed and each
+ * entry loses a trailing reason after a space ("frontend-design (did not fit)", "docx - not needed", "x: no PDF").
+ * @param {string} v @returns {string[]}
+ */
+function replySkillNames(v) {
+  const entries = v
+    .replace(/[*_`]+$/, "")
+    .split(",")
+    .map((e) => e.trim().replace(/(?:\s+[(\u2013\u2014]|\s+-\s|:\s).*$/, "").replace(/:$/, ""));
+  return skillNames(entries.join(","));
 }
 
 /** READ value: lookup, extract or judge (its first word, any case), else null. @param {string | undefined} v @returns {'lookup' | 'extract' | 'judge' | null} */
@@ -183,14 +235,17 @@ export const isPlanReview = (text) => /^\s*PLAN REVIEW\b/.test(str(text));
 export const sliceOfBrief = (text) => (isPlanReview(text) ? "plan" : parseHeader(text).slice);
 
 /**
- * @typedef {{ slice: string, files: string[], depends: string[], goal: string | null, risky: boolean, checks: string[] }} PlannedSlice
+ * @typedef {{
+ *   slice: string, files: string[], depends: string[], goal: string | null, risky: boolean, checks: string[],
+ *   kind: string | null, skill: string | null, target: 'private' | 'public' | null
+ * }} PlannedSlice
  * @typedef {{ isPlanReview: boolean, replan: number | null, constraints: Record<string, string>, slices: PlannedSlice[] }} Plan
  */
 
 /**
  * A PLAN REVIEW brief: REPLAN number, the CONSTRAINTS block (C<n>: text lines right after a CONSTRAINTS: line) and the
- * planned slices (each SLICE: line starts one; FILES, DEPENDS, GOAL, RISKY and CHECKS lines up to the next SLICE: fill
- * it). Text that is not a PLAN REVIEW brief gives an empty plan. A repeated SLICE id continues its first entry; the
+ * planned slices (each SLICE: line starts one; FILES, DEPENDS, GOAL, RISKY, CHECKS, KIND, SKILL and TARGET lines up to
+ * the next SLICE: fill it; KIND, SKILL and TARGET read as in parseHeader). Text that is not a PLAN REVIEW brief gives an empty plan. A repeated SLICE id continues its first entry; the
  * first goal (inline after the id, else the GOAL line) is kept.
  * @param {unknown} text @returns {Plan}
  */
@@ -228,7 +283,7 @@ export function parsePlan(text) {
       const id = (s[1] ?? "").replace(/[:,;.]+$/, "");
       const own = !!id && id.toLowerCase() !== "plan";
       cur = own ? (plan.slices.find((x) => x.slice === id) ?? null) : null;
-      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [] }));
+      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }));
       const rest = (s[2] ?? "").replace(/^[\s*`_:|—–-]+/, "").trim();
       if (cur && rest && !cur.goal) cur.goal = rest;
       continue;
@@ -244,6 +299,12 @@ export function parsePlan(text) {
     if (risky !== undefined) cur.risky = yes(risky);
     const checks = lineValue(l, "CHECKS");
     if (checks !== undefined) cur.checks = checkIds(checks);
+    const kind = lineValue(l, "KIND");
+    if (kind !== undefined) cur.kind = word(kind) || null;
+    const skill = lineValue(l, "SKILL");
+    if (skill !== undefined) cur.skill = newSkillName(skill);
+    const target = lineValue(l, "TARGET");
+    if (target !== undefined) cur.target = targetOf(target);
   }
   return plan;
 }
@@ -266,7 +327,8 @@ export function parseStatus(text) {
  * @typedef {{ verdict: 'pass' | 'fail', mode: 'cmd' | 'read' | null, detail: string }} Answer
  * @typedef {{ confidence: number | null, text: string }} Gap
  * @typedef {{ locator: string, text: string }} Quote
- * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer>, gaps: Gap[], quotes: Quote[] }} Reply
+ * @typedef {{ name: string, branch: string }} Draft
+ * @typedef {{ status: 'pass' | 'fail' | null, open: string[], answers: Record<string, Answer>, gaps: Gap[], quotes: Quote[], draft: Draft | null, skillsUsed: string[], skillsSkipped: string[] }} Reply
  */
 
 /**
@@ -278,13 +340,16 @@ export function parseStatus(text) {
  * Gaps: `GAP: <0-100> <text>` (a trailing % allowed); a missing or out-of-range number gives confidence null and the
  * whole rest as text; a gap without text and the template `GAP: <0-100> ...` are dropped. Quotes:
  * `QUOTE: <locator> | <verbatim text>`, one pair of surrounding quotes stripped from the text; a line without the `|`,
- * the locator or the text is dropped. Blockquoted GAP and QUOTE lines do not count.
+ * the locator or the text is dropped. Draft: the first `DRAFT: <name> <branch>` line whose name is a valid skill name and
+ * whose branch is a plain git branch name (draftOf), else null. Skills used and skipped: the first `SKILLS-USED:` and the
+ * first `SKILLS-SKIPPED:` line, read as skill names (replySkillNames: at most 8, a trailing reason per entry dropped,
+ * anything that is not a skill name dropped). Blockquoted GAP, QUOTE, DRAFT and SKILLS-* lines do not count.
  * @param {unknown} text @returns {Reply}
  */
 export function parseReply(text) {
   const all = lines(str(text));
   /** @type {Reply} */
-  const reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [] };
+  const reply = { status: parseStatus(text), open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] };
 
   const at = all.findIndex((l) => OPEN_RE.test(l));
   if (at !== -1) {
@@ -331,8 +396,28 @@ export function parseReply(text) {
     const q = QUOTE_RE.exec(l);
     const quote = q ? quoteOf(q[1] ?? "") : null;
     if (quote) reply.quotes.push(quote);
+    const d = reply.draft ? null : DRAFT_RE.exec(l);
+    if (d) reply.draft = draftOf(d[1] ?? "");
   }
+  const used = all.map((l) => SKILLS_USED_RE.exec(l)).find((m) => m);
+  if (used) reply.skillsUsed = replySkillNames(used[1] ?? "");
+  const skipped = all.map((l) => SKILLS_SKIPPED_RE.exec(l)).find((m) => m);
+  if (skipped) reply.skillsSkipped = replySkillNames(skipped[1] ?? "");
   return reply;
+}
+
+/**
+ * The value of a DRAFT line: `<name> <branch>`, backticks and emphasis around either word removed; null unless the name
+ * is a valid skill name and the branch a plain branch name (letters, digits, `.`, `_`, `/`, `-`; no `..`, at most 200
+ * characters) and nothing else follows.
+ * @param {string} v @returns {Draft | null}
+ */
+function draftOf(v) {
+  const parts = v.replace(/[`*_]+(?=\s|$)|(?<=^|\s)[`*_]+/g, "").trim().split(/\s+/);
+  if (parts.length !== 2) return null;
+  const [name, branch] = /** @type {[string, string]} */ (parts);
+  const okBranch = branch.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch) && !branch.includes("..") && !branch.endsWith("/") && !branch.endsWith(".lock");
+  return isSkillName(name) && okBranch ? { name, branch } : null;
 }
 
 /** The value of a GAP line as a gap; null when it has no text or is the template. @param {string} v @returns {Gap | null} */
@@ -451,25 +536,29 @@ export function escalationMode(env = {}) {
  *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
  *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] },
  *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[],
- *   skills?: string[]
+ *   skills?: string[], skill?: string, target?: 'private' | 'public', update?: true, drafts?: string[]
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
  * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
  * (invalid URLs skipped); in `sources` an http(s) entry becomes its host, a path stays as it is. Older records carry only
  * session_id, agent_id, slice, role; records before 0.4.0 lack sources, read, kind, validate and urls; older ones lack
- * skills (the names from SKILLS, never other brief text).
+ * skills (the names from SKILLS, never other brief text). skill, target, update and drafts are there only when the brief
+ * has a valid SKILL, a TARGET, UPDATE: yes or DRAFTS names, so a brief without those lines gives the record it gave before.
  *
  * @typedef {{ confidence: number | null, key: string }} GapKey
  * @typedef {{
  *   ts: string, session_id: string, agent_id: string | null, role: string, agent_type?: string, slice: string | null,
  *   status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], run?: number | null,
  *   model?: string | null, checks?: string[], risky?: boolean,
- *   gaps?: GapKey[], quotes?: number, files_touched?: string[]
+ *   gaps?: GapKey[], quotes?: number, files_touched?: string[], draft?: Draft, skills_used?: string[], skills_skipped?: string[]
  * }} StopRecord
  * journal.jsonl, one per SubagentStop of a worker. `slice` comes from the launch record with the same agent_id (or the
  * pending path when the stop arrives first). Older records lack answers, open and run; records before 0.4.0 lack gaps
  * and quotes. `gaps` holds each GAP's confidence and gapKey, `quotes` the number of QUOTE lines: never their text.
- * `files_touched` is there only when the caller passed `filesTouched` as an array of strings.
+ * `files_touched` is there only when the caller passed `filesTouched` as an array of strings. `draft` (name and branch of
+ * a DRAFT line) is there only when the reply has a valid one, so a reply without it gives the record it gave before.
+ * `skills_used` and `skills_skipped` (the skill names of the SKILLS-USED and SKILLS-SKIPPED lines, at most 8 each) are
+ * there only when non-empty, for the same reason.
  *
  * @typedef {{ ts: string, gate: string, decision: string, reason: string, agent_type?: string, agent_id?: string, session_id?: string }} GateRecord
  * gates.jsonl. A test-gate record (gate "test", from verify.sh) names no slice: it is joined by agent_id to a launch.
@@ -514,6 +603,10 @@ export function launchRecord(toolInput, ctx = {}) {
   rec.validate = h.validate;
   rec.urls = [...new Set(briefUrls(prompt).map(hostOf).filter((x) => x !== null))];
   rec.skills = h.skills;
+  if (h.skill) rec.skill = h.skill;
+  if (h.target) rec.target = h.target;
+  if (h.update) rec.update = true;
+  if (h.drafts.length) rec.drafts = h.drafts;
   return rec;
 }
 
@@ -562,6 +655,9 @@ export function stopRecord(ctx) {
   };
   const ft = c.filesTouched;
   if (Array.isArray(ft) && ft.every((f) => typeof f === "string")) rec.files_touched = [...ft];
+  if (r.draft) rec.draft = { name: r.draft.name, branch: r.draft.branch };
+  if (r.skillsUsed.length) rec.skills_used = [...r.skillsUsed];
+  if (r.skillsSkipped.length) rec.skills_skipped = [...r.skillsSkipped];
   return rec;
 }
 

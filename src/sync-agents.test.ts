@@ -65,3 +65,15 @@ test("upsertKey adds after maxTurns, replaces, removes, and never touches the bo
   assert.equal(upsertKey(doc, "tools", undefined), doc);
   assert.equal(upsertKey("---\nname: x\n---\n", "tools", "Read"), "---\nname: x\ntools: Read\n---\n");
 });
+
+test("syncAgents writes the orchestrator's tools line with Skill and restores it when Skill is dropped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agents-"));
+  cpSync(join(process.cwd(), ".claude", "agents"), dir, { recursive: true });
+  const orchestrator = join(dir, "orchestrator.md");
+  const before = readFileSync(orchestrator, "utf8");
+  assert.match(before, /^tools: Agent\(researcher, implementer, integrator, reviewer\), SendMessage, Read, Grep, Glob, Skill$/m);
+  writeFileSync(orchestrator, before.replace(/, Skill$/m, ""));
+  assert.deepEqual(syncAgents(dir, true), ["orchestrator.md"]);
+  assert.deepEqual(syncAgents(dir, false), ["orchestrator.md"]);
+  assert.equal(readFileSync(orchestrator, "utf8"), before);
+});

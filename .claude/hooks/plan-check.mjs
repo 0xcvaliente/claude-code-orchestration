@@ -63,12 +63,41 @@
 // as a brief or reply line is dropped. The appended text goes out in the same allow with updatedInput as the read
 // router's (one updatedInput carries both); the model is never changed by a hint. Researcher and reviewer launches still
 // write no plan-check.jsonl record. Each hint decision goes to skills.jsonl in the state dir (role, slice, names, reason
-// codes, counts; never brief or skill text).
-import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+// codes, counts; never brief or skill text). A reviewer gets at most 1 pick, or 2 when the launch's effective model (the
+// call's model, else the agent file's) ranks opus or above; a model it cannot rank keeps the limit of 1. In a PLAN REVIEW
+// brief the SKILLS lines inside the planned slices are those slices' choices, for the reviewer to check, not skills for
+// the reviewer: only a SKILLS line before the first SLICE line counts as explicit there.
+//
+// Skill slices (an implementer brief with KIND: skill; design: Part 2 of the skills design). Switches, maintainer-facing
+// only (never in a block message): ORCH_SKILL_CREATE (empty: on; off), ORCH_SKILLS_REPO_PRIVATE and
+// ORCH_SKILLS_REPO_PUBLIC (absolute paths of the two skills repositories), each also read from the plugin option
+// (state.mjs bridges them). The target is private unless the brief says TARGET: public. After missing_lines, in order,
+// each with the usual loop guard (two blocks per reason and slice, then <reason>_gave_up):
+//   skill_create_off    skill creation is off.
+//   skill_name_invalid  no SKILL line, or a name that is not lower-case words joined by hyphens (at most 64 characters).
+//   skill_repo_missing  the target's repo path is not configured (or not absolute), is not a git work tree, or has no
+//                       scripts/validate.py.
+//   skill_exists        skills/<name> exists in either configured repo, or an installed skill has that name (the part
+//                       after the last ":"), unless the brief says UPDATE: yes.
+//   skill_limit         this run already allowed another new (not UPDATE) skill slice with a different name.
+// A skill slice's FILES are relative to the skills repo root and resolve against its draft worktree,
+// <CLAUDE_CONFIG_DIR or ~/.claude>/orchestration/skill-drafts/<target>/<name>; the resolved paths are what
+// plan-check.jsonl records and what file_overlap compares, and not_in_plan resolves the planned FILES of a slice the
+// plan marks KIND: skill with SKILL: against the same draft, so a skill slice's README.md never meets the project's.
+// When the first three pass (given up or not), every allow of the slice appends one facts block (repo, draft worktree,
+// branch skill/<name>, base branch, the worktree command or how to reuse the worktree, the validator, the catalog file,
+// the seal command and the authoring skill's name), all values from this hook, in the same allow with updatedInput as
+// the hints and the haiku rule's raise; a block in which a line would parse as a brief or reply line is dropped. A
+// brief of our implementer, researcher or reviewer with DRAFTS: gets one line per draft of this run this hook allowed
+// (its SKILL.md path); an unknown name is dropped. Every decision on a skill slice and every DRAFTS lookup goes to
+// skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
+// text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
+import { execFileSync, spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { agentModel, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
+import { agentModel, isPlanReview, isSkillName, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
 import { builtinAgents, OWN_AGENTS } from "./builtin-agents.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
@@ -93,6 +122,11 @@ const SKILL_LOG = "skills.jsonl";
 const OWN_TYPES = new Set(OWN_AGENTS.flatMap((a) => [a, `orchestration:${a}`]));
 const FLOOR_MODEL = "sonnet";
 const FLOOR_LOG = "model-floor.jsonl";
+const CREATE_LOG = "skill-create.jsonl";
+const OWN_IMPLEMENTER = new Set(["implementer", "orchestration:implementer"]);
+const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
+// The authoring skill a skill slice loads: the plugin's namespaced copy for the plugin's hook, else the project's.
+const AUTHORING = process.argv.includes("--plugin") ? "orchestration:skill-authoring" : "skill-authoring";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -145,9 +179,10 @@ if (role === "implementer") {
     }
   }
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
-  if (routed || block || floored) {
+  const drafts = !builtin && HINTED_TYPES.has(type) ? draftsText(null) : "";
+  if (routed || block || drafts || floored) {
     const raised = !!routed?.raised;
-    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}` });
+    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}${drafts}` });
   }
   process.exit(0);
 }
@@ -209,16 +244,178 @@ function allowWith(updatedInput) {
   }
 }
 
-/** True when any line of `text` parses as a brief or reply line. @param {string} text */
-function briefShaped(text) {
+/**
+ * True when any line of `text` parses as a brief or reply line. `all` adds the skill slice lines (SKILL, TARGET, UPDATE,
+ * DRAFTS, DRAFT) for the blocks this hook writes for them; the hint block is checked without them, as before they existed.
+ * @param {string} text @param {boolean} [all]
+ */
+function briefShaped(text, all = false) {
   const hd = parseHeader(text);
   const rp = parseReply(text);
+  // SKILL, TARGET and DRAFT lines are tested by their key as well: an invalid value parses to null but is still a line.
+  const keyed = all && text.split("\n").some((l) => /^[ \t>*_`#-]*(SKILL|TARGET|UPDATE|DRAFTS?)[\s*_`]*:/i.test(l));
+  const skillLines = all && (!!hd.skill || !!hd.target || hd.update || hd.drafts.length > 0 || keyed || rp.draft !== null);
   return (
     !!hd.slice || hd.files.length > 0 || hd.depends.length > 0 || !!hd.path || hd.risky || hd.checks.length > 0 || !!hd.focus || hd.workflow ||
     hd.sources.length > 0 || !!hd.read || !!hd.kind || hd.validate || hd.skills.length > 0 ||
+    skillLines ||
     rp.status !== null || rp.open.length > 0 || Object.keys(rp.answers).length > 0 || rp.gaps.length > 0 || rp.quotes.length > 0 ||
     text.split("\n").some((l) => /^\s*PLAN REVIEW\b/.test(l))
   );
+}
+
+/** ORCH_SKILL_CREATE: skill slices may run unless it is "off" (any case). @param {Record<string, string | undefined>} env */
+function createOn(env) {
+  return String(env.ORCH_SKILL_CREATE ?? "").trim().toLowerCase() !== "off";
+}
+
+/** Where draft worktrees live: <CLAUDE_CONFIG_DIR or ~/.claude>/orchestration/skill-drafts. */
+function draftHome() {
+  return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "orchestration", "skill-drafts");
+}
+
+/** The draft worktree of a skill. @param {'private' | 'public'} target @param {string} name */
+const draftOf = (target, name) => join(draftHome(), target, name);
+
+/** The configured repo path of a target when it is absolute, else null. @param {'private' | 'public'} target @returns {string | null} */
+function repoPath(target) {
+  const v = String(process.env[`ORCH_SKILLS_REPO_${target.toUpperCase()}`] ?? "").trim();
+  return v && isAbsolute(v) ? resolve(v) : null;
+}
+
+/** git -C dir args: trimmed stdout, or null on any failure. @param {string} dir @param {string[]} args @returns {string | null} */
+function git(dir, args) {
+  try {
+    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** The repo is usable for drafts: a git work tree with scripts/validate.py. @param {string | null} repo */
+function usableRepo(repo) {
+  try {
+    return !!repo && git(repo, ["rev-parse", "--is-inside-work-tree"]) === "true" && existsSync(join(repo, "scripts", "validate.py"));
+  } catch {
+    return false;
+  }
+}
+
+/** An installed skill has this name (the part after the last ":"). Any failure counts as not installed. @param {string} name */
+async function installedSkill(name) {
+  try {
+    const cat = await import("./skill-catalog.mjs");
+    let cacheDir = null;
+    try {
+      ensureStateDir();
+      cacheDir = stateDir;
+    } catch {
+      // no state dir: scan without a cache
+    }
+    const list = cat.skillCatalog({ env: process.env, projectDir: projectDir(), cacheDir });
+    return Array.isArray(list) && list.some((s) => s && typeof s.name === "string" && s.name.split(":").pop() === name);
+  } catch {
+    return false;
+  }
+}
+
+/** A word for a shell command line, single-quoted unless it is plain. @param {string} s */
+const sh = (s) => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+/** Append one record to skill-create.jsonl; never throws. @param {Record<string, unknown>} rec */
+function createLog(rec) {
+  try {
+    ensureStateDir();
+    const sid = typeof input.session_id === "string" ? input.session_id : "";
+    appendFileSync(join(stateDir, CREATE_LOG), `${JSON.stringify({ ts: new Date().toISOString(), session_id: sid, ...rec })}\n`);
+  } catch {
+    // logging must never change the decision
+  }
+}
+
+/**
+ * The facts block appended to an allowed skill slice ("" when it would parse as a brief or reply line). Every value
+ * comes from this hook. Never throws.
+ * @param {{ name: string, target: 'private' | 'public', repo: string, draft: string, branch: string }} s
+ * @returns {{ text: string, base: string | null, baseSha: string | null, reuse: string }}
+ */
+function skillFactsText(s) {
+  try {
+    const base = git(s.repo, ["branch", "--show-current"]) || git(s.repo, ["rev-parse", "HEAD"]) || "HEAD";
+    // The base commit, pinned for the skill gate: it compares the draft with this commit, not with a branch name.
+    const baseSha = git(s.repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    const hasBranch = git(s.repo, ["rev-parse", "--verify", "--quiet", `refs/heads/${s.branch}`]) !== null;
+    const reuse = existsSync(s.draft) ? "exists" : hasBranch ? "branch" : "new";
+    const make =
+      reuse === "exists"
+        ? `- The draft worktree exists already (an earlier attempt): work in it and do not create it again.`
+        : reuse === "branch"
+          ? `- Create the draft worktree on the existing branch: git -C ${sh(s.repo)} worktree add ${sh(s.draft)} ${s.branch}`
+          : `- Create the draft worktree first: git -C ${sh(s.repo)} worktree add -b ${s.branch} ${sh(s.draft)} ${sh(base)}`;
+    const skillDir = join(s.draft, "skills", s.name);
+    const text = [
+      "",
+      "",
+      "Skill draft (added by the plan check; every value below comes from the hook, use it as given):",
+      `- Repository: the ${s.target} skills repository at ${s.repo}`,
+      `- Draft worktree: ${s.draft}`,
+      `- Branch ${s.branch}, based on ${base}`,
+      make,
+      "- The paths on this brief's FILES line are relative to the draft worktree, not to the project.",
+      `- Validator, run in the draft worktree: python3 scripts/validate.py skills/${s.name}`,
+      `- Catalog file: README.md in the draft worktree (one row for the skill)`,
+      `- Seal, after the last change: node ${sh(join(HOOKS_DIR, "skill-seal.mjs"))} ${sh(skillDir)}`,
+      `- Authoring skill: load ${AUTHORING} with the Skill tool before starting`,
+    ].join("\n");
+    return { text: briefShaped(text, true) ? "" : text, base, baseSha, reuse };
+  } catch {
+    return { text: "", base: null, baseSha: null, reuse: "" };
+  }
+}
+
+/**
+ * The DRAFTS lines for this launch ("" for none): one line per named draft this hook allowed in this run (its SKILL.md
+ * path), unknown names dropped; logged to skill-create.jsonl. `scope`: the run keys to match, or null to work them out
+ * from the session's runs. Never throws.
+ * @param {string[] | null} scope @returns {string}
+ */
+function draftsText(scope) {
+  if (!h.drafts.length) return "";
+  const sid = typeof input.session_id === "string" ? input.session_id : "";
+  try {
+    let keys = scope;
+    if (!keys) {
+      let runs = [];
+      /** @type {any} */
+      let openRun = null;
+      try {
+        ({ runs, open: openRun } = sessionRuns(sid, { env: process.env }));
+      } catch {
+        // unreadable logs: no run
+      }
+      keys = openRun ? [String(openRun.id)] : [String(runs.length), `none-${runs.length}`];
+    }
+    const made = readJsonl(stateDir, CREATE_LOG).filter(
+      (e) => e.session_id === sid && e.decision === "allow" && typeof e.skill === "string" && typeof e.draft === "string" && keys.includes(String(e.run)),
+    );
+    /** @type {{ name: string, path: string }[]} */
+    const known = [];
+    /** @type {string[]} */
+    const unknown = [];
+    for (const name of h.drafts) {
+      const e = made.findLast((x) => x.skill === name);
+      if (e) known.push({ name, path: join(e.draft, "skills", name, "SKILL.md") });
+      else unknown.push(name);
+    }
+    const text = known.length
+      ? ["", "", "Draft skills of this run (added by the plan check): read each SKILL.md below before starting.", ...known.map((k) => `- ${k.path} (draft skill ${k.name})`)].join("\n")
+      : "";
+    const shaped = !!text && briefShaped(text, true);
+    createLog({ decision: "drafts", reason: shaped ? "brief_line" : known.length ? "ok" : "none_known", agent_type: type, role, slice: h.slice, names: known.map((k) => k.name), paths: known.map((k) => k.path), unknown, run: keys[0] ?? null });
+    return shaped ? "" : text;
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -248,11 +445,13 @@ function skillHintText() {
     }
     const catalog = hintMods.skillCatalog({ env: process.env, projectDir: dir, cacheDir });
     const list = Array.isArray(catalog) ? catalog : [];
-    const picks = hintMods.skillHints({ role, header: h, brief: prompt, catalog: list });
+    const header = isPlanReview(prompt) ? { ...h, skills: planReviewSkills(prompt) } : h;
+    const rank = hintModelRank();
+    const picks = hintMods.skillHints({ role, modelRank: rank, header, brief: prompt, catalog: list });
     const safe = Array.isArray(picks) ? picks.filter((p) => p && typeof p.name === "string" && typeof p.reason === "string") : [];
     const names = safe.map((p) => p.name);
     const reasons = safe.map((p) => p.reason);
-    const counts = { picks: safe.length, catalog: list.length, explicit: h.skills.length, not_found: reasons.filter((r) => r === "explicit_not_found").length };
+    const counts = { picks: safe.length, catalog: list.length, explicit: header.skills.length, not_found: reasons.filter((r) => r === "explicit_not_found").length };
     const block = safe.length ? String(hintMods.hintBlock(safe) ?? "") : "";
     if (!block) {
       log({ decision: "none", names: [], reasons: [], ...counts });
@@ -267,6 +466,35 @@ function skillHintText() {
   } catch {
     log({ decision: "skip", reason: "hint_error" });
     return "";
+  }
+}
+
+/**
+ * The SKILLS names of a PLAN REVIEW brief that are meant for its reviewer: those of a SKILLS line before the first SLICE
+ * line (the lines after it describe the planned slices). Read with parseHeader, line by line. Never throws.
+ * @param {string} text @returns {string[]}
+ */
+function planReviewSkills(text) {
+  try {
+    const all = text.split("\n");
+    const first = all.findIndex((l) => parseHeader(l).slice !== null);
+    return parseHeader(first < 0 ? text : all.slice(0, first).join("\n")).skills;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The rank of the model a hinted launch runs on: the call's model, else the agent file's; null when neither can be
+ * ranked. Never throws.
+ * @returns {number | null}
+ */
+function hintModelRank() {
+  try {
+    const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
+    return modelRank(explicit ?? agentFileModel());
+  } catch {
+    return null;
   }
 }
 
@@ -426,7 +654,16 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
   return { raised, tier, note };
 }
 const sessionId = typeof input.session_id === "string" ? input.session_id : "";
-const { slice, files, depends } = h;
+const { slice, depends } = h;
+// A skill slice's FILES become paths in its draft worktree once its repo checks pass; every other brief keeps its own.
+let files = h.files;
+// Only this plugin's or project's own implementer (bare or orchestration:) is a skill slice; built-ins, fork and other
+// plugins' agents get nothing from the skill feature.
+const skillSlice = OWN_IMPLEMENTER.has(type) && h.kind === "skill";
+/** @type {{ name: string | null, target: 'private' | 'public', update: boolean, repo?: string, draft?: string, branch?: string, base?: string, worktree?: string, facts?: string } | null} */
+let skillInfo = skillSlice ? { name: h.skill, target: h.target ?? "private", update: h.update } : null;
+/** True once create, name and repo checks passed (given up or not): only then are there facts to append. */
+let skillReady = false;
 
 const lock = join(stateDir, "plan-check.lock");
 let locked = false;
@@ -450,8 +687,8 @@ try {
   // no state dir: decide unlocked
 }
 
-/** @type {{ runs: import("./brief.mjs").Run[], open: import("./brief.mjs").Run | null, records: { stops: any[] } }} */
-let state = { runs: [], open: null, records: { stops: [] } };
+/** @type {{ runs: import("./brief.mjs").Run[], open: import("./brief.mjs").Run | null, records: { stops: any[], launches?: any[] } }} */
+let state = { runs: [], open: null, records: { stops: [], launches: [] } };
 try {
   state = sessionRuns(sessionId, { env: process.env });
 } catch {
@@ -486,6 +723,27 @@ function decide(decision, reason, message) {
   } catch {
     // logging must never change the decision
   }
+  // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
+  // A ready skill slice gets its facts on every allow; DRAFTS lines go to every allow. The haiku rule's raised model
+  // goes out on every allow.
+  let extra = "";
+  if (decision === "allow") {
+    const hinted = (reason === "ok" || reason === "light_path") && HINTED_TYPES.has(type) && role === "implementer";
+    const block = hinted ? skillHintText() : "";
+    let facts = "";
+    if (skillInfo && skillReady && skillInfo.name && skillInfo.repo && skillInfo.draft && skillInfo.branch) {
+      const f = skillFactsText({ name: skillInfo.name, target: skillInfo.target, repo: skillInfo.repo, draft: skillInfo.draft, branch: skillInfo.branch });
+      facts = f.text;
+      skillInfo = { ...skillInfo, ...(f.base ? { base: f.base } : {}), ...(f.baseSha ? { base_sha: f.baseSha } : {}), worktree: f.reuse, facts: facts ? "appended" : "dropped" };
+    }
+    // DRAFTS lines only for our own implementer (this path's own researcher and reviewer exit earlier): never for a
+    // built-in, fork or another plugin's agent, which keep their old output.
+    extra = `${block}${facts}${HINTED_TYPES.has(type) && role === "implementer" ? draftsText(scope) : ""}`;
+  }
+  if (skillInfo) {
+    const { name, ...rest } = skillInfo;
+    createLog({ decision, reason, skill: name, ...rest, slice, files, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}) });
+  }
   if (locked) rmSync(lock, { recursive: true, force: true });
   if (decision === "block") {
     try {
@@ -495,13 +753,7 @@ function decide(decision, reason, message) {
     }
     process.exit(2);
   }
-  // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
-  // The haiku rule's raised model goes out on every allow.
-  if (decision === "allow") {
-    const hinted = (reason === "ok" || reason === "light_path") && HINTED_TYPES.has(type) && role === "implementer";
-    const block = hinted ? skillHintText() : "";
-    if (block || floored) allowWith({ ...tool, prompt: `${prompt}${block}` });
-  }
+  if (decision === "allow" && (extra || floored)) allowWith({ ...tool, prompt: `${prompt}${extra}` });
   process.exit(0);
 }
 /** Blocks so far in this scope for a reason (and, when given, the same slice or agent type). @param {string} reason @param {(e: any) => boolean} [same] */
@@ -524,6 +776,42 @@ if (role !== "implementer") {
 if (!slice || files.length === 0) {
   if (blocks("missing_lines") >= MAX_BLOCKS) decide("allow", "missing_lines_gave_up");
   decide("block", "missing_lines", "Plan check: every implementer brief starts with SLICE: <id>, FILES: <owned files, comma-separated> and DEPENDS: <slice ids or none>. Add them and launch again.");
+}
+
+// Skill slices: the five skill checks, each blocking twice per slice and then giving up.
+if (skillInfo) {
+  /** @param {string} reason @param {string} message */
+  const gate = (reason, message) => {
+    if (blocks(reason, (e) => e.slice === slice) < MAX_BLOCKS) decide("block", reason, message);
+    gaveUp.push(`${reason}_gave_up`);
+  };
+  const { name, target } = skillInfo;
+  const repo = repoPath(target);
+  if (!createOn(process.env)) {
+    gate("skill_create_off", "Plan check: creating skills is turned off on this machine, so a KIND: skill slice cannot run. Drop the skill slice and do the task without it, and say in the final report that the skill was not created.");
+  } else if (!name) {
+    gate("skill_name_invalid", "Plan check: a KIND: skill brief needs a line SKILL: <name>, where the name is lower-case letters and digits in words joined by single hyphens, at most 64 characters (for example release-notes). Add or fix the line and launch again.");
+  } else if (!usableRepo(repo)) {
+    gate("skill_repo_missing", `Plan check: the ${target} skills repository is not set up on this machine (no path for it, not a git work tree, or no scripts/validate.py), so the skill cannot be drafted there. Do the task without the skill and say so in the final report, or ask the person to set up the ${target} skills repository.`);
+  } else if (repo) {
+    const draft = draftOf(target, name);
+    skillInfo = { ...skillInfo, repo, draft, branch: `skill/${name}` };
+    skillReady = true;
+    files = normalizeFiles(h.files, draft);
+    if (!skillInfo.update) {
+      const repos = /** @type {string[]} */ ([repoPath("private"), repoPath("public")].filter(Boolean));
+      if (repos.some((r) => existsSync(join(r, "skills", name))) || (await installedSkill(name))) {
+        gate("skill_exists", `Plan check: a skill named ${name} already exists (in a skills repository or installed). Pick another name, name the existing skill on a SKILLS line instead, or, to change that skill, add the line UPDATE: yes.`);
+      }
+      const made = readJsonl(stateDir, CREATE_LOG).filter(
+        (e) => e.session_id === sessionId && e.decision === "allow" && e.update !== true && typeof e.skill === "string" && e.skill !== name && scope.includes(String(e.run)),
+      );
+      const other = made.at(-1)?.skill;
+      if (other) {
+        gate("skill_limit", `Plan check: this run already creates the skill ${other}, and a run creates at most one new skill. Drop this skill slice, or name the draft with DRAFTS: ${other} in the briefs that need it.`);
+      }
+    }
+  }
 }
 
 const launched = scoped.filter((e) => e.decision === "allow" && e.slice);
@@ -579,7 +867,8 @@ else {
   else if (!planned.files.length) skips.push("not_in_plan:no_planned_files");
   else {
     const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
-    const allowed = normalizeFiles(planned.files, dir);
+    // A slice the plan marks KIND: skill with a SKILL name has its planned FILES in that skill's draft worktree.
+    const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir);
     /** A planned path covers itself, what is under it as a folder, and what its glob prefix starts. @param {string} p @param {string} f */
     const covers = (p, f) => {
       const [x, y] = [base(p), base(f)];
@@ -596,6 +885,26 @@ else {
       decide("block", "not_in_plan", `Plan check: ${problem}. Launch the slice as planned, or send the change to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with the new or changed SLICE, FILES, DEPENDS and GOAL lines.`);
     }
     gaveUp.push("not_in_plan_gave_up");
+  }
+}
+
+/**
+ * The draft worktree of a slice the open run's plan marks KIND: skill with a valid SKILL (TARGET public, else private):
+ * the latest planned entry for the slice in a plan review of this run; null for any other slice. Never throws.
+ * @param {string} id @returns {string | null}
+ */
+function plannedDraft(id) {
+  try {
+    const since = open?.openedAt ?? -Infinity;
+    /** @type {any} */
+    let p = null;
+    for (const l of records.launches ?? []) {
+      if (!l || typeof l !== "object" || !l.plan || !Array.isArray(l.plan.slices) || tsMs(l.ts) < since) continue;
+      for (const x of l.plan.slices) if (x && x.slice === id) p = x;
+    }
+    return p && p.kind === "skill" && isSkillName(p.skill) ? draftOf(p.target === "public" ? "public" : "private", p.skill) : null;
+  } catch {
+    return null;
   }
 }
 

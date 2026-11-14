@@ -35,6 +35,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const HEADLESS_FLAGS = Object.freeze([
   "--agent", "--output-format", "--verbose", "--permission-mode", "--no-session-persistence", "--max-budget-usd", "--model",
   "--add-dir", "--disallowedTools", "--allowedTools", "--setting-sources", "--tools", "--strict-mcp-config",
+  "--append-system-prompt",
 ]);
 /** Options they pass that the help does not list (so the help cannot confirm them). */
 export const HIDDEN_FLAGS = Object.freeze(["--max-turns", "--advisor"]);

@@ -127,6 +127,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --plugin",
             "timeout": 900
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/skill-gate.mjs\" --plugin",
+            "timeout": 120
           }
         ]
       },

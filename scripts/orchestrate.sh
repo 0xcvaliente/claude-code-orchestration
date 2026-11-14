@@ -28,6 +28,12 @@
 #      ORCH_SESSION_PERSISTENCE=1 (omit --no-session-persistence, so the session and its subagent transcripts are written
 #        and telemetry v2 can read per-agent tokens, turns and models at SubagentStop; unset or any other value keeps it),
 #      ORCH_DRY_RUN=1 (print the claude arguments, one per line, and exit).
+# Every run is told it is unattended (one sentence through --append-system-prompt: nobody can answer a question), so
+# the orchestrator plans a new skill without proposing it first. Skill slices: unless ORCH_SKILL_CREATE=off, each
+# skills repository set in ORCH_SKILLS_REPO_PRIVATE or ORCH_SKILLS_REPO_PUBLIC (an absolute path to a directory) and
+# the draft home <CLAUDE_CONFIG_DIR or ~/.claude>/orchestration/skill-drafts (created when missing) get --add-dir, and
+# the Skill tool and the rules for the repositories' validator and the seal command join the allowlist (git -C and git worktree are
+# already there). With neither repository set, nothing changes. The rules join a replaced list (ORCH_ALLOWED_TOOLS) too.
 set -uo pipefail
 export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a run that was already routed
 
@@ -98,6 +104,23 @@ else
   done <<< "${ORCH_EXTRA_ALLOWED_TOOLS:-}"
 fi
 
+# Skill slices (see the header): the configured skills repositories and the draft home, and the two commands a skill
+# slice runs there that the list above may not cover.
+skill_dirs=()
+skill_create="$(printf '%s' "${ORCH_SKILL_CREATE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+if [ "$skill_create" != off ]; then
+  for d in "${ORCH_SKILLS_REPO_PRIVATE:-}" "${ORCH_SKILLS_REPO_PUBLIC:-}"; do
+    case "$d" in /*) [ -d "$d" ] && skill_dirs+=("$d") ;; esac
+  done
+  if [ "${#skill_dirs[@]}" -gt 0 ]; then
+    drafts="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/orchestration/skill-drafts"
+    # Created in a dry run too: bench/lib/*-launch.sh run claude with the dry run's arguments.
+    mkdir -p "$drafts" 2>/dev/null && skill_dirs+=("$drafts")
+    # Skill: the implementer loads the authoring skill; dontAsk denies an unlisted tool.
+    tools+=("Skill" "Bash(python3 scripts/validate.py*)" "Bash(python3 */scripts/validate.py*)" "Bash(node */skill-seal.mjs *)")
+  fi
+fi
+
 # Block Claude Code's built-in subagents (general-purpose, Explore, Plan, ...) in headless runs: this repo's own agents
 # do those jobs, with gates. DENIED_AGENTS in src/config.ts; src/policy.test.ts fails if this line goes away.
 export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
@@ -116,6 +139,10 @@ args+=(--output-format stream-json --verbose --permission-mode dontAsk)
 [ -n "${ORCH_ADVISOR:-}" ] && args+=(--advisor "$ORCH_ADVISOR")
 [ -n "${ORCH_MODEL:-}" ] && args+=(--model "$ORCH_MODEL")
 [ -n "${ORCH_ADD_DIR:-}" ] && args+=(--add-dir "$ORCH_ADD_DIR")
+# One --add-dir per skills directory: the option is variadic, so each takes exactly one value here.
+[ "${#skill_dirs[@]}" -gt 0 ] && for d in "${skill_dirs[@]}"; do args+=(--add-dir "$d"); done
+# Headless: nobody reads a question before the run ends (the orchestrator then decides instead of asking).
+args+=(--append-system-prompt "This run is unattended: nobody can answer a question during this run, so decide and proceed instead of asking.")
 # Never publish or escalate, whatever the folder's settings say (a plugin user's folder has no deny list, and this
 # repo's leaves git push to interactive sessions). A deny beats every allow rule, so `Bash(git -C *)` cannot reach a
 # push. UNSAFE_BASH in src/config.ts; src/verify.test.ts fails on drift. Variadic: keep it before --allowedTools.

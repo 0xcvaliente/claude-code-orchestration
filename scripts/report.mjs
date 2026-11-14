@@ -6,6 +6,8 @@
 // auto.sh's routes.jsonl in the repo, telemetry.jsonl and gates.jsonl in the per-user dir. report.html goes in the
 // first dir with telemetry or runs, else routes or gates, so a plugin install's report stays out of the repo too; the
 // page holds no hook payloads. With no logs anywhere it writes an empty report where this repo's writers would log.
+// The Skills section (skills.jsonl, journal.jsonl, skill-create.jsonl, skill-gate.jsonl) appears only when those logs
+// name a skill, so the report of a run without skills is the one it was before.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
@@ -46,6 +48,26 @@ const events = read("telemetry.jsonl");
 const routes = read("routes.jsonl");
 const gates = read("gates.jsonl");
 const reads = read("reads.jsonl");
+/**
+ * A log read like `read`, but listed under "State:" only once `note` is called, so logs that every run writes
+ * (journal.jsonl) do not change the page of a run that has no skill data.
+ * @param {string} name @returns {{ rows: any[], note: () => void }}
+ */
+const readQuiet = (name) => {
+  const from = candidates.find(has([name]));
+  if (!from) return { rows: [], note: () => {} };
+  const rows = readFileSync(join(from, name), "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l)];
+      } catch {
+        return [];
+      }
+    });
+  return { rows, note: () => void (sources.get(from) ?? sources.set(from, []).get(from)).push(name) };
+};
 /** @param {string[]} heads @param {unknown[][]} rows */
 const table = (heads, rows) =>
   `<table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
@@ -191,6 +213,70 @@ const readTable = reads.length
   ? table(["Kind", ...roleList, "Total"], [...readCounts].map(([kind, m]) => [kind, ...roleList.map((r) => m.get(r) ?? 0), [...m.values()].reduce((a, b) => a + b, 0)]))
   : "<p>No reads logged yet.</p>";
 
+// Skills: per skill how often the plan check suggested it (skills.jsonl, decision "hint"), and how often a worker said
+// it used or skipped it (journal.jsonl stop records, skills_used and skills_skipped from the SKILLS-USED and
+// SKILLS-SKIPPED reply lines); the drafts skill slices created (skill-create.jsonl, decision "allow", the last per
+// session and skill) with the skill gate's last result for each (skill-gate.jsonl); and "worth revising": a skill
+// skipped three or more times, or used in a slice whose latest review failed.
+const skillLogs = { hints: readQuiet("skills.jsonl"), journal: readQuiet("journal.jsonl"), create: readQuiet("skill-create.jsonl"), gate: readQuiet("skill-gate.jsonl") };
+/** @param {unknown} v @returns {string[]} */
+const names = (v) => (Array.isArray(v) ? v.filter((n) => typeof n === "string" && n.length > 0 && n.length <= 100) : []);
+/** @type {Map<string, { suggested: number, used: number, skipped: number }>} */
+const skillCounts = new Map();
+/** @param {string} n */
+const countOf = (n) => skillCounts.get(n) ?? skillCounts.set(n, { suggested: 0, used: 0, skipped: 0 }).get(n) ?? { suggested: 0, used: 0, skipped: 0 };
+for (const r of skillLogs.hints.rows) if (r?.decision === "hint") for (const n of names(r.names)) countOf(n).suggested++;
+/** @param {any} r */
+const sliceKey = (r) => `${r?.session_id ?? ""}\n${r?.run ?? ""}\n${r?.slice ?? ""}`;
+/** @type {Map<string, string | null>} the latest review status of each slice */
+const lastReview = new Map();
+/** @type {{ skill: string, key: string, slice: string }[]} */
+const usedIn = [];
+for (const r of skillLogs.journal.rows) {
+  if (!r || typeof r !== "object") continue;
+  if (String(r.role ?? r.agent_type ?? "").split(":").pop() === "reviewer" && r.slice) lastReview.set(sliceKey(r), typeof r.status === "string" ? r.status : null);
+  for (const n of names(r.skills_used)) {
+    countOf(n).used++;
+    if (r.slice) usedIn.push({ skill: n, key: sliceKey(r), slice: String(r.slice) });
+  }
+  for (const n of names(r.skills_skipped)) countOf(n).skipped++;
+}
+/** @type {Map<string, any>} the last allow per session and skill */
+const drafts = new Map();
+for (const r of skillLogs.create.rows) if (r?.decision === "allow" && typeof r.skill === "string") drafts.set(`${r.session_id ?? ""}\n${r.skill}`, r);
+/** @type {Map<string, any>} the last gate record per session and skill */
+const gateLast = new Map();
+for (const r of skillLogs.gate.rows) if (typeof r?.skill === "string") gateLast.set(`${r.session_id ?? ""}\n${r.skill}`, r);
+/** @param {any} g */
+const gateText = (g) => {
+  if (!g) return "not run";
+  const failed = names(g.failed).join(", ");
+  if (g.decision === "allow" && g.reason === "ok") return "passed";
+  if (g.reason === "skill_gate_gave_up") return `gave up after its blocks${failed ? ` (${failed})` : ""}`;
+  return `${g.decision === "block" ? "blocked" : String(g.decision ?? "?")}${failed ? ` (${failed})` : ""}`;
+};
+/** @type {Map<string, string[]>} */
+const revise = new Map();
+for (const [n, c] of skillCounts) if (c.skipped >= 3) revise.set(n, [`skipped ${c.skipped} times`]);
+for (const u of usedIn) {
+  if (lastReview.get(u.key) !== "fail") continue;
+  const why = `used in slice ${u.slice}, whose review failed`;
+  const list = revise.get(u.skill) ?? revise.set(u.skill, []).get(u.skill) ?? [];
+  if (!list.includes(why)) list.push(why);
+}
+const skillsSection = (() => {
+  if (!skillCounts.size && !drafts.size) return "";
+  for (const l of Object.values(skillLogs)) if (l.rows.length) l.note();
+  const countTable = skillCounts.size
+    ? table(["Skill", "Suggested", "Used", "Skipped"], [...skillCounts].sort(([a], [b]) => a.localeCompare(b)).map(([n, c]) => [n, c.suggested, c.used, c.skipped]))
+    : "";
+  const draftTable = drafts.size
+    ? `<h3>Drafts created</h3>${table(["Time", "Skill", "Target", "Branch", "Slice", "Skill gate"], [...drafts].map(([k, r]) => [r.ts, r.skill, r.target ?? "private", r.branch ?? `skill/${r.skill}`, r.slice ?? "", gateText(gateLast.get(k))]))}`
+    : "";
+  const reviseList = revise.size ? `<h3>Worth revising</h3><ul>${[...revise].map(([n, why]) => `<li><code>${esc(n)}</code>: ${esc(why.join("; "))}</li>`).join("")}</ul>` : "";
+  return `\n<h2>Skills</h2>${countTable}${draftTable}${reviseList}`;
+})();
+
 // Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".
 const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</code> (${names.join(", ")})`).join("; ") : `<code>${esc(dir)}</code>`;
 
@@ -200,7 +286,7 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agents by role</h2>${roleTable}${noStopLine}
 <h2>Estimated cost by role and model</h2>${costTable}
-<h2>Reads by kind and role</h2>${readTable}
+<h2>Reads by kind and role</h2>${readTable}${skillsSection}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}
 <h2>Gate decisions</h2>${gates.length ? table(["Time", "Gate", "Decision", "Reason", "Agent or session"], gates.map((g) => [g.ts, g.gate, g.decision, g.reason, g.agent_type || g.session_id])) : "<p>No gate decisions yet.</p>"}</body></html>`;
