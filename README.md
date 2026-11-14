@@ -26,7 +26,7 @@ Start a new chat afterwards. The plugin's `SessionStart` hook tells Claude to ru
 Two settings the plugin cannot set for you:
 
 - **Parallel code slices need `baseRef: "head"`.** Claude Code starts a worktree from the remote default branch unless told otherwise, so a parallel slice would not see unpushed or feature-branch commits. Add `{ "worktree": { "baseRef": "head" } }` to your `.claude/settings.json` or `~/.claude/settings.json`. Without it the orchestrator runs code slices one after another in the shared tree and says so.
-- **Permission denies.** A plugin cannot ship them. This repo denies Claude Code's six built-in subagents, `Agent(fork)`, `git remote*`, `sudo*` and `rm -rf` in its own `.claude/settings.json`; add the ones you want to your settings. Without them the plan check still blocks fork and built-in launches while a run is open (`builtin_agent_in_run`).
+- **Permission denies.** A plugin cannot ship them. This repo denies Claude Code's built-in subagents (seven since Claude Code 2.1.325 added `web-fetch`; the list is `.claude/hooks/builtin-agents.mjs`), `Agent(fork)`, `git remote*`, `sudo*` and `rm -rf` in its own `.claude/settings.json`; add the ones you want to your settings. Without them the plan check still blocks fork and built-in launches while a run is open (`builtin_agent_in_run`).
 
 Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist (the package registries and the hosts the task needs): the 0.4.0 guards narrow what a researcher or reviewer can reach, but Bash can still reach the network.
 
@@ -173,7 +173,18 @@ The test gate skips the tests only in a git work tree when every changed path is
 - **Reports checked before delivery.** In auto mode a worker's report passes `handback-check.mjs` and, for researchers, the quote check, before the orchestrator sees it. Each sends a report back at most once.
 - **Cost in the report.** Estimated cost by role and model, one-hour cache writes and mid-run cache rewrites.
 - **Subagent status line.** Shipped by the plugin ([Dashboard and status line](#dashboard-and-status-line)).
-- **SDK pipeline.** Agent SDK 0.3.322; the Bash judge's hook is registered with `onFailure: "block"`.
+- **SDK pipeline.** Agent SDK 0.3.322 (0.3.325 since 1.2.2); the Bash judge's hook is registered with `onFailure: "block"`.
+
+### After a Claude Code update
+
+Claude Code updates itself, and an update can add something that goes around these gates. 2.1.325 added a built-in subagent, `web-fetch`, that the block list did not name. After an update, run this in a checkout:
+
+```sh
+npm run claude-update              # check; exit 1 when something needs attention
+npm run claude-update -- --fix     # also repair this machine
+```
+
+It reads the built-in subagent types from the installed Claude Code and fails when one is not blocked, and it checks the headless switches, the options the scripts pass, the Agent SDK version, the plugin install and `dist/`. It calls no model. `--fix` blocks a newly found built-in on this machine at once and updates a stale plugin install; `--enable` installs and enables the plugin when it is off. [docs/claude-code-updates.md](docs/claude-code-updates.md) has every check and what to do when one fails.
 
 ## How a worker launch is shaped
 
@@ -462,6 +473,7 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_MODEL_JUDGE`, `ORCH_JUDGE_AUDIT` | SDK | The Bash judge's model (default `claude-opus-5-5`) and audit file |
 | `ORCH_SANDBOX`, `ORCH_SANDBOX_DOMAINS` | SDK | `on` runs Bash roles in the SDK's OS sandbox (opt-in; smoke-tested on macOS only), and the network domains it allows |
 | `ORCH_NO_NUDGE` | `nudge.mjs` | Silence the session nudge |
+| `ORCH_BUILTINS_FILE`, `ORCH_CLAUDE_BIN` | `plan-check.mjs`, `claude-update.mjs` | The file of built-in agent types learned on this machine (default `~/.claude/orchestration/builtin-agents.json`; empty means none), and the `claude` binary the update check runs |
 | `ORCH_HOME` | `/route` skill | Where this repo lives (default `~/claude-code-orchestration`) |
 
 The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm test` when `package.json` has a test script; `pytest` (or `unittest`) only when `test_*.py` or `*_test.py` files exist; `cargo test`; `go test ./...`; `swift test`; `make test` when a `test:` target exists (`.claude/hooks/test-cmd.sh`). No runner means the gate allows (`no_test_command`).
@@ -478,6 +490,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run orchestrate`, `npm run test-dashboard` | Interactive orchestrator with the dashboard loaded; the dashboard's own test (needs the `claude` CLI) |
 | `npm run report` | HTML timeline and per-role tables from the state dir |
 | `npm run install-statusline` | Copy the status line script and print the setting |
+| `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](docs/claude-code-updates.md)) |
 | `npm run eval` | `claude plugin eval` on `dist/plugin` with the four cases in `evals/` (paid, `--max-cost-usd 10`); not smoke-run yet |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md)) |
 | `npm start` | SDK pipeline with triage |
@@ -491,7 +504,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
                      baseline, bugfix check), review-gate.mjs, quote-check.mjs, researcher-guard.mjs, egress-guard.mjs,
                      compact-context.mjs, journal.mjs, telemetry.mjs, read-log.mjs, nudge.mjs, brief.mjs (the parser),
                      run.mjs, state.mjs, file-profile.mjs, skill-catalog.mjs, skill-hint.mjs, judge-hook.mjs,
-                     judge-core.mjs, prompt-capture.mjs, test-cmd.sh
+                     judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
+                     built-in subagent types)
   skills/            route, orchestration-conventions
   workflows/         orchestrate.js (the gated workflow)
   settings.json, rules/
@@ -500,10 +514,12 @@ dist/plugin/, dist/dashboard/   the built plugin and the dashboard mod alone (co
 dashboard/           the live pane (source for both builds)
 statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
-scripts/             auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs
+scripts/             auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
+                     claude-update.mjs (the check to run after a Claude Code update)
 evals/               the plugin eval suite
 bench/               the benchmark: run, grade, analyze, report, tasks/, matrix/
-docs/                native-mode.md, brief-grammar.md, dashboard.md, native-vs-plugin.md, bash-judge.md, benchmark pages,
+docs/                native-mode.md, brief-grammar.md, dashboard.md, native-vs-plugin.md, bash-judge.md,
+                     claude-code-updates.md, benchmark pages,
                      research-2026-10-31.md, data/ (run data, live checks), diagrams/
 ```
 

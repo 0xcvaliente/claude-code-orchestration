@@ -782,7 +782,7 @@ test("parity: parseHeader matches plan-check.mjs, sliceOfBrief matches journal.m
     const state = join(dir, ".claude", "state");
     mkdirSync(hooks, { recursive: true });
     mkdirSync(state, { recursive: true });
-    for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+    for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
     const briefs = [
       "SLICE: toml\nFILES: toolkit/toml.py, ./tests/test_toml.py\nDEPENDS: none",
       "- **SLICE:** auth extra\n- FILES: `src/auth.ts`, 'src/session/'\n- DEPENDS: A0, A1",

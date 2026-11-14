@@ -332,7 +332,7 @@ test("format picks: a skill whose description sends the format to another skill 
 
 // ---------------------------------------------------------------------------------------------------- plan-check
 
-const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "file-profile.mjs", "skill-catalog.mjs", "skill-hint.mjs"];
+const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "file-profile.mjs", "skill-catalog.mjs", "skill-hint.mjs"];
 /** A throwaway project with the hooks, a haiku researcher agent file, a fixture text file and a temp skills root. */
 function project({ hooks = HOOKS, reviewed = false } = {}) {
   const dir = temp("skills-e2e-");

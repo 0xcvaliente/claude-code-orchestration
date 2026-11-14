@@ -1144,8 +1144,18 @@ export async function judgeBash(command: string, ctx: JudgeContext, deps: JudgeD
 }
 
 /**
+ * The environment of every query() this repo starts (workers and the judge): the caller's, plus
+ * CLAUDE_CODE_DISABLE_AUTO_MEMORY=1. Claude Code's auto memory is for a person's own sessions. In a worker it would add
+ * memory instructions to the prompt and write notes under ~/.claude/projects/<worktree or temp folder>/memory, one
+ * folder per throwaway worktree, where a later session or a memory plugin would find them.
+ */
+export function workerEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string | undefined> {
+  return { ...env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" };
+}
+
+/**
  * The default `deps.ask`: one model call with nothing attached. No tools, no settings or CLAUDE.md, no MCP servers, no
- * plugins, one turn, in the temp folder; `dontAsk` so nothing could prompt even if a tool slipped in.
+ * plugins, no auto memory, one turn, in the temp folder; `dontAsk` so nothing could prompt even if a tool slipped in.
  */
 export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5", timeoutMs = JUDGE_TIMEOUT_MS): JudgeDeps["ask"] {
   return async (prompt) => {
@@ -1167,6 +1177,7 @@ export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5
           plugins: [],
           permissionMode: "dontAsk",
           persistSession: false,
+          env: workerEnv(),
           systemPrompt: "You judge whether a shell command may run. Reply with one JSON object only.",
           abortController: abort,
         },

@@ -7,8 +7,8 @@
 // in order; the first five block (exit 2, reason on stderr) at most twice and then let the launch through with a logged
 // <reason>_gave_up, so a slip never stalls a run; the last two block every time, as they always have:
 //   builtin_agent_in_run  while a run is open, an Agent launch whose subagent_type is fork or a Claude Code built-in
-//                         (general-purpose, which a missing subagent_type also means, claude, Explore, Plan,
-//                         claude-code-guide, statusline-setup). Plugin-namespaced and project agents are never
+//                         (general-purpose, which a missing subagent_type also means, and the others listed in
+//                         builtin-agents.mjs or learned on this machine). Plugin-namespaced and project agents are never
 //                         blocked; ORCH_ALLOW_BUILTINS=1 turns this off. Counted per subagent_type and run.
 //   missing_lines         a brief without SLICE or FILES (counted per run).
 //   no_plan_review        until a reviewer of this run's PLAN REVIEW brief has stopped (journal.mjs records it).
@@ -61,6 +61,7 @@ import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs"
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { agentModel, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
+import { builtinAgents } from "./builtin-agents.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -68,8 +69,9 @@ const MAX_BLOCKS = 2; // loop guard: two blocks per reason and scope, then the l
 const LOG = "plan-check.jsonl";
 const WAIT_MS = 5000;
 const STALE_MS = 10000;
-// Claude Code's built-in agent types (DENIED_AGENTS in src/config.ts) and fork, which no gate here tracks.
-const BUILTINS = new Set(["fork", "general-purpose", "claude", "Explore", "Plan", "claude-code-guide", "statusline-setup"]);
+// Claude Code's built-in agent types and fork, which no gate here tracks: the list in builtin-agents.mjs plus the names
+// scripts/claude-update.mjs learned from the Claude Code installed on this machine.
+const BUILTINS = builtinAgents();
 // The read router rewrites only this plugin's researcher: the project's own copy or the plugin's namespaced one.
 const ROUTED_TYPES = new Set(["researcher", "orchestration:researcher"]);
 const ROUTE_LOG = "reads-route.jsonl";
