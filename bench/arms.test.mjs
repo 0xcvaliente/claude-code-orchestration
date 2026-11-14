@@ -157,6 +157,9 @@ require("fs").writeFileSync(${JSON.stringify(out)}, JSON.stringify({ args: proce
     assert.equal(a.includes("--agent"), false);
     assert.equal(a[a.indexOf("--model") + 1], "opus");
     assert.equal(a[a.indexOf("--permission-mode") + 1], "dontAsk");
+    // orchestrate.sh's own runs read the event stream; this arm runs claude itself and needs the one JSON document.
+    assert.equal(a[a.indexOf("--output-format") + 1], "json");
+    assert.equal(a.includes("--verbose"), false);
     assert.ok(a.includes("Workflow") && a.includes("Bash(date*)") && a.includes("Bash(git push*)"));
   } finally {
     rmSync(tmp, { recursive: true, force: true });

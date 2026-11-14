@@ -4,6 +4,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Fixed
+
+- **The run log recorded the last wake-up of a headless run, not the run.** `claude -p` answers once per wake-up of the session: an orchestrator that launches agents stops, is woken by each agent's result and stops again, and every stop is a result with its own `num_turns` and `duration_ms`. `--output-format json` prints the last one only, so `runs.jsonl` logged a run of two minutes and three agents as `duration_ms: 8320` and `turns: 1`. `scripts/orchestrate.sh` now asks for the event stream (`--output-format stream-json --verbose`) and `scripts/run-result.mjs` reduces it to the document the script prints: the last result as before, plus `orch_totals` with `results` (how many results the session produced), `turns` (`num_turns` summed over them) and `wall_ms` (the run's wall time, measured by the script). `scripts/log-run.mjs` writes those two totals to `turns` and `duration_ms`. Tokens were already right: `modelUsage` in the last result covers the whole session. Rows logged before this fix keep their low figures. The bench's `num_turns` still comes from each document's own `num_turns`; its `N-UC` arm runs `claude` itself and keeps `--output-format json`.
+
 ## [1.2.2] - 2026-11-14
 
 1.2.2 follows Claude Code 2.1.323 to 2.1.325. Claude Code updated itself and the update went around two things this repo relies on; both are fixed, and a script now checks for the same kind of change after every update.
