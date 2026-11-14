@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Read-only research. Answers one narrow question with evidence: file paths and line references for code and local files, URLs for web sources. Use for parallel fact-finding before planning.
-model: haiku
+model: sonnet
 effort: low
 maxTurns: 15
 omitClaudeMd: true

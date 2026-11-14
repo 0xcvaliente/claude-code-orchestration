@@ -74,7 +74,8 @@ orchestrate() { ORCH_AGENT=orchestrator exec "$here/orchestrate.sh" "$task" "$re
 [ "$mode" = orchestrate ] && orchestrate
 
 # The session's JSON still goes to stdout as orchestrate.sh printed it; the reviewer reads its result.
-session_out="$(ORCH_AGENT=none "$here/orchestrate.sh" "$task" "$repo")"
+# The plain session runs on opus unless ORCH_MODEL names another model (the same model the implementer agent runs on).
+session_out="$(ORCH_AGENT=none ORCH_MODEL="${ORCH_MODEL:-opus}" "$here/orchestrate.sh" "$task" "$repo")"
 code=$?
 printf '%s\n' "$session_out"
 

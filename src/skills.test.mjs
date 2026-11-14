@@ -359,7 +359,8 @@ function hook(dir, payload, env = {}) {
   for (const k of Object.keys(base)) if (k.startsWith("CLAUDE_PLUGIN_OPTION_")) delete base[k];
   return spawnSync(process.execPath, [join(dir, ".claude", "hooks", "plan-check.mjs")], {
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
-    env: { ...base, CLAUDE_PROJECT_DIR: dir, CLAUDE_CONFIG_DIR: join(dir, "no-config"), ORCH_SKILL_ROOTS: join(dir, "skills-root"), ...env },
+    // ORCH_ALLOW_HAIKU: the project's researcher file says haiku, and these tests are about hints and the router, not the haiku rule.
+    env: { ...base, CLAUDE_PROJECT_DIR: dir, CLAUDE_CONFIG_DIR: join(dir, "no-config"), ORCH_SKILL_ROOTS: join(dir, "skills-root"), ORCH_ALLOW_HAIKU: "1", ...env },
     encoding: "utf8",
   });
 }

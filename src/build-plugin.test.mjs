@@ -207,7 +207,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 16);
+  assert.equal(keys.length, 17);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
