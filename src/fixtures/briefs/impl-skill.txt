@@ -1,0 +1,10 @@
+SLICE: notes-skill
+FILES: skills/release-notes/, README.md
+DEPENDS: none
+KIND: skill
+SKILL: `release-notes`
+TARGET: Public
+UPDATE: yes
+DRAFTS: release-notes, changelog-style
+
+Write the release-notes skill. A SKILL: key in mid-line does not count, and SKILLS: is another line.

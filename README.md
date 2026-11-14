@@ -113,7 +113,7 @@ One slice's life:
 
 | Role | Model, effort | Tools | Job |
 |---|---|---|---|
-| Orchestrator / planner | Fable, high | read-only; natively it can only delegate | Plans slices, writes briefs, sends reviews and retries |
+| Orchestrator / planner | Fable, high | read-only, `Skill`; natively it can only delegate | Plans slices, writes briefs, sends reviews and retries |
 | Researcher / explorer | Sonnet, low | read-only, read-only `git`, `WebSearch`, `WebFetch`, `Skill` | Answers one narrow question with evidence: file paths, or URLs for web sources |
 | Implementer / writer | Opus, medium | every tool except `Agent` | Builds one slice: code, a document, an analysis or an operation |
 | Reviewer / verifier | Sonnet, medium | read, bash, `WebSearch`, `WebFetch`, `Skill`; never edits | Independent check of one slice or result |
@@ -198,7 +198,9 @@ It reads the built-in subagent types from the installed Claude Code and fails wh
 
 - **No Haiku (on by default, `ORCH_ALLOW_HAIKU=1` to allow it).** A launch of any of this plugin's agents whose model is in the haiku family, from the call or from an older agent file, is raised to sonnet in the same `updatedInput`.
 - **Read router (opt-in, `ORCH_READ_ROUTER=on`).** For a researcher brief that names `SOURCES:`, it profiles each file with local tools (poppler, unzip, no model call) and picks the cheapest adequate tier: a PDF with a good text layer is haiku; scans, tables, multi-column pages or figures make it sonnet; a 50-page or longer PDF with `READ: judge` is one read on opus. The launch's model is raised to the tier, never lowered. Text conversions are cached under the state dir and listed in the brief. It was checked once live (a scanned PDF raised a researcher from haiku to sonnet) and benchmarked once on `d3-reader` ([route-040](#read-router-benchmark-route-040)): direction only, with the model raise and the converted-text notes confounded. It stays off until H14 is decided.
-- **Skill suggestions (on by default, `ORCH_SKILL_HINTS=off` to drop).** The plan check appends one block naming at most 3 installed skills (1 for a reviewer), names and reason codes only, picked from the brief's `SKILLS:` names, the file types in FILES or SOURCES, the role and the goal's words. Installed skills are found on disk: `~/.claude/skills` (synced skills as `anthropic-skills:<name>`), the project's `.claude/skills` and enabled plugins' skills. A worker loads what fits with the Skill tool and reports a skipped suggestion in one line of its report, not under OPEN, because a non-empty OPEN is a doubt signal.
+- **Skill suggestions (on by default, `ORCH_SKILL_HINTS=off` to drop).** The plan check appends one block naming at most 3 installed skills (1 for a reviewer, 2 when the reviewer's launch runs on opus or above, from the call's `model` else the agent file's), names and reason codes only, picked from the brief's `SKILLS:` names, the file types in FILES or SOURCES, the role and the goal's words. Installed skills are found on disk: `~/.claude/skills` (synced skills as `anthropic-skills:<name>`), the project's `.claude/skills` and enabled plugins' skills. A worker loads what fits with the Skill tool and reports a skipped suggestion in one line of its report, not under OPEN, because a non-empty OPEN is a doubt signal. The orchestrator has the `Skill` tool: before planning it may load at most two installed skills that shape the plan itself (domain rules, architecture, a threat model), since each one stays in its context for the whole run, and passes every other fitting skill to the workers by name. In the PLAN REVIEW brief each slice may carry `SKILLS: <names>` or `SKILLS: none` (always one of the two on a RISKY slice), and the plan reviewer checks the choice. In the gated workflow a planned slice may carry `skills`, which become a `SKILLS:` line in its implementer and reviewer briefs.
+
+**Creating a skill.** When no installed skill covers knowledge the task needs and that knowledge is reusable, a run may draft one new skill as a skill slice (`KIND: skill`). The draft lives in a git worktree of the private skills repository (unless the slice says `TARGET: public`), on branch `skill/<name>`; a skill gate checks it at the implementer's stop, and it is sealed with a `provenance.json`. No agent pushes or installs it: a person publishes it with `npm run skill-publish`. Off with `ORCH_SKILL_CREATE=off`; it needs `ORCH_SKILLS_REPO_PRIVATE` (and `ORCH_SKILLS_REPO_PUBLIC` for public skills). Details, the live checks behind it and its limits: [docs/skills.md](docs/skills.md).
 
 Workflow agents get neither: they make no Agent tool call, so they never reach the plan check. A live probe showed that a mod's `agent.spawn` hook runs under `claude -p`, fires for workflow agents, and can rewrite a workflow agent's model and prompt. Mod code can read files with `$.fs.read`, run scripts with `$.process.run` and import its own files, but cannot import `node:` modules or files outside the plugin. So routing workflow researchers there is feasible, but not built ([docs/data/live-checks-workflow.md](docs/data/live-checks-workflow.md)).
 
@@ -227,12 +229,15 @@ The orchestrator's briefs and the workers' replies follow one spec, [docs/brief-
 | `STATUS:`, `C1: pass (cmd) ...`, `C1: pass (read) ...`, `C1: fail ...`, `OPEN:` | every reply | journal, review gate, dashboard |
 | `GAP: <0-100> <text>` | reviewer replies (0.4.0) | review counting, stall gate |
 | `QUOTE: <locator> \| <verbatim text>` | researcher replies (0.4.0) | quote check |
+| `KIND: skill`, `SKILL: <name>`, `TARGET:`, `UPDATE: yes`; `DRAFTS: <names>` | a skill slice's implementer brief; any worker brief | plan check (skill slices, [docs/skills.md](docs/skills.md)), skill gate |
+| `DRAFT: <name> <branch>` | a skill slice's reply | journal |
+| `SKILLS-USED: <names>`, `SKILLS-SKIPPED: <names>` | worker replies whose brief named or suggested skills | journal, `npm run report` |
 
 **STATUS rule** (one rule in `parseStatus`, the journal, telemetry, the review gate, the dashboard and `scripts/auto.sh`): a STATUS line starts with `STATUS: pass` or `STATUS: fail` after whitespace, emphasis or heading characters; any STATUS line that says fail fails the reply, otherwise the first one decides; blockquoted lines, a STATUS in mid-line and the template `STATUS: pass or fail` do not count. A reviewer with no STATUS line fails.
 
 ## Switches and plugin settings
 
-The plugin declares 17 settings as `userConfig`, shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; the hooks copy it to `ORCH_<KEY>` only when that variable is unset, so an environment variable wins over `/config`. The project copy of the hooks reads only the environment. Switches are named only in maintainer text, never in agent prompts, skills or the nudge (`src/contracts.test.ts` checks this).
+The plugin declares 20 settings as `userConfig`, shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; the hooks copy it to `ORCH_<KEY>` only when that variable is unset, so an environment variable wins over `/config`. The project copy of the hooks reads only the environment. Switches are named only in maintainer text, never in agent prompts, skills or the nudge (`src/contracts.test.ts` checks this).
 
 | Key | Environment | Default | Effect |
 |---|---|---|---|
@@ -253,6 +258,9 @@ The plugin declares 17 settings as `userConfig`, shown in `/config`. Claude Code
 | `skill_hints` | `ORCH_SKILL_HINTS` | on | `off` drops the suggested-skills block; an explicit `SKILLS:` line still reaches the worker |
 | `allow_haiku` | `ORCH_ALLOW_HAIKU` | haiku raised to sonnet | `1` lets a launch of this plugin's agents run on a haiku model |
 | `handback_check` | `ORCH_HANDBACK_CHECK` | on | `off` skips the report check at a worker's hand-back |
+| `skill_create` | `ORCH_SKILL_CREATE` | on | `off` blocks every skill slice (`skill_create_off`), so a run drafts no skill ([docs/skills.md](docs/skills.md)) |
+| `skills_repo_private` | `ORCH_SKILLS_REPO_PRIVATE` | unset | Absolute path of the private skills repository, where a new skill goes by default; unset, a skill slice is blocked with `skill_repo_missing` |
+| `skills_repo_public` | `ORCH_SKILLS_REPO_PUBLIC` | unset | Absolute path of the public skills repository, for a skill slice with `TARGET: public` |
 
 The remaining environment variables (headless runs, the SDK, the nudge) are in [Reference](#environment).
 
@@ -273,7 +281,7 @@ In a plugin workflow `agentType` must be namespaced (`orchestration:<role>`; a p
 
 ## The plugin
 
-The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract, the `/route` skill, the gated workflow, the eval suite (`evals/`), the opt-in judge hooks, the dashboard mod and the 15 `userConfig` settings. It does not carry permission denies or the `worktree` setting: a plugin's own settings can set only `agent` and `subagentStatusLine` ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)).
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. It carries the agents, the gate hooks, the session nudge, the worker contract, the `/route` skill, the gated workflow, the eval suite (`evals/`), the opt-in judge hooks, the dashboard mod and the 20 `userConfig` settings. It does not carry permission denies or the `worktree` setting: a plugin's own settings can set only `agent` and `subagentStatusLine` ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)).
 
 - **Headless runs in any folder.** `npm run native` and `npm run auto` from a checkout run the folder's own `.claude/agents/<name>.md` or, without it, the plugin's agent (`orchestration:<name>`) when `claude plugin list --json` shows the plugin enabled there. With neither, the agent step exits 1 with the reason and calls no model. Details in [docs/native-mode.md](docs/native-mode.md#headless-ci-and-unattended).
 - **The nudge.** A `SessionStart` hook (`nudge.mjs`) nudges every new main session to route non-trivial tasks. `ORCH_NO_NUDGE=1` silences it; headless runs set it.
@@ -477,6 +485,7 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_SANDBOX`, `ORCH_SANDBOX_DOMAINS` | SDK | `on` runs Bash roles in the SDK's OS sandbox (opt-in; smoke-tested on macOS only), and the network domains it allows |
 | `ORCH_NO_NUDGE` | `nudge.mjs` | Silence the session nudge |
 | `ORCH_BUILTINS_FILE`, `ORCH_CLAUDE_BIN` | `plan-check.mjs`, `claude-update.mjs` | The file of built-in agent types learned on this machine (default `~/.claude/orchestration/builtin-agents.json`; empty means none), and the `claude` binary the update check runs |
+| `ORCH_SKILL_CREATE`, `ORCH_SKILLS_REPO_PRIVATE`, `ORCH_SKILLS_REPO_PUBLIC` | `plan-check.mjs`, `scripts/orchestrate.sh` | Skill creation on or `off`, and the two skills repositories (also plugin settings, [above](#switches-and-plugin-settings)); `CLAUDE_CONFIG_DIR` also moves the draft home that `scripts/skill-publish.mjs` reads |
 | `ORCH_HOME` | `/route` skill | Where this repo lives (default `~/claude-code-orchestration`) |
 
 The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm test` when `package.json` has a test script; `pytest` (or `unittest`) only when `test_*.py` or `*_test.py` files exist; `cargo test`; `go test ./...`; `swift test`; `make test` when a `test:` target exists (`.claude/hooks/test-cmd.sh`). No runner means the gate allows (`no_test_command`).
@@ -494,6 +503,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run report` | HTML timeline and per-role tables from the state dir |
 | `npm run install-statusline` | Copy the status line script and print the setting |
 | `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](docs/claude-code-updates.md)) |
+| `npm run skill-publish` | List draft skills; `-- <name>` pushes a draft and opens its pull request, `--merge` merges, installs and removes the draft, `--dry-run` prints the steps ([docs/skills.md](docs/skills.md#publishing)) |
 | `npm run eval` | `claude plugin eval` on `dist/plugin` with the four cases in `evals/` (paid, `--max-cost-usd 10`); not smoke-run yet |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md)) |
 | `npm start` | SDK pipeline with triage |
@@ -508,8 +518,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
                      compact-context.mjs, journal.mjs, telemetry.mjs, read-log.mjs, nudge.mjs, brief.mjs (the parser),
                      run.mjs, state.mjs, file-profile.mjs, skill-catalog.mjs, skill-hint.mjs, judge-hook.mjs,
                      judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
-                     built-in subagent types)
-  skills/            route, orchestration-conventions
+                     built-in subagent types), skill-gate.mjs (the skill gate), skill-seal.mjs (a draft skill's seal)
+  skills/            route, orchestration-conventions, skill-authoring
   workflows/         orchestrate.js (the gated workflow)
   settings.json, rules/
 .claude-plugin/      marketplace.json
@@ -518,11 +528,12 @@ dashboard/           the live pane (source for both builds)
 statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
 scripts/             auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
-                     claude-update.mjs (the check to run after a Claude Code update),
+                     claude-update.mjs (the check to run after a Claude Code update), skill-publish.mjs (a person
+                     publishes a draft skill),
                      run-result.mjs and log-run.mjs (a headless run's one result document and its row in runs.jsonl)
 evals/               the plugin eval suite
 bench/               the benchmark: run, grade, analyze, report, tasks/, matrix/
-docs/                native-mode.md, brief-grammar.md, dashboard.md, native-vs-plugin.md, bash-judge.md,
+docs/                native-mode.md, brief-grammar.md, skills.md, dashboard.md, native-vs-plugin.md, bash-judge.md,
                      claude-code-updates.md, benchmark pages,
                      research-2026-10-31.md, data/ (run data, live checks), diagrams/
 ```

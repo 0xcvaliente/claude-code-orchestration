@@ -10,7 +10,7 @@ claude --agent orchestrator
 
 | Agent | Model / effort | Tools |
 |---|---|---|
-| `orchestrator` | fable, high | `Agent(researcher, implementer, integrator, reviewer)`, `SendMessage`, Read, Grep, Glob |
+| `orchestrator` | fable, high | `Agent(researcher, implementer, integrator, reviewer)`, `SendMessage`, Read, Grep, Glob, `Skill` |
 | `researcher` | sonnet, low (the read router may raise it) | Read, Grep, Glob, read-only `git` (`log`, `ls-files`, `rev-list`, `rev-parse`, `status`, `show`, `branch --show-current`, each also as `git -C <dir> ...`), `wc`, `ls`, `du`, `WebSearch`, `WebFetch`, `Skill` |
 | `implementer` | opus, medium, maxTurns 80 | every tool except `Agent` (`disallowedTools: Agent`) |
 | `integrator` | sonnet, low | Read, Grep, Glob, Bash |
@@ -25,6 +25,7 @@ claude --agent orchestrator
 - `researcher` and `integrator` set `omitClaudeMd: true`: they take everything from the brief, so they skip `CLAUDE.md`.
 - The researcher's `git` is limited to a read-only allowlist. Verified from its own transcript: `git log`, `git ls-files` and `date` run, `git tag` is refused. This was added after a 14-repo analysis where file-only researchers read `.git/logs/HEAD` (a reflog across all branches) and got dates, tracked-file claims and counts wrong. The `tools` line alone did not hold it: in auto mode a researcher once wrote a file with a heredoc and ran `python3` ([research, section 3 item 4](research-2026-10-31.md#3-other-improvements-ranked)). Since 0.4.0 `researcher-guard.mjs` enforces the list ([Guards](#guards-040)).
 - `researcher` and `reviewer` have the `Skill` tool, so they can load the skills a brief names (`SKILLS:` or the plan check's suggestions). A loaded skill never widens their tools. The integrator has no `Skill`.
+- The orchestrator has the `Skill` tool too (checked live on Claude Code 2.1.325: a main-thread agent whose tools name `Skill` sees the installed skills and can load one). Before planning it may load at most two installed skills that shape the plan itself (domain rules, architecture, a threat model), because each loaded skill stays in its context for the whole run; every other fitting skill goes to the workers by name on `SKILLS:` lines. In the PLAN REVIEW brief each slice may carry `SKILLS: <names>` or `SKILLS: none`, and a RISKY slice always carries one of the two; the plan reviewer treats a named skill that is not installed or does not fit, and a RISKY slice with no decision, as gaps.
 - Retries (0.4.0). A review fails on a failed checked id or a gap at or above the cutoff (80). Before a retry the orchestrator sends those gaps with the diff to a reviewer whose brief starts with `SLICE: <id>` and `VALIDATE: gaps`, and forwards only the gaps it confirms. The second attempt is a `SendMessage` resume of the same implementer; the third and last is a fresh implementer with `model: "opus"`, because a resume keeps the original model. A launch or reply blocked with `replan_required` gets a REPLAN plan review, not a retry.
 
 ## Light path and full path
@@ -123,7 +124,7 @@ None of the reply lines changes STATUS, the constraint answers or OPEN. `brief.m
 
 ### Switches and plugin settings (0.4.0)
 
-The plugin declares 17 settings as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`), shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; `state.mjs` (`OPTION_KEYS`, `bridgeOptions`) and `verify.sh` copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset, so an environment variable still wins over `/config`. The project copy of the hooks reads only the environment.
+The plugin declares 20 settings as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`), shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; `state.mjs` (`OPTION_KEYS`, `bridgeOptions`) and `verify.sh` copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset, so an environment variable still wins over `/config`. The project copy of the hooks reads only the environment.
 
 | Key | Environment | Default | Effect |
 |---|---|---|---|
@@ -143,6 +144,10 @@ The plugin declares 17 settings as `userConfig` (`OPTIONS` in `scripts/build-plu
 | `gate_isolated` | `ORCH_GATE_ISOLATED` | `warn` | test gate in worktrees: `warn`, `block` or `skip` |
 | `skill_hints` | `ORCH_SKILL_HINTS` | on | `off` drops the suggested-skills block |
 | `handback_check` | `ORCH_HANDBACK_CHECK` | on | `off` skips the report check at a worker's hand-back |
+| `allow_haiku` | `ORCH_ALLOW_HAIKU` | haiku raised to sonnet | `1` lets a launch of this plugin's agents run on a haiku model |
+| `skill_create` | `ORCH_SKILL_CREATE` | on | `off` blocks every skill slice (`skill_create_off`) |
+| `skills_repo_private` | `ORCH_SKILLS_REPO_PRIVATE` | unset | the private skills repository, where a new skill goes by default |
+| `skills_repo_public` | `ORCH_SKILLS_REPO_PUBLIC` | unset | the public skills repository, for `TARGET: public` |
 
 Switches are named only in maintainer text (this page, README, CLAUDE.md, the rules file and hook comments), never in agent bodies, skills or the nudge's context; `src/contracts.test.ts` checks that.
 
@@ -173,7 +178,9 @@ Checked live once: a researcher brief naming a scanned PDF was raised from haiku
 
 #### Skill suggestions (0.4.0)
 
-On unless `ORCH_SKILL_HINTS=off`. For an implementer (only when the plan check allows it with `ok` or `light_path`), researcher or reviewer launch, the plan check appends one block naming at most 3 installed skills (1 for a reviewer), each with a reason code and no description (`skill-hint.mjs`). The picks come from the brief's `SKILLS:` names first, then a document extension in FILES or SOURCES matched to a skill that names that format, then a preference table (security, bugfix, tdd, UI work, motion), else a minimum word score against the goal. Installed skills are found on disk by `skill-catalog.mjs`: `~/.claude/skills` (a `synced/<id>/<name>` skill is named `anthropic-skills:<name>`), the project's `.claude/skills`, and the skills of plugins listed in `installed_plugins.json` and enabled in the merged settings (`<plugin>:<skill>`). A `SKILLS:` name not found on disk passes through, marked as not found. A block in which any line would parse as a brief or reply line is dropped. Each decision goes to `skills.jsonl` (names and reason codes only).
+On unless `ORCH_SKILL_HINTS=off`. For an implementer (only when the plan check allows it with `ok` or `light_path`), researcher or reviewer launch, the plan check appends one block naming at most 3 installed skills (1 for a reviewer, 2 for a reviewer whose launch's effective model, the call's `model` else the agent file's, ranks opus or above; a model it cannot rank keeps 1), each with a reason code and no description (`skill-hint.mjs`). The picks come from the brief's `SKILLS:` names first, then a document extension in FILES or SOURCES matched to a skill that names that format, then a preference table (security, bugfix, tdd, UI work, motion), else a minimum word score against the goal. Installed skills are found on disk by `skill-catalog.mjs`: `~/.claude/skills` (a `synced/<id>/<name>` skill is named `anthropic-skills:<name>`), the project's `.claude/skills`, and the skills of plugins listed in `installed_plugins.json` and enabled in the merged settings (`<plugin>:<skill>`). A `SKILLS:` name not found on disk passes through, marked as not found. In a PLAN REVIEW brief only a `SKILLS:` line before the first `SLICE:` line counts as the reviewer's own; the lines inside the planned slices are the slices' choices, which the reviewer checks. A block in which any line would parse as a brief or reply line is dropped. Each decision goes to `skills.jsonl` (names and reason codes only).
+
+Creating a skill (a skill slice, its draft worktree, the seal, the skill gate and `npm run skill-publish`) is described in [skills.md](skills.md).
 
 ### Guards (0.4.0)
 
@@ -260,6 +267,7 @@ What it does:
 
 - **Plan**: a planner returns a CONSTRAINTS ledger (the task's hard rules as `C<n>` ids) and at most `maxSlices` (default 6) slices with disjoint files, each with the ids it can break.
 - **Explore**: researchers in parallel.
+- **Skills**: a planned slice may carry `skills` (names of installed skills). Its implementer and reviewer briefs then carry a `SKILLS:` line after the header lines the workflow already writes (the marker, `KIND`, the slice line and `CHECKS`); names are passed through as written, at most 5, each a plain skill name (letters, digits, `-`, `_`, `:`, `.`), and invalid entries are dropped. A slice without skills gets exactly the briefs it got before.
 - **Build and review**: per slice, an implementer, then a fresh reviewer that answers each checked id; up to `maxRetries` (default 2) retries with the reviewer's gaps. A RISKY slice gets a default and an opus reviewer at once; for other slices a passing review with a doubt signal (a `(read)` answer, a non-empty OPEN) or after a retry goes to one opus reviewer, whose verdict decides.
 - **Replan**: one pass. Slices that failed for good go back to the planner, which plans only the missing work; a replanned slice that depends on a failed slice is not run.
 - **Integrate**: the integrator merges isolated code branches (code in git only).
@@ -340,6 +348,6 @@ then, inside `claude`: `/plugin install typescript-lsp@claude-plugins-official`.
 
 ## Plugin build
 
-`npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. The first live plugin run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter, and project permission denies are not part of a plugin. Since 0.3.0 the build also ships `.claude/workflows/*.js` as plugin workflows (with `agentType` rewritten to `orchestration:<role>`), copies the repo-root `evals/` into the plugin for `claude plugin eval`, and registers `judge-hook.mjs` (PreToolUse, `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`. Since 0.4.0 it also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`), wraps the judge hook for `onFailure: "block"`, and writes the 15 `userConfig` settings into `plugin.json`.
+`npm run build-plugin` assembles `dist/plugin` (`claude plugin validate dist/plugin`, `claude --plugin-dir dist/plugin`). Plugin agents are namespaced, so the build rewrites the orchestrator's allowlist and the test-gate hook matcher to `orchestration:<name>`, and the hooks compare the bare role name. The first live plugin run exposed that the namespaced name silently disabled both gates; `hooks.test.ts` now covers plain and namespaced names. Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter, and project permission denies are not part of a plugin. Since 0.3.0 the build also ships `.claude/workflows/*.js` as plugin workflows (with `agentType` rewritten to `orchestration:<role>`), copies the repo-root `evals/` into the plugin for `claude plugin eval`, and registers `judge-hook.mjs` (PreToolUse, `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`. Since 0.4.0 it also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`), wraps the judge hook for `onFailure: "block"`, and writes the `userConfig` settings into `plugin.json` (15 in 0.4.0, 20 now).
 
 `npm run sync-agents` rewrites model, effort and `maxTurns` in the agent files from `src/config.ts`; `npm run check-agents` fails on drift.

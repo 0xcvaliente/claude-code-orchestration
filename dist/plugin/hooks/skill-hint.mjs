@@ -4,11 +4,27 @@
 // extension in FILES or SOURCES matched to skills whose name or description names that format (a description that
 // sends the format to another skill does not count), then the preference table (RULES: security, bugfix, tdd, ui_work,
 // motion; each suggests the first of its skills that is installed), else a minimum score from the brief's words against
-// a skill's name and description. One pick per near-duplicate family; at most 3 picks (1 for a reviewer), none for the
-// integrator or any other role.
+// a skill's name and description. One pick per near-duplicate family; at most 3 picks (1 for a reviewer, 2 for a
+// reviewer whose launch runs on opus or above), none for the integrator or any other role.
 
 /** Picks per role; a role not listed (the integrator, anything else) gets none. @type {Record<string, number>} */
 export const MAX_PICKS = { implementer: 3, researcher: 3, reviewer: 1 };
+/** Picks for a reviewer whose launch's model ranks opus or above. */
+export const MAX_PICKS_SENIOR_REVIEWER = 2;
+/** The model rank of opus as plan-check.mjs's modelRank gives it (sonnet ranks 1, fable 3). */
+export const OPUS_RANK = 2;
+
+/**
+ * The pick limit for a role and the launch's model rank (a number from plan-check.mjs's modelRank, or null when the
+ * model cannot be ranked). Only a reviewer's limit depends on the rank. Never throws.
+ * @param {unknown} role @param {unknown} [rank] @returns {number}
+ */
+export function maxPicks(role, rank) {
+  const r = String(role ?? "").split(":").pop() ?? "";
+  const base = Object.prototype.hasOwnProperty.call(MAX_PICKS, r) ? MAX_PICKS[r] ?? 0 : 0;
+  if (r === "reviewer" && typeof rank === "number" && Number.isFinite(rank) && rank >= OPUS_RANK) return MAX_PICKS_SENIOR_REVIEWER;
+  return base;
+}
 
 // Document extensions and the words that name each format in a skill's name or description.
 /** @type {Record<string, string[]>} */
@@ -32,7 +48,7 @@ const META = new Set([
   "claude-api", "workflow-authoring", "plugin-authoring", "artifact-design", "artifact-capabilities", "artifact-diagramming",
 ]);
 // This plugin's own skills, project copies included.
-const OWN = new Set(["orchestrate", "route", "orchestration-conventions"]);
+const OWN = new Set(["orchestrate", "route", "orchestration-conventions", "skill-authoring"]);
 
 // Words that never count: brief keys, glue words, and verbs and nouns that every brief uses.
 const STOP = new Set(`
@@ -160,14 +176,15 @@ export function preferenceRules(a) {
 const extOf = (p) => (p.replace(/[?#].*$/, "").match(/\.([A-Za-z0-9]+)$/)?.[1] ?? "").toLowerCase();
 
 /**
- * Skill hints for one launch.
- * @param {{ role?: string, header?: { files?: string[], sources?: string[], depends?: string[], skills?: string[], kind?: string | null, risky?: boolean }, brief?: string, catalog?: CatalogSkill[] }} args
+ * Skill hints for one launch. `modelRank` is the launch's effective model rank (null or missing when unknown): a
+ * reviewer on opus or above gets up to 2 picks instead of 1.
+ * @param {{ role?: string, modelRank?: number | null, header?: { files?: string[], sources?: string[], depends?: string[], skills?: string[], kind?: string | null, risky?: boolean }, brief?: string, catalog?: CatalogSkill[] }} args
  * @returns {SkillPick[]}
  */
 export function skillHints(args) {
   try {
     const role = String(args?.role ?? "").split(":").pop() ?? "";
-    const max = MAX_PICKS[role] ?? 0;
+    const max = maxPicks(role, args?.modelRank);
     if (!max) return [];
     const header = args?.header ?? {};
     const catalog = (Array.isArray(args?.catalog) ? args.catalog : []).filter((s) => s && typeof s.name === "string" && s.name);
