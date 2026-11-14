@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { DENIED_AGENTS, NATIVE_TOOLS, PUSH_BASH, SDK_DENIED_BASH, UNSAFE_BASH } from "./config.js";
+import { BUILTIN_AGENTS, DENIED_AGENTS, NATIVE_TOOLS, PUSH_BASH, SDK_DENIED_BASH, UNSAFE_BASH } from "./config.js";
+import { builtinAgents, learnedBuiltins, learnedFile, OWN_AGENTS } from "../.claude/hooks/builtin-agents.mjs";
 
 test("SDK worker deny list plus the blocked built-in agents match permissions.deny in .claude/settings.json, except push", () => {
   const settings = JSON.parse(readFileSync(new URL("../.claude/settings.json", import.meta.url), "utf8"));
@@ -27,6 +28,17 @@ test("fork subagents are denied in permissions.deny", () => {
   const settings = JSON.parse(readFileSync(new URL("../.claude/settings.json", import.meta.url), "utf8"));
   assert.ok(DENIED_AGENTS.includes("Agent(fork)"));
   assert.ok(settings.permissions.deny.includes("Agent(fork)"));
+});
+
+test("one built-in list: DENIED_AGENTS and the plan check's set both come from builtin-agents.mjs", () => {
+  assert.deepEqual(DENIED_AGENTS, [...BUILTIN_AGENTS.map((a) => `Agent(${a})`), "Agent(fork)"]);
+  assert.ok(BUILTIN_AGENTS.includes("web-fetch"), "web-fetch is a built-in since Claude Code 2.1.325");
+  for (const own of OWN_AGENTS) assert.ok(!BUILTIN_AGENTS.includes(own), `${own} is this plugin's own agent`);
+  const none = { ORCH_BUILTINS_FILE: "" };
+  assert.deepEqual([...builtinAgents(none)].sort(), ["fork", ...BUILTIN_AGENTS].sort());
+  assert.equal(learnedFile(none), null);
+  assert.deepEqual(learnedBuiltins(none), []);
+  assert.match(learnedFile({ CLAUDE_CONFIG_DIR: "/cfg" }) ?? "", /^\/cfg[\\/]orchestration[\\/]builtin-agents\.json$/);
 });
 
 test("native tool policy: the implementer cannot spawn agents, the orchestrator only names this repo's workers", () => {

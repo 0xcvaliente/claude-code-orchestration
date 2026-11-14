@@ -69,6 +69,8 @@ test("judge on: Bash roles carry the PreToolUse hook with a timeout above the ju
     assert.equal(m[0]!.matcher, "Bash");
     assert.equal(m[0]!.timeout, HOOK_TIMEOUT_S);
     assert.equal(m[0]!.onFailure, "block", "a guard that fails blocks the command (Agent SDK 0.3.317)");
+    assert.equal(o.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1", "a worker never starts Claude Code auto memory");
+    assert.equal(o.env?.PATH, process.env.PATH, "the rest of the environment is passed on");
     assert.ok(HOOK_TIMEOUT_S * 1000 > JUDGE_TIMEOUT_MS);
     assert.deepEqual(o.disallowedTools, SDK_DENIED_BASH);
     assert.ok(o.allowedTools!.includes("Bash"));

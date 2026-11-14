@@ -15,6 +15,7 @@
       "Agent(Plan)",
       "Agent(claude-code-guide)",
       "Agent(statusline-setup)",
+      "Agent(web-fetch)",
       "Agent(fork)"
     ]
   },
