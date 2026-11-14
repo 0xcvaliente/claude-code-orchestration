@@ -1,0 +1,25 @@
+PLAN REVIEW
+Task: write a release-notes skill and use it for the project's README.
+CONSTRAINTS:
+C9: a new skill goes to the private repository unless the brief says TARGET: public
+Planned slices:
+SLICE: notes-skill
+KIND: skill
+SKILL: release-notes
+TARGET: public
+FILES: skills/release-notes/, README.md
+DEPENDS: none
+GOAL: the skill draft
+CHECKS: C9
+
+SLICE: readme
+FILES: README.md
+DEPENDS: notes-skill
+GOAL: project README written with the draft
+KIND: Docs.
+
+SLICE: bad
+SKILL: Not A Name
+TARGET: elsewhere
+FILES: x.md
+DEPENDS: none

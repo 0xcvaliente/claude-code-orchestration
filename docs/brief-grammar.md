@@ -2,7 +2,7 @@
 
 Normative spec for the lines the orchestrator writes in its briefs, the lines workers write in their replies, and the run model the hooks and the dashboard derive from them. One implementation: `.claude/hooks/brief.mjs` (ESM, Node built-ins only, no side effects at import). Fixtures for every form are in `src/fixtures/briefs/` with their parse results in `expected.json`; `src/brief.test.mjs` checks both and each rule below.
 
-Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip. The same holds for the 0.4.0 lines (`SOURCES`, `READ`, `KIND`, `VALIDATE` and `SKILLS` in briefs; `GAP`, `QUOTE` in replies): every one is optional, and a brief or reply without them parses exactly as before, with the new fields empty.
+Every parser takes any value and never throws: empty, malformed or non-string input gives `null`, `[]`, `{}` or `false`. Briefs, plans and replies written before this spec (no `RISKY`, `CHECKS`, `REPLAN`, `CONSTRAINTS` or plan slice lines) parse to those empty values, so a check that needs them can skip. The same holds for the 0.4.0 lines (`SOURCES`, `READ`, `KIND`, `VALIDATE` and `SKILLS` in briefs; `GAP`, `QUOTE` in replies) and the skill slice lines (`SKILL`, `TARGET`, `UPDATE`, `DRAFTS` in briefs and planned slices; `DRAFT`, `SKILLS-USED` and `SKILLS-SKIPPED` in replies): every one is optional, and a brief or reply without them parses exactly as before, with the new fields empty.
 
 ## Line rule
 
@@ -45,7 +45,33 @@ SKILLS: anthropic-skills:docx, orchestration:route         (skills the worker sh
 | `VALIDATE: gaps` | `validate: boolean` | `true` only when the first word is `gaps` (any case); anything else is `false` |
 | `SKILLS: <names>` | `skills: string[]` | comma-separated, read like `FILES` (trimmed, outer quotes or backticks and a leading `./` removed, empty entries and `none` dropped); an entry that is not a skill name is dropped; duplicates dropped keeping the first; at most 8 names, the first 8 kept |
 
-**SKILLS.** Optional, on any worker's brief (implementer, reviewer, researcher, integrator). The orchestrator writes it to name the skills the worker should load with its Skill tool before it starts, for example a file-format skill for a document slice. A skill name is a letter or digit followed by letters, digits, `_`, `.`, `/` or `-`, optionally namespaced with `:` parts each of the same form (`docx`, `anthropic-skills:docx`, `orchestration:route`, `a:b:c`), at most 100 characters; anything else (a phrase such as `use the pdf skill`, `:x`, `x:`) is dropped, so the field never carries brief text. No gate reads it. The plan check may later add skill suggestions of its own; that is specified in a later slice, not here. A brief without the line parses exactly as before, with `skills: []`.
+**SKILLS.** Optional, on any worker's brief (implementer, reviewer, researcher, integrator). The orchestrator writes it to name the skills the worker should load with its Skill tool before it starts, for example a file-format skill for a document slice. A skill name is a letter or digit followed by letters, digits, `_`, `.`, `/` or `-`, optionally namespaced with `:` parts each of the same form (`docx`, `anthropic-skills:docx`, `orchestration:route`, `a:b:c`), at most 100 characters; anything else (a phrase such as `use the pdf skill`, `:x`, `x:`) is dropped, so the field never carries brief text. No gate reads it. The plan check may add skill suggestions of its own (README, "Skill suggestions"). A brief without the line parses exactly as before, with `skills: []`.
+
+## Skill slice lines
+
+A skill slice is an implementer slice that drafts one new skill (or changes one) in a skills repository instead of changing the project. Its brief carries `KIND: skill` and these optional header lines; any implementer, researcher or reviewer brief may carry `DRAFTS:`. They follow the line rule above (first matching line wins, prefixes allowed, keys case-insensitive, a key in mid-line does not count; `SKILL:` is not `SKILLS:`).
+
+```
+SLICE: notes-skill
+FILES: skills/release-notes/, README.md     (relative to the skills repository root, not the project)
+DEPENDS: none
+KIND: skill
+SKILL: release-notes                        (the skill's name: its folder skills/<name>)
+TARGET: public                              (optional: private, the default, or public)
+UPDATE: yes                                 (optional: the skill exists and this slice changes it)
+DRAFTS: release-notes                       (any worker brief: drafts of this run to read first)
+```
+
+| Line | Field | Parse |
+|---|---|---|
+| `SKILL: <name>` | `skill: string\|null` | the first word, quotes, backticks and `*` removed; kept only when it is lower-case letters and digits in words joined by single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`) and at most 64 characters, else `null` (`Release_Notes`, `-x`, `a--b` are `null`) |
+| `TARGET: private\|public` | `target: 'private'\|'public'\|null` | the first word, cleaned like `KIND`, any case; any other word, or no line, is `null` (the plan check then uses private) |
+| `UPDATE: yes` | `update: boolean` | `true` when the value starts with `yes` (like `RISKY`) |
+| `DRAFTS: <names>` | `drafts: string[]` | comma-separated, read like `FILES`; only names valid for `SKILL` are kept; duplicates dropped keeping the first; at most 8 |
+
+`isSkillName(name)` is the `SKILL` rule. A brief without these lines parses exactly as before, with `skill: null`, `target: null`, `update: false`, `drafts: []`, and its launch record has none of the four fields (they are written only when set).
+
+**Plan check.** For an implementer brief with `KIND: skill` the plan check (README, "The gates") checks that creating skills is on (`skill_create_off`), that the name is valid (`skill_name_invalid`), that the target's skills repository is set up (`skill_repo_missing`), that no skill of that name exists in either repository or is installed unless the brief says `UPDATE: yes` (`skill_exists`), and that the run creates no other new skill (`skill_limit`); each blocks twice per slice, then lets the launch through as `<reason>_gave_up`. The slice's `FILES` resolve against its draft worktree (`<config dir>/orchestration/skill-drafts/<target>/<name>`, the config dir being `CLAUDE_CONFIG_DIR` or `~/.claude`), in the launch and for the same slice in the plan, so they never overlap a project slice's files. On an allow it appends one block of facts to the brief (repository, draft worktree, branch `skill/<name>`, base branch, the worktree command, the validator, the catalog file, the seal command and the authoring skill). A brief with `DRAFTS:` gets one line per draft of this run the plan check allowed, the path of its `SKILL.md`; other names are dropped. Decisions go to `skill-create.jsonl` (parsed fields and paths only).
 
 **URLs in a brief.** `briefUrls(text)` returns the `http://` and `https://` URLs anywhere in the text (header or body): unique (exact string), in order of first appearance, at most 50. A URL ends at whitespace, `<`, `>`, a quote or a backtick; trailing `).,;:'"]>` characters are then stripped, except a `)` or `]` that closes one opened inside the URL (`https://en.wikipedia.org/wiki/Foo_(bar)` keeps its `)`). A scheme with no host (`https://`, `https://?x`) is not a URL.
 
@@ -64,19 +90,22 @@ FILES: toolkit/toml.py, tests/test_toml.py
 DEPENDS: none
 GOAL: TOML reader
 CHECKS: C1, C2
+SKILLS: tdd                    (optional: the slice's skill decision)
 SLICE: csv - CSV reader        (text after the id is the goal)
 FILES: toolkit/csv.py
 DEPENDS: toml
 RISKY: yes
 CHECKS: C2
+SKILLS: none                   (a RISKY slice always carries SKILLS: <names> or SKILLS: none)
 ```
 
 - `REPLAN: <n>`: a non-negative integer, else `null`.
 - Constraints block: a line `CONSTRAINTS:` followed by lines `C<n>: <text>` (prefix characters allowed, blank lines inside the block allowed). The first line that is neither ends the block. Ids are upper-cased; a repeated id keeps its first text; an empty text is dropped.
-- Planned slices: each `SLICE:` line (a `#` heading prefix is also allowed here) starts a slice; the `FILES`, `DEPENDS`, `GOAL`, `RISKY` and `CHECKS` lines up to the next `SLICE:` fill it. The id loses trailing `:,;.`; the id `plan` is not a slice. Text after the id is the goal, else the first `GOAL:` line. A repeated id continues its first entry. This matches `planOf` in `dashboard/register.tsx`.
+- Planned slices: each `SLICE:` line (a `#` heading prefix is also allowed here) starts a slice; the `FILES`, `DEPENDS`, `GOAL`, `RISKY`, `CHECKS`, `KIND`, `SKILL` and `TARGET` lines up to the next `SLICE:` fill it (`KIND`, `SKILL` and `TARGET` read as in a brief; a skill slice in the plan carries `KIND: skill` and `SKILL: <name>`, and its `FILES` are relative to the skills repository). The id loses trailing `:,;.`; the id `plan` is not a slice. Text after the id is the goal, else the first `GOAL:` line. A repeated id continues its first entry. This matches `planOf` in `dashboard/register.tsx`.
+- `SKILLS:` in a planned slice: the slice's skill decision, `SKILLS: <names>` (the skills its workers will get on their `SKILLS:` lines, each name as the Skill tool lists it) or `SKILLS: none`. Optional on a slice; a RISKY slice always carries one of the two. The plan reviewer checks the choice: a named skill that is not installed or does not fit the slice, and a RISKY slice with no `SKILLS:` line, are gaps. `parsePlan` does not read it (no gate does); in a PLAN REVIEW brief the plan check counts only a `SKILLS:` line before the first `SLICE:` line as names for the plan reviewer itself.
 - Text that does not start with `PLAN REVIEW` is not a plan: `parsePlan` returns `{ isPlanReview: false, replan: null, constraints: {}, slices: [] }`. A plan review without slice lines has `slices: []`.
 
-`parsePlan(text)` returns `{ isPlanReview, replan, constraints: { C1: text }, slices: [{ slice, files, depends, goal, risky, checks }] }`.
+`parsePlan(text)` returns `{ isPlanReview, replan, constraints: { C1: text }, slices: [{ slice, files, depends, goal, risky, checks, kind, skill, target }] }`; a slice without the last three lines has them `null`.
 
 ## Reviewer brief
 
@@ -126,7 +155,24 @@ Like STATUS, OPEN and the answers, these are the worker's own lines: list and em
 - `GAP: <0-100> <text>`: the number may carry a trailing `%`. A number from 0 to 100 gives `{ confidence: <n>, text }`; a missing number, a number above 100, a negative or decimal one gives `{ confidence: null, text: <the whole rest> }`. Trailing emphasis characters are removed from the text. A GAP line with no text (`GAP:`, `GAP: 70`) and the template `GAP: <0-100> <text>` are dropped.
 - `QUOTE: <locator> | <verbatim text>`: the locator is the part before the first `|` (a path, `path:line` or `path p.N`; surrounding backticks removed), the text the part after it, trimmed, with one pair of surrounding quotes stripped (`"…"`, `'…'`, `“…”`, `‘…’` or backticks). A line without `|`, or with an empty locator or text, is dropped.
 
-`parseReply(text)` returns `{ status, open: string[], answers: { C1: { verdict: 'pass'|'fail', mode: 'cmd'|'read'|null, detail } }, gaps: [{ confidence: number|null, text }], quotes: [{ locator, text }] }`; `parseStatus(text)` returns the status alone. GAP and QUOTE lines never change the status, the answers or OPEN.
+**Draft (skill slices, optional).** A skill slice reports no `BRANCH:` line; it names its draft instead:
+
+```
+DRAFT: release-notes skill/release-notes
+```
+
+- `DRAFT: <name> <branch>`: exactly two words, backticks and emphasis around them removed. The name must be valid for `SKILL`; the branch is a plain branch name (letters, digits, `.`, `_`, `/`, `-`, starting with a letter or digit, no `..`, not ending in `/` or `.lock`, at most 200 characters). The first such valid line counts; invalid ones are skipped, and a blockquoted line or a key in mid-line does not count. `DRAFTS:` is a brief line, not this one.
+
+**Skills used and skipped (any worker, optional).** A worker whose brief named skills, or got suggestions, ends its report with the skills it loaded and the ones it left out:
+
+```
+SKILLS-USED: frontend-design, anthropic-skills:docx
+SKILLS-SKIPPED: diagnosing-bugs (no bug in this slice)
+```
+
+- The first `SKILLS-USED:` line and the first `SKILLS-SKIPPED:` line count; a blockquoted line or a key in mid-line does not, and `SKILLS:` is a brief line, not these. Each value is read like `SKILLS`: comma-separated, trailing emphasis removed, each entry cut at a trailing reason (a space and then `(`, `-` and a space, an en or em dash, or `: `), backticks and quotes removed, entries that are not a skill name dropped (`none` included), duplicates dropped keeping the first, at most 8.
+
+`parseReply(text)` returns `{ status, open: string[], answers: { C1: { verdict: 'pass'|'fail', mode: 'cmd'|'read'|null, detail } }, gaps: [{ confidence: number|null, text }], quotes: [{ locator, text }], draft: { name, branch }|null, skillsUsed: string[], skillsSkipped: string[] }`; `parseStatus(text)` returns the status alone. GAP, QUOTE, DRAFT and SKILLS-* lines never change the status, the answers or OPEN.
 
 ## Run model
 
@@ -189,6 +235,7 @@ Hooks log parsed fields only, never brief or reply text. Readers accept older re
 | `plan` | PLAN REVIEW briefs only: `{ constraints, slices }` from `parsePlan` |
 | `read`, `kind`, `validate` | `parseHeader` (0.4.0) |
 | `skills` | `parseHeader`'s `skills`: skill names only (0.4.0) |
+| `skill`, `target`, `update`, `drafts` | `parseHeader`'s skill slice fields, each present only when set (a valid `SKILL`, a `TARGET`, `UPDATE: yes`, `DRAFTS` names) |
 | `sources` | `parseHeader`'s `sources` with each `http://` or `https://` entry replaced by its host (`new URL(u).host`, port included; an entry that does not parse is dropped); paths stay as they are (0.4.0) |
 | `urls` | the hosts of `briefUrls` of the prompt (`new URL(u).host`), deduplicated, in order of first appearance; invalid URLs skipped (0.4.0) |
 
@@ -201,6 +248,8 @@ The record keeps hosts only, never a URL's path, query or fragment (which can ca
 | `gaps` | `[{ confidence, key }]`, one per GAP line of the reply, in order. `key` is `gapKey(text)`: the first 8 hex characters of the sha1 (`node:crypto`) of the gap text normalised: lower-cased, every run of non-alphanumerics (`[^a-z0-9]`) turned into one space, trimmed, cut to its first 120 characters. Equal keys mean the same gap across replies. |
 | `quotes` | the number of QUOTE lines |
 | `files_touched` | `string[]`, present only when the caller passes `filesTouched` as an array of strings (an empty array included); any other value leaves the field out |
+| `draft` | `{ name, branch }` from the reply's DRAFT line, present only when the reply has a valid one; a reply without it gives the record it gave before |
+| `skills_used`, `skills_skipped` | `string[]`, the `skillsUsed` and `skillsSkipped` of the reply, each present only when non-empty; a reply without the lines gives the record it gave before. `npm run report` counts them in its Skills section |
 
 Records written before 0.4.0 lack these fields; readers treat a missing field as empty. `foldRuns` reads `gaps` for review counting and the stall, and the reviewer launch record's `validate` for supersede; a stop record without `gaps` is an old-style reply, whose fail counts, so records without the 0.4.0 fields fold and gate exactly as before.
 
@@ -236,6 +285,7 @@ Hooks read the records through `.claude/hooks/run.mjs` (`loadRecords`, `sessionR
 | `parsePlan(text)` | the PLAN REVIEW plan |
 | `parseReply(text)` / `parseStatus(text)` | status, open items, constraint answers / status only |
 | `isPlanReview(text)` / `sliceOfBrief(text)` | the PLAN REVIEW marker / journal slice key (`plan`, the SLICE id, or `null`) |
+| `isSkillName(name)` | the SKILL name rule (`^[a-z0-9]+(-[a-z0-9]+)*$`, at most 64 characters) |
 | `normalizeFiles(files, baseDir)` | absolute paths: relative against `baseDir`, trailing slashes stripped, duplicates dropped |
 | `isOpusModel(model)`, `modelFromAgentFile(text)`, `agentModel(toolInput, dirs)` | reviewer model rules |
 | `briefUrls(text)` | unique http(s) URLs of a text, in order, at most 50 |

@@ -1,0 +1,8 @@
+SLICE: bad-skill
+FILES: skills/x/
+DEPENDS: none
+KIND: skill
+SKILL: Release_Notes extra words
+TARGET: somewhere else
+UPDATE: maybe
+DRAFTS: ok-name, Bad Name, -lead, double--hyphen, trail-, none, ok-name, a-very-long-name-that-goes-on-and-on-and-on-past-the-limit-of-sixty-four-chars

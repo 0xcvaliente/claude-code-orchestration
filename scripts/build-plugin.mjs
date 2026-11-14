@@ -93,7 +93,8 @@ const hooks = {
     SubagentStop: [
       { hooks: [{ type: "command", command: run("telemetry.mjs") }] },
       { hooks: [{ type: "command", command: run("journal.mjs") }] },
-      { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh"), timeout: 900 }] },
+      // The skill gate sits beside verify.sh with the same disjoint matcher; it acts only on a KIND: skill slice.
+      { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh"), timeout: 900 }, { type: "command", command: run("skill-gate.mjs"), timeout: 120 }] },
       { matcher: `${NAME}:researcher`, hooks: [{ type: "command", command: run("quote-check.mjs") }] },
     ],
     Stop: [{ hooks: [{ type: "command", command: run("review-gate.mjs") }] }],
@@ -137,6 +138,9 @@ const OPTIONS = [
   ["skill_hints", "string", "Skill hints", "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."],
   ["allow_haiku", "string", "Allow Haiku", "Empty: a launch of this plugin's agents on a haiku model is raised to sonnet; 1 lets it run on haiku (ORCH_ALLOW_HAIKU)."],
   ["handback_check", "string", "Report check", "Empty: on; off skips sending a worker's report back once when it has no STATUS line or leaves a checked id unanswered (ORCH_HANDBACK_CHECK)."],
+  ["skill_create", "string", "Skill creation", "Empty: on; off blocks a KIND: skill implementer launch, so a run creates no skill (ORCH_SKILL_CREATE)."],
+  ["skills_repo_private", "string", "Private skills repository", "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."],
+  ["skills_repo_public", "string", "Public skills repository", "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(

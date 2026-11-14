@@ -13,7 +13,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -26,7 +30,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-bugfix.txt": {
@@ -45,7 +52,11 @@
       "read": null,
       "kind": "bugfix",
       "validate": true,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -58,7 +69,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-light.txt": {
@@ -77,7 +91,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -90,7 +108,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-malformed.txt": {
@@ -107,7 +128,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -120,7 +145,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-new-lines-malformed.txt": {
@@ -139,7 +167,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -152,7 +184,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-old-style.txt": {
@@ -171,7 +206,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -184,7 +223,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-plain.txt": {
@@ -204,7 +246,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -217,7 +263,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-risky-checks.txt": {
@@ -243,7 +292,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -256,7 +309,94 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "impl-skill-malformed.txt": {
+    "header": {
+      "slice": "bad-skill",
+      "files": [
+        "skills/x/"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": "skill",
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": [
+        "ok-name"
+      ]
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "impl-skill.txt": {
+    "header": {
+      "slice": "notes-skill",
+      "files": [
+        "skills/release-notes/",
+        "README.md"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": "skill",
+      "validate": false,
+      "skills": [],
+      "skill": "release-notes",
+      "target": "public",
+      "update": true,
+      "drafts": [
+        "release-notes",
+        "changelog-style"
+      ]
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-skills-malformed.txt": {
@@ -284,7 +424,11 @@
         "s4",
         "s5",
         "s6"
-      ]
+      ],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -297,7 +441,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-skills.txt": {
@@ -320,7 +467,11 @@
         "anthropic-skills:pptx",
         "orchestration:route",
         "tdd"
-      ]
+      ],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -333,7 +484,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "impl-workflow.txt": {
@@ -352,7 +506,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -365,7 +523,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "plan-constraints.txt": {
@@ -388,7 +549,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": true,
@@ -411,7 +576,10 @@
           "checks": [
             "C1",
             "C2"
-          ]
+          ],
+          "kind": null,
+          "skill": null,
+          "target": null
         },
         {
           "slice": "csv",
@@ -425,7 +593,10 @@
           "risky": true,
           "checks": [
             "C3"
-          ]
+          ],
+          "kind": null,
+          "skill": null,
+          "target": null
         }
       ]
     },
@@ -434,7 +605,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "plan-not-first.txt": {
@@ -453,7 +627,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -466,7 +644,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "plan-old-style.txt": {
@@ -483,7 +664,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": true,
@@ -496,7 +681,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "plan-replan.txt": {
@@ -517,7 +705,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": true,
@@ -536,7 +728,10 @@
           "risky": false,
           "checks": [
             "C4"
-          ]
+          ],
+          "kind": null,
+          "skill": null,
+          "target": null
         }
       ]
     },
@@ -545,7 +740,99 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "plan-skill.txt": {
+    "header": {
+      "slice": "notes-skill",
+      "files": [
+        "skills/release-notes/",
+        "README.md"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [
+        "C9"
+      ],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": "skill",
+      "validate": false,
+      "skills": [],
+      "skill": "release-notes",
+      "target": "public",
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": true,
+      "replan": null,
+      "constraints": {
+        "C9": "a new skill goes to the private repository unless the brief says TARGET: public"
+      },
+      "slices": [
+        {
+          "slice": "notes-skill",
+          "files": [
+            "skills/release-notes/",
+            "README.md"
+          ],
+          "depends": [],
+          "goal": "the skill draft",
+          "risky": false,
+          "checks": [
+            "C9"
+          ],
+          "kind": "skill",
+          "skill": "release-notes",
+          "target": "public"
+        },
+        {
+          "slice": "readme",
+          "files": [
+            "README.md"
+          ],
+          "depends": [
+            "notes-skill"
+          ],
+          "goal": "project README written with the draft",
+          "risky": false,
+          "checks": [],
+          "kind": "docs",
+          "skill": null,
+          "target": null
+        },
+        {
+          "slice": "bad",
+          "files": [
+            "x.md"
+          ],
+          "depends": [],
+          "goal": null,
+          "risky": false,
+          "checks": [],
+          "kind": null,
+          "skill": null,
+          "target": null
+        }
+      ]
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-blockquote-then-pass.txt": {
@@ -562,7 +849,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -577,7 +868,10 @@
       ],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-blockquoted.txt": {
@@ -594,7 +888,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -607,7 +905,52 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "reply-draft.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": [
+        "release-notes"
+      ]
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": {
+        "name": "release-notes",
+        "branch": "skill/release-notes"
+      },
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-fail.txt": {
@@ -624,7 +967,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -651,7 +998,10 @@
         }
       },
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-gaps.txt": {
@@ -668,7 +1018,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -704,7 +1058,10 @@
           "text": "no number at all"
         }
       ],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-no-status.txt": {
@@ -721,7 +1078,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -734,7 +1095,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-old-style.txt": {
@@ -751,7 +1115,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -764,7 +1132,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-pass-answers.txt": {
@@ -781,7 +1152,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -810,7 +1185,10 @@
         }
       },
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-quotes.txt": {
@@ -827,7 +1205,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -853,6 +1235,54 @@
           "locator": "src/x.ts",
           "text": "plain text with a | pipe"
         }
+      ],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "reply-skills.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [
+        "not-a-reply-line"
+      ],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [
+        "frontend-design",
+        "anthropic-skills:docx"
+      ],
+      "skillsSkipped": [
+        "diagnosing-bugs",
+        "tdd"
       ]
     }
   },
@@ -870,7 +1300,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -885,7 +1319,10 @@
       ],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reply-two-status.txt": {
@@ -902,7 +1339,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -921,7 +1362,10 @@
         }
       },
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "researcher-brief.txt": {
@@ -945,7 +1389,11 @@
       "read": "extract",
       "kind": "survey",
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -958,7 +1406,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reviewer-brief-old.txt": {
@@ -975,7 +1426,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -988,7 +1443,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   },
   "reviewer-brief.txt": {
@@ -1008,7 +1466,11 @@
       "read": null,
       "kind": null,
       "validate": false,
-      "skills": []
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
     },
     "plan": {
       "isPlanReview": false,
@@ -1021,7 +1483,10 @@
       "open": [],
       "answers": {},
       "gaps": [],
-      "quotes": []
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
     }
   }
 }
