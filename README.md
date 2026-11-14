@@ -515,7 +515,8 @@ dashboard/           the live pane (source for both builds)
 statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
 scripts/             auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
-                     claude-update.mjs (the check to run after a Claude Code update)
+                     claude-update.mjs (the check to run after a Claude Code update),
+                     run-result.mjs and log-run.mjs (a headless run's one result document and its row in runs.jsonl)
 evals/               the plugin eval suite
 bench/               the benchmark: run, grade, analyze, report, tasks/, matrix/
 docs/                native-mode.md, brief-grammar.md, dashboard.md, native-vs-plugin.md, bash-judge.md,
