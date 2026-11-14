@@ -46,6 +46,14 @@
 // only allow any hook returns (a permissions.deny rule still wins). Every router decision goes to reads-route.jsonl
 // in the state dir with parsed fields only (tier, models, short reason codes, counts, paths; never brief or file text).
 //
+// No Haiku unless the user says so. For a launch of one of this plugin's own agents (the project's copy or the plugin's
+// namespaced one; never a built-in, fork or another plugin's agent) whose model is in the haiku family, the launch is
+// raised to sonnet through the same updatedInput. The model looked at is tool_input.model, else the agent file's model:
+// line (an agent file copied from a version before this rule may still say haiku). CLAUDE_CODE_SUBAGENT_MODEL is the
+// user's own setting and is left alone. ORCH_ALLOW_HAIKU=1 (or the plugin option) turns the rule off. A raise goes to
+// model-floor.jsonl in the state dir (agent type, where the model came from; never brief text). The read router ranks
+// the raised model, so it can still raise it further and never lowers it.
+//
 // Skill hints. On unless ORCH_SKILL_HINTS=off (or the plugin option SKILL_HINTS=off). For a launch of this plugin's own
 // implementer (only when this check allows it with reason ok or light_path, never a *_gave_up or other allow),
 // researcher or reviewer (bare or orchestration:-prefixed; never the integrator, a built-in, fork or another plugin's
@@ -61,7 +69,7 @@ import { appendFileSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs"
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { agentModel, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
-import { builtinAgents } from "./builtin-agents.mjs";
+import { builtinAgents, OWN_AGENTS } from "./builtin-agents.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -81,6 +89,10 @@ const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
 // Skill hints go only to this plugin's own workers: the project's copy or the plugin's namespaced one.
 const HINTED_TYPES = new Set(["implementer", "orchestration:implementer", "researcher", "orchestration:researcher", "reviewer", "orchestration:reviewer"]);
 const SKILL_LOG = "skills.jsonl";
+// The haiku rule covers every agent of this plugin: the project's copy or the plugin's namespaced one.
+const OWN_TYPES = new Set(OWN_AGENTS.flatMap((a) => [a, `orchestration:${a}`]));
+const FLOOR_MODEL = "sonnet";
+const FLOOR_LOG = "model-floor.jsonl";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -98,9 +110,14 @@ const type = typeof tool.subagent_type === "string" ? tool.subagent_type.trim() 
 const role = type.split(":").pop();
 const prompt = typeof tool.prompt === "string" ? tool.prompt : "";
 const h = parseHeader(prompt);
-// The scripted workflow fixes the order in code and plans its own slices, so its briefs say so and skip this check.
-if (h.workflow) process.exit(0);
 const builtin = !type.includes(":") && BUILTINS.has(type || "general-purpose");
+// From here on `tool.model` is the raised model, so every allow below that prints updatedInput carries it.
+const floored = !builtin && OWN_TYPES.has(type) && raiseHaiku();
+// The scripted workflow fixes the order in code and plans its own slices, so its briefs say so and skip this check.
+if (h.workflow) {
+  if (floored) allowWith({ ...tool });
+  process.exit(0);
+}
 // The hint modules, loaded only for a launch that may get hints; any failure (a missing file, a syntax error) is none.
 /** @type {{ skillCatalog: Function, skillHints: Function, hintBlock: Function } | null} */
 let hintMods = null;
@@ -128,7 +145,7 @@ if (role === "implementer") {
     }
   }
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
-  if (routed || block) {
+  if (routed || block || floored) {
     const raised = !!routed?.raised;
     allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}` });
   }
@@ -138,6 +155,44 @@ if (role === "implementer") {
 /** ORCH_READ_ROUTER: the router runs only on "on" (any case). @param {Record<string, string | undefined>} env */
 function routerOn(env) {
   return String(env.ORCH_READ_ROUTER ?? "").trim().toLowerCase() === "on";
+}
+
+/** The project dir a launch belongs to. */
+function projectDir() {
+  return process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
+}
+
+/** The model: line of the agent file this launch names: the plugin's for a namespaced type, else the project's. @returns {string | null} */
+function agentFileModel() {
+  const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT || null;
+  const dir = projectDir();
+  return type.includes(":")
+    ? agentModel({ subagent_type: type }, { pluginRoot }) ?? agentModel({ subagent_type: type }, { projectDir: dir })
+    : agentModel({ subagent_type: type }, { projectDir: dir });
+}
+
+/**
+ * The haiku rule: when this launch would run on a haiku model and the user has not allowed that, set tool.model to
+ * sonnet and log the raise. Returns whether it raised; any error leaves the launch as it was.
+ */
+function raiseHaiku() {
+  try {
+    if (String(process.env.ORCH_ALLOW_HAIKU ?? "").trim() === "1") return false;
+    const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
+    const model = explicit ?? agentFileModel();
+    if (modelRank(model) !== 0) return false;
+    tool.model = FLOOR_MODEL;
+    try {
+      ensureStateDir();
+      const sessionId = typeof input.session_id === "string" ? input.session_id : "";
+      appendFileSync(join(stateDir, FLOOR_LOG), `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_type: type, decision: "raise", from: "haiku", to: FLOOR_MODEL, model_source: explicit ? "call" : "agent_file" })}\n`);
+    } catch {
+      // logging must never change the decision
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** ORCH_SKILL_HINTS (else the plugin option): hints run unless "off" (any case). @param {Record<string, string | undefined>} env */
@@ -272,7 +327,7 @@ function routeRead() {
     log({ decision: "skip", reason: "no_sources" });
     return null;
   }
-  const dir = env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
+  const dir = projectDir();
   const isUrl = (/** @type {string} */ s) => /^https?:\/\//i.test(s);
   const sources = h.sources.map((s) => (isUrl(s) ? s : resolve(dir, s)));
   const paths = sources.map((s) => {
@@ -324,12 +379,7 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
   }
 
   const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
-  const pluginRoot = env.CLAUDE_PLUGIN_ROOT || null;
-  const fromFile = explicit
-    ? null
-    : type.includes(":")
-      ? agentModel({ subagent_type: type }, { pluginRoot }) ?? agentModel({ subagent_type: type }, { projectDir: dir })
-      : agentModel({ subagent_type: type }, { projectDir: dir });
+  const fromFile = explicit ? null : agentFileModel();
   const fromEnv = (env.CLAUDE_CODE_SUBAGENT_MODEL ?? "").trim() || null;
   const effective = explicit ?? fromFile ?? fromEnv;
   const source = explicit ? "call" : fromFile ? "agent_file" : fromEnv ? "env" : "unknown";
@@ -446,9 +496,11 @@ function decide(decision, reason, message) {
     process.exit(2);
   }
   // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
-  if (decision === "allow" && (reason === "ok" || reason === "light_path") && HINTED_TYPES.has(type) && role === "implementer") {
-    const block = skillHintText();
-    if (block) allowWith({ ...tool, prompt: `${prompt}${block}` });
+  // The haiku rule's raised model goes out on every allow.
+  if (decision === "allow") {
+    const hinted = (reason === "ok" || reason === "light_path") && HINTED_TYPES.has(type) && role === "implementer";
+    const block = hinted ? skillHintText() : "";
+    if (block || floored) allowWith({ ...tool, prompt: `${prompt}${block}` });
   }
   process.exit(0);
 }

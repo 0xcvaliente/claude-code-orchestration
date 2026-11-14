@@ -135,6 +135,7 @@ const OPTIONS = [
   ["quote_check", "string", "Quote check", "Empty: on; off skips checking researcher QUOTE lines against their sources (ORCH_QUOTE_CHECK)."],
   ["gate_isolated", "string", "Test gate in worktrees", "Test gate in isolated worktrees: warn (default), block or skip (ORCH_GATE_ISOLATED)."],
   ["skill_hints", "string", "Skill hints", "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."],
+  ["allow_haiku", "string", "Allow Haiku", "Empty: a launch of this plugin's agents on a haiku model is raised to sonnet; 1 lets it run on haiku (ORCH_ALLOW_HAIKU)."],
   ["handback_check", "string", "Report check", "Empty: on; off skips sending a worker's report back once when it has no STATUS line or leaves a checked id unanswered (ORCH_HANDBACK_CHECK)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */

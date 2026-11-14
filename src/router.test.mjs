@@ -38,7 +38,9 @@ function run(dir, script, payload, env = {}) {
   for (const k of ENV_KEYS) delete base[k];
   return spawnSync(process.execPath, [join(dir, ".claude", "hooks", script)], {
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
-    env: { ...base, CLAUDE_PROJECT_DIR: dir, ORCH_SKILL_HINTS: "off", ...env }, // skill hints off: the exact assertions stay machine-independent
+    // Skill hints off: the exact assertions stay machine-independent. Haiku allowed: these tests rank a haiku researcher
+    // against the router's tiers; without it the haiku rule raises every launch to sonnet first (model-floor.test.mjs).
+    env: { ...base, CLAUDE_PROJECT_DIR: dir, ORCH_SKILL_HINTS: "off", ORCH_ALLOW_HAIKU: "1", ...env },
     encoding: "utf8",
   });
 }

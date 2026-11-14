@@ -98,7 +98,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "You only read the folder; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
     },
     solo: {
-      model: model("ORCH_MODEL_SOLO", "claude-sonnet-5-5"),
+      model: model("ORCH_MODEL_SOLO", "claude-opus-5-5"),
       effort: "medium",
       maxTurns: 60,
       tools: [...READ_ONLY, "Edit", "Write", "Bash"],
@@ -110,7 +110,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "When finished, reply with a short summary and the command you ran to check the work.",
     },
     planner: {
-      model: model("ORCH_MODEL_PLANNER", "claude-opus-5-5"),
+      model: model("ORCH_MODEL_PLANNER", "claude-fable-5-2"),
       effort: "high",
       maxTurns: 20,
       tools: READ_ONLY,
@@ -120,7 +120,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "Answer with the requested JSON and nothing else.",
     },
     explorer: {
-      model: model("ORCH_MODEL_EXPLORER", "claude-haiku-5-5"),
+      model: model("ORCH_MODEL_EXPLORER", "claude-sonnet-5-5"),
       effort: "low",
       maxTurns: 15,
       tools: READ_ONLY,
@@ -130,7 +130,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "Reply in at most 250 words. Do not paste large code blocks.",
     },
     writer: {
-      model: model("ORCH_MODEL_WRITER", "claude-sonnet-5-5"),
+      model: model("ORCH_MODEL_WRITER", "claude-opus-5-5"),
       effort: "medium",
       maxTurns: 80,
       tools: [...READ_ONLY, "Edit", "Write", "Bash"],
