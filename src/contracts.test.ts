@@ -111,7 +111,7 @@ function project(): string {
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
   mkdirSync(join(dir, ".claude", "state"), { recursive: true });
-  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   return dir;
 }
 const run = (dir: string, script: string, payload: unknown) =>

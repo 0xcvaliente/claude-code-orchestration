@@ -14,7 +14,7 @@ function project({ reviewed = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "plan-hooks-"));
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
-  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   if (reviewed) {
     mkdirSync(join(dir, ".claude", "state"), { recursive: true });
     const plan = (/** @type {string} */ session) => JSON.stringify({ ts: "t", session_id: session, slice: "plan", role: "reviewer", status: "pass", agent_id: "r0" });
@@ -336,13 +336,13 @@ test("plan check: while a run is open, built-in and fork agents are blocked (bui
     const builtin = (/** @type {string | undefined} */ type, env = {}) =>
       spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs")], {
         input: JSON.stringify({ session_id: "s1", tool_name: "Agent", tool_input: { ...(type === undefined ? {} : { subagent_type: type }), prompt: "Look around." } }),
-        env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ORCH_ALLOW_BUILTINS: "", ORCH_RUN_STALE_MIN: "", ...env },
+        env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ORCH_ALLOW_BUILTINS: "", ORCH_RUN_STALE_MIN: "", ORCH_BUILTINS_FILE: "", ...env },
         encoding: "utf8",
       });
     assert.equal(builtin("general-purpose").status, 0, "no run open: not this hook's business");
     assert.equal(lastCheck(dir).reason, "builtin_outside_run");
     agents(dir).plan(PLAN2);
-    for (const t of ["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup", "fork", undefined]) {
+    for (const t of ["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup", "web-fetch", "fork", undefined]) {
       const r = builtin(t);
       assert.equal(r.status, 2, String(t));
       assert.match(r.stderr, /run 1 is open.*built-in or a fork.*ORCH_ALLOW_BUILTINS=1/);
@@ -355,6 +355,33 @@ test("plan check: while a run is open, built-in and fork agents are blocked (bui
     assert.equal(builtin("Plan", { ORCH_ALLOW_BUILTINS: "1" }).status, 0);
     assert.equal(builtin("Plan", { ORCH_RUN_STALE_MIN: "0.00001" }).status, 0, "a stale run is not open");
     assert.equal(builtin("Plan").status, 2, "Plan still has one block left");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plan check: a built-in type learned on this machine (scripts/claude-update.mjs --fix) is blocked like the listed ones; own agents and a broken file never are", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const learned = join(dir, "builtin-agents.json");
+    const launchAs = (/** @type {string} */ type, /** @type {string} */ file) =>
+      spawnSync("node", [join(dir, ".claude", "hooks", "plan-check.mjs")], {
+        input: JSON.stringify({ session_id: "s1", tool_name: "Agent", tool_input: { subagent_type: type, prompt: "Look around." } }),
+        env: { ...process.env, CLAUDE_PROJECT_DIR: dir, ORCH_ALLOW_BUILTINS: "", ORCH_RUN_STALE_MIN: "", ORCH_BUILTINS_FILE: file },
+        encoding: "utf8",
+      });
+    agents(dir).plan(PLAN2);
+    assert.equal(launchAs("deep-search", "").status, 0, "unknown to the list and nothing learned: somebody's own agent");
+    writeFileSync(learned, JSON.stringify({ v: 1, claude_code_version: "2.1.999", agents: ["deep-search", "reviewer", "acme:helper", 7, "bad name"] }));
+    assert.equal(launchAs("deep-search", learned).status, 2, "learned built-in");
+    assert.equal(lastCheck(dir).reason, "builtin_agent_in_run");
+    assert.equal(launchAs("reviewer", learned).status, 0, "this plugin's own agent is never a built-in");
+    assert.equal(launchAs("acme:helper", learned).status, 0, "a namespaced agent is never a built-in");
+    assert.equal(launchAs("Explore", learned).status, 2, "the listed built-ins stay blocked");
+    writeFileSync(learned, "{ not json");
+    assert.equal(launchAs("deep-search", learned).status, 0, "a broken file adds nothing");
+    assert.equal(launchAs("general-purpose", learned).status, 2, "and takes nothing away");
+    assert.equal(launchAs("deep-search", join(dir, "missing.json")).status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

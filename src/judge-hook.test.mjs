@@ -26,7 +26,7 @@ writeFileSync(
   `#!/usr/bin/env node
 import { appendFileSync, readFileSync, readdirSync } from "node:fs";
 const stdin = readFileSync(0, "utf8");
-appendFileSync(process.env.STUB_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), cwdEntries: readdirSync(process.cwd()), inner: process.env.ORCH_JUDGE_INNER, stdin }) + "\\n");
+appendFileSync(process.env.STUB_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), cwdEntries: readdirSync(process.cwd()), inner: process.env.ORCH_JUDGE_INNER, noAutoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, stdin }) + "\\n");
 const result = (text) => process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: text }));
 const mode = process.env.STUB_MODE;
 if (mode === "approve") result('{"decision":"allow","reason":"the user asked for it"}');
@@ -197,6 +197,7 @@ test("the judge runs claude -p with opus, one turn, no tools, project settings o
   assert.equal(after("--tools"), "");
   assert.ok(a.includes("--strict-mcp-config"));
   assert.equal(call.inner, "1");
+  assert.equal(call.noAutoMemory, "1", "the judge's own run never starts Claude Code auto memory");
   assert.deepEqual(call.cwdEntries, []);
   assert.notEqual(call.cwd, project);
   assert.equal(existsSync(call.cwd), false, "temp dir removed");
