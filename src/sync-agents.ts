@@ -18,7 +18,7 @@ const MAP: Partial<Record<Role, { agent: string; keys: Key[] }>> = {
 };
 
 /** Agent files use aliases so they follow the newest model in a family; unknown ids stay verbatim. */
-export const alias = (model: string): string => /opus|sonnet|haiku/.exec(model)?.[0] ?? model;
+export const alias = (model: string): string => /fable|opus|sonnet|haiku/.exec(model)?.[0] ?? model;
 
 function frontmatter(text: string): { whole: string; front: string } {
   const m = /^---\n([\s\S]*?)\n---/.exec(text);

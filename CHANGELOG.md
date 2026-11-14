@@ -4,6 +4,14 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Changed
+
+- **Models: Fable plans, Opus does the tasks, Sonnet does the rest, and no Haiku.** The orchestrator (SDK planner) runs on Fable 5.2 (was Opus). The implementer (SDK writer) and the plain session (`npm run auto`'s plain route, the SDK's solo role) run on Opus (were Sonnet; the plain session used to run on whatever model Claude Code defaulted to). The researcher (SDK explorer) runs on Sonnet (was Haiku). The reviewer, integrator and triager stay on Sonnet, and the Bash judge and the escalated reviews stay on Opus. The third and last attempt of a slice is still a fresh implementer on Opus, which is now the same model as the first attempt. Cost per run goes up: the benchmark figures in the README were measured with the earlier models and the triage thresholds were set against a plain Sonnet session, and neither was measured again. `ORCH_MODEL_<ROLE>` and `ORCH_MODEL` still override each default.
+
+### Added
+
+- **The haiku rule.** `plan-check.mjs` raises a launch of any of this plugin's agents to sonnet when its model is in the haiku family (the call's `model`, else the agent file's `model:` line, so an agent file copied from an earlier version is covered). `ORCH_ALLOW_HAIKU=1` or the new plugin setting `allow_haiku` turns the rule off; `CLAUDE_CODE_SUBAGENT_MODEL` is left alone. Each raise goes to `model-floor.jsonl` in the state dir. The read router is unchanged: it only raises a model, so with a Sonnet researcher its haiku tier changes nothing.
+
 ### Fixed
 
 - **The run log recorded the last wake-up of a headless run, not the run.** `claude -p` answers once per wake-up of the session: an orchestrator that launches agents stops, is woken by each agent's result and stops again, and every stop is a result with its own `num_turns` and `duration_ms`. `--output-format json` prints the last one only, so `runs.jsonl` logged a run of two minutes and three agents as `duration_ms: 8320` and `turns: 1`. `scripts/orchestrate.sh` now asks for the event stream (`--output-format stream-json --verbose`) and `scripts/run-result.mjs` reduces it to the document the script prints: the last result as before, plus `orch_totals` with `results` (how many results the session produced), `turns` (`num_turns` summed over them) and `wall_ms` (the run's wall time, measured by the script). `scripts/log-run.mjs` writes those two totals to `turns` and `duration_ms`. Tokens were already right: `modelUsage` in the last result covers the whole session. Rows logged before this fix keep their low figures. The bench's `num_turns` still comes from each document's own `num_turns`; its `N-UC` arm runs `claude` itself and keeps `--output-format json`.

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 730" width="1060" height="730" role="img" aria-labelledby="dc-1ced876da7-title dc-1ced876da7-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
 <title id="dc-1ced876da7-title">Pipeline for code in a git repository: plan, then build each slice behind two gates, with validated retries</title>
-<desc id="dc-1ced876da7-desc">For code in a git repository: Opus plans questions, Haiku explores, and the plan splits the work into up to 6 slices. Each slice is written by Sonnet in its own worktree and must pass the test gate (a bugfix slice also needs a test that fails before the fix) and a fresh-context reviewer. Failing tests go back to the writer. A review&#x27;s gaps first go to a fresh reviewer that keeps only the gaps that stand: confirmed gaps start a retry (the second attempt resumes the same writer, the third and last is a fresh writer on Opus); when none stand, the slice moves on to be merged. The same gap in two failed reviews in a row stalls the slice until one replan plans the missing work. Passing slices are merged into the result branch. Validation, the Opus attempt and the stall belong to the native orchestrator (the gated workflow validates and escalates too, without the stall gate); the SDK pipeline sends the gaps straight back. Work that changes no code follows the same plan and review steps in your folder.</desc>
+<desc id="dc-1ced876da7-desc">For code in a git repository: Fable plans questions, Sonnet explores, and the plan splits the work into up to 6 slices. Each slice is written by Opus in its own worktree and must pass the test gate (a bugfix slice also needs a test that fails before the fix) and a fresh-context reviewer. Failing tests go back to the writer. A review&#x27;s gaps first go to a fresh reviewer that keeps only the gaps that stand: confirmed gaps start a retry (the second attempt resumes the same writer, the third and last is a fresh writer on Opus); when none stand, the slice moves on to be merged. The same gap in two failed reviews in a row stalls the slice until one replan plans the missing work. Passing slices are merged into the result branch. Validation, the Opus attempt and the stall belong to the native orchestrator (the gated workflow validates and escalates too, without the stall gate); the SDK pipeline sends the gaps straight back. Work that changes no code follows the same plan and review steps in your folder.</desc>
 <defs><marker id="dc-1ced876da7-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
 <rect width="1060" height="730" fill="#0d1117" aria-hidden="true"/>
 <rect x="14" y="24" width="312" height="416" rx="8" fill="none" stroke="#656c76" stroke-dasharray="4 4"/>
@@ -23,12 +23,12 @@
 <g id="dc-1ced876da7-node-questions" data-node="questions" data-x="30" data-y="70" data-w="280" data-h="84">
 <rect x="30" y="70" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="109.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="questions"><tspan x="48" dy="0">Plan questions</tspan></text>
-<text x="48" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="questions"><tspan x="48" dy="0">Opus, read-only</tspan></text>
+<text x="48" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="questions"><tspan x="48" dy="0">Fable, read-only</tspan></text>
 </g>
 <g id="dc-1ced876da7-node-explore" data-node="explore" data-x="30" data-y="204" data-w="280" data-h="84">
 <rect x="30" y="204" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="243.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="explore"><tspan x="48" dy="0">Explore</tspan></text>
-<text x="48" y="269.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="explore"><tspan x="48" dy="0">Haiku, parallel, read-only</tspan></text>
+<text x="48" y="269.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="explore"><tspan x="48" dy="0">Sonnet, parallel, read-only</tspan></text>
 </g>
 <g id="dc-1ced876da7-node-plan" data-node="plan" data-x="30" data-y="338" data-w="280" data-h="84">
 <rect x="30" y="338" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
@@ -38,7 +38,7 @@
 <g id="dc-1ced876da7-node-write" data-node="write" data-x="370" data-y="70" data-w="280" data-h="84">
 <rect x="370" y="70" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="388" y="109.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="write"><tspan x="388" dy="0">Write in parallel</tspan></text>
-<text x="388" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="write"><tspan x="388" dy="0">Sonnet, a worktree each</tspan></text>
+<text x="388" y="135.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="write"><tspan x="388" dy="0">Opus, a worktree each</tspan></text>
 </g>
 <g id="dc-1ced876da7-node-test" data-node="test" data-x="370" data-y="204" data-w="280" data-h="84">
 <rect x="370" y="204" width="280" height="84" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>

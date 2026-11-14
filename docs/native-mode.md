@@ -10,9 +10,9 @@ claude --agent orchestrator
 
 | Agent | Model / effort | Tools |
 |---|---|---|
-| `orchestrator` | opus, high | `Agent(researcher, implementer, integrator, reviewer)`, `SendMessage`, Read, Grep, Glob |
-| `researcher` | haiku, low (the read router may raise it) | Read, Grep, Glob, read-only `git` (`log`, `ls-files`, `rev-list`, `rev-parse`, `status`, `show`, `branch --show-current`, each also as `git -C <dir> ...`), `wc`, `ls`, `du`, `WebSearch`, `WebFetch`, `Skill` |
-| `implementer` | sonnet, medium, maxTurns 80 | every tool except `Agent` (`disallowedTools: Agent`) |
+| `orchestrator` | fable, high | `Agent(researcher, implementer, integrator, reviewer)`, `SendMessage`, Read, Grep, Glob |
+| `researcher` | sonnet, low (the read router may raise it) | Read, Grep, Glob, read-only `git` (`log`, `ls-files`, `rev-list`, `rev-parse`, `status`, `show`, `branch --show-current`, each also as `git -C <dir> ...`), `wc`, `ls`, `du`, `WebSearch`, `WebFetch`, `Skill` |
+| `implementer` | opus, medium, maxTurns 80 | every tool except `Agent` (`disallowedTools: Agent`) |
 | `integrator` | sonnet, low | Read, Grep, Glob, Bash |
 | `reviewer` | sonnet, medium, maxTurns 40 | Read, Grep, Glob, Bash, `WebSearch`, `WebFetch`, `Skill` |
 
@@ -123,7 +123,7 @@ None of the reply lines changes STATUS, the constraint answers or OPEN. `brief.m
 
 ### Switches and plugin settings (0.4.0)
 
-The plugin declares 16 settings as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`), shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; `state.mjs` (`OPTION_KEYS`, `bridgeOptions`) and `verify.sh` copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset, so an environment variable still wins over `/config`. The project copy of the hooks reads only the environment.
+The plugin declares 17 settings as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`), shown in `/config`. Claude Code passes each to hooks as `CLAUDE_PLUGIN_OPTION_<KEY>`; `state.mjs` (`OPTION_KEYS`, `bridgeOptions`) and `verify.sh` copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset, so an environment variable still wins over `/config`. The project copy of the hooks reads only the environment.
 
 | Key | Environment | Default | Effect |
 |---|---|---|---|
@@ -162,6 +162,10 @@ Off unless `ORCH_READ_ROUTER=on`, until H14 is measured. For a researcher launch
 - a PDF with a good text layer is haiku; a scanned or thin text layer, tables, multi-column pages, figures or empty pages make it sonnet; a PDF of 50 or more pages with `READ: judge` is one whole-document read on opus;
 - an xlsx with formulas or merged cells, a docx with tables, or an image-heavy docx or pptx is sonnet; plain ones are haiku;
 - `READ: lookup` and `extract` ask for haiku at least, `judge` for sonnet; a `RISKY: yes` brief makes it opus. The overall tier is the highest of these.
+
+The router only raises a model. Since the researcher starts on sonnet, a haiku tier changes nothing; sonnet and opus tiers work as before.
+
+**No Haiku unless you allow it.** `plan-check.mjs` raises a launch of any of this plugin's agents to sonnet when its model is in the haiku family: the call's `model`, else the agent file's `model:` line (a folder may hold agent files copied from a version that shipped a haiku researcher). `ORCH_ALLOW_HAIKU=1`, or the plugin setting `allow_haiku`, turns the rule off. `CLAUDE_CODE_SUBAGENT_MODEL` is your own setting and is left alone, and built-ins, fork and other plugins' agents are not touched. Each raise is logged to `model-floor.jsonl` in the state dir. In the SDK pipeline no role defaults to haiku; `ORCH_MODEL_<ROLE>` still accepts any model.
 
 The effective model is the launch's `model`, else the agent file's `model:` line, else `CLAUDE_CODE_SUBAGENT_MODEL`. When the tier ranks above it the launch gets the tier's alias; a model is never lowered, fable is never chosen or changed, and an `inherit`, missing or unrankable model is left alone. Text conversions are cached under `<state dir>/read-cache`, keyed by path, size and mtime, and a short note listing them, with each PDF's hard pages, is appended to the brief. Profiling runs in a child process with a 15-second budget (`ORCH_READ_ROUTER_BUDGET_MS`); an error or a timeout skips routing. Each decision goes to `reads-route.jsonl` (tier, models, reason codes, counts, paths; never brief or file text).
 

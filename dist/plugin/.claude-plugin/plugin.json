@@ -85,6 +85,11 @@
       "title": "Skill hints",
       "description": "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."
     },
+    "allow_haiku": {
+      "type": "string",
+      "title": "Allow Haiku",
+      "description": "Empty: a launch of this plugin's agents on a haiku model is raised to sonnet; 1 lets it run on haiku (ORCH_ALLOW_HAIKU)."
+    },
     "handback_check": {
       "type": "string",
       "title": "Report check",

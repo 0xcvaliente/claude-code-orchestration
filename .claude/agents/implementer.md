@@ -1,7 +1,7 @@
 ---
 name: implementer
 description: Does exactly one scoped slice from a written brief (code, documents, analysis or operations) and runs its acceptance check. Use for edits only, one slice per call.
-model: sonnet
+model: opus
 effort: medium
 maxTurns: 80
 disallowedTools: Agent
