@@ -4,6 +4,23 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-14
+
+1.2.2 follows Claude Code 2.1.323 to 2.1.325. Claude Code updated itself and the update went around two things this repo relies on; both are fixed, and a script now checks for the same kind of change after every update.
+
+### Fixed
+
+- **`web-fetch`, a built-in subagent added in Claude Code 2.1.325, was not blocked.** The block list named six built-in types by hand in three places. The plan check took `web-fetch` for somebody's own agent, so a session with an open run could hand work to it and no gate saw that, and `permissions.deny` in this repo did not deny it. The names now live in one file, `.claude/hooks/builtin-agents.mjs`: the plan check reads it, `DENIED_AGENTS` in `src/config.ts` is built from it, and `policy.test.ts` keeps `permissions.deny` in step. Headless runs were not affected: `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` still removes every built-in (checked on 2.1.325).
+- **Claude Code's auto memory ran inside the judge and the SDK workers.** Each `claude -p` call of the native judge left an empty `~/.claude/projects/<temp folder>/memory` folder and carried the auto-memory instructions in its prompt; an SDK worker could write memory notes under its throwaway worktree's project folder. The judge hook, the SDK judge and every SDK worker now run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (`workerEnv` in `src/judge.ts`).
+
+### Added
+
+- **`npm run claude-update` (`scripts/claude-update.mjs`).** Run it after Claude Code updates. It asks the installed Claude Code for its built-in subagent types (its start-up answer in safe mode; no model call) and fails when one is not on the block list; checks that the headless switches still leave no built-in agent, that the options `scripts/orchestrate.sh` and the native judge pass are still in `claude --help`, that the Agent SDK carries the same Claude Code as the installed one, that an installed plugin is current, and that `dist/` matches the sources. `--fix` repairs the machine: it writes newly found built-in types to `~/.claude/orchestration/builtin-agents.json`, which the plan check reads at once, and updates a stale plugin install. `--enable` installs and enables the plugin when it is off (`--fix` never turns it on: the plugin is opt-in). `--write-source` is for a maintainer: it adds the new types to `builtin-agents.mjs` and `permissions.deny` and rebuilds `dist/`. Details in [docs/claude-code-updates.md](docs/claude-code-updates.md).
+
+### Changed
+
+- Agent SDK 0.3.325 (it carries Claude Code 2.1.325; 0.3.322 carried 2.1.322, so the SDK pipeline ran an older Claude Code than the installed one). `@types/node` 26.6.6.
+
 ## [1.2.1] - 2026-11-10
 
 ### Fixed
@@ -106,6 +123,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.2.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.2
 [1.2.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.1
 [1.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.0
 [1.1.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.1.0

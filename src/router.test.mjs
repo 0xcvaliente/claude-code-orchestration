@@ -19,7 +19,7 @@ const hasPoppler = (() => {
   }
 })();
 const POPPLER = hasPoppler ? false : "poppler is not installed: PDF routing tests skipped";
-const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "file-profile.mjs", "quote-check.mjs"];
+const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "file-profile.mjs", "quote-check.mjs"];
 const ENV_KEYS = ["ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_READ_ROUTER_BUDGET_MS", "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_PLUGIN_ROOT", "ORCH_ALLOW_BUILTINS"];
 
 /** A project with the hooks, a haiku researcher agent file and the fixture files at its root. */

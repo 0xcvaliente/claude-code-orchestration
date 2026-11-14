@@ -2,6 +2,9 @@
 import { judgeEnabled } from "./judge.js";
 // Read-router thresholds live with the zero-model file profiler (a hook, so it runs without tsx).
 export { READ_TIERS } from "../.claude/hooks/file-profile.mjs";
+// The built-in agent names live with the plan check (a hook, so it runs without tsx).
+import { BUILTIN_AGENTS, FORK } from "../.claude/hooks/builtin-agents.mjs";
+export { BUILTIN_AGENTS };
 
 export type Role = "planner" | "explorer" | "writer" | "verifier" | "triager" | "solo";
 
@@ -25,16 +28,14 @@ export const UNSAFE_BASH = [
   ...PUSH_BASH, "Bash(git remote*)", "Bash(git * remote*)",
   "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
 ];
-// Claude Code's six built-in subagents (general-purpose, claude, Explore, Plan, claude-code-guide, statusline-setup)
-// plus fork subagents (`Agent(fork)`: on by default since Claude Code v2.1.302, a fork inherits the whole conversation
-// and every tool). This repo ships its own researcher, implementer, reviewer and integrator, so these are blocked: they
-// are in permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and scripts/orchestrate.sh sets
+// Claude Code's built-in subagents (BUILTIN_AGENTS in .claude/hooks/builtin-agents.mjs, the one list: general-purpose,
+// claude, Explore, Plan, claude-code-guide, statusline-setup and, since Claude Code 2.1.325, web-fetch) plus fork
+// subagents (`Agent(fork)`: on by default since Claude Code v2.1.302, a fork inherits the whole conversation and every
+// tool). This repo ships its own researcher, implementer, reviewer and integrator, so these are blocked: they are in
+// permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and scripts/orchestrate.sh sets
 // CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 and CLAUDE_CODE_FORK_SUBAGENT=0 for headless runs. SDK workers have no Agent
-// tool.
-export const DENIED_AGENTS = [
-  "Agent(general-purpose)", "Agent(claude)", "Agent(Explore)", "Agent(Plan)",
-  "Agent(claude-code-guide)", "Agent(statusline-setup)", "Agent(fork)",
-];
+// tool. A Claude Code update can add a built-in: `npm run claude-update` finds it (see scripts/claude-update.mjs).
+export const DENIED_AGENTS = [...BUILTIN_AGENTS.map((a) => `Agent(${a})`), `Agent(${FORK})`];
 
 // Tool policy of the native agents: the `tools:` and `disallowedTools:` frontmatter lines of .claude/agents/<name>.md,
 // kept in step by src/sync-agents.ts (`npm run check-agents` fails on drift, `npm run sync-agents` fixes it). A key left
