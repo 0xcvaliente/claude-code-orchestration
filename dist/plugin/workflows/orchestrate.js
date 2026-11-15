@@ -65,6 +65,7 @@ const QUESTIONS = {
 }
 // A slice's optional skills: names of installed skills its implementer and reviewers load, passed through as written.
 const MAX_SKILLS = 5
+const MAX_SUITE = 300
 const SKILL_NAME = /^[A-Za-z0-9_.:-]+$/
 const SLICES = {
   type: 'object',
@@ -92,6 +93,7 @@ const SLICES = {
         required: ['id', 'goal', 'files', 'acceptance', 'dependsOn', 'risky', 'checks', 'kind'],
       },
     },
+    suite: { type: 'string' },
   },
   required: ['constraints', 'slices'],
 }
@@ -175,8 +177,8 @@ const VERDICT = {
 
 const SKILL_RULE = `A slice may add skills: at most ${MAX_SKILLS} names of installed skills, exactly as the Skill tool lists them, that the slice clearly needs; leave it out otherwise.`
 const PLAN_RULES = CODE
-  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
-  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (a runnable command if the slice runs code, otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
+  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command (the narrowest command that proves the slice, the tests of the files it owns; the test gate already runs the project's whole suite when each implementer stops, so never name the whole suite here), dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. Suite: the command that runs the project's whole test suite, or empty when there is none; it runs once after the merge. ${SKILL_RULE}`
+  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (the narrowest command that proves the slice if it runs code: the test gate already runs the project's whole suite when each implementer stops, so never name the whole suite; otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
 
 // Plan check (args.planCheck). Paths lose a leading ./ and a trailing /; '.' is the whole folder.
 const normPath = (p) => {
@@ -285,7 +287,7 @@ async function checkedPlan(p, external, label, ask, keep = () => true) {
       { label: `${label}:recheck`, phase: 'Plan', effort: 'high', schema: SLICES },
     )
     if (slicesOf(again).length) {
-      p = { constraints: [...((p && p.constraints) || []), ...((again && again.constraints) || [])], slices: again.slices }
+      p = { constraints: [...((p && p.constraints) || []), ...((again && again.constraints) || [])], slices: again.slices, suite: again.suite !== undefined ? again.suite : p && p.suite }
       r = checkPlan(slicesOf(p), external)
       if (!r.problems.length) log(`${label}: the planner fixed the plan`)
     } else log(`${label}: the planner returned no plan; fixing in code`)
@@ -354,7 +356,7 @@ if (!plan) {
         { label: 'plan:revise', phase: 'Plan', effort: 'high', schema: SLICES },
       )
       if (revised && ((revised.slices || []).filter(Boolean)).length) {
-        plan = { constraints: (revised.constraints || []).length ? revised.constraints : (plan && plan.constraints) || [], slices: revised.slices }
+        plan = { constraints: (revised.constraints || []).length ? revised.constraints : (plan && plan.constraints) || [], slices: revised.slices, suite: revised.suite !== undefined ? revised.suite : plan && plan.suite }
         if (PLAN_CHECK) plan = await checkedPlan(plan, [], 'plan:revise', true)
       } else log('plan review: the planner returned no revised plan; keeping the plan')
     }
@@ -373,6 +375,11 @@ const addConstraints = (list) => {
 }
 addConstraints(plan && plan.constraints)
 const slices = ((plan && plan.slices) || []).filter(Boolean).map(withKind)
+// The project's whole-suite command (optional plan field): a trimmed single line of at most MAX_SUITE characters,
+// otherwise empty. The integrator runs it once after the merge; empty leaves the integrator brief as it was.
+const rawSuite = typeof (plan && plan.suite) === 'string' ? plan.suite.trim() : ''
+const SUITE = rawSuite && rawSuite.length <= MAX_SUITE && !/[\r\n]/.test(rawSuite) ? rawSuite : ''
+if (rawSuite && !SUITE) log('plan: suite command dropped (more than one line or too long)')
 log(`${slices.length} slice(s): ${slices.map((s) => s.id).join(', ') || 'none'}`)
 if (slices.length === 0) return { task, slices: [], note: 'planner returned no slices' }
 log(`plan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices })}`)
@@ -584,7 +591,7 @@ async function runWave(wave) {
       const gaps = await review(
         s,
         CODE
-          ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check and return a verdict.\n`
+          ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped. Return a verdict.\n`
           : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.\n`,
         `review:${s.id}#${attempt}`,
         'Build',
@@ -620,7 +627,7 @@ async function runWave(wave) {
     const branches = built.filter((b) => b.status === 'built' && b.branch).map((b) => b.branch)
     const merged = branches.length
       ? await agent(
-          `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${built.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}\nReturn status, merged (the branches you merged) and open (what stayed unmerged or failed).`,
+          `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${built.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}\n${SUITE ? `Then run the project's whole test suite once: ${SUITE}\n` : ''}Return status, merged (the branches you merged) and open (what stayed unmerged or failed).`,
           { label: 'integrate', phase: 'Integrate', agentType: 'orchestration:integrator', schema: MERGE },
         )
       : null
