@@ -164,7 +164,7 @@ export function parseFailures(text, root = "") {
       else add(jsFile, n);
     } else if ((m = /^\s*[✕×]\s+(.+?)(?:\s+\d[\d.]*\s*m?s|\s+\(\d[\d.]*\s*m?s\))?$/.exec(line))) {
       add(jsFile, m[1]);
-    } else if ((m = /^(FAILED|ERROR)\s+(\S+)(?:\s+-\s.*)?$/.exec(line))) {
+    } else if ((m = /^(FAILED|ERROR)\s+(\S+?\[.*?\]|\S+)(?:\s+-\s.*)?$/.exec(line))) { // a parametrized id may hold spaces
       const id = m[2] ?? "";
       if (id.startsWith("(")) continue; // unittest's "FAILED (failures=1)"
       const k = id.indexOf("::");
@@ -327,11 +327,12 @@ export function runGroup(cmd, cwd, ms) {
 /**
  * Run `cmd` in a fresh detached worktree of `base` (OS temp dir). node_modules comes from the main worktree only, and
  * only when the base's lock files match the main worktree's (otherwise the base would run against other dependencies,
- * so there is no base run: null). `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S, run in its own
- * process group; the worktree is always removed.
+ * so there is no base run: cause "lock_mismatch", with the lock file). A failed `git worktree add` is cause
+ * "worktree_add_failed". `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S, run in its own process
+ * group; the worktree is always removed.
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd
  * @param {(wt: string) => void} [prepare]
- * @returns {Promise<{ rc: number, timedOut: boolean, failures: Failures } | null>}
+ * @returns {Promise<{ rc: number, timedOut: boolean, failures: Failures } | { cause: string, file?: string }>}
  */
 export async function runInBase(info, cwd, cmd, prepare) {
   const sub = subdirOf(info.top, cwd);
@@ -342,17 +343,17 @@ export async function runInBase(info, cwd, cmd, prepare) {
       // Compare blob ids: the base's lock file against the main worktree's file on disk (missing on one side differs).
       const onBase = git(info.top, ["rev-parse", "--verify", "-q", `${info.base}:${rel}`])?.trim() ?? null;
       const inMain = existsSync(join(info.main, rel)) ? (git(info.main, ["hash-object", "--no-filters", "--", rel])?.trim() ?? "?") : null;
-      if (onBase !== inMain) return null;
+      if (onBase !== inMain) return { cause: "lock_mismatch", file: rel };
     }
   }
   pruneStale(info.top);
   const dir = mkdtempSync(join(tmpdir(), BASE_PREFIX));
   const wt = join(dir, "wt");
   try {
-    if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return null;
+    if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return { cause: "worktree_add_failed" };
     for (const d of nmDirs) {
       const target = join(wt, d, "node_modules");
-      if (existsSync(join(wt, d)) && !existsSync(target)) symlinkSync(join(info.main, d, "node_modules"), target);
+      if (existsSync(join(wt, d)) && !existsSync(target)) symlinkSync(join(info.main, d, "node_modules"), target, "junction"); // a folder link on Windows; ignored elsewhere
     }
     if (prepare) prepare(wt);
     const runDir = sub && existsSync(join(wt, sub)) ? join(wt, sub) : wt;
@@ -399,16 +400,18 @@ function writeCache(state, key, value) {
 
 /**
  * The plain base run (cached): usable only when it finished in time and passed, or failed with complete names.
+ * Otherwise why not: runInBase's cause, "base_timeout" or "no_test_names".
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd @param {string} state
- * @returns {Promise<{ rc: number, names: string[] } | null>}
+ * @returns {Promise<{ rc: number, names: string[] } | { cause: string, file?: string }>}
  */
 async function plainBase(info, cwd, cmd, state) {
   const key = cacheKey(info.base, cmd, subdirOf(info.top, cwd));
   const hit = readCache(state)[key];
-  if (hit && typeof hit.rc === "number" && Array.isArray(hit.names)) return hit;
+  if (hit && typeof hit.rc === "number" && Array.isArray(hit.names)) return { rc: hit.rc, names: hit.names };
   const run = await runInBase(info, cwd, cmd);
-  if (!run || run.timedOut) return null;
-  if (run.rc !== 0 && !complete(run.failures)) return null;
+  if ("cause" in run) return run;
+  if (run.timedOut) return { cause: "base_timeout" };
+  if (run.rc !== 0 && !complete(run.failures)) return { cause: "no_test_names" };
   const res = { rc: run.rc, names: run.rc === 0 ? [] : run.failures.names };
   writeCache(state, key, res);
   return res;
@@ -430,7 +433,7 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
   const base = await plainBase(info, cwd, cmd, state);
-  if (!base) return null;
+  if ("cause" in base) return null;
   const onBase = new Set(base.names);
   const shared = cur.names.filter((n) => onBase.has(n));
   if (allow && shared.length === cur.names.length) {
@@ -532,18 +535,38 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
       `KIND: bugfix needs a test that reproduces the bug: no test file is changed or added against ${short}. Add a test that fails without the fix and passes with it.`,
     );
   }
-  const unusable = (/** @type {string} */ what) =>
-    block("bugfix_base_unusable", `KIND: bugfix: unverified. The test run on ${short} ${what}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`);
+  // Each cause has its own text for the agent and a snake_case "cause" for the gate record (verify.sh keeps only
+  // [a-z_0-9,:"] of the extra line).
+  const why = (/** @type {{ cause: string, file?: string }} */ c, how = "") => {
+    switch (c.cause) {
+      case "lock_mismatch":
+        return `could not run: the lock file ${c.file ?? ""} of ${short} differs from the one in the main checkout, so the main checkout's dependencies (node_modules) could not be linked into the base worktree`;
+      case "worktree_add_failed":
+        return `could not run: \`git worktree add\` of ${short} failed, so there was no base worktree to run it in`;
+      case "base_timeout":
+        return `${how}timed out`;
+      default:
+        return `${how}failed without parsable test names`;
+    }
+  };
+  const unusable = (/** @type {{ cause: string, file?: string }} */ c, how = "") =>
+    block(
+      "bugfix_base_unusable",
+      `KIND: bugfix: unverified. The test run on ${short} ${why(c, how)}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`,
+      `"cause":"${c.cause}"`,
+    );
   const plain = await plainBase(info, cwd, cmd, state);
-  if (!plain) return unusable("timed out or failed without parsable test names");
+  if ("cause" in plain) return unusable(plain);
   const withTests = await runInBase(info, cwd, cmd, (wt) => {
     for (const t of tests) {
       mkdirSync(dirname(join(wt, t)), { recursive: true });
       copyFileSync(join(info.top, t), join(wt, t));
     }
   });
-  if (!withTests) return block("bugfix_no_base", `KIND: bugfix: the gate could not create a worktree of ${short} to run the reproduction test.`);
-  if (withTests.timedOut) return unusable("with the changed test files timed out");
+  if ("cause" in withTests) {
+    return block("bugfix_no_base", `KIND: bugfix: the gate could not run the reproduction test on ${short}: the test run there ${why(withTests)}.`, `"cause":"${withTests.cause}"`);
+  }
+  if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
   const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
