@@ -166,6 +166,68 @@ test("test gate budget: no time left for the bugfix check blocks as unverified",
   assert.equal(lastTest(dir).reason, "tests_passed");
 });
 
+// ---- 1b. The gate's temp folder lives until the hook ends. ----
+
+// run_limited's watchdog is a subshell that the hook stops when the command ends. A SIGTERM that reached it before it
+// had reset the traps it inherited ran the hook's EXIT trap there, which removed the hook's temp folder while the hook
+// still ran (a fast command on a loaded machine: "check.in: No such file or directory", and the bugfix check skipped).
+test("test gate: run_limited's watchdog never runs the hook's EXIT trap, however fast the command ends", () => {
+  const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
+  assert.match(fn, /^run_limited\(\) \{/);
+  const work = tmp("orch-gh-trap-");
+  const loop = 'i=0\nwhile [ "$i" -lt 40 ]; do\n  run_limited 5 /dev/null /dev/null /dev/null true\n  [ -d "$work" ] || { echo "temp folder gone after run $i"; exit 3; }\n  i=$((i + 1))\ndone\ntrap - EXIT\n';
+  const r = spawnSync("bash", ["-c", `${fn}\nwork="$1"\ntrap 'rm -rf "$work"' EXIT\n${loop}`, "x", work], { encoding: "utf8", timeout: 120000 });
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  assert.ok(existsSync(work));
+});
+
+// At its limit run_limited first sends the command's group SIGTERM, so a helper can remove its base worktree, and
+// kills the group only when it is still there a few seconds later.
+test("test gate: run_limited terminates the command before it kills it, and kills a group that ignores the terminate", () => {
+  const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
+  const dir = tmp("orch-gh-term-");
+  const polite = `trap 'echo cleaned > "${dir}/cleaned"; exit 0' TERM; sleep 60 & wait`;
+  const stubborn = `trap '' TERM; sleep 60 & echo $! > "${dir}/child.pid"; wait`;
+  const script = `${fn}\nrun_limited 1 /dev/null /dev/null /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 1 /dev/null /dev/null /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
+  const t0 = Date.now();
+  const r = spawnSync("bash", ["-c", script, "x", polite, stubborn], { encoding: "utf8", timeout: 60000 });
+  assert.match(r.stdout, /polite:1\nstubborn:1\n/);
+  assert.equal(readFileSync(join(dir, "cleaned"), "utf8"), "cleaned\n", "the command got a SIGTERM and could clean up");
+  const child = Number(readFileSync(join(dir, "child.pid"), "utf8"));
+  assert.ok(child > 0 && !alive(child), "a group that ignores SIGTERM is killed after the grace");
+  assert.ok(Date.now() - t0 < 40000, `took ${Date.now() - t0} ms`);
+});
+
+/** A committed repo with a code change and a transcript whose brief has `kind`. @param {string | null} kind */
+function changedRepo(kind) {
+  const dir = tmp("orch-gh-lost-");
+  git(dir, "init", "-q");
+  write(dir, { "app.sh": "VALUE=1\n", "tests/ok_test.sh": "true\n" });
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "init");
+  write(dir, { "app.sh": "VALUE=2\n" });
+  const transcript = join(tmp("orch-gh-tr-"), "agent.jsonl");
+  const brief = `SLICE: fix\nFILES: app.sh\nDEPENDS: none\n${kind ? `KIND: ${kind}\n` : ""}Fix VALUE.`;
+  writeFileSync(transcript, `${JSON.stringify({ type: "user", message: { content: brief } })}\n`);
+  return { dir, transcript };
+}
+
+// Whatever removes the hook's temp folder (here the suite itself), the bugfix check still runs: before, the hook could
+// not write the helper's input, skipped the check without a word and allowed with tests_passed.
+test("test gate: a KIND: bugfix check still runs when the suite removes the gate's temp folder", () => {
+  const cmd = 'rm -rf "$TMPDIR"/orch-verify.*; true';
+  const bug = changedRepo("bugfix");
+  const r = gate(bug.dir, { transcript: bug.transcript, env: { ORCH_TEST_CMD: cmd } });
+  assert.equal(r.status, 2, `the check ran and blocks: ${r.stderr}`);
+  assert.equal(lastTest(bug.dir).reason, "bugfix_no_test");
+  assert.doesNotMatch(r.stderr, /No such file/);
+  // Any other agent still passes.
+  const plain = changedRepo(null);
+  const ok = gate(plain.dir, { transcript: plain.transcript, env: { ORCH_TEST_CMD: cmd } });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(lastTest(plain.dir).reason, "tests_passed");
+});
+
 // ---- 2. Review gate: a block record with no ts counts toward the loop guard, as the comment says. ----
 
 test("review gate: block records with no ts count toward the loop guard", () => {
