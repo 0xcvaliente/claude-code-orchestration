@@ -66,7 +66,7 @@ On an allow it appends one facts block through its single allow with `updatedInp
 2. The repository's `scripts/` is unchanged from its base, and `python3 -I -B scripts/validate.py skills/<name>` exits 0 (it includes the catalog-row check).
 3. No secret or personal detail in the skill's files or in the README lines the branch adds: private key blocks, well-known token prefixes, e-mail addresses, home-directory paths.
 4. `provenance.json` exists and the seal verifies.
-5. The worktree is clean, on `skill/<name>`, and the branch is ahead of its base.
+5. The worktree is clean, on `skill/<name>` (a branch git cannot name fails too), the branch is ahead of its base, and every file under `skills/<name>` is committed on the branch: the seal covers ignored and untracked files, which `git status` does not show and a push would not carry.
 
 It blocks with one message listing every failure; after three blocks it lets the stop through and logs `skill_gate_gave_up` (the reviewer still reviews). Records go to `skill-gate.jsonl`.
 
@@ -83,7 +83,7 @@ npm run skill-publish -- <name> --merge                # after review: merge, up
 
 Options: `--target private|public` (default private; a name that exists only under public is taken from there), `--base <branch>` (default: the branch the repository's main checkout is on), `--install "<command>"` (default `scripts/install.sh --target claude` when that file exists, else the install is skipped with a note).
 
-`scripts/skill-publish.mjs` verifies the seal, runs the validator in the draft, checks the worktree is clean and the branch has a commit of its own, pushes `skill/<name>` (never a force push) and opens a pull request with `gh`. The body names the skill, the target, the provenance digest, and says an agent created it and a person must review it. With `--merge` it merges the pull request, fast-forwards the main checkout, runs the installer and removes the draft worktree. Each failing step exits non-zero and says what to do. It refuses to run, except with `--dry-run`, inside a Claude Code session: publishing is a person's step.
+`scripts/skill-publish.mjs` verifies the seal, runs the validator in the draft, checks the worktree is clean, the branch has a commit of its own and every file under `skills/<name>` is committed on it, and records the branch's head commit. It refuses to push when origin's `skill/<name>` exists and is neither that head nor an ancestor of it (commits the seal never covered); otherwise it pushes `skill/<name>` (never a force push) and opens a pull request with `gh`. The body names the skill, the target, the provenance digest, and says an agent created it and a person must review it. With `--merge` it merges the pull request with `gh pr merge --match-head-commit <that head>`, so nothing pushed after the checks is merged, fast-forwards the main checkout, runs the installer and removes the draft worktree. Each failing step exits non-zero and says what to do. It refuses to run, except with `--dry-run`, inside a Claude Code session: publishing is a person's step.
 
 ### Monitoring
 
