@@ -139,6 +139,18 @@ test("code: false runs a wave in the shared folder with no checkpoint, integrato
   assert.equal(r.result.passed, 2);
 });
 
+test("the planner asks for the narrowest acceptance command and the reviewer leaves the whole suite to the test gate", async () => {
+  for (const code of [true, false]) {
+    const r = await run({ args: { code }, slices: [slice("a")] });
+    const plan = r.calls.find((c) => c.opts.label === "plan:slices");
+    assert.match(plan.prompt, /narrowest command that proves the slice/, `code: ${code}`);
+    assert.match(plan.prompt, /test gate already runs the project's whole suite when each implementer stops/, `code: ${code}`);
+  }
+  const r = await run({ slices: [slice("a")] });
+  const rv = reviewers(r.calls).find((c) => c.opts.label === "review:a#1");
+  assert.match(rv.prompt, /run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped/);
+});
+
 test("the plan is bounded to 6 slices by default and by args.maxSlices", async () => {
   /** @param {number} [maxSlices] */
   const planCall = async (maxSlices) => {

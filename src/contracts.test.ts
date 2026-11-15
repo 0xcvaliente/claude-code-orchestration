@@ -210,6 +210,7 @@ test("worker agents and the conventions skill describe their 0.4.0 lines", () =>
   assert.match(read(IMPLEMENTER), /`KIND: bugfix`, reproduce the bug first: write a test that fails/);
   const researcher = read(RESEARCHER);
   for (const t of ["QUOTE: <locator> | <verbatim text>", "path:line", "p.N", "SOURCES:", "READ:", "`pages` parameter"]) assert.ok(researcher.includes(t), `${RESEARCHER} must mention ${t}`);
+  assert.match(researcher, /redirection are refused, except a stderr redirection written exactly `2>\/dev\/null` or `2>&1`/, `${RESEARCHER} names the two stderr redirections the guard allows`);
   const conventions = read(CONVENTIONS);
   for (const t of ["GAP: <0-100> <text>", "QUOTE: <locator> | <verbatim text>"]) assert.ok(conventions.includes(t), `${CONVENTIONS} must mention ${t}`);
 });
@@ -309,4 +310,18 @@ test("nudge warns about agent teams only when they are switched on", () => {
   assert.match(on, /outside the plan check/);
   const bad = spawnSync("node", [join(root, NUDGE)], { input: "not json", env: { ...process.env, ORCH_NO_NUDGE: "" }, encoding: "utf8" });
   assert.equal(bad.status, 0, "malformed input exits 0");
+});
+
+// --- The acceptance check: the narrowest command, since the test gate already runs the whole suite. ---
+test("every place that states the acceptance check asks for the narrowest command and leaves the whole suite to the test gate", () => {
+  const texts: [string, string][] = [[IMPLEMENTER, read(IMPLEMENTER)], [ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /narrowest command that proves the slice/, `${file} asks for the narrowest command that proves the slice`);
+    assert.match(text, /tests of the files (it|you) owns?/, `${file} says that for code it is the tests of the files the slice owns`);
+    assert.match(text, /test gate runs the project's whole suite when (an|the|each) implementer stops|test gate runs the project's whole suite when you stop/, `${file} says the test gate runs the whole suite`);
+    assert.match(text, /once more after (integration|the merge)/, `${file} says the whole suite runs once more after integration`);
+  }
+  const workflow = read(".claude/workflows/orchestrate.js");
+  assert.equal(workflow.match(/narrowest command that proves the slice/g)?.length, 2, "both planner rules (code and not code) ask for the narrowest command");
+  assert.match(workflow, /not the project's whole suite: the test gate already ran it/, "the reviewer brief leaves the whole suite to the test gate");
 });
