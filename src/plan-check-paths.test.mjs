@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -174,5 +174,90 @@ syncBuiltinESMExports();\n`,
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("file_overlap: a glob whose first wildcard segment matches a symlink to a folder overlaps the link's target, both ways", () => {
+  for (const [a, b] of [["l*/a.ts", "src/a.ts"], ["src/a.ts", "l*/a.ts"], ["?ink/*.ts", "src/a.ts"]]) {
+    const dir = linked();
+    try {
+      const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b));
+      assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${a} then ${b}: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("not_in_plan: a planned glob whose wildcard matches a symlink to a folder covers the link's target", () => {
+  const dir = linked({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: l*/a.ts\nDEPENDS: none\nGOAL: a");
+    const r = launch(dir, "SLICE: a\nFILES: src/a.ts\nDEPENDS: none");
+    assert.equal(r.status, 0, r.stderr);
+    const o = launch(dir, "SLICE: a\nFILES: src/b.ts\nDEPENDS: none");
+    assert.deepEqual([o.status, lastCheck(dir).reason], [2, "not_in_plan"], "l*/a.ts does not cover src/b.ts");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file_overlap: past the alias cap a glob's names cannot be decided, so it overlaps", () => {
+  const dir = project();
+  try {
+    for (let i = 0; i < 40; i++) {
+      mkdirSync(join(dir, `d${i}`));
+      symlinkSync(join(dir, `d${i}`), join(dir, `l${i}`));
+    }
+    const r = pairIn(dir, "l*/x.ts", "other/y.ts");
+    assert.deepEqual([r.status, r.reason], [2, "file_overlap"], r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file_overlap: with no symlink in the folder a glob is compared as before", () => {
+  const dir = project();
+  try {
+    mkdirSync(join(dir, "src"));
+    mkdirSync(join(dir, "lib"));
+    writeFileSync(join(dir, "src", "a.ts"), "");
+    assert.equal(pairIn(dir, "l*/a.ts", "src/a.ts").status, 0, "lib is a folder, not a link");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("out of reach: a symlink reached only through ** or a later wildcard is not seen as its target", () => {
+  // **/link/a.ts matches link/a.ts, which is src/a.ts, yet both launches are allowed today; so is t*/l*/a.ts, whose
+  // link sits behind the first wildcard segment.
+  for (const [a, b] of [["**/link/a.ts", "src/a.ts"], ["t*/l*/a.ts", "src/a.ts"]]) {
+    const dir = linked();
+    try {
+      mkdirSync(join(dir, "t1"));
+      symlinkSync(join(dir, "src"), join(dir, "t1", "link"));
+      assert.equal(pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b)).status, 0, `${a} then ${b}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("out of reach: a hard link to a file is another name the check does not see", () => {
+  const dir = linked();
+  try {
+    linkSync(join(dir, "src", "a.ts"), join(dir, "h.ts"));
+    assert.equal(pairIn(dir, "h.ts", "src/a.ts").status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("out of reach: two Unicode normal forms of one name are two entries, even where the file system folds them", () => {
+  const dir = project();
+  try {
+    assert.equal(pairIn(dir, "café.md", "café.md", INSENSITIVE).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

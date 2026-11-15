@@ -102,7 +102,7 @@
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -970,7 +970,11 @@ const caseInsensitive = (() => {
  * One name for a normalized entry: the fixed leading folders (all of it, for a plain entry) resolved through the file
  * system as far as they exist (the deepest existing ancestor's real path plus the remaining segments, so a symlink and
  * its target are one name; a dangling link or a path not on disk yet stays as written), then case-folded on a
- * case-insensitive file system. A glob's pattern part is never resolved. Never throws: on any error, the entry.
+ * case-insensitive file system. A glob's pattern part is never resolved here; names() adds the symlinks its first
+ * wildcard segment matches. Never throws: on any error, the entry.
+ * Out of reach (other names for one file this check does not see), with link -> src beside src/a.ts: a symlink
+ * reached only through a `**` segment (the entry `**` then link/a.ts) or through a wildcard segment after the first
+ * (t*, then l*, then a.ts); a hard link (h.ts); two Unicode normal forms of one name on a file system that folds them.
  * @param {string} p
  */
 const canon = (p) => {
@@ -1010,6 +1014,59 @@ const canon = (p) => {
   return out;
 };
 canon.memo = new Map();
+const ALIAS_CAP = 32;
+/**
+ * Every name of a normalized entry: its canon(), and for a glob whose first wildcard segment is not the last (and not
+ * `**`) one alias per symlink to a folder that segment matches in its fixed leading folder (one readdir, no recursion):
+ * the link's real path followed by the rest of the pattern. null when it cannot be decided (more than ALIAS_CAP links,
+ * or an error): the caller treats that as an overlap. Never throws.
+ * @param {string} p @returns {string[] | null}
+ */
+const names = (p) => {
+  /** @type {Map<string, string[] | null>} */
+  const memo = names.memo;
+  if (memo.has(p)) return memo.get(p) ?? null;
+  /** @type {string[] | null} */
+  let out;
+  try {
+    const c = canon(p);
+    out = [c];
+    const segs = c.split("/").filter(Boolean);
+    const g = segs.findIndex(isGlob);
+    if (c.startsWith("/") && g !== -1 && g < segs.length - 1 && segs[g] !== "**") {
+      const folder = `/${segs.slice(0, g).join("/")}`;
+      /** @type {import("node:fs").Dirent[] | null} */
+      let ents = null;
+      try {
+        ents = readdirSync(folder, { withFileTypes: true });
+      } catch (err) {
+        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") out = null;
+      }
+      const re = segRe(segs[g] ?? "");
+      const rest = segs.slice(g + 1).join("/");
+      for (const e of ents ?? []) {
+        if (!out) break;
+        if (!e.isSymbolicLink() || !re.test(caseInsensitive ? e.name.toLowerCase() : e.name)) continue;
+        let real;
+        try {
+          const at = join(folder, e.name);
+          if (!statSync(at).isDirectory()) continue;
+          real = realpathSync(at);
+        } catch {
+          continue; // a dangling link names nothing
+        }
+        if (out.length > ALIAS_CAP) out = null;
+        else out.push(canon(`${real === "/" ? "" : real}/${rest}`));
+      }
+    }
+  } catch {
+    out = null;
+  }
+  memo.set(p, out);
+  return out;
+};
+names.memo = new Map();
 /** Path segments; a plain entry that may be a folder gets a trailing `**` (what is under it). @param {string} p */
 const segsOf = (p, under = !isGlob(p) && !fileLike(p)) => [...p.split("/").filter(Boolean), ...(under ? ["**"] : [])];
 /** One segment pattern as a regular expression. @param {string} g */
@@ -1096,7 +1153,7 @@ else {
   else if (!planned.files.length) skips.push("not_in_plan:no_planned_files");
   else {
     // A slice the plan marks KIND: skill with a SKILL name has its planned FILES in that skill's draft worktree.
-    const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir).map(canon);
+    const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir).flatMap((p) => names(p) ?? [canon(p)]);
     const extra = files.filter((f) => {
       const n = normalizeFiles([f], dir)[0];
       return !n || !allowed.some((p) => covers(p, canon(n)));
@@ -1137,10 +1194,11 @@ for (const e of launched) {
   // FILES are logged as written and compared normalized; an entry that does not normalize is compared as written.
   /** @type {string[]} */
   const owned = (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
-  const theirs = owned.map((g) => canon(normalizeFiles([g], dir)[0] ?? g));
+  // Each entry with all its names (names()); an entry whose names cannot be decided overlaps.
+  const theirs = owned.map((g) => names(normalizeFiles([g], dir)[0] ?? g));
   for (const f of files) {
-    const n = canon(normalizeFiles([f], dir)[0] ?? f);
-    if (theirs.some((g) => overlaps(n, g))) clashes.push(`${f} (owned by ${e.slice})`);
+    const mine = names(normalizeFiles([f], dir)[0] ?? f);
+    if (theirs.some((t) => !t || !mine || mine.some((n) => t.some((g) => overlaps(n, g))))) clashes.push(`${f} (owned by ${e.slice})`);
   }
 }
 // file_overlap and dependency_cycle block every time, as before this hook was scoped to runs: two owners of one file,
