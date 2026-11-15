@@ -50,10 +50,20 @@ export function runContext(run) {
     tail.push("Constraints:");
     for (const [id, text] of constraints) tail.push(`${id}: ${String(text).slice(0, 200)}`);
   }
-  // The constraints and the final reminder matter most after a compaction, so the slice lines give way first.
   const reminder = "Every slice still needs a passing review before the final report.";
-  const after = cap(tail.join("\n"), MAX_CONTEXT - reminder.length - 200);
-  const end = `${after ? `${after}\n` : ""}${reminder}`;
+  const full = [...lines, ...tail, reminder].join("\n");
+  if (full.length <= MAX_CONTEXT) return full;
+  // Over the cap: the constraints and the final reminder matter most after a compaction, so the slice lines give way
+  // first. Only when the header, the "+N more slices" marker, the constraints and the reminder alone do not fit is the
+  // constraints block cut, and then no slice line is shown.
+  const marker = ids.length ? `\n- +${ids.length} more slices` : "";
+  const minimal = `${lines[0]}${marker}`;
+  const constraintsText = tail.join("\n");
+  if (minimal.length + 1 + (constraintsText ? constraintsText.length + 1 : 0) + reminder.length > MAX_CONTEXT) {
+    const room = MAX_CONTEXT - minimal.length - reminder.length - 2;
+    return [minimal, cap(constraintsText, room), reminder].join("\n");
+  }
+  const end = constraintsText ? `${constraintsText}\n${reminder}` : reminder;
   return `${fitSlices(lines, MAX_CONTEXT - end.length - 1)}\n${end}`;
 }
 

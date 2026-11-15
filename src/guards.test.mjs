@@ -533,6 +533,70 @@ test("compact-context: no state at all → silent; the context is capped", () =>
   assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
 });
 
+// The runContext of commit b13b2ca (before b4), kept to compare against: it cut the whole text from the end.
+const REMINDER = "Every slice still needs a passing review before the final report.";
+/** @param {any} run */
+function oldRunContext(run) {
+  const state = (/** @type {any} */ s) => (s.passed ? "passed" : s.gaveUp ? "failed for good" : "pending");
+  const ids = run.kind === "planned" && run.planned.length ? run.planned : Object.keys(run.slices);
+  const lines = [`Orchestration run ${run.id} is still open in this session (${run.kind}${run.planReviewed ? ", plan reviewed" : ""}). Slices:`];
+  for (const id of ids) {
+    const s = run.slices[id];
+    if (!s) {
+      lines.push(`- ${id}: pending`);
+      continue;
+    }
+    const files = s.files.length ? ` FILES: ${s.files.slice(0, 8).join(", ")}${s.files.length > 8 ? ", ..." : ""}` : "";
+    lines.push(`- ${id}: ${state(s)}${s.risky ? ", RISKY" : ""}${files}`);
+  }
+  const constraints = Object.entries(run.constraints ?? {});
+  if (constraints.length) {
+    lines.push("Constraints:");
+    for (const [id, text] of constraints) lines.push(`${id}: ${String(text).slice(0, 200)}`);
+  }
+  lines.push(REMINDER);
+  const text = lines.join("\n");
+  return text.length <= MAX_CONTEXT ? text : `${text.slice(0, MAX_CONTEXT - 16).trimEnd()}\n[... truncated]`;
+}
+
+test("compact-context: sweep against the old output; constraints cut only when they alone do not fit (b4)", () => {
+  let cases = 0;
+  let fitted = 0;
+  let cut = 0;
+  for (let n = 0; n <= 60; n++) {
+    const slices = Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [`s${i}`, { files: i % 3 ? [`src/a/file-${i}.ts`, `src/b/${i}.ts`] : [], passed: i % 4 === 0, gaveUp: i % 7 === 1, attempts: 0, launches: 0, reviews: [], lastImplAt: null, risky: i % 5 === 2 }]),
+    );
+    for (let k = 0; k <= 8; k++) {
+      for (const size of [12, 150, 200, 260]) {
+        const constraints = Object.fromEntries(Array.from({ length: k }, (_, i) => [`C${i + 1}`, `${String.fromCharCode(97 + i)}`.repeat(size)]));
+        const run = { id: 3, kind: "planned", planned: Object.keys(slices), slices, constraints, planReviewed: true };
+        const got = runContext(run);
+        const old = oldRunContext(run);
+        const label = `${n} slices, ${k} constraints of ${size}`;
+        cases++;
+        if (!old.endsWith("[... truncated]")) {
+          fitted++;
+          assert.equal(got, old, label);
+        }
+        assert.ok(got.length <= MAX_CONTEXT, `${label}: ${got.length}`);
+        assert.ok(got.endsWith(REMINDER), label);
+        const block = k ? `Constraints:\n${Object.entries(constraints).map(([id, t]) => `${id}: ${t.slice(0, 200)}`).join("\n")}\n` : "";
+        const head = got.split("\n")[0] ?? "";
+        const minimal = `${head}\n${n ? `- +${n} more slices\n` : ""}${block}${REMINDER}`;
+        if (!got.includes(block)) {
+          cut++;
+          assert.ok(minimal.length > MAX_CONTEXT, `${label}: a constraint was cut although constraints and reminder fit`);
+        }
+        const shown = (got.match(/^- s\d+:/gm) ?? []).length;
+        const more = Number(/^- \+(\d+) more slices$/m.exec(got)?.[1] ?? 0);
+        assert.equal(shown + more, n, label);
+      }
+    }
+  }
+  assert.ok(fitted > 0 && cut > 0 && cases > fitted, `${cases} ${fitted} ${cut}`);
+});
+
 test("compact-context: with many slices the constraints and the final reminder survive the cap (b4)", () => {
   const slices = Object.fromEntries(
     Array.from({ length: 40 }, (_, i) => [`slice-${i}`, { files: [`src/some/long/path/file-${i}.ts`, `src/other/${i}.ts`], passed: i < 3, gaveUp: false, attempts: 0, launches: 0, reviews: [], lastImplAt: null, risky: false }]),
