@@ -4,6 +4,7 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 
 ## Opening it
 
+- It opens by itself only inside herdr: when Claude Code was started with `TERM_PROGRAM` starting with `herdr` or with `HC_TERMINAL_SOCKET` set (`inHerdr`, read with `$.env.get`). In any other terminal none of the openings below happen and no toast is shown; `/orchestration` still opens it.
 - The pane opens when you submit a prompt (`prompt.submit`), in any folder: no git repository, checkout or code project is needed. Slash commands, meta prompts, blank prompts and prompts the engine queues that you did not type (a background task's notification, a peer session's message, a scheduled trigger; the `NOT_THE_PERSON` origins) do not open it and are not new work.
 - It also opens when the first orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of an `npm run route` Bash call in the main session).
 - `/orchestration` opens it focused, so the arrow keys work at once.
