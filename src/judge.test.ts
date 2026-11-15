@@ -281,24 +281,33 @@ const CASES: Array<[string, BashClass]> = [
   ["PAGER=x git log", "deny"],
   ["EDITOR=x git commit", "deny"],
   ["export GIT_PAGER=x && git log", "deny"],
-  // A quoted assignment is still one when a declaration command (export, declare, env, ...) takes it as its argument.
+  // The exec-env rule reads a word's static prefix: its literal pieces joined, quoted or not, up to the first dynamic or
+  // glob piece. A prefix that starts with an exec-env name and `=` or `+=` counts, wherever the word is: nothing about
+  // env, launchers or declaring builtins is modelled.
   ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
   ["export 'PATH=/tmp/x'; git status", "deny"],
   ["export \"PATH\"=/tmp/x; git status", "deny"],
+  ["export PA\"TH=/x\"; git status", "deny"],
   ["declare -x 'GIT_PAGER=x'; git log", "deny"],
   ["typeset 'EDITOR=x'; git commit", "deny"],
   ["env 'PAGER=x' git log", "deny"],
   ["command export 'PATH=/tmp/x'; git status", "deny"],
-  ["grep 'PATH=' .envrc && git status", "pass"], // quoted text that no declaration takes is data
-  ["git log --grep 'PAGER=x'", "pass"],
-  // env's own words end at its program: the first static word after env with no `=` and no leading `-` whose previous
-  // word does not start with `-` (an option's value follows an option). Every word before it may be an assignment.
-  ["env LC_ALL=C git log --grep 'PATH='", "pass"],
-  ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "pass"],
-  ["export A=1; grep 'PATH=' f && git status", "pass"],
-  ["env -u HOME git log --grep 'PATH='", "pass"],
-  ["env -- git log --grep \"PATH=x\"", "pass"],
-  ["git log --grep 'PATH='", "pass"],
+  ["env \"PATH=/x\" git status", "deny"],
+  ["env PA\"TH=/x\" git status", "deny"],
+  ["env \"\"PATH=/x git status", "deny"],
+  ["env \\PATH=/x git status", "deny"],
+  ["env \"PATH\"=/x git status", "deny"],
+  ["env $'PATH'=/x git status", "deny"],
+  ["env PATH=\"/x\" git status", "deny"],
+  ["env -u HOME env \"PATH=/x\" git status", "deny"],
+  ["timeout -s KILL 5 env \"PATH=/x\" git status", "deny"],
+  ["taskset 1 env \"PATH=/x\" git status", "deny"],
+  ["find . -exec env \"PATH=/x\" git status \;", "deny"],
+  ["nice ${E}nv \"PATH=/x\" git status", "deny"],
+  ["./e \"GIT_SSH_COMMAND=sh x\" git status", "deny"],
+  ["GIT_SSH_COMMAND+=\"sh -c id\" git fetch", "deny"],
+  ["export LD_PRELOAD+=/tmp/x.so; git status", "deny"],
+  ["PAGER+=evil git log", "deny"],
   ["env -iu HOME \"PATH=/x\" git status", "deny"],
   ["env -iC /tmp \"PATH=/x\" git status", "deny"],
   ["env -vi0u HOME \"PATH=/x\" git status", "deny"],
@@ -317,9 +326,28 @@ const CASES: Array<[string, BashClass]> = [
   ["env -C /tmp \"PATH=/x\" git status", "deny"],
   ["env A=1 \"PATH=/x\" git status", "deny"],
   ["env -- \"PATH=/x\" git status", "deny"],
-  ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
   ["env -u \"$X\" HOME \"PATH=/x\" git status", "deny"],
   ["env \"$X\" HOME \"PATH=/x\" git status", "deny"],
+  // The accepted cost: such a word is denied on a line that runs git, rm or a shell even when it is only an argument,
+  // as the unquoted form is on 1.4.0. Run the search or echo as its own command.
+  ["git log --grep 'PATH='", "deny"],
+  ["git log --grep 'PAGER=x'", "deny"],
+  ["grep 'PATH=' f && git status", "deny"],
+  ["grep 'PATH=' .envrc && git status", "deny"],
+  ["echo \"PATH=$PATH\"; git status", "deny"],
+  ["git commit -m 'EDITOR=vim is the default'", "deny"],
+  ["env LC_ALL=C git log --grep 'PATH='", "deny"],
+  ["env -u HOME git log --grep 'PATH='", "deny"],
+  // Text that does not start with an exec-env name and `=`, or a line with no git, rm or shell, still passes.
+  ["grep -rn 'PATH=' src", "pass"],
+  ["echo \"PATH=x\"", "pass"],
+  ["git log --grep 'XPATH='", "pass"],
+  ["git commit -m \"fix PATH= handling\"", "pass"],
+  ["git log --grep=PATH=x", "pass"],
+  ["env PATHX=1 git status", "pass"],
+  // Out of reach, as on 1.4.0: a dynamic name part, and assignments never spelled NAME=.
+  ["env ${P}ATH=/x git status", "pass"],
+  ["env \"$V\" git status", "pass"],
   ["PATH=/tmp/evil:$PATH git status", "deny"],
   ["LD_PRELOAD=/x.so rm file", "deny"],
   ["BASH_ENV=/x bash run.sh", "deny"],
@@ -514,6 +542,16 @@ test("tokenize: words carry their literal text and whether the shell decides the
   assert.equal(tokenize("a; b | c && d").commands.length, 4);
   assert.equal(tokenize('echo "a; b | c"').commands.length, 1, "separators inside quotes do not split");
   assert.throws(() => tokenize("echo 'x"));
+});
+
+test("classify: the exec-env deny names the variable and says to run a search or echo as its own command", () => {
+  const rows: Array<[string, string]> = [["git log --grep 'PATH='", "PATH"], ["GIT_SSH_COMMAND+=\"sh -c id\" git fetch", "GIT_SSH_COMMAND"], ["PAGER+=evil git log", "PAGER"]];
+  for (const [cmd, name] of rows) {
+    const r = classifyDetail(cmd, CWD);
+    assert.equal(r.cls, "deny", cmd);
+    assert.match(r.reason ?? "", new RegExp(`^setting ${name} on a command line that runs git, rm or a shell`), cmd);
+    assert.match(r.reason ?? "", /as its own command/, cmd);
+  }
 });
 
 test("classify: an absolute rm -rf target is denied when the working folder is unknown", () => {

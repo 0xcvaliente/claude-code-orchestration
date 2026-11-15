@@ -420,11 +420,10 @@ const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
 /** git config keys whose value runs a program (or pulls in config that may). */
 const GIT_EXEC_KEY =
   /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.cmd|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
-/** Environment names that make git, a shell or another tool run a program, or change what a command name finds. */
-const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)=/;
+/** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
+ * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
+const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)\+?=/;
 
-/** Commands whose arguments are assignments even when quoted (`export 'PATH=/x'`, `env "PAGER=x" git log`). */
-const DECLARE = new Set(["export", "declare", "typeset", "local", "readonly", "env"]);
 
 const deny = (reason, kind) => ({ cls: "deny", reason, ...(kind && { kind }) });
 const PASS = { cls: "pass" };
@@ -552,22 +551,17 @@ function suffixAny(words, test) {
 }
 
 /**
- * Where the program `env` at ws[k] runs may start, never earlier than any env (GNU, BSD, uutils) would place it: the
- * first static word after env with no `=` and no leading `-` whose previous word does not start with `-` (`--` aside).
- * An earlier word env does not run can only be an option's value, and a value follows a word starting with `-`; so
- * env's option table is not modelled. A dynamic word, or one after a dynamic word, is never the program. Every word
- * before the result may be an assignment env applies (ws.length if no program is found).
+ * A word's static prefix: the text of its literal pieces joined, quoted or not (`"PA"TH`, `\\PATH`, `$'PATH'`, `""PATH`
+ * all give PATH), up to its first dynamic or glob piece. The exec-env rule tests it, so quoting a word never hides an
+ * assignment, and no command (env, export, a launcher) is modelled to decide which words are assignments.
  */
-function envProgram(ws, k) {
-  let prev = ws[k]; // the word before ws[i] that env reads (redirection targets are not env's words)
-  for (let i = k + 1; i < ws.length; i++) {
-    const w = ws[i];
-    if (w.redirect) continue;
-    const afterValue = prev.dynamic || (prev.text.startsWith("-") && prev.text !== "--");
-    if (!w.dynamic && !w.text.includes("=") && !w.text.startsWith("-") && !afterValue) return i;
-    prev = w;
+function staticPrefix(w) {
+  let s = "";
+  for (const p of w.pieces) {
+    if (!("lit" in p)) break;
+    s += p.lit;
   }
-  return ws.length;
+  return s;
 }
 
 function analyzeCommand(cmd, ctx, depth, plainLine) {
@@ -603,16 +597,13 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const script = (text, dynamic, what) =>
     push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set();
-  // Words before this index are arguments of a declaration command (export, env, ...), so a quoted one may be an
-  // assignment. For env they end at the program it runs (see envProgram): that program's arguments are text.
-  let declareUntil = 0;
   let trapped = false; // a trap word already read every later word as a script
   // The first deny decides (see analyze), so the words after it are not read.
   for (let k = 0; k < ws.length && !denied; k++) {
     const w = ws[k];
-    const first = w.pieces[0];
-    if (first && "lit" in first && !first.quoted && EXEC_ENV.test(first.lit)) ctx.env ??= first.lit.split("=")[0];
-    else if (k < declareUntil && !w.redirect && EXEC_ENV.test(w.text)) ctx.env ??= w.text.split("=")[0];
+    // An exec-env assignment, wherever the word is and however it is quoted: its static prefix starts NAME= or NAME+=.
+    const env = EXEC_ENV.exec(staticPrefix(w));
+    if (env) ctx.env ??= env[1];
     if (w.assign || w.redirect) continue; // NAME=value and redirection targets are not commands
     if (w.text.toLowerCase().startsWith("--no-preserve-root")) push(deny("--no-preserve-root is always blocked", "rm"));
     if (w.dynamic) {
@@ -625,7 +616,6 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
     }
     const name = base(w.text);
     if (name === "git" || name.startsWith("git-") || name === "rm" || SHELLS.has(name)) ctx.sensitive = true;
-    if (DECLARE.has(name) && (k === at || afterWrapper(ws, k))) declareUntil = Math.max(declareUntil, name === "env" ? envProgram(ws, k) : ws.length);
     const s = from[k]; // the words after this one are nr[s], nr[s + 1], ...
     if (name === "sudo" || name === "doas") push(deny(`${name} is always blocked`));
     // su, pkexec, runuser are common words in text (`grep su file`), so they count only as the command word, when an
@@ -800,10 +790,10 @@ function analyze(src, ctx, depth) {
  *   `source`/`.` of the same; `xargs` running a shell, rm, sudo, eval or env;
  * - `git -c`/`--config-env` with a key that runs a program (core.fsmonitor, core.sshCommand, core.pager, alias.*,
  *   ...), `git config` of such a key, and an exec-relevant environment assignment (GIT_SSH_COMMAND, GIT_EDITOR, PAGER,
- *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell, also a quoted one given to
- *   export, declare, typeset, local or readonly, or to env before the program it runs (`export 'PATH=/x'`); env's program
- *   is the first static word with no `=` and no leading `-` whose previous word does not start with `-` (`--` aside),
- *   so it is never placed earlier than a real env would place it (`env -iu HOME 'PATH=/x' git status` is denied).
+ *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell: any word whose static
+ *   prefix (literal pieces joined, quoted or not, up to the first dynamic or glob piece) starts with such a name and
+ *   `=` or `+=`, wherever it stands (`env "PATH=/x" git status`, `export PA"TH=/x"`, `PAGER+=x git log`); an argument
+ *   such as `git log --grep 'PATH='` is denied too (the accepted cost: run the search on its own);
  * Every substitution (`$(..)`, backticks, `<(..)`), every `sh -c`-style payload, `eval`, `trap` action, `env -S`
  * string and `watch` command is read as a script of its own with the same rules (a dynamic one is denied).
  * An rm, git or sudo that appears only inside a quoted argument (`git commit -m "fix rm -rf docs"`, `echo "git push"`)
@@ -821,7 +811,9 @@ function analyze(src, ctx, depth) {
 export function classifyDetail(command, cwd) {
   const ctx = { cwd, sensitive: false };
   const r = analyze(command, ctx, 0);
-  if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(`setting ${ctx.env} on a command line that runs git, rm or a shell is always blocked`);
+  if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(
+      `setting ${ctx.env} on a command line that runs git, rm or a shell is always blocked (any word starting ${ctx.env}= counts, quoted or not, even as an argument: run a search or echo of it as its own command)`,
+    );
   return r;
 }
 

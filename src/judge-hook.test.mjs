@@ -368,14 +368,14 @@ test("core: a command of 20,000 words is classified within seconds, so the hook 
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
 });
 
-test("core: a quoted exec-env assignment counts only as an argument of export, declare or env itself", () => {
+test("core: an exec-env word counts by its static prefix, quoted or not, wherever it stands", () => {
   const rows = [
-    ["env LC_ALL=C git log --grep 'PATH='", "pass"],
-    ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "pass"],
-    ["export A=1; grep 'PATH=' f && git status", "pass"],
-    ["env -u HOME git log --grep 'PATH='", "pass"],
-    ["env -- git log --grep \"PATH=x\"", "pass"],
-    ["git log --grep 'PATH='", "pass"],
+    ["env LC_ALL=C git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
+    ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "deny"], // the accepted cost: run the search on its own
+    ["export A=1; grep 'PATH=' f && git status", "deny"], // the accepted cost: run the search on its own
+    ["env -u HOME git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
+    ["env -- git log --grep \"PATH=x\"", "deny"], // the accepted cost: run the search on its own
+    ["git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
     ["env -iu HOME \"PATH=/x\" git status", "deny"],
     ["env -iC /tmp \"PATH=/x\" git status", "deny"],
     ["env -vi0u HOME \"PATH=/x\" git status", "deny"],
@@ -397,6 +397,17 @@ test("core: a quoted exec-env assignment counts only as an argument of export, d
     ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
     ["env -u \"$X\" HOME \"PATH=/x\" git status", "deny"],
     ["env \"$X\" HOME \"PATH=/x\" git status", "deny"],
+    ["env -u HOME env \"PATH=/x\" git status", "deny"],
+    ["timeout -s KILL 5 env \"PATH=/x\" git status", "deny"],
+    ["nice ${E}nv \"PATH=/x\" git status", "deny"],
+    ["./e \"GIT_SSH_COMMAND=sh x\" git status", "deny"],
+    ["env $'PATH'=/x git status", "deny"],
+    ["PAGER+=evil git log", "deny"],
+    ["grep -rn 'PATH=' src", "pass"],
+    ["echo \"PATH=x\"", "pass"],
+    ["git log --grep 'XPATH='", "pass"],
+    ["git commit -m \"fix PATH= handling\"", "pass"],
+    ["git log --grep=PATH=x", "pass"],
   ];
   const wrong = rows.filter(([c, want]) => coreClassify(c, "/w").cls !== want).map(([c, want]) => `${c}: want ${want}`);
   assert.deepEqual(wrong, []);
