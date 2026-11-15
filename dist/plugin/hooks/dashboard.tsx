@@ -15,6 +15,8 @@ const workAtom = atom({ plugin: 'orchestration', key: 'work' } as const, null)
 const planAtom = atom({ plugin: 'orchestration', key: 'plan' } as const, null)
 const usedAtom = atom({ plugin: 'orchestration', key: 'used' } as const, NO_USE)
 const runAtom = atom({ plugin: 'orchestration', key: 'run' } as const, null)
+// Whether the person turned the pane on in this session. Off at every session start; only /orchestration sets it.
+const enabledAtom = atom({ plugin: 'orchestration', key: 'enabled' } as const, false)
 
 const GLYPH = { running: '●', pass: '✔', fail: '✖', done: '◆', queued: '◌' } as const
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
@@ -688,26 +690,26 @@ const sceneOf = (list: Agent[], ghosts: boolean) => {
   return sceneVal
 }
 
-type PaneApi = {
-  ui: { open(o: { id: string; title: string }): Promise<{ isPlaced: boolean }>; toast(text: string, o: { timeoutMs: number }): unknown }
-  env: { get(name: string): Promise<string | undefined> }
-}
-
-// The pane opens by itself only inside herdr (its terminal sets TERM_PROGRAM=herdr-* and HC_TERMINAL_SOCKET). In a plain terminal it stays
-// closed, so the chat keeps the full width; /orchestration still opens it there.
-const inHerdr = async ($: PaneApi) =>
-  ((await $.env.get('TERM_PROGRAM')) ?? '').startsWith('herdr') || !!(await $.env.get('HC_TERMINAL_SOCKET'))
-
+// The pane is off by default, in every terminal: it opens by itself only once the person turned it on with /orchestration in this session.
+// The run is recorded either way, so turning it on mid-run shows the run so far.
 let told = false // the one-line hint for a terminal too narrow to seat the pane by itself
-// Unasked, a pane seats only from 144 columns; on a narrower terminal it waits, so say how to open it.
-const openPane = async ($: PaneApi) => {
-  if (!(await inHerdr($))) return
-  const opened = await $.ui.open({ id: PANE, title: 'Orchestration' })
-  if (!opened.isPlaced && !told) {
-    told = true
-    void $.ui.toast('Orchestration is running: type /orchestration to see the agents and slice diagram.', { timeoutMs: 8000 })
+// Unasked, a pane seats only from 144 columns; on a narrower terminal it waits, so say how to open it. Never throws: the caller's event goes on.
+const openPane = async ($: Ctx) => {
+  try {
+    if (!(await read($, enabledAtom))) return
+    const opened = await $.ui.open({ id: PANE, title: 'Orchestration' })
+    if (!opened.isPlaced && !told) {
+      told = true
+      void Promise.resolve($.ui.toast('Orchestration is running: type /orchestration on to see the agents and slice diagram.', { timeoutMs: 8000 })).catch(() => {})
+    }
+  } catch {
+    // the pane must never change the event that opened it
   }
 }
+
+const USAGE = 'Usage: /orchestration [on|off]: on shows the pane, off hides it, nothing switches between the two.'
+const SAID_ON = 'Orchestration pane is on: arrow keys scroll, Esc returns to the prompt. Type /orchestration off to turn it off.'
+const SAID_OFF = 'Orchestration pane is off. Type /orchestration on to turn it on.'
 
 // Prompts the engine queues that the person did not type (a background task's notification, a peer session, a schedule): they are not new work.
 const NOT_THE_PERSON = [
@@ -868,9 +870,14 @@ function startTimer($: Ctx, slot: { timer?: Timer }) {
     }
     await update($, tick, n => n + 1)
   }
-  slot.timer ??= $.clock.every(250, () => {
-    void pulse().catch(() => {}) // a redraw that fails (the module is gone) is skipped
-  })
+  // A hot reload cancels the old load's timers (the `$.clock` doc in the API types), so the new load's slot starts empty and starts its own.
+  try {
+    slot.timer ??= $.clock.every(250, () => {
+      void pulse().catch(() => {}) // a redraw that fails (the module is gone) is skipped
+    })
+  } catch {
+    // no redraw timer: the pane still redraws on every state write
+  }
 }
 
 export const register: Register = on => {
@@ -904,7 +911,15 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'orchestration', description: 'Show the orchestration agents, slice diagram and token usage in a pane' })
+    try {
+      await $.command.register({
+        name: 'orchestration',
+        description: 'Turn the orchestration pane (agents, slice diagram, token usage) on or off; alone it switches',
+        argumentHint: '[on|off]',
+      })
+    } catch {
+      // without the command the pane stays off: the session goes on
+    }
     // A plugin-only install has no `npm run route`: the model records the verdict through this tool. `isDeferred: false` keeps it out of ToolSearch.
     try {
       await $.tool.register({
@@ -931,9 +946,24 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'orchestration' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Orchestration', focus: true })
-    return { text: 'Orchestration pane opened; use the arrow keys to scroll, Esc to return to the prompt.' }
+  // /orchestration on, off, or alone to switch: the only writer of the on/off state. Always answers with one line.
+  on('command.run', { command: 'orchestration' }, async ($, e) => {
+    const arg = (e.args ?? '').trim().toLowerCase()
+    if (arg && arg !== 'on' && arg !== 'off') return { text: USAGE }
+    let want = arg === 'on'
+    try {
+      if (!arg) want = !(await read($, enabledAtom))
+      await update($, enabledAtom, () => want)
+    } catch {
+      return { text: `The orchestration pane could not be switched. ${USAGE}` }
+    }
+    try {
+      if (want) await $.ui.open({ id: PANE, title: 'Orchestration', focus: true })
+      else await $.ui.close({ id: PANE })
+    } catch {
+      // the state is set; the pane follows it on the next event
+    }
+    return { text: want ? SAID_ON : SAID_OFF }
   })
 
   // An agent starts: record it, open the pane the first time, and redraw while any agent runs.
@@ -948,49 +978,53 @@ export const register: Register = on => {
       }
     }
     if (!ROLES.includes(role) || !('agentId' in spawned) || !spawned.agentId) return spawned
-    const plan = isPlanReview(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
-    const parsed = plan ? parsePlan(e.prompt) : undefined
-    const header = parseHeader(e.prompt)
-    const slice = plan ? undefined : sliceOf(e.prompt) // a plan review is a stage of its own, whatever SLICE line its brief carries
-    const agent: Rec = {
-      id: spawned.agentId, role, model: spawned.model, slice, label: slice ?? (plan ? 'plan review' : e.description),
-      deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
-      tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
-      ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
-      ...(parsed && parsed.replan !== null ? { replan: true } : {}),
+    try {
+      const plan = isPlanReview(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
+      const parsed = plan ? parsePlan(e.prompt) : undefined
+      const header = parseHeader(e.prompt)
+      const slice = plan ? undefined : sliceOf(e.prompt) // a plan review is a stage of its own, whatever SLICE line its brief carries
+      const agent: Rec = {
+        id: spawned.agentId, role, model: spawned.model, slice, label: slice ?? (plan ? 'plan review' : e.description),
+        deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
+        tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
+        ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
+        ...(parsed && parsed.replan !== null ? { replan: true } : {}),
+      }
+      const t = agent.startedAt
+      const before = await read($, agents)
+      const run0 = await read($, runAtom)
+      const open0 = runOpen(before, await read($, planAtom), run0, t)
+      // A new plan (a PLAN REVIEW without REPLAN that names slices) closes the run on the pane once it holds slices; one that names none, or the fixed
+      // plan after a failed plan review with no slice launched yet, keeps the agents so the re-plan loop shows. Otherwise the diagram is dropped only once
+      // nothing runs, the main turn is not working, and the run is closed (every slice final) or stale; agents with no run (no plan review, no light
+      // path) are dropped only when stale.
+      const newPlan = !!parsed && parsed.replan === null && parsed.slices.length > 0 && before.some(a => a.slice)
+      const idle = !workOpen(await read($, workAtom), before, t) && !before.some(a => a.status === 'running')
+      const reset = before.length > 0 && (newPlan || (idle && (staleOf(before, t) || (!!run0 && !open0))))
+      if (reset) await newRun($, t, true)
+      // The run the gates would see; the scripted workflow's briefs are not part of it.
+      if (parsed && (parsed.replan === null || reset || !open0)) await update($, runAtom, () => ({ kind: 'planned', at: t }) as Run)
+      else if (!plan && role === 'implementer' && header.path === 'light' && !header.workflow && slice && (reset || !open0)) await update($, runAtom, () => ({ kind: 'light', at: t, slice }) as Run)
+      // a spawn whose id already has a record (a resume that fires agent.spawn again) is a new record, so the earlier run stays as history
+      const grown = await update($, agents, list => [...list, agent].slice(-80))
+      await update($, main, () => e.parentModel)
+      // The plan the review checks is the plan the progress bar follows; a brief that names no slice leaves the last plan in place. REPLAN extends the
+      // plan of the open run: a slice it names again is updated, a new one is added.
+      if (parsed) {
+        const planned = planOf(e.prompt)
+        const marks = { ...(parsed.replan !== null ? { replan: parsed.replan } : {}), ...(Object.keys(parsed.constraints).length ? { constraints: parsed.constraints } : {}) }
+        const old = await read($, planAtom)
+        if (parsed.replan !== null && old && open0 && !reset) {
+          const slices = old.slices.map(s => ({ ...s, ...(planned.find(p => p.id === s.id) ?? {}) }))
+          for (const p of planned) if (!slices.some(s => s.id === p.id)) slices.push(p)
+          await update($, planAtom, () => ({ ...old, slices, ...marks, ...(marks.constraints ? { constraints: { ...(old.constraints ?? {}), ...marks.constraints } } : {}) }))
+        } else if (planned.length) await update($, planAtom, () => ({ at: t, slices: planned, ...marks }))
+      }
+      const note = startNote(grown, agent)
+      await update($, log, l => [...l, { at: agent.startedAt, kind: 'start', role, label: agent.label, model: agent.model, ...(note ? { note } : {}) } as LogEntry].slice(-60))
+    } catch {
+      // the record is the pane's: the spawn goes on whatever fails here
     }
-    const t = agent.startedAt
-    const before = await read($, agents)
-    const run0 = await read($, runAtom)
-    const open0 = runOpen(before, await read($, planAtom), run0, t)
-    // A new plan (a PLAN REVIEW without REPLAN that names slices) closes the run on the pane once it holds slices; one that names none, or the fixed
-    // plan after a failed plan review with no slice launched yet, keeps the agents so the re-plan loop shows. Otherwise the diagram is dropped only once
-    // nothing runs, the main turn is not working, and the run is closed (every slice final) or stale; agents with no run (no plan review, no light
-    // path) are dropped only when stale.
-    const newPlan = !!parsed && parsed.replan === null && parsed.slices.length > 0 && before.some(a => a.slice)
-    const idle = !workOpen(await read($, workAtom), before, t) && !before.some(a => a.status === 'running')
-    const reset = before.length > 0 && (newPlan || (idle && (staleOf(before, t) || (!!run0 && !open0))))
-    if (reset) await newRun($, t, true)
-    // The run the gates would see; the scripted workflow's briefs are not part of it.
-    if (parsed && (parsed.replan === null || reset || !open0)) await update($, runAtom, () => ({ kind: 'planned', at: t }) as Run)
-    else if (!plan && role === 'implementer' && header.path === 'light' && !header.workflow && slice && (reset || !open0)) await update($, runAtom, () => ({ kind: 'light', at: t, slice }) as Run)
-    // a spawn whose id already has a record (a resume that fires agent.spawn again) is a new record, so the earlier run stays as history
-    const grown = await update($, agents, list => [...list, agent].slice(-80))
-    await update($, main, () => e.parentModel)
-    // The plan the review checks is the plan the progress bar follows; a brief that names no slice leaves the last plan in place. REPLAN extends the
-    // plan of the open run: a slice it names again is updated, a new one is added.
-    if (parsed) {
-      const planned = planOf(e.prompt)
-      const marks = { ...(parsed.replan !== null ? { replan: parsed.replan } : {}), ...(Object.keys(parsed.constraints).length ? { constraints: parsed.constraints } : {}) }
-      const old = await read($, planAtom)
-      if (parsed.replan !== null && old && open0 && !reset) {
-        const slices = old.slices.map(s => ({ ...s, ...(planned.find(p => p.id === s.id) ?? {}) }))
-        for (const p of planned) if (!slices.some(s => s.id === p.id)) slices.push(p)
-        await update($, planAtom, () => ({ ...old, slices, ...marks, ...(marks.constraints ? { constraints: { ...(old.constraints ?? {}), ...marks.constraints } } : {}) }))
-      } else if (planned.length) await update($, planAtom, () => ({ at: t, slices: planned, ...marks }))
-    }
-    const note = startNote(grown, agent)
-    await update($, log, l => [...l, { at: agent.startedAt, kind: 'start', role, label: agent.label, model: agent.model, ...(note ? { note } : {}) } as LogEntry].slice(-60))
     await openPane($)
     startTimer($, slot)
     return spawned
@@ -1034,14 +1068,18 @@ export const register: Register = on => {
   // this session. The main loop's `npm run route` also gives the pane its triage.
   on('tool.call', async ($, e, next) => {
     if (e.agentId) {
-      const id = e.agentId
-      const t = e as unknown as Record<string, unknown>
-      const target = String(t.command ?? t.file_path ?? t.path ?? t.pattern ?? '').replace(/\s+/g, ' ').trim()
-      const tool = cut(target ? `${e.tool} ${target}` : e.tool, 30)
-      await update($, agents, list => {
-        const i = list.findLastIndex(a => a.id === id && a.status === 'running')
-        return i < 0 ? list : list.map((a, j) => (j === i ? { ...a, tool } : a))
-      })
+      try {
+        const id = e.agentId
+        const t = e as unknown as Record<string, unknown>
+        const target = String(t.command ?? t.file_path ?? t.path ?? t.pattern ?? '').replace(/\s+/g, ' ').trim()
+        const tool = cut(target ? `${e.tool} ${target}` : e.tool, 30)
+        await update($, agents, list => {
+          const i = list.findLastIndex(a => a.id === id && a.status === 'running')
+          return i < 0 ? list : list.map((a, j) => (j === i ? { ...a, tool } : a))
+        })
+      } catch {
+        // the agent's latest tool is the pane's: the call goes on
+      }
     }
     const ran = await next(e)
     try {
@@ -1097,48 +1135,52 @@ export const register: Register = on => {
       }
     }
     if (id) {
-      const now = await $.clock.now()
-      const u = e.usage
-      const inT = u?.input_tokens ?? 0
-      const outT = u?.output_tokens ?? 0
-      const cacheT = (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0)
-      const reply = parseReply(e.answer)
-      const raw: Agent['status'] = reply.status ?? 'done'
-      // A reviewer's verdict as the gates count it: a fail with only low-confidence gaps is a pass with doubt.
-      const counted = countedOf(reply)
-      const review = (a: Agent) => (a.role === 'reviewer' ? { doubt: counted.doubt || undefined, gapKeys: counted.keys.length ? counted.keys : undefined } : {})
-      const statusOf = (a: Agent): Agent['status'] => (a.role === 'reviewer' && counted.doubt ? 'pass' : raw)
-      // the constraint answers and OPEN items of this report (absent on an old-style reply, so its record is as before)
-      const said = { ...(Object.keys(reply.answers).length ? { answers: reply.answers } : {}), ...(reply.open.length ? { open: reply.open } : {}) }
-      const result = resultOf(e.answer)
-      const spent = { tokens: inT + outT + cacheT, inTokens: inT, outTokens: outT, cacheTokens: cacheT }
-      const hold: { one?: Agent; resumed?: boolean } = {}
-      const list = await update($, agents, l => {
-        const i = latestOf(l, id)
-        const a = l[i]
-        if (!a) return l
-        if (a.endedAt === undefined) {
-          // the run this record opened ends
+      try {
+        const now = await $.clock.now()
+        const u = e.usage
+        const inT = u?.input_tokens ?? 0
+        const outT = u?.output_tokens ?? 0
+        const cacheT = (u?.cache_read_input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0)
+        const reply = parseReply(e.answer)
+        const raw: Agent['status'] = reply.status ?? 'done'
+        // A reviewer's verdict as the gates count it: a fail with only low-confidence gaps is a pass with doubt.
+        const counted = countedOf(reply)
+        const review = (a: Agent) => (a.role === 'reviewer' ? { doubt: counted.doubt || undefined, gapKeys: counted.keys.length ? counted.keys : undefined } : {})
+        const statusOf = (a: Agent): Agent['status'] => (a.role === 'reviewer' && counted.doubt ? 'pass' : raw)
+        // the constraint answers and OPEN items of this report (absent on an old-style reply, so its record is as before)
+        const said = { ...(Object.keys(reply.answers).length ? { answers: reply.answers } : {}), ...(reply.open.length ? { open: reply.open } : {}) }
+        const result = resultOf(e.answer)
+        const spent = { tokens: inT + outT + cacheT, inTokens: inT, outTokens: outT, cacheTokens: cacheT }
+        const hold: { one?: Agent; resumed?: boolean } = {}
+        const list = await update($, agents, l => {
+          const i = latestOf(l, id)
+          const a = l[i]
+          if (!a) return l
+          if (a.endedAt === undefined) {
+            // the run this record opened ends
+            const status = statusOf(a)
+            const upd = { ...a, ...review(a), status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
+            hold.one = upd
+            return l.map((x, j) => (j === i ? upd : x))
+          }
+          // a turn ends for a record that already ended (a resume that fires no agent.spawn): the old run stays as history, the resumed run is a new record.
+          // It starts when the old one ended, or after the last other end in its slice, so a retry after a reviewer's verdict starts after that verdict.
+          const from = Math.max(a.endedAt, ...l.filter(x => a.slice && x.slice === a.slice && x !== a).map(x => x.endedAt ?? 0))
           const status = statusOf(a)
-          const upd = { ...a, ...review(a), status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
-          hold.one = upd
-          return l.map((x, j) => (j === i ? upd : x))
+          const again = { ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
+          hold.one = again
+          hold.resumed = true
+          return [...l, again].slice(-80)
+        })
+        const one = hold.one
+        if (one) {
+          const entry: LogEntry = { at: now, kind: one.status, role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
+          const note = hold.resumed ? startNote(list, one) : undefined
+          if (note) await update($, log, l => [...l, { at: one.startedAt, kind: 'start', role: one.role, label: one.label, model: one.model, note } as LogEntry].slice(-60))
+          await update($, log, l => [...l, entry].slice(-60))
         }
-        // a turn ends for a record that already ended (a resume that fires no agent.spawn): the old run stays as history, the resumed run is a new record.
-        // It starts when the old one ended, or after the last other end in its slice, so a retry after a reviewer's verdict starts after that verdict.
-        const from = Math.max(a.endedAt, ...l.filter(x => a.slice && x.slice === a.slice && x !== a).map(x => x.endedAt ?? 0))
-        const status = statusOf(a)
-        const again = { ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
-        hold.one = again
-        hold.resumed = true
-        return [...l, again].slice(-80)
-      })
-      const one = hold.one
-      if (one) {
-        const entry: LogEntry = { at: now, kind: one.status, role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
-        const note = hold.resumed ? startNote(list, one) : undefined
-        if (note) await update($, log, l => [...l, { at: one.startedAt, kind: 'start', role: one.role, label: one.label, model: one.model, note } as LogEntry].slice(-60))
-        await update($, log, l => [...l, entry].slice(-60))
+      } catch {
+        // the agent's record is the pane's: the turn goes on
       }
     }
     return next(e)
@@ -1515,7 +1557,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {needsScroll && <Text dimColor>↑↓ scroll · click the pane or /orchestration</Text>}
+        {needsScroll && <Text dimColor>↑↓ scroll · click the pane or type /orchestration on</Text>}
         {!active && <Text dimColor>No orchestration agents yet.</Text>}
         {list.length > 0 && (
           <Box flexWrap="wrap">

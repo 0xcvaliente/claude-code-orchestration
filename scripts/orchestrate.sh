@@ -160,9 +160,10 @@ trap 'rm -f "$stream"' EXIT
 start_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
 code=0
 claude "${args[@]}" > "$stream" || code=$?
-# One JSON document, as before: the last result, with orch_totals (results, turns, wall_ms) for the whole run.
-out="$(node "$here/run-result.mjs" "$stream" "$start_ms")" || out="$(cat "$stream")"
+# One JSON document, as before: the last result, with orch_totals (results, turns, wall_ms, and exit_code and complete
+# from claude's exit code, so a run cut short after an interim result is marked) for the whole run.
+out="$(node "$here/run-result.mjs" "$stream" "$start_ms" "$code")" || out="$(cat "$stream")"
 
 printf '%s\n' "$out"
-printf '%s' "$out" | node "$here/log-run.mjs" "$task" || true
+printf '%s' "$out" | node "$here/log-run.mjs" "$task" "$code" || true
 exit "$code"

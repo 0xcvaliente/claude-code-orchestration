@@ -27,8 +27,9 @@
 //                  scanned whatever the content; a file over 5 MB or unreadable is a finding of its own) or in the
 //                  README.md lines the branch adds. The message gives file, line and kind, never the matched text.
 //   seal           provenance.json exists and skill-seal.mjs verify() passes.
-//   git_state      the draft worktree is clean, is on branch skill/<name>, and that branch has at least one commit its
-//                  base does not. The base is the one plan-check logged for this skill in skill-create.jsonl, else the
+//   git_state      the draft worktree is clean, is on branch skill/<name> (a failing branch lookup fails too), that
+//                  branch has at least one commit its base does not, and every file under skills/<name> is in the
+//                  branch's last commit (the seal covers ignored and untracked files, which git status hides). The base is the one plan-check logged for this skill in skill-create.jsonl, else the
 //                  branch of the skills repository's main worktree.
 // Loop guard: after three blocks for the same agent and slice in this session the stop goes through and the record
 // says skill_gate_gave_up. Records go to skill-gate.jsonl in the state dir: decision, reason, failed reason codes,
@@ -251,6 +252,21 @@ function scriptsChangedSince(draft, mergeBase) {
 }
 
 /**
+ * The files under the skill folder on disk that the branch's last commit lacks (ignored, untracked or only staged),
+ * as repository paths; null when git cannot list the branch. The seal covers every file on disk, ignored ones too, and
+ * git status hides ignored files, so this is the check that the pushed branch carries what the seal lists.
+ * @param {string} draft @param {string} skillDir @param {string} skillRel @param {string} branch @returns {string[] | null}
+ */
+function filesNotOnBranch(draft, skillDir, skillRel, branch) {
+  const tree = git(draft, ["ls-tree", "-r", "-z", "--name-only", "--full-tree", `refs/heads/${branch}`, "--", skillRel]);
+  if (tree.status !== 0) return null;
+  const onBranch = new Set(tree.out.split("\0").filter(Boolean));
+  return filesUnder(skillDir)
+    .map((rel) => `${skillRel}/${rel}`)
+    .filter((p) => !onBranch.has(p));
+}
+
+/**
  * Run the gate's checks on a draft.
  * @param {{ draft: string, name: string, base: string | null }} o
  * @returns {{ code: string, text: string }[]} the failures, empty when the draft passes
@@ -381,12 +397,24 @@ function checkDraft({ draft, name, base }) {
   if (st.status !== 0) gitIssues.push("git status failed in the draft worktree");
   else if (st.out.trim()) gitIssues.push(`the draft worktree has ${st.out.split("\n").filter(Boolean).length} uncommitted paths; commit them on ${branch}`);
   const head = git(draft, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  if (head.status === 0 && head.out.trim() !== branch) gitIssues.push(`the draft worktree is not on branch ${branch}; check it out there`);
+  if (head.status !== 0) gitIssues.push(`git cannot tell which branch the draft worktree is on (git rev-parse --abbrev-ref HEAD failed); check out ${branch} there`);
+  else if (head.out.trim() !== branch) gitIssues.push(`the draft worktree is not on branch ${branch}; check it out there`);
   if (git(draft, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).status !== 0) gitIssues.push(`branch ${branch} does not exist; create the draft worktree with the command from your brief`);
-  else if (!baseRef) gitIssues.push(`the base branch of ${branch} cannot be found; the draft worktree must come from the command in your brief`);
   else {
-    const ahead = git(draft, ["rev-list", "--count", `${baseRef}..refs/heads/${branch}`]);
-    if (ahead.status !== 0 || Number(ahead.out.trim()) < 1) gitIssues.push(`branch ${branch} has no commit that ${baseRef} lacks; commit the skill, its README.md row and provenance.json on it`);
+    if (!baseRef) gitIssues.push(`the base branch of ${branch} cannot be found; the draft worktree must come from the command in your brief`);
+    else {
+      const ahead = git(draft, ["rev-list", "--count", `${baseRef}..refs/heads/${branch}`]);
+      if (ahead.status !== 0 || Number(ahead.out.trim()) < 1) gitIssues.push(`branch ${branch} has no commit that ${baseRef} lacks; commit the skill, its README.md row and provenance.json on it`);
+    }
+    if (!dirProblem) {
+      const missing = filesNotOnBranch(draft, skillDir, skillRel, branch);
+      if (missing === null) gitIssues.push(`git cannot list the files of branch ${branch}`);
+      else if (missing.length) {
+        const shown = missing.slice(0, MAX_FINDINGS_SHOWN).join(", ");
+        const more = missing.length > MAX_FINDINGS_SHOWN ? ` and ${missing.length - MAX_FINDINGS_SHOWN} more` : "";
+        gitIssues.push(`${missing.length} file${missing.length === 1 ? "" : "s"} under ${skillRel} ${missing.length === 1 ? "is" : "are"} not committed on ${branch} (ignored or untracked), so the pushed branch would lack what the seal lists: ${shown}${more}; commit each (git add -f for an ignored one) or delete it and seal again`);
+      }
+    }
   }
   if (gitIssues.length) fail.push({ code: "git_state", text: `${gitIssues.join("; ")}. Commit only; never push.` });
   return fail;

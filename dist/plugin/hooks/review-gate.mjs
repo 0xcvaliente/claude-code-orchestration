@@ -90,7 +90,11 @@ const time = (ts) => Date.parse(String(ts ?? "")) || 0;
 // Plugin agents arrive namespaced ("orchestration:implementer"); compare the bare role name.
 /** @param {any} e */
 const role = (e) => String(String(e.agent_type ?? e.role ?? "").split(":").pop());
-const telemetry = readJsonl(stateDir, "telemetry.jsonl").filter((e) => e.session_id === sessionId);
+// Each log is read once per call: the session's lines of telemetry.jsonl and gates.jsonl (plus gate records with no
+// session_id, which the fold keeps) are read here and handed to sessionRuns.
+const telemetryRaw = readJsonl(stateDir, "telemetry.jsonl", sessionId);
+const gatesRaw = readJsonl(stateDir, "gates.jsonl", sessionId);
+const telemetry = telemetryRaw.filter((e) => e.session_id === sessionId);
 
 // 1. Agents still running.
 /** @returns {{ source: string, agents: string[] } | null} */
@@ -139,14 +143,14 @@ let runs = [];
 let records = { launches: [], stops: [], gates: [], starts: [] };
 let foldFailed = false;
 try {
-  ({ runs, records } = sessionRuns(sessionId, { now, env: process.env }));
+  ({ runs, records } = sessionRuns(sessionId, { now, env: process.env, raw: { "telemetry.jsonl": telemetryRaw, "gates.jsonl": gatesRaw } }));
 } catch {
   foldFailed = true;
 }
 // This session's review-gate records. An unfinished implementer is gated for its own lifetime, not per window: two
 // blocks that name it, one give-up that names it, and then it is left alone, so an implementer the person stopped
 // early in a long session does not block every later piece of work again.
-const sessionGates = readJsonl(stateDir, "gates.jsonl").filter((g) => g.gate === "review" && g.session_id === sessionId);
+const sessionGates = gatesRaw.filter((g) => g.gate === "review" && g.session_id === sessionId);
 /** @param {any} g @param {string} id */
 const names = (g, id) => Array.isArray(g.unfinished) && g.unfinished.includes(id);
 /** @param {string} id */
@@ -167,7 +171,7 @@ if (!lastImpl && !unfinished.length) decide("allow", "no_implementer_in_session"
 // whole session would stop gating for good after MAX_BLOCKS, so later work in a long session would go out unreviewed.
 // A record with no ts counts them all.
 const since = Math.max(lastImpl ? time(lastImpl.ts) : 0, ...unfinished.map((u) => u.start));
-const priorBlocks = sessionGates.filter((g) => g.decision === "block" && Date.parse(g.ts) >= since);
+const priorBlocks = sessionGates.filter((g) => g.decision === "block" && (g.ts === undefined || g.ts === null || Date.parse(g.ts) >= since));
 /** @param {string} reason */
 const blocksFor = (reason) => priorBlocks.filter((g) => g.reason === undefined || g.reason === reason).length;
 

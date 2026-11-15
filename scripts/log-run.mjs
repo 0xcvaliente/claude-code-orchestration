@@ -3,7 +3,9 @@
 // tokens = input + output + cache read + cache write over every model (null when the output is unparsed); usage = that breakdown.
 // turns and duration_ms are the whole run's: orch_totals from scripts/run-result.mjs (turns summed over every result of the
 // session, wall time measured by orchestrate.sh). A document without orch_totals gives its own num_turns and duration_ms.
-// Usage: <the document scripts/orchestrate.sh prints> | node scripts/log-run.mjs "task"   (run from the target repo)
+// exit_code is claude's (orch_totals.exit_code, else the second argument; null when neither gives it) and complete is
+// orch_totals.complete, else whether exit_code is 0: false marks a run cut short, whose result is an interim one.
+// Usage: <the document scripts/orchestrate.sh prints> | node scripts/log-run.mjs "task" [claude's exit code]   (run from the target repo)
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { totalTokens, usageOf } from "./tokens.mjs";
@@ -22,6 +24,9 @@ try {
 /** @param {unknown} v */
 const count = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const totals = r?.orch_totals;
+const codeArg = process.argv[3];
+const exitCode = Number.isInteger(totals?.exit_code) ? totals.exit_code : codeArg !== undefined && /^\d+$/.test(codeArg) ? Number(codeArg) : null;
+const complete = typeof totals?.complete === "boolean" ? totals.complete : exitCode === null ? null : exitCode === 0;
 
 const line = {
   ts: new Date().toISOString(),
@@ -34,6 +39,8 @@ const line = {
   terminal_reason: r?.terminal_reason ?? "unparsed output",
   subagents: r?.subagent_stats?.by_type ?? {},
   result: typeof r?.result === "string" ? r.result.slice(0, 300) : raw.slice(0, 300),
+  exit_code: exitCode,
+  complete,
 };
 
 const dir = join(process.cwd(), ".claude", "state");
