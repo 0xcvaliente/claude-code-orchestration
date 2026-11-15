@@ -1,6 +1,7 @@
 // turn-budget.mjs (PostToolUse, no matcher): warns one of this plugin's workers once, in additionalContext, when its
 // turns (telemetry.mjs's count, from its own transcript) reach 80% of its maxTurns. Driven with payloads and fake
 // transcripts; the sh pre-filter is run from the real command strings of a temp build and of .claude/settings.json.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

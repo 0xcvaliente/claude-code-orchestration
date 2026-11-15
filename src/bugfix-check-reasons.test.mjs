@@ -1,6 +1,7 @@
 // Why a base run could not be used (bugfix-check.mjs): each cause has its own message for the agent and its own
 // "cause" detail in the gate record; the node_modules link passes the folder link type Windows needs; the pytest
 // summary parser keeps parametrized ids that contain a space. bugfix() is called directly on temporary git repos.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs, { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";

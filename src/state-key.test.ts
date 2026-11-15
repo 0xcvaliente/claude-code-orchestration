@@ -1,4 +1,5 @@
 // .claude/hooks/state.mjs stateKey is the rule; verify.sh mirrors it in bash. Both must give the same key.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";

@@ -1,6 +1,7 @@
 // The native Bash judge hook (.claude/hooks/judge-hook.mjs) and prompt capture (.claude/hooks/prompt-capture.mjs), run as
 // child processes with a stubbed claude binary: no model call is ever made. Also checks that judge-core.mjs's floor
 // agrees with src/judge.ts on the corpus and on every string in src/judge.test.ts.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";

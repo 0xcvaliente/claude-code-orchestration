@@ -1,5 +1,6 @@
 // Read router (plan-check.mjs, ORCH_READ_ROUTER=on) and quote check (quote-check.mjs), run as hooks in a throwaway
 // project with the hooks copied from .claude/hooks. PDF fixtures: src/fixtures/files (make.sh rebuilds them).
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

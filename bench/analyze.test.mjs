@@ -1,4 +1,5 @@
 // node --test bench/analyze.test.mjs
+import "../src/test-tmp.mjs";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
