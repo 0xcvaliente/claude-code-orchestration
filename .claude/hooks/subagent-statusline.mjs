@@ -30,22 +30,72 @@ export function shortTokens(n) {
 const family = (model) => String(model ?? "").toLowerCase().match(/fable|mythos|opus|sonnet|haiku/)?.[0] ?? "";
 
 /**
+ * The launch records of one session from the text of journal-launches.jsonl, oldest first. The file holds every session
+ * of the project, so a line that does not contain the session id is skipped before it is parsed. No session id: all.
+ * @param {string} text @param {unknown} sessionId
+ * @returns {any[]}
+ */
+export function sessionLaunches(text, sessionId) {
+  const sid = typeof sessionId === "string" ? sessionId : "";
+  // the id as it appears inside a JSON string
+  const needle = sid ? JSON.stringify(sid).slice(1, -1) : "";
+  /** @type {any[]} */
+  const out = [];
+  for (const l of text.split("\n")) {
+    if (!l || (needle && !l.includes(needle))) continue;
+    try {
+      const r = JSON.parse(l);
+      if (r && typeof r === "object" && (!sid || r.session_id === sid)) out.push(r);
+    } catch {
+      // a torn or foreign line: skip it
+    }
+  }
+  return out;
+}
+
+/**
+ * One pass over the launches for all rows of a refresh: the latest launch of each agent id, and the attempt number of
+ * each implementer launch (fresh launches of its slice up to and including its time; a SendMessage resume makes no
+ * launch, so it keeps its number).
+ * @param {any[]} launches
+ * @returns {{ byAgent: Map<unknown, any>, nth: Map<any, number> }}
+ */
+export function indexLaunches(launches) {
+  const byAgent = new Map();
+  /** @type {Map<string, any[]>} */
+  const bySlice = new Map();
+  for (const l of launches) {
+    byAgent.set(l?.agent_id, l);
+    if (bare(l?.agent_type) === "implementer" && typeof l.slice === "string") {
+      const group = bySlice.get(l.slice) ?? [];
+      group.push(l);
+      bySlice.set(l.slice, group);
+    }
+  }
+  /** @type {Map<any, number>} */
+  const nth = new Map();
+  for (const group of bySlice.values()) for (const l of group) nth.set(l, group.filter((o) => o.ts <= l.ts).length);
+  return { byAgent, nth };
+}
+
+/**
  * The row body of one task, or null to keep Claude Code's own row.
  * @param {any} task one entry of the `tasks` array @param {any[]} launches this session's launch records, oldest first
  * @param {number} [columns] usable row width
+ * @param {{ byAgent: Map<unknown, any>, nth: Map<any, number> }} [index] indexLaunches(launches), built once per refresh
  * @returns {string | null}
  */
-export function rowFor(task, launches, columns = 0) {
+export function rowFor(task, launches, columns = 0, index) {
   const role = bare(task?.agentType);
   if (!task || typeof task.id !== "string" || !WORKERS.has(role)) return null;
-  const launch = launches.findLast((l) => l.agent_id === task.id);
+  const idx = index ?? indexLaunches(launches);
+  const launch = idx.byAgent.get(task.id);
   const head = [role];
   if (launch?.isPlanReview) head.push(launch.replan === null || launch.replan === undefined ? "plan" : "replan");
   else if (typeof launch?.slice === "string" && launch.slice) {
     head.push(launch.slice);
     if (role === "implementer") {
-      // Fresh launches of the slice up to this one; a SendMessage resume makes no launch, so it keeps its number.
-      const nth = launches.filter((l) => bare(l.agent_type) === "implementer" && l.slice === launch.slice && l.ts <= launch.ts).length;
+      const nth = idx.nth.get(launch) ?? 0;
       if (nth > 1) head.push(`#${nth}`);
     }
     if (launch.validate) head.push("validate");
@@ -77,24 +127,15 @@ if (process.argv[1]?.endsWith("subagent-statusline.mjs")) {
       /** @type {any[]} */
       let launches = [];
       try {
-        launches = readFileSync(join(dir, "journal-launches.jsonl"), "utf8")
-          .split("\n")
-          .filter(Boolean)
-          .flatMap((l) => {
-            try {
-              const r = JSON.parse(l);
-              return r && typeof r === "object" && (!input.session_id || r.session_id === input.session_id) ? [r] : [];
-            } catch {
-              return [];
-            }
-          });
+        launches = sessionLaunches(readFileSync(join(dir, "journal-launches.jsonl"), "utf8"), input.session_id);
       } catch {
         // no launch records yet: rows show the role, model and tokens only
       }
       const columns = typeof input.columns === "number" ? input.columns : 0;
+      const index = indexLaunches(launches);
       const out = [];
       for (const t of tasks) {
-        const content = rowFor(t, launches, columns);
+        const content = rowFor(t, launches, columns, index);
         if (content !== null) out.push(JSON.stringify({ id: t.id, content }));
       }
       if (out.length) process.stdout.write(`${out.join("\n")}\n`);

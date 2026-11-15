@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { launchRecord } from "../.claude/hooks/brief.mjs";
-import { rowFor, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
+import { indexLaunches, rowFor, sessionLaunches, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, ".claude", "hooks", "subagent-statusline.mjs");
@@ -75,4 +75,37 @@ test("the command: one JSON line per worker row, this session's launches only, n
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("sessionLaunches: parses only the lines that name the session, and keeps the same records", () => {
+  const other = launchRecord({ subagent_type: "implementer", prompt: "SLICE: zzz\nFILES: z.py\nDEPENDS: none" }, { ts: at(2), sessionId: "another", agentId: "impl1" });
+  const text = [...LAUNCHES, other, ...Array.from({ length: 50 }, () => other)].map((r) => JSON.stringify(r)).join("\n") + "\nnot json\n{\"session_id\":\"s1\"\n";
+  const parse = JSON.parse;
+  let calls = 0;
+  JSON.parse = (/** @type {any[]} */ ...a) => {
+    calls++;
+    return /** @type {any} */ (parse)(...a);
+  };
+  let got;
+  try {
+    got = sessionLaunches(text, "s1");
+  } finally {
+    JSON.parse = parse;
+  }
+  assert.deepEqual(got, LAUNCHES.map((r) => parse(JSON.stringify(r))));
+  // the five s1 records and the one broken s1 line; the 51 lines of another session are skipped unparsed
+  assert.equal(calls, 6);
+  // no session id: every record, as before
+  assert.equal(sessionLaunches(text, "").length, LAUNCHES.length + 51);
+});
+
+test("indexLaunches: attempt numbers counted once for all rows, the same as counting per task", () => {
+  const idx = indexLaunches(LAUNCHES);
+  assert.deepEqual(["impl1", "impl2", "rev1"].map((id) => idx.nth.get(idx.byAgent.get(id))), [1, 2, undefined]);
+  // rowFor uses a given index instead of scanning the launches again
+  const many = Array.from({ length: 3 }, () => task("impl2", "implementer", { model: "claude-opus-5-5" }));
+  let scans = 0;
+  const watched = new Proxy(LAUNCHES, { get: (t, k, r) => (k === "filter" || k === "findLast" ? (scans++, Reflect.get(t, k, r)) : Reflect.get(t, k, r)) });
+  for (const t of many) assert.equal(rowFor(t, watched, 0, idx), "implementer a #2 risky · opus · 41.2k · Running the tests");
+  assert.equal(scans, 0);
 });

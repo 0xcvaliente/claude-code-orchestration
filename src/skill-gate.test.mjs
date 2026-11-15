@@ -256,6 +256,45 @@ test("e: an unclean worktree, or a branch with no commit of its own, fails as gi
   });
 });
 
+test("e: a sealed file that is ignored (so never committed) fails as git_state and is named", () => {
+  withSetup((s) => {
+    worktree(s);
+    // The seal covers every file on disk, ignored ones too; git status hides an ignored file, so the worktree looks clean.
+    writeSkill(s, {
+      edit: (sd, wt) => {
+        writeFileSync(join(wt, ".gitignore"), `skills/${NAME}/references/extra.md\n`);
+        writeFileSync(join(sd, "references", "extra.md"), "Only on disk.\n");
+      },
+    });
+    assert.equal(git(s.draft, ["status", "--porcelain"], s.base), "", "git status is clean");
+    launch(s);
+    const msg = blocked(s, ["git_state"]);
+    assert.match(msg, /not committed on skill\/demo-skill/);
+    assert.match(msg, /skills\/demo-skill\/references\/extra\.md/);
+  });
+  // An untracked file that is not ignored is named the same way.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "references", "b.md"), "Untracked.\n"), commit: false });
+    git(s.draft, ["add", "README.md", `skills/${NAME}/SKILL.md`, `skills/${NAME}/references/a.md`, `skills/${NAME}/provenance.json`], s.base);
+    git(s.draft, ["commit", "-q", "-m", "partial"], s.base);
+    launch(s);
+    assert.match(blocked(s, ["git_state"]), /skills\/demo-skill\/references\/b\.md/);
+  });
+});
+
+test("e: a branch check that git cannot answer fails as git_state", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s);
+    // HEAD on a branch with no commit: git rev-parse --abbrev-ref HEAD exits non-zero (and scripts/ cannot be compared
+    // with the base either, so the validator is not run).
+    git(s.draft, ["symbolic-ref", "HEAD", "refs/heads/unborn"], s.base);
+    launch(s);
+    assert.match(blocked(s, ["validator", "git_state"]), /cannot tell which branch the draft worktree is on/);
+  });
+});
+
 test("several failures are listed together in one message", () => {
   withSetup((s) => {
     worktree(s);
