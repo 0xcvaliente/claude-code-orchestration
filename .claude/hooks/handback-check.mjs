@@ -16,10 +16,9 @@
 // other agent, a session in another permission mode (no SubagentHandback tool: the report is the last message, and
 // the gates read it at SubagentStop as before) and malformed input exit 0. ORCH_HANDBACK_CHECK=off disables it.
 // Decisions go to gates.jsonl in the state dir (gate "handback": the reason and ids only, never report text).
-import { appendFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { parseReply } from "./brief.mjs";
-import { readJsonl } from "./run.mjs";
+import { appendJsonl, readJsonl } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"]);
@@ -73,9 +72,9 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   let deniedBefore = false;
   try {
     if (agentId) {
-      const launch = readJsonl(stateDir, "journal-launches.jsonl").findLast((l) => l.session_id === sessionId && l.agent_id === agentId);
+      const launch = readJsonl(stateDir, "journal-launches.jsonl", sessionId).findLast((l) => l.session_id === sessionId && l.agent_id === agentId);
       if (Array.isArray(launch?.checks)) checks = launch.checks.filter((/** @type {unknown} */ c) => typeof c === "string");
-      deniedBefore = readJsonl(stateDir, "gates.jsonl").some((g) => g.gate === "handback" && g.decision === "deny" && g.session_id === sessionId && g.agent_id === agentId);
+      deniedBefore = readJsonl(stateDir, "gates.jsonl", sessionId).some((g) => g.gate === "handback" && g.decision === "deny" && g.session_id === sessionId && g.agent_id === agentId);
     }
   } catch {
     // unreadable logs: no CHECKS ids, and no earlier denial is known
@@ -91,8 +90,8 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   try {
     ensureStateDir();
     const rec = { ts: new Date().toISOString(), gate: "handback", decision: deny ? "deny" : "allow", reason: deny ? problem.reason : `${problem.reason}_gave_up`, ...(problem.missing ? { missing: problem.missing } : {}), session_id: sessionId, agent_id: agentId, agent_type: role };
-    appendFileSync(join(stateDir, "gates.jsonl"), `${JSON.stringify(rec)}\n`);
-    recorded = readJsonl(stateDir, "gates.jsonl").some((g) => g.gate === "handback" && g.decision === "deny" && g.session_id === sessionId && g.agent_id === agentId);
+    // The record is read back from the end of the log only, so the log is read in full once per call.
+    recorded = appendJsonl(stateDir, "gates.jsonl", rec) && deny;
   } catch {
     // no record, so no denial
   }

@@ -21,11 +21,11 @@
 // paths only, never quote, reply or file text). When a quote is unverified and quote-check has not blocked this agent
 // before, it exits 2 with the unverified locators, asking the researcher to correct each quote from its source or drop
 // it and list the claim under OPEN; the next stop always passes. Exits early on duplicate(); exits 0 on malformed input.
-import { appendFileSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
-import { loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
+import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const LOG = "quotes.jsonl";
@@ -78,8 +78,10 @@ function reportFromTranscript(path) {
 const atHandback = input.tool_name === "SubagentHandback" && typeof input.tool_input?.message === "string";
 if (input.tool_name !== undefined && !atHandback) process.exit(0); // a tool call that carries no report
 const reportAgentId = typeof input.agent_id === "string" && input.agent_id ? input.agent_id : null;
+// quotes.jsonl is read once per call: only its records of this agent matter.
+const prior = reportAgentId ? readJsonl(stateDir, LOG).filter((e) => e.agent_id === reportAgentId) : [];
 // The stop that follows a checked handback has nothing new to check.
-if (!atHandback && reportAgentId && readJsonl(stateDir, LOG).some((e) => e.agent_id === reportAgentId && e.at === "handback")) process.exit(0);
+if (!atHandback && reportAgentId && prior.some((e) => e.agent_id === reportAgentId && e.at === "handback")) process.exit(0);
 const report = atHandback ? String(input.tool_input.message) : (reportFromTranscript(input.agent_transcript_path) ?? (typeof input.last_assistant_message === "string" ? input.last_assistant_message : ""));
 const quotes = parseReply(report).quotes;
 const projectDir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
@@ -214,16 +216,14 @@ try {
 // At a hand-back a refusal must be provably the only one: a refused report is not delivered until the researcher sends
 // it again, and after three refusals it is never delivered. So there the hook blocks only with an agent id (without
 // one a second report cannot be told from the first) and only once the record of the refusal is written and readable.
-const blockedBefore = agentId ? readJsonl(stateDir, LOG).some((e) => e.agent_id === agentId && e.blocked === true) : atHandback ? true : input.stop_hook_active === true;
+const blockedBefore = agentId ? prior.some((e) => e.agent_id === agentId && e.blocked === true) : atHandback ? true : input.stop_hook_active === true;
 const block = counts.unverified > 0 && !blockedBefore;
 let recorded = false;
 try {
   ensureStateDir();
-  appendFileSync(
-    `${stateDir}/${LOG}`,
-    `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, agent_id: agentId, slice, total: quotes.length, ...counts, blocked: block, ...(atHandback ? { at: "handback" } : {}), ...(unverifiedPaths.length ? { unverified_paths: unverifiedPaths } : {}) })}\n`,
-  );
-  recorded = !atHandback || !block || readJsonl(stateDir, LOG).some((e) => e.agent_id === agentId && e.blocked === true && e.at === "handback");
+  // Read back from the end of the log only (appendJsonl), so the log is read in full once per call.
+  const readable = appendJsonl(stateDir, LOG, { ts: new Date().toISOString(), session_id: sessionId, agent_id: agentId, slice, total: quotes.length, ...counts, blocked: block, ...(atHandback ? { at: "handback" } : {}), ...(unverifiedPaths.length ? { unverified_paths: unverifiedPaths } : {}) });
+  recorded = !atHandback || !block || readable;
 } catch {
   // at SubagentStop logging never changes the decision; at a hand-back an unrecorded refusal is not made (below)
 }
