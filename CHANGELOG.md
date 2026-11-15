@@ -2,9 +2,9 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.3] - 2026-11-16
 
-These changes stop workers from each running the whole test suite, make the plan check treat a symlink and its target as one file, and fix two timing and trust holes in the test gate and the egress guard. For contributors, `npm run check` runs its steps side by side, and a test file run on its own cleans up its temp folders. Upgrading: no plugin setting changed. `ORCH_READ_ROUTER_BUDGET_MS` is now capped at 40000 (it was 50000): a higher value is not rejected, it is used as 40000. Every new test file must import `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) first, or `npm test` fails. The changed hooks take effect in a new session.
+1.4.3 stops workers from each running the whole test suite, makes the plan check treat a symlink and its target as one file, and fixes two timing and trust holes in the test gate and the egress guard. For contributors, `npm run check` runs its steps side by side, and a test file run on its own cleans up its temp folders. Upgrading: no plugin setting changed. `ORCH_READ_ROUTER_BUDGET_MS` is now capped at 40000 (it was 50000): a higher value is not rejected, it is used as 40000. Every new test file must import `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) first, or `npm test` fails. The changed hooks take effect in a new session.
 
 ### Changed
 
@@ -244,6 +244,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.4.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.3
 [1.4.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.2
 [1.4.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.1
 [1.4.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.0
