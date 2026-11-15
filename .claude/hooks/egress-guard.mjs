@@ -10,6 +10,8 @@
 // agent_transcript_path; transcript_path is the main session's. The subagent transcript is
 // <transcript_path minus .jsonl>/subagents/agent-<agent_id>.jsonl (Agent tool, foreground or background) or
 // .../subagents/workflows/<run>/agent-<agent_id>.jsonl (workflow agent(), its brief wrapped and indented by the harness).
+// Later messages: a reviewer resumed by SendMessage may also fetch the hosts that message names (laterUserTexts: the
+// coordinator's messages and plain user text only, never tool results, fetched content, reminders or notifications).
 // Brief unreadable: exit 0 and log egress_unverified.
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output; never an allow or ask decision. Acts only for
 // the bare agent_type `reviewer`; ORCH_GUARDS=off disables it; malformed input exits 0. Decisions go to gates.jsonl
@@ -93,6 +95,39 @@ export function firstUserText(path) {
 }
 
 /**
+ * Texts of the messages that reached the agent after its brief from whoever launched it: a resume by SendMessage (a
+ * user record with origin {kind: "coordinator"}, isMeta true and string content, as real subagent transcripts show it)
+ * or a plain user record (no isMeta, no origin, text parts only). Never a tool result, a fetched page, a system
+ * reminder, a skill body, a task notification or hook feedback: those are isMeta without the coordinator origin, or
+ * tool_result parts, and a URL in them must never widen the allowlist. @param {string} path @returns {string[]}
+ */
+export function laterUserTexts(path) {
+  /** @type {string[]} */
+  const out = [];
+  let seenFirst = false;
+  for (const line of readHead(path, 4 * MAX_BYTES).split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r?.type !== "user") continue;
+      if (!seenFirst) {
+        seenFirst = true;
+        continue;
+      }
+      const c = r.message?.content;
+      const coordinator = r.isMeta === true && r.origin?.kind === "coordinator";
+      const plain = r.isMeta !== true && r.origin === undefined;
+      if (!coordinator && !plain) continue;
+      if (typeof c === "string") out.push(c);
+      else if (Array.isArray(c) && c.length && c.every((p) => p && p.type === "text" && typeof p.text === "string")) out.push(c.map((p) => p.text).join("\n"));
+    } catch {
+      // a partial last line
+    }
+  }
+  return out;
+}
+
+/**
  * Allowed hosts for a reviewer brief: its URLs' hosts plus the hosts of URLs in its slice's planned files.
  * @param {string} brief @param {string[]} files planned FILES of the brief's slice @param {string} baseDir
  * @returns {Set<string>}
@@ -141,7 +176,9 @@ export function egressDecision(input, opts = {}) {
   // far exists only on an isolated slice's branch (its worktree) is not seen there, so its URLs do not count. This fails
   // safe: such a fetch is denied, never allowed, and the brief can name the URL itself.
   const base = typeof input.cwd === "string" && input.cwd ? input.cwd : env.CLAUDE_PROJECT_DIR || process.cwd();
-  const allowed = allowedHosts(brief, files, base);
+  // A resumed reviewer may also fetch what the messages it was resumed with name (laterUserTexts); the slice and the
+  // planned files still come from the brief alone.
+  const allowed = allowedHosts([brief, ...(path ? laterUserTexts(path) : [])].join("\n"), files, base);
   if (host && allowed.has(host)) return { decision: "allow", host };
   return {
     decision: "deny",
