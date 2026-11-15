@@ -1,4 +1,5 @@
 // node --test bench/sdk.test.mjs: the SDK arm. No model calls; git runs in temp repos, the SDK output is faked.
+import "../src/test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

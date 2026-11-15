@@ -1,5 +1,6 @@
 // Slice e-guards: the researcher Bash guard, the reviewer egress guard and the compact-context hook, run as child
 // processes with fixture state and transcripts (no model call), plus their pure parts imported directly.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

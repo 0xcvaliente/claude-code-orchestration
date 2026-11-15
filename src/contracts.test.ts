@@ -1,5 +1,6 @@
 // "Change these together" contracts from .claude/rules/agents.md, enforced per file: the triage numbers, the three
 // route names and the brief-format tokens must agree across the prose files and the hooks that parse the briefs.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

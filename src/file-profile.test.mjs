@@ -1,6 +1,7 @@
 // The zero-model file profiler (.claude/hooks/file-profile.mjs): kinds, tier rules, reasons, conversions, the cache,
 // hard pages, URLs, missing files and the fallback without poppler. Fixtures: src/fixtures/files (make.sh rebuilds them).
 // Tests that run poppler skip with a message when it is absent; the fallback tests use an injected tool runner.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

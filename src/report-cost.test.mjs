@@ -1,4 +1,5 @@
 // 1.2.0: the report's cost estimate (scripts/prices.mjs) and its line for agents that started and never stopped.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

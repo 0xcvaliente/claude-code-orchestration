@@ -2,6 +2,7 @@
 // loop guard on a block record with no ts, one read per log per hook call (run.mjs readJsonl, review-gate.mjs,
 // quote-check.mjs, handback-check.mjs), test-gate timestamps in milliseconds and a cwd with JSON escapes (verify.sh).
 // Real hook processes on temporary folders and git repos; no model call.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";

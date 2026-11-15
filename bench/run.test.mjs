@@ -1,4 +1,5 @@
 // Tests for the benchmark runner: node --test bench/run.test.mjs (no model calls; one test spawns a fake agent script).
+import "../src/test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

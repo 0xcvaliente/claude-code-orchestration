@@ -1,5 +1,6 @@
 // scripts/claude-update.mjs: the check to run after Claude Code updates. Every command goes through the `run` seam, so
 // no real `claude` starts; files are written only under a temp folder.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";

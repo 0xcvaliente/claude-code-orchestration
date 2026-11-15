@@ -1,6 +1,7 @@
 // routes.jsonl (src/route.ts) and the HTML report (scripts/report.mjs) follow the hooks' state-dir rule in
 // .claude/hooks/state.mjs: a repo that registers its own hooks keeps .claude/state, a plugin install keeps its
 // state in a per-user dir, never in the repo.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";

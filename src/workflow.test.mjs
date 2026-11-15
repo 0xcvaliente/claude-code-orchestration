@@ -1,5 +1,6 @@
 // Tests orchestrate.js against a STUBBED Workflow runtime (fake agent/parallel/pipeline/phase/log).
 // They do not show that the real runtime's agent() launches reach PreToolUse hooks or that Stop gates fire.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

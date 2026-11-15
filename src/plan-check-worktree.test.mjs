@@ -1,6 +1,7 @@
 // The plan check's worktree base check (worktree_base_not_head): an implementer launched with isolation "worktree"
 // while the effective worktree.baseRef is not "head" and HEAD differs from origin's default branch is blocked twice,
 // then let through. Temporary git repositories with an origin/HEAD ref; settings in a temp project and config dir.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

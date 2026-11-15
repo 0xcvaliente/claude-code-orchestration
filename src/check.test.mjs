@@ -1,5 +1,6 @@
 // scripts/check.mjs (`npm run check`) runs its steps at the same time; these tests drive it with stub steps
 // (ORCH_CHECK_STEPS) and check the exit code, the failing-step line, unmixed output, parallelism and signal handling.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -104,10 +105,27 @@ test("each step's output is printed whole under its own header, never interleave
 });
 
 test("the steps run at the same time", async () => {
-  // two steps of about 1.25 s each (0.25 s of output, 1 s sleep): one after another would take over 2.5 s
-  const r = await check([step("alpha", 0, 1000), step("beta", 0, 1000)]);
+  // each step writes the time it started and the time it ended; run at the same time, the two intervals overlap, run one
+  // after another the second starts only after the first has ended. No wall-clock limit, so a loaded machine still passes.
+  const timed = join(dir, "timed.mjs");
+  writeFileSync(
+    timed,
+    `import { writeFileSync } from "node:fs";
+const [file, sleepMs] = process.argv.slice(2);
+const start = Date.now();
+await new Promise((r) => setTimeout(r, Number(sleepMs)));
+writeFileSync(file, JSON.stringify({ start, end: Date.now() }));
+`,
+  );
+  const [a, b] = [join(dir, "times-alpha.json"), join(dir, "times-beta.json")];
+  const r = await check([
+    ["alpha", `node "${timed}" "${a}" 1000`],
+    ["beta", `node "${timed}" "${b}" 1000`],
+  ]);
   assert.equal(r.code, 0, r.out);
-  assert.ok(r.ms < 2000, `took ${r.ms} ms`);
+  const ta = JSON.parse(readFileSync(a, "utf8"));
+  const tb = JSON.parse(readFileSync(b, "utf8"));
+  assert.ok(ta.start < tb.end && tb.start < ta.end, `alpha ran ${ta.start}..${ta.end}, beta ${tb.start}..${tb.end}: no overlap`);
 });
 
 // 5 MB of output read through a pipe (as CI reads it): nothing may be lost to an exit while writes are still queued

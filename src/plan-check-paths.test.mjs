@@ -1,6 +1,7 @@
 // plan-check.mjs: two names for one file (a symlink, or another case on a case-insensitive file system) are one file
 // in file_overlap and not_in_plan, and the read router's budget stays under the hook's 60 s timeout. Driven end to end
 // through the hook like src/plan-check-overlap.test.mjs: a throwaway project with the hooks copied in.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

@@ -1,6 +1,7 @@
 // Builds the plugin with --out into temp dirs: the workflow ships with namespaced agent types, evals/ is copied only
 // when present, the judge hooks are registered only when their files exist, and dist/ is never touched. Then checks the
 // committed plugin against .claude/settings.json: the 0.4.0 hooks, timeouts, the fail-closed judge and userConfig.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

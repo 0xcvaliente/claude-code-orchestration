@@ -2,6 +2,7 @@
 // run as hooks in a throwaway project. The skills repositories are temporary git repositories, the config dir
 // (CLAUDE_CONFIG_DIR, which holds the draft home) is a temp folder and installed skills come from a temp
 // ORCH_SKILL_ROOTS: nothing here touches the real skills repositories or the real ~/.claude.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

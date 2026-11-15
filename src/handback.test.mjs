@@ -1,5 +1,6 @@
 // 1.2.0: reports checked before delivery. handback-check.mjs (PreToolUse on SubagentHandback: STATUS line, CHECKS
 // answers) and quote-check.mjs on the same event, run as child processes with fixture state (no model call).
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
