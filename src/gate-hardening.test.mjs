@@ -182,13 +182,14 @@ test("test gate: run_limited's watchdog never runs the hook's EXIT trap, however
 });
 
 // At its limit run_limited first sends the command's group SIGTERM, so a helper can remove its base worktree, and
-// kills the group only when it is still there a few seconds later.
+// kills the group only when it is still there a few seconds later. The 5 s limit leaves a loaded machine's bash time to
+// set its TERM trap before the SIGTERM comes (at 1 s a slow start died on the default action and never cleaned up).
 test("test gate: run_limited terminates the command before it kills it, and kills a group that ignores the terminate", () => {
   const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
   const dir = tmp("orch-gh-term-");
   const polite = `trap 'echo cleaned > "${dir}/cleaned"; exit 0' TERM; sleep 60 & wait`;
   const stubborn = `trap '' TERM; sleep 60 & echo $! > "${dir}/child.pid"; wait`;
-  const script = `${fn}\nrun_limited 1 /dev/null "$3/polite.out" /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 1 /dev/null "$3/stubborn.out" /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
+  const script = `${fn}\nrun_limited 5 /dev/null "$3/polite.out" /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 5 /dev/null "$3/stubborn.out" /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
   const t0 = Date.now();
   const r = spawnSync("bash", ["-c", script, "x", polite, stubborn, dir], { encoding: "utf8", timeout: 60000 });
   assert.match(r.stdout, /polite:1\nstubborn:1\n/);
