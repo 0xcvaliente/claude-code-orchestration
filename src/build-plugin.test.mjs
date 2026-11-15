@@ -76,6 +76,10 @@ test("--out builds from the repo into a temp dir, ships the workflow with namesp
     // The plugin verify.sh matcher matches the agent_type a plugin-workflow implementer reports.
     const stop = hooksJson(out).hooks.SubagentStop;
     assert.ok(stop.some((/** @type {any} */ h) => h.matcher === "orchestration:implementer" && /verify\.sh/.test(commands(h))));
+    // PostToolUse: journal first, read-log, then the turn budget with no matcher behind its sh pre-filter.
+    const post = hooksJson(out).hooks.PostToolUse.map((/** @type {any} */ e) => [e.matcher, e.hooks.map((/** @type {any} */ c) => String(c.command).match(/hooks\/([\w-]+\.mjs)/)?.[1])]);
+    assert.deepEqual(post, [["Agent|Task", ["journal.mjs"]], ["Read|WebFetch", ["read-log.mjs"]], [undefined, ["turn-budget.mjs"]]]);
+    assert.ok(existsSync(join(out, "plugin", "hooks", "turn-budget.mjs")), "turn-budget.mjs ships");
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

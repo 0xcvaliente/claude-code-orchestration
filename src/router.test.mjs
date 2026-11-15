@@ -20,7 +20,7 @@ const hasPoppler = (() => {
 })();
 const POPPLER = hasPoppler ? false : "poppler is not installed: PDF routing tests skipped";
 const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "file-profile.mjs", "quote-check.mjs"];
-const ENV_KEYS = ["ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_READ_ROUTER_BUDGET_MS", "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_PLUGIN_ROOT", "ORCH_ALLOW_BUILTINS"];
+const ENV_KEYS = ["ORCH_SOURCES_NOTE", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_READ_ROUTER_BUDGET_MS", "CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_PLUGIN_ROOT", "ORCH_ALLOW_BUILTINS"];
 
 /** A project with the hooks, a haiku researcher agent file and the fixture files at its root. */
 function project() {
@@ -40,7 +40,8 @@ function run(dir, script, payload, env = {}) {
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
     // Skill hints off: the exact assertions stay machine-independent. Haiku allowed: these tests rank a haiku researcher
     // against the router's tiers; without it the haiku rule raises every launch to sonnet first (model-floor.test.mjs).
-    env: { ...base, CLAUDE_PROJECT_DIR: dir, ORCH_SKILL_HINTS: "off", ORCH_ALLOW_HAIKU: "1", ...env },
+    // The researcher coverage note off too, for the same reason; its own tests turn it on.
+    env: { ...base, CLAUDE_PROJECT_DIR: dir, ORCH_SKILL_HINTS: "off", ORCH_SOURCES_NOTE: "off", ORCH_ALLOW_HAIKU: "1", ...env },
     encoding: "utf8",
   });
 }
@@ -59,7 +60,8 @@ test("router off: identical output to before (no stdout, exit 0, no route log) f
   const dir = project();
   try {
     const brief = "SOURCES: scanned.pdf, table.pdf\nREAD: judge\nRISKY: yes\nWhat does it say?";
-    for (const env of /** @type {Record<string, string>[]} */ ([{}, { ORCH_READ_ROUTER: "off" }, { ORCH_READ_ROUTER: "1" }])) {
+    // Router, hints and coverage note all off (the note is set here explicitly as well as in run()'s defaults).
+    for (const env of /** @type {Record<string, string>[]} */ ([{}, { ORCH_READ_ROUTER: "off" }, { ORCH_READ_ROUTER: "1" }, { ORCH_SOURCES_NOTE: "OFF" }])) {
       for (const type of ["researcher", "orchestration:researcher", "reviewer"]) {
         const r = launch(dir, { subagent_type: type, prompt: brief }, env);
         assert.equal(r.status, 0);
@@ -69,6 +71,59 @@ test("router off: identical output to before (no stdout, exit 0, no route log) f
     }
     assert.equal(logOf(dir, "reads-route.jsonl").length, 0);
     assert.equal(existsSync(join(dir, ".claude", "state", "read-cache")), false, "nothing profiled");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const COVERAGE =
+  "\n\nCoverage: read every SOURCES file in full before you judge, with several Read calls in one turn. End your report with a line `FILES-READ:` naming each file and the lines you read; a file you did not read goes under OPEN.";
+
+test("coverage note: with router and hints off, the note alone is appended to a researcher brief with two local SOURCES", () => {
+  const dir = project();
+  try {
+    const brief = "SOURCES: scanned.pdf, table.pdf\nREAD: judge\nRISKY: yes\nWhat does it say?";
+    for (const env of /** @type {Record<string, string>[]} */ ([{ ORCH_SOURCES_NOTE: "" }, { ORCH_SOURCES_NOTE: "on" }])) {
+      for (const type of ["researcher", "orchestration:researcher"]) {
+        const r = launch(dir, { subagent_type: type, prompt: brief, description: "d" }, env);
+        assert.equal(r.status, 0);
+        const o = out(r);
+        assert.equal(o.permissionDecision, "allow");
+        assert.equal(o.updatedInput.prompt, `${brief}${COVERAGE}`);
+        assert.equal(o.updatedInput.description, "d");
+        assert.equal(o.updatedInput.model, undefined, "the note never sets a model");
+        assert.equal(o.updatedInput.subagent_type, type);
+      }
+    }
+    assert.equal(logOf(dir, "reads-route.jsonl").length, 0, "the router stayed off");
+    const on = { ORCH_SOURCES_NOTE: "" };
+    // Not for a reviewer, a built-in, fork or another plugin's researcher.
+    for (const type of ["reviewer", "general-purpose", "fork", "other:researcher"]) {
+      assert.equal(launch(dir, { subagent_type: type, prompt: brief }, { ...on, ORCH_ALLOW_BUILTINS: "1" }).stdout, "", type);
+    }
+    // Fewer than two local regular files: a URL, a missing file or a folder does not count.
+    // The same file twice (also spelled differently) is one file.
+    for (const p of ["SOURCES: table.pdf\nQ", "SOURCES: table.pdf, table.pdf\nQ", "SOURCES: table.pdf, ./table.pdf, sub/../table.pdf\nQ","SOURCES: table.pdf, https://example.com/a.pdf\nQ", "SOURCES: table.pdf, missing.pdf\nQ", "SOURCES: table.pdf, .claude\nQ", "Q"]) {
+      assert.equal(launch(dir, { subagent_type: "researcher", prompt: p }, on).stdout, "", p);
+    }
+    // Paths resolve against the project dir, like the router's.
+    mkdirSync(join(dir, "sub"));
+    writeFileSync(join(dir, "sub", "a.md"), "a");
+    const p = "SOURCES: sub/a.md, `plain.txt`\nQ";
+    assert.equal(out(launch(dir, { subagent_type: "researcher", prompt: p }, on)).updatedInput.prompt, `${p}${COVERAGE}`);
+    assert.doesNotMatch(COVERAGE, /ORCH_|SOURCES_NOTE/, "the note does not name its switch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("coverage note: goes out with the router's model change in one updatedInput", { skip: POPPLER }, () => {
+  const dir = project();
+  try {
+    const p = "SOURCES: scanned.pdf, plain.txt\nREAD: extract\nQ";
+    const o = out(launch(dir, { subagent_type: "researcher", prompt: p }, { ...ON, ORCH_SOURCES_NOTE: "" }));
+    assert.equal(o.updatedInput.model, "sonnet");
+    assert.equal(o.updatedInput.prompt, `${p}${COVERAGE}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

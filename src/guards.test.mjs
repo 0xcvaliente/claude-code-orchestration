@@ -158,6 +158,150 @@ test("researcher guard: everything else is denied with a reason", () => {
   }
 });
 
+// The decision the guard gave each command at commit 525e464, before its denial messages gained hints. Literal values,
+// so a change to the messages (or to the lists above) cannot move what is allowed or denied without failing here.
+// Every command the tests in this file use, plus forms researchers were refused in real use.
+const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
+  ["git log --oneline -5", "allow"],
+  ["git log --format=\"%h <%ae>\" -3", "allow"],
+  ["git -C /some/repo status --short", "allow"],
+  ["git -C ../other show HEAD:README.md", "allow"],
+  ["git branch --show-current", "allow"],
+  ["git ls-files | wc -l", "allow"],
+  ["git rev-parse HEAD && git rev-list --count HEAD", "allow"],
+  ["ls -la src; du -sh .", "allow"],
+  ["wc -l src/*.ts", "allow"],
+  ["grep -rn \"foo bar\" src --include='*.ts'", "allow"],
+  ["grep -rnE 'a|b' . --exclude-dir=node_modules -A 3 | head -20", "allow"],
+  ["git ls-files | grep -c test", "allow"],
+  ["grep -rl SubagentHandback .claude/hooks/", "allow"],
+  ["tail --lines=5 a.txt", "allow"],
+  ["head --bytes=100 a.txt | wc -c", "allow"],
+  ["cat a.txt /dev/null", "allow"],
+  ["grep --file=/dev/null x .", "allow"],
+  ["rg -f/dev/null x .", "allow"],
+  ["grep -rn foo . --include=*.ts --exclude-dir=node_*", "allow"],
+  ["ls src/*.ts README*", "allow"],
+  ["rg -n --glob '*.mjs' tokenize .claude/hooks", "allow"],
+  ["find . -name '*.md' -type f", "allow"],
+  ["find src -maxdepth 2 -newer package.json | wc -l", "allow"],
+  ["head -50 README.md", "allow"],
+  ["tail -n 20 CHANGELOG.md", "allow"],
+  ["cat package.json", "allow"],
+  ["cat > notes.md <<'EOF'\nhello\nEOF", "deny"],
+  ["python3 -c 'print(1)'", "deny"],
+  ["cd /tmp && ls", "deny"],
+  ["git log | python3", "deny"],
+  ["git ls-files | xargs cat", "deny"],
+  ["ls > out.txt", "deny"],
+  ["git log >> log.txt", "deny"],
+  ["wc -l < f", "deny"],
+  ["ls $(pwd)", "deny"],
+  ["ls `pwd`", "deny"],
+  ["wc -l <(git ls-files)", "deny"],
+  ["X=1 ls", "deny"],
+  ["ls $HOME", "deny"],
+  ["git log --output=out.txt", "deny"],
+  ["git branch -D main", "deny"],
+  ["git -c core.pager=sh log", "deny"],
+  ["git push origin main", "deny"],
+  ["f() { ls; }; f", "deny"],
+  ["ls 'unterminated", "deny"],
+  ["git log\nrm -r src", "deny"],
+  ["ls \\'<<X\n${x:=y}'\nX", "deny"],
+  ["ls <<<'text'", "deny"],
+  ["git log | wc -l <<X\nx\nX", "deny"],
+  ["ls \\'<f \\'", "deny"],
+  ["find . -name '*.tmp' -delete", "deny"],
+  ["find . -type f -exec rm {} +", "deny"],
+  ["find . -fprint out.txt", "deny"],
+  ["grep --filter='gz:zcat' foo .", "deny"],
+  ["grep --pager=less foo .", "deny"],
+  ["grep ---myconf foo .", "deny"],
+  ["rg --pre cat foo", "deny"],
+  ["tail -f log.txt", "deny"],
+  ["tail --follow=name log.txt", "deny"],
+  ["rg -e -- --pre=/bin/sh foo .", "deny"],
+  ["rg --regexp -- --pre=sh x .", "deny"],
+  ["grep -e -- --filter=sh foo .", "deny"],
+  ["grep -c -- --filter notes.md", "deny"],
+  ["rg -z foo .", "deny"],
+  ["rg -nz foo .", "deny"],
+  ["rg --search-zip foo .", "deny"],
+  ["grep -Q foo", "deny"],
+  ["tail -5f a.txt", "deny"],
+  ["tail -F a.txt", "deny"],
+  ["tail --fol a.txt", "deny"],
+  ["tail --retry a.txt", "deny"],
+  ["find . -name '*.tmp' -rm", "deny"],
+  ["cat /dev/zero", "deny"],
+  ["head /dev/urandom", "deny"],
+  ["grep x /dev/zero", "deny"],
+  ["tail /dev/zero", "deny"],
+  ["grep --file=/dev/zero x", "deny"],
+  ["rg -f/dev/urandom x", "deny"],
+  ["grep -rf/dev/urandom x .", "deny"],
+  ["tail --lines=5 --verbose=/dev/zero", "deny"],
+  ["tail -? log.txt", "deny"],
+  ["find . -delet[e]", "deny"],
+  ["find . -de*", "deny"],
+  ["rg --glob* x .", "deny"],
+  ["git log -?", "deny"],
+  ["rg -g*.md x", "deny"],
+  ["grep -e -* f", "deny"],
+  ["grep foo . > out.txt", "deny"],
+  ["cat a.txt | sh", "deny"],
+  ["/usr/bin/grep foo .", "deny"],
+  ["sed -n 1,5p a.txt", "deny"],
+  ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
+  ["python3 x.py", "deny"],
+  ["cd src && ls", "deny"],
+  ["git log --oneline | wc -l", "allow"],
+  ["cd /x && grep -n foo a.txt", "deny"],
+  ["grep foo a.txt | sort", "deny"],
+  ["echo hi", "deny"],
+  ["x=0; grep foo a.txt", "deny"],
+  ["grep foo a.txt 2>/dev/null", "deny"],
+  ["ls -la /x 2>/dev/null", "deny"],
+  ["wc -l /x/a.txt /x/b.txt", "allow"],
+  ["wc -l /x/{a,b}.txt", "deny"],
+]);
+
+test("researcher guard: every recorded command keeps its allow or deny decision", () => {
+  for (const [c, want] of DECISIONS) {
+    /** @type {string | undefined} */
+    let got;
+    assert.doesNotThrow(() => {
+      got = researcherViolation(c) ? "deny" : "allow";
+    }, c);
+    assert.equal(got, want, c);
+  }
+});
+
+// A denial says what to use instead, and keeps its first words so the gate records still group.
+const HINTS = [
+  ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
+  ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
+  ["sed -n 1,5p a.txt", /^`sed` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  ["awk 'NR<5' a.txt", /^`awk` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  ["grep foo a.txt | sort", /^`sort` is not an allowed command; .*grep, rg, find, head, tail, cat, ls, wc, du.*in the report/],
+  ["uniq a.txt", /^`uniq` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["echo hi", /^`echo` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["printf hi", /^`printf` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["python3 x.py", /^`python3` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["x=0; grep foo a.txt", /^a variable assignment; .*grep, rg, find.*in the report/],
+];
+
+test("researcher guard: a refused command's reason says what to use instead, in one or two short sentences", () => {
+  for (const [c, re] of HINTS) {
+    const v = researcherViolation(/** @type {string} */ (c));
+    assert.ok(v, String(c));
+    assert.match(v.reason, /** @type {RegExp} */ (re), String(c));
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+});
+
+
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
 });
