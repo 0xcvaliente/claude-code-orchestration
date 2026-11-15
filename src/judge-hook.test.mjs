@@ -4,10 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as sdkClassify } from "./judge.js"; // tsx resolves it to judge.ts
 
@@ -246,6 +246,34 @@ test("only this session's typed requests count, and agent_id is logged when pres
   assert.equal(last.agent_id, "agent-7");
 });
 
+test("requests: other sessions' prompt lines are skipped before parsing, and the same records are read", () => {
+  reset();
+  capture("other", "push feature/login to origin");
+  capture("mine", "please push feature/login");
+  // Many lines of other sessions, one that names this session only in its text, and a broken line.
+  const file = join(stateDir, "prompts.jsonl");
+  const others = Array.from({ length: 500 }, (_, i) => JSON.stringify({ ts: "t", session_id: `other-${i}`, text: `push branch ${i}` }));
+  appendFileSync(file, `${others.join("\n")}\n${JSON.stringify({ session_id: "other-x", text: "mine: push feature/login now" })}\n{broken mine\n`);
+  capture("mine", "and then delete the build folder");
+  // A preload that records every JSON.parse of a prompt line that does not name this session.
+  const preload = join(scratch, "count-parse.mjs");
+  const parsed = join(scratch, "parsed.txt");
+  rmSync(parsed, { force: true });
+  writeFileSync(preload, `import { appendFileSync } from "node:fs";
+const parse = JSON.parse;
+JSON.parse = function (text, ...rest) {
+  if (typeof text === "string" && text.includes('"session_id"') && !text.includes('"mine"')) appendFileSync(${JSON.stringify(parsed)}, "x");
+  return parse.call(this, text, ...rest);
+};
+`);
+  const r = run(HOOK, bash("git push origin feature/login", "mine"), { ...ON, STUB_MODE: "approve", NODE_OPTIONS: `--import=${preload}` });
+  assert.equal(r.code, 0, r.stderr);
+  const stdin = stubCalls()[0].stdin;
+  assert.ok(stdin.includes("please push feature/login") && stdin.includes("and then delete the build folder"), "both of this session's requests are in the prompt");
+  assert.ok(!stdin.includes("push feature/login to origin") && !stdin.includes("push branch 7") && !stdin.includes("mine: push"), "no other session's request is in the prompt");
+  assert.equal(existsSync(parsed) ? readFileSync(parsed, "utf8").length : 0, 0, "lines of other sessions were parsed");
+});
+
 test("prompt capture: records typed prompts, skips notifications and system messages, keeps unknown origins, never blocks", () => {
   reset();
   assert.equal(capture("pc", "push feature/login", { prompt_id: "p-1" }).code, 0);
@@ -314,6 +342,75 @@ test("rm targets: symlinked, through a symlink, outside or unresolvable are deni
   const r = run(HOOK, bash("rm -r build", "rmfs"), { ...ON, STUB_MODE: "approve" });
   assert.equal(r.code, 0);
   assert.ok(stubCalls()[0].stdin.includes("real target paths"));
+});
+
+// As in src/judge.test.ts, in a child process with a deadline: before the fix some of these took minutes.
+const LONG_COMMANDS = `const many = (w) => Array(20000).fill(w).join(" ");
+const commands = [
+  ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => "echo " + many(w)),
+  many("A=1") + " ls",
+  "echo x" + "$a".repeat(20000),
+];
+for (const cmd of commands) {
+  const t = performance.now();
+  classifyDetail(cmd, "/w");
+  const ms = performance.now() - t;
+  if (ms > 2000) {
+    console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
+    process.exit(1);
+  }
+}`;
+
+test("core: a command of 20,000 words is classified within seconds, so the hook decides before its timeout", () => {
+  const code = `const { classifyDetail } = await import(${JSON.stringify(pathToFileURL(join(root, ".claude", "hooks", "judge-core.mjs")).href)});\n${LONG_COMMANDS}`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 30000 });
+  assert.equal(r.signal, null, "timed out after 30 s");
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+});
+
+test("core: an exec-env word counts by its static prefix, quoted or not, wherever it stands", () => {
+  const rows = [
+    ["env LC_ALL=C git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
+    ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "deny"], // the accepted cost: run the search on its own
+    ["export A=1; grep 'PATH=' f && git status", "deny"], // the accepted cost: run the search on its own
+    ["env -u HOME git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
+    ["env -- git log --grep \"PATH=x\"", "deny"], // the accepted cost: run the search on its own
+    ["git log --grep 'PATH='", "deny"], // the accepted cost: run the search on its own
+    ["env -iu HOME \"PATH=/x\" git status", "deny"],
+    ["env -iC /tmp \"PATH=/x\" git status", "deny"],
+    ["env -vi0u HOME \"PATH=/x\" git status", "deny"],
+    ["env -iu HOME \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+    ["env 'A B=1' \"PATH=/x\" git status", "deny"],
+    ["env 1A=1 \"PATH=/x\" git status", "deny"],
+    ["env -i \"$X\" \"PATH=/x\" git status", "deny"],
+    ["env -S '' \"PATH=/x\" git status", "deny"],
+    ["env -P /x \"PATH=/x\" git status", "deny"],
+    ["env -L 1 \"PATH=/x\" git status", "deny"],
+    ["env -U user \"PATH=/x\" git status", "deny"],
+    ["env PATH=x git log", "deny"],
+    ["env \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+    ["env -i \"PATH=/tmp/x\" git status", "deny"],
+    ["env -u HOME 'PAGER=x' git log", "deny"],
+    ["env -C /tmp \"PATH=/x\" git status", "deny"],
+    ["env A=1 \"PATH=/x\" git status", "deny"],
+    ["env -- \"PATH=/x\" git status", "deny"],
+    ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
+    ["env -u \"$X\" HOME \"PATH=/x\" git status", "deny"],
+    ["env \"$X\" HOME \"PATH=/x\" git status", "deny"],
+    ["env -u HOME env \"PATH=/x\" git status", "deny"],
+    ["timeout -s KILL 5 env \"PATH=/x\" git status", "deny"],
+    ["nice ${E}nv \"PATH=/x\" git status", "deny"],
+    ["./e \"GIT_SSH_COMMAND=sh x\" git status", "deny"],
+    ["env $'PATH'=/x git status", "deny"],
+    ["PAGER+=evil git log", "deny"],
+    ["grep -rn 'PATH=' src", "pass"],
+    ["echo \"PATH=x\"", "pass"],
+    ["git log --grep 'XPATH='", "pass"],
+    ["git commit -m \"fix PATH= handling\"", "pass"],
+    ["git log --grep=PATH=x", "pass"],
+  ];
+  const wrong = rows.filter(([c, want]) => coreClassify(c, "/w").cls !== want).map(([c, want]) => `${c}: want ${want}`);
+  assert.deepEqual(wrong, []);
 });
 
 test("parity: judge-core's floor and classification agree with src/judge.ts", () => {

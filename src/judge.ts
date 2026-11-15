@@ -169,6 +169,7 @@ export function tokenize(src: string): Script {
   let pieces: Piece[] | undefined;
   let stdin = false;
   let redirectNext = false;
+  let allAssign = true; // every word so far in this command is an assignment (kept, not rescanned: long commands)
   const heredocs: Array<{ delim: string; strip: boolean; quoted: boolean }> = [];
 
   const piece = (p: Piece) => (pieces ??= []).push(p);
@@ -186,9 +187,10 @@ export function tokenize(src: string): Script {
       text,
       dynamic: pieces.some((p) => !("lit" in p)),
       quoted: pieces.some((p) => "lit" in p && p.quoted),
-      assign: !redirectNext && words.every((w) => w.assign) && !!first && "lit" in first && !first.quoted && /^[A-Za-z_][A-Za-z0-9_]*=/.test(first.lit),
+      assign: !redirectNext && allAssign && !!first && "lit" in first && !first.quoted && /^[A-Za-z_][A-Za-z0-9_]*=/.test(first.lit),
       redirect: redirectNext,
     });
+    allAssign &&= words[words.length - 1]!.assign;
     redirectNext = false;
     pieces = undefined;
   };
@@ -196,6 +198,7 @@ export function tokenize(src: string): Script {
     endWord();
     if (words.length) commands.push({ words, stdin });
     words = [];
+    allAssign = true;
     stdin = pipe;
   };
   // `$` at i (outside single quotes): an expansion piece, or a literal `$`. Returns the index of its last character.
@@ -411,30 +414,38 @@ function lastComponentLiteral(w: Word): string {
  */
 function canProduce(pieces: Piece[], target: string, anchored: boolean, literalSlash: boolean): boolean {
   const t = target.toLowerCase();
-  const go = (pi: number, ti: number): boolean => {
-    if (ti === 0) return !anchored || pieces.slice(0, pi + 1).every((p) => ("lit" in p ? p.lit === "" : "dyn" in p || p.glob === "*"));
-    if (pi < 0) return false;
-    const p = pieces[pi]!;
-    if ("lit" in p) {
-      const l = p.lit.toLowerCase();
-      if (l.length > ti) return !anchored && l.endsWith(t.slice(0, ti));
-      return t.slice(ti - l.length, ti) === l && go(pi - 1, ti - l.length);
+  const n = t.length;
+  // One row per piece, from the first: row[ti] says whether the pieces so far can produce t.slice(0, ti) (anchored:
+  // exactly; otherwise as the end of what they produce). Iterative and polynomial, with no closure made per piece: a
+  // word of many expansions (`x$a$a$a...`) must not take exponential time or overflow the stack, or the hook runs past
+  // its timeout.
+  const slash: number[] = [-1]; // slash[ti]: the index of the last `/` in t.slice(0, ti), or -1
+  for (let i = 0; i < n; i++) slash.push(t.charAt(i) === "/" ? i : slash[i]!);
+  let row: boolean[] = [true];
+  for (let ti = 1; ti <= n; ti++) row.push(false);
+  let empty = true; // every piece so far can produce the empty string
+  for (const p of pieces) {
+    const below = row;
+    row = [];
+    empty &&= "lit" in p ? p.lit === "" : "dyn" in p || p.glob === "*";
+    const l = "lit" in p ? p.lit.toLowerCase() : "";
+    for (let ti = 0; ti <= n; ti++) {
+      let v = false;
+      if (ti === 0) v = !anchored || empty;
+      else if ("lit" in p) v = l.length > ti ? !anchored && l.endsWith(t.slice(0, ti)) : t.slice(ti - l.length, ti) === l && below[ti - l.length]!;
+      else if ("dyn" in p) {
+        // t.slice(ti - m, ti) holds a `/` once m > ti - 1 - slash[ti].
+        for (let m = 0; m <= ti && !v; m++) {
+          if (literalSlash && !anchored && slash[ti]! >= ti - m) break;
+          v = below[ti - m]!;
+        }
+      } else if (p.glob === "*") {
+        for (let m = 0; m <= ti && slash[ti]! < ti - m && !v; m++) v = below[ti - m]!;
+      } else v = t.charAt(ti - 1) !== "/" && below[ti - 1]!;
+      row.push(v);
     }
-    const slashAt = (m: number) => t.slice(ti - m, ti).includes("/");
-    if ("dyn" in p) {
-      for (let m = 0; m <= ti; m++) {
-        if (literalSlash && !anchored && slashAt(m)) return false;
-        if (go(pi - 1, ti - m)) return true;
-      }
-      return false;
-    }
-    if (p.glob === "*") {
-      for (let m = 0; m <= ti && !slashAt(m); m++) if (go(pi - 1, ti - m)) return true;
-      return false;
-    }
-    return t.charAt(ti - 1) !== "/" && go(pi - 1, ti - 1);
-  };
-  return go(pieces.length - 1, t.length);
+  }
+  return row[n]!;
 }
 
 /**
@@ -473,8 +484,10 @@ const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
 /** git config keys whose value runs a program (or pulls in config that may). */
 const GIT_EXEC_KEY =
   /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.cmd|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
-/** Environment names that make git, a shell or another tool run a program, or change what a command name finds. */
-const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)=/;
+/** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
+ * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
+const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)\+?=/;
+
 
 const deny = (reason: string, kind?: "rm" | "git"): Classification => ({ cls: "deny", reason, ...(kind && { kind }) });
 const PASS: Classification = { cls: "pass" };
@@ -538,7 +551,7 @@ function rmRule(args: Word[], plainLine: boolean, cwd: string | undefined): Clas
  * not wholly quoted and mentions push, remote, alias, url. or include go to the judge. `git config` of an
  * exec key is denied: it would run on a later git call.
  */
-function gitRule(ws: Word[], k: number): { c: Classification; sub: number } {
+function gitRule(ws: Word[], k: number, later: Later): { c: Classification; sub: number } {
   let j = k + 1;
   for (; j < ws.length; j++) {
     const w = ws[j]!;
@@ -556,22 +569,30 @@ function gitRule(ws: Word[], k: number): { c: Classification; sub: number } {
   const sub = ws[j];
   if (sub?.dynamic && (!hasLiteral(sub) || GIT_PUSHY.some((n) => canProduce(sub.pieces, n, true, false)))) return { c: JUDGE_GIT, sub: j };
   if (sub && !sub.dynamic && sub.text.toLowerCase() === "config") {
-    const key = ws.slice(j + 1).find((w) => !w.dynamic && GIT_EXEC_KEY.test(w.text) && !/^(alias|url)\./i.test(w.text));
+    const at = later.execKey()[j + 1] ?? -1;
+    const key = at >= 0 ? ws[at] : undefined;
     if (key) return { c: deny(`git config ${key.text}: a key that runs a program on a later git call is always blocked`, "git"), sub: j };
   }
-  const pushy = ws.slice(k).some((w, i) => {
-    if (w.redirect) return false;
-    if (w.dynamic) return !!couldBe(w, ["push", "remote"], false);
-    if (whollyQuoted(w) && k + i !== j) return false; // a quoted argument (a commit message) is text
-    return /push|remote|send-pack|receive-pack/i.test(w.text) || /^(alias|url\.|include)/i.test(w.text);
-  });
+  // A quoted argument (a commit message) is text, except the subcommand itself.
+  const s = ws[j];
+  const pushy = later.pushy()[k] || (!!s && !s.redirect && !s.dynamic && whollyQuoted(s) && pushyText(s.text));
   return { c: pushy ? JUDGE_GIT : PASS, sub: j };
 }
 
+/** A word that mentions push, remote, their plumbing, or a route to them (alias, url., include). */
+const pushyText = (t: string) => /push|remote|send-pack|receive-pack/i.test(t) || /^(alias|url\.|include)/i.test(t);
+
+/** Facts about the later words of one simple command, each computed at most once per command (see analyzeCommand). */
+interface Later {
+  /** pushy[i]: a word at or after ws[i], not a redirection target and not wholly quoted, mentions push or remote (pushyText), or is dynamic and could be either. */
+  pushy: () => boolean[];
+  /** execKey[i]: the index of the first word at or after ws[i] that is a git config key running a program, or -1. */
+  execKey: () => number[];
+}
+
 const SU_OPTS = new Set(["-c", "--command", "-l", "--login", "-", "-s", "--shell", "-m", "-p", "--preserve-environment", "-g", "-G"]);
-/** The next word is an unquoted su-style option: `x su -c ...`, `x runuser -l u ...`. */
-function suOptionFollows(ws: Word[], k: number): boolean {
-  const next = ws.slice(k + 1).find((w) => !w.redirect);
+/** The next word (not a redirection target) is an unquoted su-style option: `x su -c ...`, `x runuser -l u ...`. */
+function suOptionFollows(next: Word | undefined): boolean {
   if (!next || next.dynamic || next.quoted) return false;
   return SU_OPTS.has(next.text) || /^--(command=|shell=|login)/.test(next.text);
 }
@@ -586,93 +607,162 @@ function afterWrapper(ws: Word[], k: number): boolean {
   return false;
 }
 
+/** `make()` on first use, then the same value. */
+function once<T>(make: () => T): () => T {
+  let done = false;
+  let value: T;
+  return () => {
+    if (!done) {
+      value = make();
+      done = true;
+    }
+    return value;
+  };
+}
+
+/** s[i]: `test` holds for some word at or after words[i]. */
+function suffixAny(words: Word[], test: (w: Word) => boolean): boolean[] {
+  const s = new Array<boolean>(words.length + 1).fill(false);
+  for (let i = words.length - 1; i >= 0; i--) s[i] = s[i + 1]! || test(words[i]!);
+  return s;
+}
+
+/**
+ * A word's static prefix: the text of its literal pieces joined, quoted or not (`"PA"TH`, `\\PATH`, `$'PATH'`, `""PATH`
+ * all give PATH), up to its first dynamic or glob piece. The exec-env rule tests it, so quoting a word never hides an
+ * assignment, and no command (env, export, a launcher) is modelled to decide which words are assignments.
+ */
+function staticPrefix(w: Word): string {
+  let s = "";
+  for (const p of w.pieces) {
+    if (!("lit" in p)) break;
+    s += p.lit;
+  }
+  return s;
+}
+
 function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: boolean): Classification[] {
   const ws = cmd.words;
   const out: Classification[] = [];
+  let denied = false;
+  const push = (c: Classification) => {
+    out.push(c);
+    if (c.cls === "deny") denied = true;
+  };
   const at = ws.findIndex((w) => !w.assign && !w.redirect); // the command word
-  const after = (k: number) => ws.slice(k + 1).filter((w) => !w.redirect);
+  // What the rules ask of the later words is computed once per command, never once per word: a command of many words
+  // must be read in linear time, or the hook runs past its timeout and the command runs unjudged.
+  const nr = ws.filter((w) => !w.redirect); // the words that are not redirection targets
+  const from: number[] = []; // from[k]: where the words after ws[k] start in nr
+  for (let k = 0, n = 0; k < ws.length; k++) from.push(ws[k]!.redirect ? n : ++n);
+  const after = (k: number) => nr.slice(from[k]);
+  const later: Later = {
+    pushy: once(() => suffixAny(ws, (w) => !w.redirect && (w.dynamic ? !!couldBe(w, ["push", "remote"], false) : !whollyQuoted(w) && pushyText(w.text)))),
+    execKey: once(() => {
+      const first = new Array<number>(ws.length + 1).fill(-1);
+      for (let i = ws.length - 1; i >= 0; i--) {
+        const w = ws[i]!;
+        first[i] = !w.dynamic && GIT_EXEC_KEY.test(w.text) && !/^(alias|url)\./i.test(w.text) ? i : first[i + 1]!;
+      }
+      return first;
+    }),
+  };
+  const forceFrom = once(() => suffixAny(nr, (x) => rmFlag(x.text, "f")));
+  const expandAliasesFrom = once(() => suffixAny(nr, (x) => x.text === "expand_aliases"));
+  // `-rm` is bfs's own name for -delete.
+  const findAction = once(() => ws.find((x) => x.text === "-delete" || x.text === "-rm")?.text);
   const script = (text: string, dynamic: boolean, what: string) =>
-    out.push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
+    push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set<number>();
-  ws.forEach((w, k) => {
-    const first = w.pieces[0];
-    if (first && "lit" in first && !first.quoted && EXEC_ENV.test(first.lit)) ctx.env ??= first.lit.split("=")[0];
-    if (w.assign || w.redirect) return; // NAME=value and redirection targets are not commands
-    if (w.text.toLowerCase().startsWith("--no-preserve-root")) out.push(deny("--no-preserve-root is always blocked", "rm"));
+  let trapped = false; // a trap word already read every later word as a script
+  // The first deny decides (see analyze), so the words after it are not read.
+  for (let k = 0; k < ws.length && !denied; k++) {
+    const w = ws[k]!;
+    // An exec-env assignment, wherever the word is and however it is quoted: its static prefix starts NAME= or NAME+=.
+    const env = EXEC_ENV.exec(staticPrefix(w));
+    if (env) ctx.env ??= env[1];
+    if (w.assign || w.redirect) continue; // NAME=value and redirection targets are not commands
+    if (w.text.toLowerCase().startsWith("--no-preserve-root")) push(deny("--no-preserve-root is always blocked", "rm"));
     if (w.dynamic) {
       const cp = k === at;
-      if (couldBe(w, DENY_NAMES, cp)) out.push(deny(`${w.text || "a dynamic word"} could expand to rm or a privilege command (sudo, doas, su, pkexec, runuser): the guard cannot tell what runs`, "rm"));
-      else if (couldBe(w, ["git"], cp)) out.push(JUDGE_GIT);
-      else if (cp) out.push(deny("a command word built from variables, substitutions or globs is always blocked: the guard cannot tell what runs"));
-      else if (couldBe(w, [...SHELLS], false) && /^-[a-z]*c[a-z]*$/i.test(ws[k + 1]?.text ?? "")) out.push(deny("a shell named by a glob or variable is always blocked"));
-      return;
+      if (couldBe(w, DENY_NAMES, cp)) push(deny(`${w.text || "a dynamic word"} could expand to rm or a privilege command (sudo, doas, su, pkexec, runuser): the guard cannot tell what runs`, "rm"));
+      else if (couldBe(w, ["git"], cp)) push(JUDGE_GIT);
+      else if (cp) push(deny("a command word built from variables, substitutions or globs is always blocked: the guard cannot tell what runs"));
+      else if (couldBe(w, [...SHELLS], false) && /^-[a-z]*c[a-z]*$/i.test(ws[k + 1]?.text ?? "")) push(deny("a shell named by a glob or variable is always blocked"));
+      continue;
     }
     const name = base(w.text);
     if (name === "git" || name.startsWith("git-") || name === "rm" || SHELLS.has(name)) ctx.sensitive = true;
-    const rest = after(k);
-    if (name === "sudo" || name === "doas") out.push(deny(`${name} is always blocked`));
+    const s = from[k]!; // the words after this one are nr[s], nr[s + 1], ...
+    if (name === "sudo" || name === "doas") push(deny(`${name} is always blocked`));
     // su, pkexec, runuser are common words in text (`grep su file`), so they count only as the command word, when an
     // su-style option follows them, or after a wrapper prefix (`timeout 5 su`, `env su`, `xargs su`).
-    else if (PRIVILEGE.includes(name) && (k === at || suOptionFollows(ws, k) || afterWrapper(ws, k))) out.push(deny(`${name} is always blocked`));
-    else if (name === "find" && ws.some((x) => x.text === "-delete")) out.push(deny("find -delete is always blocked; remove specific paths with a plain rm -r <path>", "rm"));
-    else if (k === at && (name === "alias" || name === "function")) out.push(deny(`${name} definitions are always blocked: a later word could run anything`));
-    else if (name === "shopt" && rest.some((x) => x.text === "expand_aliases")) out.push(deny("shopt expand_aliases is always blocked"));
-    else if (k === at && (name === "at" || name === "batch")) out.push(deny(`${name} schedules commands the guard cannot see: always blocked`));
-    else if (name === "eval") script(rest.map((x) => x.text).join(" "), rest.some((x) => x.dynamic), "eval");
-    else if (SHELLS.has(name)) out.push(shellRule(cmd, rest, k === at, name, ctx, depth));
+    else if (PRIVILEGE.includes(name) && (k === at || suOptionFollows(nr[s]) || afterWrapper(ws, k))) push(deny(`${name} is always blocked`));
+    else if (name === "find" && findAction()) push(deny(`find ${findAction()} is always blocked; remove specific paths with a plain rm -r <path>`, "rm"));
+    else if (k === at && (name === "alias" || name === "function")) push(deny(`${name} definitions are always blocked: a later word could run anything`));
+    else if (name === "shopt" && expandAliasesFrom()[s]) push(deny("shopt expand_aliases is always blocked"));
+    else if (k === at && (name === "at" || name === "batch")) push(deny(`${name} schedules commands the guard cannot see: always blocked`));
+    else if (name === "eval") {
+      const rest = after(k);
+      script(rest.map((x) => x.text).join(" "), rest.some((x) => x.dynamic), "eval");
+    } else if (SHELLS.has(name)) push(shellRule(cmd, nr, s, k === at, name, ctx, depth));
     else if (name === "source" || (k === at && w.text === ".")) {
-      const file = rest[0];
-      if (!file || file.dynamic || STDIN_PATH.test(file.text)) out.push(deny(`${w.text} of stdin, a substitution or a dynamic path is always blocked`));
-    } else if (name === "xargs") out.push(xargsRule(rest));
+      const file = nr[s];
+      if (!file || file.dynamic || STDIN_PATH.test(file.text)) push(deny(`${w.text} of stdin, a substitution or a dynamic path is always blocked`));
+    } else if (name === "xargs") push(xargsRule(nr, s));
     else if (name === "trap") {
-      for (const x of rest) {
+      if (trapped) continue; // a later trap word would read a subset of the same words again
+      trapped = true;
+      for (let i = s; i < nr.length && !denied; i++) {
+        const x = nr[i]!;
         if (["-", "-p", "-l", "--"].includes(x.text) || (!x.dynamic && /^(SIG)?[A-Z][A-Z0-9+-]*$|^\d+$/.test(x.text))) continue;
         script(x.text, x.dynamic, "trap");
       }
     } else if (name === "env") {
-      for (let i = 0; i < rest.length; i++) {
-        const x = rest[i]!;
+      for (let i = s; i < nr.length; i++) {
+        const x = nr[i]!;
         const t = x.text;
         if (t === "-u" || t === "--unset" || t === "-C" || t === "--chdir") i++;
         else if (t === "--split-string" || t.startsWith("--split-string=")) {
-          const p = t === "--split-string" ? rest[++i] : x;
+          const p = t === "--split-string" ? nr[++i] : x;
           script(p === x ? t.slice("--split-string=".length) : p?.text ?? "", !p || p.dynamic, "env -S");
         } else if (/^-[A-Za-z]*S/.test(t)) {
           const attached = t.slice(t.indexOf("S") + 1);
-          const p = attached ? x : rest[++i];
+          const p = attached ? x : nr[++i];
           script(attached || (p?.text ?? ""), !p || p.dynamic, "env -S");
         } else if (!t.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) break;
       }
     } else if (name === "watch") {
-      let i = 0;
-      for (; i < rest.length && rest[i]!.text.startsWith("-"); i++) if (["-n", "--interval"].includes(rest[i]!.text)) i++;
-      const run = rest.slice(i);
+      let i = s;
+      for (; i < nr.length && nr[i]!.text.startsWith("-"); i++) if (["-n", "--interval"].includes(nr[i]!.text)) i++;
+      const run = nr.slice(i);
       if (run.length) script(run.map((x) => x.text).join(" "), run.some((x) => x.dynamic), "watch");
     } else if (name === "git" || name.startsWith("git-")) {
-      const g = gitRule(ws, k);
-      out.push(g.c);
+      const g = gitRule(ws, k, later);
+      push(g.c);
       gitSubs.add(g.sub);
     } else if (name === "rm") {
       if (gitSubs.has(k)) {
         // `git rm` is git's own command: it refuses to drop uncommitted changes unless forced.
-        if (rest.some((x) => rmFlag(x.text, "f"))) out.push(deny("git rm -f is always blocked", "rm"));
-      } else if (k !== at) out.push(deny("rm run through another command (xargs, find -exec, env, an argument) is always blocked; use a plain rm -r <path>", "rm"));
-      else out.push(rmRule(rest, plainLine && at === 0 && depth === 0 && ws.every((x) => !x.redirect), ctx.cwd));
+        if (forceFrom()[s]) push(deny("git rm -f is always blocked", "rm"));
+      } else if (k !== at) push(deny("rm run through another command (xargs, find -exec, env, an argument) is always blocked; use a plain rm -r <path>", "rm"));
+      else push(rmRule(after(k), plainLine && at === 0 && depth === 0 && ws.every((x) => !x.redirect), ctx.cwd));
     }
-  });
+  }
   return out;
 }
 
 /**
  * A shell word: `-c` payloads are read as scripts. Denied: `-s`, a shell with no script that reads a pipe or here
  * document (or is the command itself), a script path that is stdin or a substitution (`/dev/stdin`, `<(...)`), and
- * options the guard cannot parse. Option values (`-o pipefail`, `-O extglob`, `--rcfile f`) are skipped.
+ * options the guard cannot parse. Option values (`-o pipefail`, `-O extglob`, `--rcfile f`) are skipped. The words after
+ * the shell are `nr[s]` on.
  */
-function shellRule(cmd: SimpleCommand, rest: Word[], commandPosition: boolean, name: string, ctx: Ctx, depth: number): Classification {
+function shellRule(cmd: SimpleCommand, nr: Word[], s: number, commandPosition: boolean, name: string, ctx: Ctx, depth: number): Classification {
   const SAFE_LONG = new Set(["--norc", "--noprofile", "--login", "--posix", "--restricted", "--verbose", "--noediting", "--debugger", "--no-config", "--private"]);
-  let i = 0, dashC = false;
-  for (; i < rest.length; i++) {
-    const x = rest[i]!;
+  let i = s, dashC = false;
+  for (; i < nr.length; i++) {
+    const x = nr[i]!;
     const t = x.text;
     if (x.dynamic) break;
     if (t === "--") {
@@ -695,7 +785,7 @@ function shellRule(cmd: SimpleCommand, rest: Word[], commandPosition: boolean, n
     } else if (/^[-+]/.test(t)) return deny(`${name} option ${t} cannot be parsed with confidence: always blocked`);
     else break;
   }
-  const payload = rest[i];
+  const payload = nr[i];
   if (dashC) {
     if (!payload || payload.dynamic) return deny(`${name} -c with a script the guard cannot read is always blocked`);
     return analyze(payload.text, ctx, depth + 1);
@@ -706,15 +796,16 @@ function shellRule(cmd: SimpleCommand, rest: Word[], commandPosition: boolean, n
 }
 
 /** xargs runs its command word with arguments from stdin: the guard cannot see them. */
-function xargsRule(rest: Word[]): Classification {
-  let i = 0;
-  for (; i < rest.length; i++) {
-    const x = rest[i]!;
+/** `nr[s]` on are the words after xargs. */
+function xargsRule(nr: Word[], s: number): Classification {
+  let i = s;
+  for (; i < nr.length; i++) {
+    const x = nr[i]!;
     if (x.dynamic) return deny("xargs with a command the guard cannot read is always blocked");
     if (!x.text.startsWith("-")) break;
     if (["-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a"].includes(x.text)) i++;
   }
-  const cw = rest[i];
+  const cw = nr[i];
   if (!cw) return PASS;
   const n = base(cw.text);
   if (DENY_NAMES.includes(n) || SHELLS.has(n) || ["eval", "source", "env", "xargs", "trap", "watch"].includes(n)) {
@@ -734,9 +825,19 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
     return deny(`the guard cannot tell what runs (${err instanceof Error ? err.message : String(err)}): always blocked`);
   }
   if (script.defines) return deny("function definitions are always blocked: a later word could run anything");
-  const results: Classification[] = script.substitutions.map((s) => analyze(s, ctx, depth + 1));
+  // The first deny decides, so nothing after it is read (a long command stays fast once it is denied).
+  const results: Classification[] = [];
+  for (const sub of script.substitutions) {
+    const r = analyze(sub, ctx, depth + 1);
+    if (r.cls === "deny") return r;
+    results.push(r);
+  }
   const plainLine = script.plain && script.commands.length === 1;
-  for (const cmd of script.commands) results.push(...analyzeCommand(cmd, ctx, depth, plainLine));
+  for (const cmd of script.commands) {
+    const r = analyzeCommand(cmd, ctx, depth, plainLine);
+    for (const c of r) results.push(c);
+    if (r.some((c) => c.cls === "deny")) break;
+  }
   return results.find((r) => r.cls === "deny") ?? results.find((r) => r.cls === "judge" && r.kind === "rm") ?? results.find((r) => r.cls === "judge") ?? PASS;
 }
 
@@ -760,13 +861,16 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  * - rm with a dynamic argument (`rm *.o`, `rm $F`), and a recursive rm (`-r`, `-R`, `--recursive`, force or not) that
  *   is not one plain `rm <flags> <literal paths>` command line, or whose target is `/`, a `..` path, `.git`, the whole
  *   working folder, or outside `cwd`;
- * - `find ... -delete`, `--no-preserve-root`;
+ * - `find ... -delete` (or `-rm`, bfs's name for it), `--no-preserve-root`;
  * - a shell (sh, bash, zsh, dash, ksh, ash, fish, csh, tcsh, rbash, busybox) fed a script the guard cannot see: `-s`,
  *   no script with a pipe or here-document, `/dev/stdin`, `/dev/fd/*`, `/proc/*`, `<(..)`, unparseable options;
  *   `source`/`.` of the same; `xargs` running a shell, rm, sudo, eval or env;
  * - `git -c`/`--config-env` with a key that runs a program (core.fsmonitor, core.sshCommand, core.pager, alias.*,
  *   ...), `git config` of such a key, and an exec-relevant environment assignment (GIT_SSH_COMMAND, GIT_EDITOR, PAGER,
- *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell.
+ *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell: any word whose static
+ *   prefix (literal pieces joined, quoted or not, up to the first dynamic or glob piece) starts with such a name and
+ *   `=` or `+=`, wherever it stands (`env "PATH=/x" git status`, `export PA"TH=/x"`, `PAGER+=x git log`); an argument
+ *   such as `git log --grep 'PATH='` is denied too (the accepted cost: run the search on its own);
  * Every substitution (`$(..)`, backticks, `<(..)`), every `sh -c`-style payload, `eval`, `trap` action, `env -S`
  * string and `watch` command is read as a script of its own with the same rules (a dynamic one is denied).
  * An rm, git or sudo that appears only inside a quoted argument (`git commit -m "fix rm -rf docs"`, `echo "git push"`)
@@ -784,7 +888,9 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
 export function classifyDetail(command: string, cwd?: string): Classification {
   const ctx: Ctx = { cwd, sensitive: false };
   const r = analyze(command, ctx, 0);
-  if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(`setting ${ctx.env} on a command line that runs git, rm or a shell is always blocked`);
+  if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(
+      `setting ${ctx.env} on a command line that runs git, rm or a shell is always blocked (any word starting ${ctx.env}= counts, quoted or not, even as an argument: run a search or echo of it as its own command)`,
+    );
   return r;
 }
 
