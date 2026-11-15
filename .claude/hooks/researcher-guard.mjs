@@ -58,6 +58,17 @@ const SEARCH_LONG = new Set([
   "sort", "sortr", "stats", "json", "vimgrep", "help", "version",
 ]);
 
+// What a refused researcher should do instead (gate records showed refusals with no way forward). Appended after the
+// reason's first words, which stay the same so the records still group by them.
+const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du and read-only git, and work the result out in the report";
+
+/** @param {string} word @returns {string} */
+function insteadOf(word) {
+  if (word === "cd") return "put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
+  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, or `head` and `tail`";
+  return USE_ALLOWED;
+}
+
 /**
  * Why `command` is outside the researcher's allowlist, or null when it is inside.
  * @param {string} command @returns {{ reason: string, word?: string } | null}
@@ -86,7 +97,7 @@ export function researcherViolation(command) {
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
-    if (words.some((w) => w.assign)) return { reason: "a variable assignment", word: words[0]?.text };
+    if (words.some((w) => w.assign)) return { reason: `a variable assignment; ${USE_ALLOWED}`, word: words[0]?.text };
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
     if (words.some(globInOptionName)) {
       return {
@@ -95,7 +106,7 @@ export function researcherViolation(command) {
       };
     }
     const w = words.map((x) => String(x.text));
-    if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command`, word: w[0] };
+    if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
     const option = optionViolation(w);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };

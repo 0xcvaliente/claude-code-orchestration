@@ -48,6 +48,17 @@ test("detect: npm test needs scripts.test, not the word test anywhere in package
   assert.equal(detect({ "package.json": '{"keywords":["test"],"scripts":{"test":"x"}}' }), "npm test --silent");
 });
 
+test("detect: npm init's placeholder test script is not a test command; detection goes on to the next rule", () => {
+  const placeholder = JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } });
+  assert.equal(detect({ "package.json": placeholder }), "");
+  assert.equal(detect({ "package.json": placeholder, Makefile: "test:\n\ttrue\n" }), "make test");
+  assert.match(detect({ "package.json": placeholder, "tests/test_a.py": "" }), /^python3 -m /);
+  assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: "node --test" } }) }), "npm test --silent");
+  // Only npm's exact placeholder (whitespace trimmed) counts; a real suite that merely mentions the words still runs.
+  assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: '  echo "Error: no test specified" && exit 1 ' } }) }), "");
+  assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: 'echo "no test specified yet" && node --test' } }) }), "npm test --silent");
+});
+
 test("allow rules per runner", () => {
   assert.deepEqual(rules("python3 -m pytest -q"), ["Bash(python3 *)", "Bash(pytest*)"]);
   assert.deepEqual(rules("python3 -m unittest discover -q"), ["Bash(python3 *)"]);

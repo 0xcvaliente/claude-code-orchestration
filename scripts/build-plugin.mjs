@@ -69,6 +69,10 @@ const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROO
 // The judge refuses on a crash or timeout (onFailure "block"); a missing node exits 0, so it never blocks every command.
 /** @param {string} script */
 const failClosed = (script) => `sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node "$0" "$@"' "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}" --plugin`;
+// The turn budget warns subagents only: sh starts node only when the payload holds "agent_id" (a main-session tool
+// call has none), passes the payload on to node's stdin, and does nothing without node. Never blocks.
+/** @param {string} script */
+const subagentsOnly = (script) => `sh -c 'command -v node >/dev/null 2>&1 || exit 0; p=$(cat); case $p in *\\"agent_id\\"*) printf "%s" "$p" | node "$0" "$@";; esac; exit 0' "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}" --plugin`;
 // Matchers mirror .claude/settings.json. verify.sh takes the namespaced implementer, disjoint from the project's
 // ^implementer$ (no duplicate() check). quote-check's project matcher (^|:)researcher$ covers both researcher types,
 // so the plugin copy exits on duplicate() where the project registers it, and checks plugin researchers elsewhere.
@@ -88,6 +92,8 @@ const hooks = {
     PostToolUse: [
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("journal.mjs") }] },
       { matcher: "Read|WebFetch", hooks: [{ type: "command", command: run("read-log.mjs") }] },
+      // Last, with no matcher: journal.mjs stays PostToolUse[0].
+      { hooks: [{ type: "command", command: subagentsOnly("turn-budget.mjs") }] },
     ],
     SubagentStart: [{ hooks: [{ type: "command", command: run("telemetry.mjs") }] }],
     SubagentStop: [

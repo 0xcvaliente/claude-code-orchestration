@@ -25,8 +25,9 @@
 // The result is written to <claude config dir>/orchestration/claude-update.json. Node built-ins only.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BUILTIN_AGENTS, FORK, OWN_AGENTS, learnedBuiltins, learnedFile } from "../.claude/hooks/builtin-agents.mjs";
 
@@ -98,8 +99,9 @@ export function writeSource(root, names) {
   if (!m || !Array.isArray(settings?.permissions?.deny)) return false;
   const have = [...(m[2] ?? "").matchAll(/"([^"]+)"/g)].map((x) => String(x[1]));
   const all = [...have, ...names.filter((n) => !have.includes(n))];
-  writeFileSync(listFile, src.replace(m[0], `${m[1]}\n  ${all.map((n) => JSON.stringify(n)).join(", ")},\n${m[3]}`));
+  const list = src.replace(m[0], `${m[1]}\n  ${all.map((n) => JSON.stringify(n)).join(", ")},\n${m[3]}`);
   // settings.json is hand-formatted: insert the new rules before Agent(fork) instead of re-serializing the file.
+  // Both texts are built before either is written, so a settings.json without that line leaves both files as they were.
   let text = readFileSync(settingsFile, "utf8");
   for (const n of names) {
     const rule = `Agent(${n})`;
@@ -108,6 +110,7 @@ export function writeSource(root, names) {
     if (!at) return false;
     text = text.replace(at[0], `${at[1]}${JSON.stringify(rule)},\n${at[0]}`);
   }
+  writeFileSync(listFile, list);
   writeFileSync(settingsFile, text);
   return true;
 }
@@ -186,7 +189,14 @@ export function check({ fix = false, source = false, enable = false, env = proce
     else add("flags", "ok", `all ${HEADLESS_FLAGS.length} documented options exist (${HIDDEN_FLAGS.join(", ")} are not in the help and cannot be checked)`);
 
     // sdk: 0.3.N of the Agent SDK carries Claude Code 2.1.N.
-    const sdk = readJson(join(root, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json"))?.version;
+    // Resolved as Node resolves it from the checkout, so a parent folder's node_modules counts (a worktree). The
+    // package exports no ./package.json, so read the one beside its main entry.
+    let sdk;
+    try {
+      sdk = readJson(join(dirname(createRequire(join(root, "package.json")).resolve("@anthropic-ai/claude-agent-sdk")), "package.json"))?.version;
+    } catch {
+      sdk = undefined;
+    }
     const patch = (/** @type {unknown} */ v) => /^\d+\.\d+\.(\d+)/.exec(String(v ?? ""))?.[1];
     if (!sdk) add("sdk", "ok", "the Agent SDK is not installed here (only the SDK pipeline in src/ needs it)");
     else if (patch(sdk) === patch(version)) add("sdk", "ok", `Agent SDK ${sdk} carries Claude Code ${version}`);
@@ -227,7 +237,12 @@ export function check({ fix = false, source = false, enable = false, env = proce
         p = find(plugins()) ?? p;
       }
       // A directory marketplace is read straight from the checkout (readFromFolder), so only a copied install can be stale.
-      const versionOf = (/** @type {any} */ x) => (x?.readFromFolder && resolve(x.readFromFolder).startsWith(root) ? (x.folderVersion ?? x.version) : x?.version);
+      // Compared by path segments, so a sibling such as /x/repo-old is not taken for /x/repo.
+      const inRoot = (/** @type {string} */ f) => {
+        const rel = relative(resolve(root), resolve(f));
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+      };
+      const versionOf = (/** @type {any} */ x) => (x?.readFromFolder && inRoot(x.readFromFolder) ? (x.folderVersion ?? x.version) : x?.version);
       if (p && versionOf(p) !== manifest.version && fix) {
         if (exec(bin, ["plugin", "update", id]).code === 0) done.push("updated");
         p = find(plugins()) ?? p;
