@@ -72,12 +72,17 @@ const REWRITE_MIN = 20000; // a cache write this large after the first request, 
  * Claude Code writes one transcript line per content block, each carrying the message's usage, so each usage field
  * is the maximum over the lines of one message id (a partial usage on an early line cannot undercount), then summed
  * over messages. "<synthetic>" messages (harness-made, no API call) are skipped.
- * max_turns_hit (seen in 2.1.316 transcripts): a maxTurns stop ends the transcript on the tool_result of the last
- * turn's tool call, with no assistant message after it. A killed agent can end the same way, so when the role's
- * maxTurns is known (maxTurnsOf) such an ending counts as a hit only when turns >= maxTurns, and is null below it;
- * without a known maxTurns the ending alone decides. A normal finish ends on an assistant message with stop_reason
- * end_turn, or on the tool_result of a tool that ends the turn (SubagentHandback, toolEndsTurn: true). Anything else
- * (no messages, a user text message last, a max_tokens stop) is null: it cannot tell.
+ * max_turns_hit: how the transcript ends when the SubagentStop hook reads it, which is the only time this runs. A
+ * maxTurns stop ends the transcript on the tool_result of the last turn's tool call, with no assistant message after
+ * it (seen in 2.1.316 transcripts), but such a stop fires no SubagentStop (docs/research-2026-11-10.md, Check A;
+ * .claude/rules/agents.md, implementer_unfinished), so this field never records one: those agents show as started
+ * and never stopped (the review gate's implementer_unfinished, the report). What it does record: true when an agent
+ * that did stop has a transcript ending that way at or past its maxTurns (maxTurnsOf; without a known maxTurns the
+ * ending alone decides), which is rare (a transcript not yet flushed at the stop, or a stop record replayed from a
+ * saved transcript); null for that ending below maxTurns (a killed agent ends the same way); false for a normal
+ * finish, an assistant message with stop_reason end_turn or stop_sequence, or the tool_result of a tool that ends the
+ * turn (SubagentHandback, toolEndsTurn: true). Anything else (no messages, a user text message last, a max_tokens
+ * stop) is null: it cannot tell. So false means "finished normally", and true is not a count of turn-limit stops.
  * 1.2.0 adds two cost fields. tokens.cache_write_1h: the part of cache_write written at the one-hour lifetime
  * (usage.cache_creation.ephemeral_1h_input_tokens), which the API bills at 2x input instead of 1.25x.
  * cache_rewrites: requests after the agent's first that wrote at least REWRITE_MIN tokens to the cache while reading
