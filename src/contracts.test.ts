@@ -320,6 +320,9 @@ test("every place that states the acceptance check asks for the narrowest comman
     assert.match(text, /tests of the files (it|you) owns?/, `${file} says that for code it is the tests of the files the slice owns`);
     assert.match(text, /test gate runs the project's whole suite when (an|the|each) implementer stops|test gate runs the project's whole suite when you stop/, `${file} says the test gate runs the whole suite`);
     assert.match(text, /once more after (integration|the merge)/, `${file} says the whole suite runs once more after integration`);
+    // The test gate fires only on an implementer's stop; the integrator, not the gate, runs the suite after the merge.
+    assert.match(text, /the integrator runs it once more after the merge/, `${file} makes the integrator the one that runs the whole suite after the merge`);
+    assert.doesNotMatch(text, /test gate runs the project's whole suite when [^.:;]*?,? and (it runs )?once more after/, `${file} never makes the test gate run the whole suite after the merge`);
   }
   assert.match(read(IMPLEMENTER), /run the whole suite only when your brief asks for it/, `${IMPLEMENTER} runs the whole suite only when asked`);
   for (const [file, text] of texts.slice(1)) {
