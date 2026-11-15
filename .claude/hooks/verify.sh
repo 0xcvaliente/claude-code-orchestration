@@ -43,12 +43,14 @@
 #   So test run + base run (or bugfix check) <= 870 s < 900 s.
 #   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
 #   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
-#   less those 5 s, and only a timed-out test run can add them (875 s < 900 s).
+#   less those 5 s, and only a timed-out test run can add them (875 s < 900 s; 877 s with the extra second below).
 # Temp folder: one mktemp folder per hook run, removed by the EXIT trap of the main shell only (subshells are ended
 #   with SIGKILL: a subshell that gets SIGTERM before it has reset its inherited traps would run that trap and remove the
 #   folder mid-run). Removed from outside anyway, it is made again before each use; a bugfix check whose input or
 #   answer was lost with it blocks as unverified (bugfix_tmp_lost, counted with the other bugfix blocks), never allows.
-# Only portable tools: bash job control (set -m) for the process group, kill, sleep 1 and bash's SECONDS.
+# Each limit is counted in bash's whole SECONDS plus one (a run gets between limit and limit+1 s, never less), so with
+#   SECONDS lagging the clock by under a second at the start the hook ends within 870 + 1 + 1 + 5 = 877 s < 900 s.
+# Only portable tools: bash job control (set -m) for the process group, kill, sleep (0.2, else 1) and bash's SECONDS.
 # Plugin userConfig: each ORCH_<KEY> setting falls back to CLAUDE_PLUGIN_OPTION_<KEY> when unset (state.mjs mirrors it).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
 # Every decision is appended to gates.jsonl in the state dir (the same rule as state.mjs) so a run can show
@@ -111,7 +113,8 @@ log_gate() { # decision reason [extra JSON fields: counts only]
 
 # Run a command in its own process group, stdin from $2 and stdout to $3 (stderr to $4), for at most $1 seconds; then
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
-# own group on bash 3.2 and later, without a terminal; the watchdog polls once a second.
+# own group on bash 3.2 and later, without a terminal; the watchdog polls five times a second (once a second where sleep
+# takes no fraction). The limit is counted in SECONDS plus one, so it holds for between $1 and $1+1 seconds.
 run_limited() { # limit infile outfile errfile cmd...
   local limit="$1" inf="$2" outf="$3" errf="$4" pid wd end
   shift 4
@@ -128,7 +131,10 @@ run_limited() { # limit infile outfile errfile cmd...
   fi
   pid=$!
   set +m
-  end=$((SECONDS + limit)) # the watchdog and the timeout verdict below share it
+  # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
+  # can be reached limit-1 seconds after the start (a run that took 2.6 s was timed out under a 3 s limit); one more
+  # second makes the effective limit lie between limit and limit+1 seconds, never under it.
+  end=$((SECONDS + limit + 1))
   # The watchdog: at the limit it sends the group SIGTERM (bugfix-check.mjs then removes its base worktree), and SIGKILL
   # when the leader is still there after LIM_GRACE_S seconds. Its first act is to drop the EXIT trap it inherits.
   (
@@ -144,7 +150,7 @@ run_limited() { # limit infile outfile errfile cmd...
         kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
         exit 124
       fi
-      sleep 1
+      sleep 0.2 2>/dev/null || sleep 1 # a sleep that takes no fraction polls once a second
     done
     exit 0
   ) >/dev/null 2>&1 &
