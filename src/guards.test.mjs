@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchRecord, stopRecord } from "../.claude/hooks/brief.mjs";
 import { researcherViolation } from "../.claude/hooks/researcher-guard.mjs";
-import { agentTranscript, egressDecision, hostOf } from "../.claude/hooks/egress-guard.mjs";
+import { agentTranscript, allowedHosts, egressDecision, hostOf } from "../.claude/hooks/egress-guard.mjs";
 import { MAX_CONTEXT, runContext } from "../.claude/hooks/compact-context.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -261,8 +261,35 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["grep foo a.txt | sort", "deny"],
   ["echo hi", "deny"],
   ["x=0; grep foo a.txt", "deny"],
-  ["grep foo a.txt 2>/dev/null", "deny"],
-  ["ls -la /x 2>/dev/null", "deny"],
+  // b4: exactly `2>/dev/null` and `2>&1`, each a word of its own, are the only redirections allowed.
+  ["grep foo a.txt 2>/dev/null", "allow"],
+  ["ls -la /x 2>/dev/null", "allow"],
+  ["grep -rn foo src 2>&1 | head -5", "allow"],
+  ["ls /x 2>/dev/null && wc -l a.txt 2>/dev/null", "allow"],
+  ["ls /x >/dev/null", "deny"],
+  ["ls /x 1>/dev/null", "deny"],
+  ["ls /x &>/dev/null", "deny"],
+  ["ls /x 2>/dev/nullx", "deny"],
+  ["ls /x 2>/dev/null.txt", "deny"],
+  ["ls /x 2> /dev/null", "deny"],
+  ["ls /x 2>file", "deny"],
+  ["ls /x 2>>file", "deny"],
+  ["ls /x >&2", "deny"],
+  ["wc -l <file", "deny"],
+  ["cat <<EOF\nx\nEOF", "deny"],
+  ["cat <<<x", "deny"],
+  ["ls /x 2>&1 >out", "deny"],
+  ["ls /x 2>/dev/null>out", "deny"],
+  ["ls /x 2>/dev/null;2>/dev/null ls", "deny"],
+  ["2>/dev/null ls /x", "deny"],
+  ["ls a\\ 2>/dev/null", "deny"],
+  ["ls /x # 2>/dev/null", "deny"],
+  ["ls $'\\' 2>/dev/null '", "deny"],
+  ["ls '/x' 2>/dev/null \"a\" 2>&1", "allow"],
+  ["ls $(ls 2>/dev/null)", "deny"],
+  ["ls `ls 2>&1`", "deny"],
+  ["ls /x 2>/dev/null; python3 x.py", "deny"],
+  ["ls /x 2>&1 | sh", "deny"],
   ["wc -l /x/a.txt /x/b.txt", "allow"],
   ["wc -l /x/{a,b}.txt", "deny"],
 ]);
@@ -377,6 +404,22 @@ test("egress guard: transcript location for foreground and workflow agents", () 
   assert.equal(hostOf("not a url"), null);
 });
 
+test("egress guard: the port counts, the scheme's default port is normalised (b4)", () => {
+  assert.equal(hostOf("https://a.example:443/x"), hostOf("https://a.example/"));
+  assert.equal(hostOf("http://a.example:80/x"), hostOf("http://a.example/"));
+  assert.notEqual(hostOf("https://a.example:8443/x"), hostOf("https://a.example/"));
+  assert.equal(hostOf("https://WWW.A.example:8443/x"), "a.example:8443");
+  const allowed = allowedHosts("see https://cited.example and http://alt.example:8080/doc", [], project);
+  assert.ok(allowed.has(String(hostOf("https://cited.example:443/z"))));
+  assert.ok(!allowed.has(String(hostOf("https://cited.example:8443/z"))));
+  assert.ok(allowed.has(String(hostOf("http://alt.example:8080/other"))));
+  assert.ok(!allowed.has(String(hostOf("http://alt.example/other"))));
+  const o = { dir: stateDir, env: env() };
+  assert.equal(egressDecision(fetchInput("https://cited.example:8443/x", "afg1"), o).decision, "deny");
+  assert.equal(egressDecision(fetchInput("https://cited.example:443/x", "afg1"), o).decision, "allow");
+  assert.equal(egressDecision(fetchInput("https://files.example:444/x", "afg1"), o).decision, "deny");
+});
+
 test("egress guard: hosts from the brief allow, others deny (foreground reviewer)", () => {
   const o = { dir: stateDir, env: env() };
   assert.equal(egressDecision(fetchInput("https://cited.example/other/page", "afg1"), o).decision, "allow");
@@ -484,7 +527,30 @@ test("compact-context: no state at all → silent; the context is capped", () =>
   );
   const ctx = runContext({ id: 1, kind: "planned", planned: Object.keys(slices), slices, constraints: { C1: "x".repeat(300) }, planReviewed: true });
   assert.ok(ctx.length <= MAX_CONTEXT, String(ctx.length));
-  assert.match(ctx, /truncated/);
+  assert.match(ctx, /- slice-0: pending/);
+  assert.match(ctx, /\+\d+ more slices/);
+  assert.ok(ctx.includes(`C1: ${"x".repeat(200)}\n`));
+  assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
+});
+
+test("compact-context: with many slices the constraints and the final reminder survive the cap (b4)", () => {
+  const slices = Object.fromEntries(
+    Array.from({ length: 40 }, (_, i) => [`slice-${i}`, { files: [`src/some/long/path/file-${i}.ts`, `src/other/${i}.ts`], passed: i < 3, gaveUp: false, attempts: 0, launches: 0, reviews: [], lastImplAt: null, risky: false }]),
+  );
+  const constraints = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`C${i + 1}`, `${i}`.repeat(250)]));
+  const ctx = runContext({ id: 7, kind: "planned", planned: Object.keys(slices), slices, constraints, planReviewed: true });
+  assert.ok(ctx.length <= MAX_CONTEXT, String(ctx.length));
+  assert.match(ctx, /^Orchestration run 7 is still open/);
+  for (let i = 0; i < 5; i++) assert.ok(ctx.includes(`C${i + 1}: ${`${i}`.repeat(200)}\n`), `C${i + 1}`);
+  assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
+  const shown = (ctx.match(/^- slice-\d+/gm) ?? []).length;
+  const more = Number(/\+(\d+) more slices/.exec(ctx)?.[1]);
+  assert.ok(shown >= 1, String(shown));
+  assert.equal(shown + more, 40);
+  // a run that fits keeps every slice line whole, with no marker
+  const small = runContext({ id: 8, kind: "planned", planned: ["a"], slices: { a: slices["slice-0"] }, constraints: { C1: "short" }, planReviewed: true });
+  assert.match(small, /- a: passed FILES: src\/some\/long\/path\/file-0\.ts, src\/other\/0\.ts/);
+  assert.doesNotMatch(small, /more slices|truncated/);
 });
 
 test("no hook source prints an allow or ask permission decision (C6)", () => {
