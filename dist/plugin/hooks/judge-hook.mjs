@@ -64,9 +64,14 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
 function requests() {
   const file = join(stateDir, "prompts.jsonl");
   if (!sessionId || !existsSync(file)) return [];
+  // The file holds every session's prompts, so a line that cannot hold this session's id is skipped before parsing.
+  // prompt-capture.mjs writes each record with JSON.stringify, so a record of this session holds the id as
+  // JSON.stringify writes it; parsing and the session check below still decide.
+  const id = JSON.stringify(sessionId);
   return readFileSync(file, "utf8")
     .split("\n")
     .flatMap((line) => {
+      if (!line.includes(id)) return [];
       try {
         const r = JSON.parse(line);
         return r && r.session_id === sessionId && typeof r.text === "string" && r.text.trim() ? [r.text] : [];
