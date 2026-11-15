@@ -4,11 +4,14 @@ The live dashboard is a pane beside the chat that draws an orchestration run whi
 
 ## Opening it
 
-- It opens by itself only inside herdr: when Claude Code was started with `TERM_PROGRAM` starting with `herdr` or with `HC_TERMINAL_SOCKET` set (`inHerdr`, read with `$.env.get`). In any other terminal none of the openings below happen and no toast is shown; `/orchestration` still opens it.
-- The pane opens when you submit a prompt (`prompt.submit`), in any folder: no git repository, checkout or code project is needed. Slash commands, meta prompts, blank prompts and prompts the engine queues that you did not type (a background task's notification, a peer session's message, a scheduled trigger; the `NOT_THE_PERSON` origins) do not open it and are not new work.
-- It also opens when the first orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of an `npm run route` Bash call in the main session).
-- `/orchestration` opens it focused, so the arrow keys work at once.
-- A pane nobody asked for seats only from 144 columns. On a narrower terminal a toast (shown once per run) says to type `/orchestration`.
+- The pane is off by default, in every terminal (herdr included). It is off at every session start; only the command turns it on or off, and the setting lasts for the session (the `enabled` state value).
+- `/orchestration on` turns it on and opens it focused, so the arrow keys work at once. `/orchestration off` turns it off and closes it. `/orchestration` alone switches between the two. Any other argument changes nothing and answers with the usage. Each answer is one line that says the new state and how to switch back.
+- While it is on, the pane opens by itself when you submit a prompt (`prompt.submit`), in any folder: no git repository, checkout or code project is needed. Slash commands, meta prompts, blank prompts and prompts the engine queues that you did not type (a background task's notification, a peer session's message, a scheduled trigger; the `NOT_THE_PERSON` origins) do not open it and are not new work.
+- While it is on, it also opens when an orchestration agent (researcher, implementer, reviewer or integrator) starts, and when a route verdict is recorded (the `route` tool, or the result of an `npm run route` Bash call in the main session). While it is off, none of these open it.
+- The run is recorded while the pane is off (agents, log, plan, verdict, timer), so turning it on mid-run shows the run so far.
+- A pane nobody asked for seats only from 144 columns. While it is on, on a narrower terminal a toast (shown once until the mod reloads) says to type `/orchestration on`.
+- No hook blocks or fails the event it wraps: the pane's own work is wrapped, so a state write, `ui.open` or command registration that fails still hands the prompt, spawn, tool call, turn or session start on.
+
 ## Run boundary
 
 The pane uses the gates' run model ([brief-grammar.md, Run model](brief-grammar.md#run-model)), worked out from the agents it has seen (`runOpen`, `sliceRunOf`). It replaced the old rule that started a new run when the last agent had ended 2 minutes earlier.
@@ -26,7 +29,7 @@ The pane uses the gates' run model ([brief-grammar.md, Run model](brief-grammar.
 
 ## Scrolling and resizing
 
-- When the content is taller than the pane, a hint line at the top says the arrow keys scroll. They work once the pane has the keyboard: click it or type `/orchestration`. Esc returns to the prompt.
+- When the content is taller than the pane, a hint line at the top says the arrow keys scroll. They work once the pane has the keyboard: click it or type `/orchestration on` (which also focuses a pane that is already on). Esc returns to the prompt.
 - The layout follows the pane width. The stage boxes sit 6 to a row from 100 columns, 3 from 40, 2 below that, with a return rail between rows. The slice columns stack top to bottom when they would be narrower than 14 cells each; otherwise they sit side by side.
 
 ## Sections, top to bottom
