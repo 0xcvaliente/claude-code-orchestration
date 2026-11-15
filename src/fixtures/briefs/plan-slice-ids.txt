@@ -1,0 +1,11 @@
+PLAN REVIEW
+SLICE: A0 - setup
+FILES: a.py
+SLICE: "A1" - parser
+FILES: b.py
+RISKY: yes
+CHECKS: C1
+SLICE: A2.
+FILES: c.py
+SLICE: `A3`: cli
+FILES: d.py
