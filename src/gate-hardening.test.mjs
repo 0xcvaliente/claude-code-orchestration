@@ -80,10 +80,10 @@ const HUNG = "sleep 300 & echo $! > child.pid; sleep 300";
 
 test("test gate: a hung suite is stopped at ORCH_TEST_TIMEOUT_S, with its children, and blocks as a test failure", () => {
   const dir = tmp("orch-gh-hung-");
-  const r = gate(dir, { env: { ORCH_TEST_CMD: HUNG, ORCH_TEST_TIMEOUT_S: "2" }, limitMs: 30000 });
+  const r = gate(dir, { env: { ORCH_TEST_CMD: HUNG, ORCH_TEST_TIMEOUT_S: "1" }, limitMs: 30000 });
   assert.equal(r.status, 2, `the hook must end on its own and block: ${r.stderr}`);
   assert.ok(r.ms < 15000, `stopped near the limit, took ${r.ms} ms`);
-  assert.match(r.stderr, /did not finish within 2 seconds/);
+  assert.match(r.stderr, /did not finish within 1 seconds/);
   assert.deepEqual([lastTest(dir).decision, lastTest(dir).reason, lastTest(dir).timed_out], ["block", "tests_failed", 1]);
   const child = Number(readFileSync(join(dir, "child.pid"), "utf8"));
   assert.ok(child > 0 && !alive(child), "the suite's child process is killed too");
@@ -182,14 +182,15 @@ test("test gate: run_limited's watchdog never runs the hook's EXIT trap, however
 });
 
 // At its limit run_limited first sends the command's group SIGTERM, so a helper can remove its base worktree, and
-// kills the group only when it is still there a few seconds later. The 5 s limit leaves a loaded machine's bash time to
-// set its TERM trap before the SIGTERM comes (at 1 s a slow start died on the default action and never cleaned up).
+// kills the group only when it is still there a few seconds later. The 4 s limit (at least 4 s, since a limit holds
+// for between its value and one second more, and the watchdog polls once a second) leaves a loaded machine's bash time to set its TERM trap before the
+// SIGTERM comes (at 1 s a slow start died on the default action and never cleaned up).
 test("test gate: run_limited terminates the command before it kills it, and kills a group that ignores the terminate", () => {
   const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
   const dir = tmp("orch-gh-term-");
   const polite = `trap 'echo cleaned > "${dir}/cleaned"; exit 0' TERM; sleep 60 & wait`;
   const stubborn = `trap '' TERM; sleep 60 & echo $! > "${dir}/child.pid"; wait`;
-  const script = `${fn}\nrun_limited 5 /dev/null "$3/polite.out" /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 5 /dev/null "$3/stubborn.out" /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
+  const script = `${fn}\nrun_limited 4 /dev/null "$3/polite.out" /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 4 /dev/null "$3/stubborn.out" /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
   const t0 = Date.now();
   const r = spawnSync("bash", ["-c", script, "x", polite, stubborn, dir], { encoding: "utf8", timeout: 60000 });
   assert.match(r.stdout, /polite:1\nstubborn:1\n/);
@@ -197,6 +198,19 @@ test("test gate: run_limited terminates the command before it kills it, and kill
   const child = Number(readFileSync(join(dir, "child.pid"), "utf8"));
   assert.ok(child > 0 && goneSoon(child), "a group that ignores SIGTERM is killed after the grace");
   assert.ok(Date.now() - t0 < 40000, `took ${Date.now() - t0} ms`);
+});
+
+// bash's SECONDS ticks at whole wall-clock seconds, so a limit counted in it alone ran out up to a second early: a run
+// started late in a second (here 0.95 to 0.994 s past it, where the watchdog's poll falls just after the end tick) was
+// timed out at 2.0x s of a 3 s limit. Before the fix 5 to 7 of these 12 runs were timed out in every attempt (3 of 3).
+test("test gate: run_limited never times out a run that ends before its limit, wherever in a second it starts", () => {
+  const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
+  const fracs = ["0.95", "0.96", "0.965", "0.97", "0.973", "0.976", "0.979", "0.982", "0.985", "0.988", "0.991", "0.994"];
+  const one = 'one() {\n  local s=$SECONDS\n  while [ "$SECONDS" = "$s" ]; do :; done\n  sleep "$1"\n  run_limited 3 /dev/null /dev/null /dev/null sleep 2.6\n  echo "$1:$lim_timed_out"\n}\nfor f in "$@"; do one "$f" & done\nwait\n';
+  const r = spawnSync("bash", ["-c", `${fn}\n${one}`, "x", ...fracs], { encoding: "utf8", timeout: 60000 });
+  const lines = r.stdout.split("\n").filter(Boolean).sort();
+  assert.equal(lines.length, fracs.length, `${r.stdout}${r.stderr}`);
+  assert.deepEqual(lines.filter((l) => !l.endsWith(":0")), [], "a 2.6 s run under a 3 s limit is never timed out");
 });
 
 /**
@@ -218,10 +232,10 @@ function goneSoon(pid) {
 test("test gate: a suite that deletes the gate's temp folder and exits 0 on SIGTERM at the limit still blocks as timed out", () => {
   const { dir } = changedRepo(null);
   const cmd = 'rm -rf "$TMPDIR"/orch-verify.*; trap "exit 0" TERM; sleep 100 & wait';
-  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_TEST_TIMEOUT_S: "3", ORCH_BASELINE: "off" }, limitMs: 60000 });
+  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_TEST_TIMEOUT_S: "2", ORCH_BASELINE: "off" }, limitMs: 60000 });
   assert.equal(r.status, 2, `blocks: ${r.stderr}`);
   assert.deepEqual([lastTest(dir).decision, lastTest(dir).reason, lastTest(dir).timed_out], ["block", "tests_failed", 1]);
-  assert.match(r.stderr, /did not finish within 3 seconds/);
+  assert.match(r.stderr, /did not finish within 2 seconds/);
 });
 
 // The folder is removed again while the helper runs (its base run runs the same command, with the same TMPDIR): the
