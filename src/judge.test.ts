@@ -512,7 +512,8 @@ test("classify: floor, judged and pass cases", () => {
 });
 
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
-// expansions, each classified within 2 s. Run in a child process with a deadline: before the fix some took minutes.
+// expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
+// heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.
 const LONG_COMMANDS = `const many = (w) => Array(20000).fill(w).join(" ");
 const commands = [
   ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => "echo " + many(w)),
@@ -523,7 +524,7 @@ for (const cmd of commands) {
   const t = performance.now();
   classifyDetail(cmd, "/w");
   const ms = performance.now() - t;
-  if (ms > 2000) {
+  if (ms > 8000) {
     console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
     process.exit(1);
   }

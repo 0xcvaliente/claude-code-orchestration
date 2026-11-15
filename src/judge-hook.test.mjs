@@ -355,7 +355,7 @@ for (const cmd of commands) {
   const t = performance.now();
   classifyDetail(cmd, "/w");
   const ms = performance.now() - t;
-  if (ms > 2000) {
+  if (ms > 8000) {
     console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
     process.exit(1);
   }
