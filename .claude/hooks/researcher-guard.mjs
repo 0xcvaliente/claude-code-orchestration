@@ -88,7 +88,12 @@ export function researcherViolation(command) {
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
     if (words.some((w) => w.assign)) return { reason: "a variable assignment", word: words[0]?.text };
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
-    if (words.some(globInOptionName)) return { reason: "a glob in an option name (the shell may expand it into another option, such as -f or -delete)", word: words[0]?.text };
+    if (words.some(globInOptionName)) {
+      return {
+        reason: "a glob in an option name (the shell may expand it into another option, such as -f or -delete); quote the glob (`rg -g '*.md' x`) or use the long form (`--glob=*.md`)",
+        word: words[0]?.text,
+      };
+    }
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command`, word: w[0] };
     const option = optionViolation(w);

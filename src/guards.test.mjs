@@ -137,6 +137,9 @@ const DENIED = [
   ["find . -de*", /glob in an option/],
   ["rg --glob* x .", /glob in an option/],
   ["git log -?", /glob in an option/],
+  // The denial says how to write it instead: quote the glob or use the long form.
+  ["rg -g*.md x", /quote the glob \(`rg -g '\*\.md' x`\) or use the long form \(`--glob=\*\.md`\)/],
+  ["grep -e -* f", /quote the glob/],
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],

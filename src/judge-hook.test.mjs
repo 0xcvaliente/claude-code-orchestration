@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as sdkClassify } from "./judge.js"; // tsx resolves it to judge.ts
 
@@ -344,19 +344,43 @@ test("rm targets: symlinked, through a symlink, outside or unresolvable are deni
   assert.ok(stubCalls()[0].stdin.includes("real target paths"));
 });
 
-test("core: a command of 20,000 words is classified within seconds, so the hook decides before its timeout", () => {
-  const many = (/** @type {string} */ w) => Array(20000).fill(w).join(" ");
-  const commands = [
-    ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => `echo ${many(w)}`),
-    `${many("A=1")} ls`,
-    `echo x${"$a".repeat(20000)}`,
-  ];
-  for (const cmd of commands) {
-    const t = performance.now();
-    coreClassify(cmd, "/w");
-    const ms = performance.now() - t;
-    assert.ok(ms < 2000, `${cmd.slice(0, 30)}...: ${Math.round(ms)} ms`);
+// As in src/judge.test.ts, in a child process with a deadline: before the fix some of these took minutes.
+const LONG_COMMANDS = `const many = (w) => Array(20000).fill(w).join(" ");
+const commands = [
+  ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => "echo " + many(w)),
+  many("A=1") + " ls",
+  "echo x" + "$a".repeat(20000),
+];
+for (const cmd of commands) {
+  const t = performance.now();
+  classifyDetail(cmd, "/w");
+  const ms = performance.now() - t;
+  if (ms > 2000) {
+    console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
+    process.exit(1);
   }
+}`;
+
+test("core: a command of 20,000 words is classified within seconds, so the hook decides before its timeout", () => {
+  const code = `const { classifyDetail } = await import(${JSON.stringify(pathToFileURL(join(root, ".claude", "hooks", "judge-core.mjs")).href)});\n${LONG_COMMANDS}`;
+  const r = spawnSync(process.execPath, ["--input-type=module", "-e", code], { encoding: "utf8", timeout: 30000 });
+  assert.equal(r.signal, null, "timed out after 30 s");
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+});
+
+test("core: a quoted exec-env assignment counts only as an argument of export, declare or env itself", () => {
+  const rows = [
+    ["env LC_ALL=C git log --grep 'PATH='", "pass"],
+    ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "pass"],
+    ["export A=1; grep 'PATH=' f && git status", "pass"],
+    ["env PATH=x git log", "deny"],
+    ["env \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+    ["env -i \"PATH=/tmp/x\" git status", "deny"],
+    ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
+    ["export 'PATH=/tmp/x'; git status", "deny"],
+  ];
+  const wrong = rows.filter(([c, want]) => coreClassify(c, "/w").cls !== want).map(([c, want]) => `${c}: want ${want}`);
+  assert.deepEqual(wrong, []);
 });
 
 test("parity: judge-core's floor and classification agree with src/judge.ts", () => {

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
   bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
@@ -290,6 +291,14 @@ const CASES: Array<[string, BashClass]> = [
   ["command export 'PATH=/tmp/x'; git status", "deny"],
   ["grep 'PATH=' .envrc && git status", "pass"], // quoted text that no declaration takes is data
   ["git log --grep 'PAGER=x'", "pass"],
+  // env's own assignments end at the program it runs: that program's arguments are text.
+  ["env LC_ALL=C git log --grep 'PATH='", "pass"],
+  ["env LC_ALL=C grep -rn 'PAGER=' src && git status", "pass"],
+  ["export A=1; grep 'PATH=' f && git status", "pass"], // a declaration does not reach the next command
+  ["env PATH=x git log", "deny"],
+  ["env \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+  ["env -i \"PATH=/tmp/x\" git status", "deny"],
+  ["env -u HOME 'PAGER=x' git log", "deny"],
   ["PATH=/tmp/evil:$PATH git status", "deny"],
   ["LD_PRELOAD=/x.so rm file", "deny"],
   ["BASH_ENV=/x bash run.sh", "deny"],
@@ -453,19 +462,29 @@ test("classify: floor, judged and pass cases", () => {
   assert.deepEqual(wrong, []);
 });
 
-test("classify: a command of 20,000 words is analysed in linear time (the hook decides before its timeout)", () => {
-  const many = (w: string) => Array(20000).fill(w).join(" ");
-  const commands = [
-    ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => `echo ${many(w)}`),
-    `${many("A=1")} ls`, // every word an assignment
-    `echo x${"$a".repeat(20000)}`, // one word of 20,000 expansions (could it be rm?)
-  ];
-  for (const cmd of commands) {
-    const t = performance.now();
-    classifyDetail(cmd, CWD);
-    const ms = performance.now() - t;
-    assert.ok(ms < 2000, `${cmd.slice(0, 30)}...: ${Math.round(ms)} ms`);
+// A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
+// expansions, each classified within 2 s. Run in a child process with a deadline: before the fix some took minutes.
+const LONG_COMMANDS = `const many = (w) => Array(20000).fill(w).join(" ");
+const commands = [
+  ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => "echo " + many(w)),
+  many("A=1") + " ls",
+  "echo x" + "$a".repeat(20000),
+];
+for (const cmd of commands) {
+  const t = performance.now();
+  classifyDetail(cmd, "/w");
+  const ms = performance.now() - t;
+  if (ms > 2000) {
+    console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
+    process.exit(1);
   }
+}`;
+
+test("classify: a command of 20,000 words is analysed in linear time (the hook decides before its timeout)", () => {
+  const code = `const { classifyDetail } = await import(${JSON.stringify(new URL("./judge.ts", import.meta.url).href)});\n${LONG_COMMANDS}`;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { encoding: "utf8", timeout: 30000 });
+  assert.equal(r.signal, null, "timed out after 30 s");
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
 });
 
 test("tokenize: words carry their literal text and whether the shell decides them", () => {

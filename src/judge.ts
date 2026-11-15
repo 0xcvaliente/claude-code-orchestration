@@ -628,6 +628,18 @@ function suffixAny(words: Word[], test: (w: Word) => boolean): boolean[] {
   return s;
 }
 
+/** The index of the program `env` at ws[k] runs: the first word after its options and assignments (ws.length if none). */
+function envProgram(ws: Word[], k: number): number {
+  let i = k + 1;
+  for (; i < ws.length; i++) {
+    const w = ws[i]!;
+    if (w.redirect) continue;
+    if (["-u", "--unset", "-C", "--chdir"].includes(w.text)) i++;
+    else if (!w.text.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text)) break;
+  }
+  return i;
+}
+
 function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: boolean): Classification[] {
   const ws = cmd.words;
   const out: Classification[] = [];
@@ -661,14 +673,16 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
   const script = (text: string, dynamic: boolean, what: string) =>
     push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set<number>();
-  let declares = false; // a declaration command (export, env, ...) ran: a later quoted word may be an assignment
+  // Words before this index are arguments of a declaration command (export, env, ...), so a quoted one may be an
+  // assignment. For env they end at the program it runs: that program's arguments are text.
+  let declareUntil = 0;
   let trapped = false; // a trap word already read every later word as a script
   // The first deny decides (see analyze), so the words after it are not read.
   for (let k = 0; k < ws.length && !denied; k++) {
     const w = ws[k]!;
     const first = w.pieces[0];
     if (first && "lit" in first && !first.quoted && EXEC_ENV.test(first.lit)) ctx.env ??= first.lit.split("=")[0];
-    else if (declares && !w.redirect && EXEC_ENV.test(w.text)) ctx.env ??= w.text.split("=")[0];
+    else if (k < declareUntil && !w.redirect && EXEC_ENV.test(w.text)) ctx.env ??= w.text.split("=")[0];
     if (w.assign || w.redirect) continue; // NAME=value and redirection targets are not commands
     if (w.text.toLowerCase().startsWith("--no-preserve-root")) push(deny("--no-preserve-root is always blocked", "rm"));
     if (w.dynamic) {
@@ -681,7 +695,7 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     }
     const name = base(w.text);
     if (name === "git" || name.startsWith("git-") || name === "rm" || SHELLS.has(name)) ctx.sensitive = true;
-    if (DECLARE.has(name) && (k === at || afterWrapper(ws, k))) declares = true;
+    if (DECLARE.has(name) && (k === at || afterWrapper(ws, k))) declareUntil = Math.max(declareUntil, name === "env" ? envProgram(ws, k) : ws.length);
     const s = from[k]!; // the words after this one are nr[s], nr[s + 1], ...
     if (name === "sudo" || name === "doas") push(deny(`${name} is always blocked`));
     // su, pkexec, runuser are common words in text (`grep su file`), so they count only as the command word, when an
@@ -857,7 +871,7 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  * - `git -c`/`--config-env` with a key that runs a program (core.fsmonitor, core.sshCommand, core.pager, alias.*,
  *   ...), `git config` of such a key, and an exec-relevant environment assignment (GIT_SSH_COMMAND, GIT_EDITOR, PAGER,
  *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell, also a quoted one given to
- *   export, declare, typeset, local, readonly or env (`export 'PATH=/x'`).
+ *   export, declare, typeset, local or readonly, or to env before the program it runs (`export 'PATH=/x'`).
  * Every substitution (`$(..)`, backticks, `<(..)`), every `sh -c`-style payload, `eval`, `trap` action, `env -S`
  * string and `watch` command is read as a script of its own with the same rules (a dynamic one is denied).
  * An rm, git or sudo that appears only inside a quoted argument (`git commit -m "fix rm -rf docs"`, `echo "git push"`)
