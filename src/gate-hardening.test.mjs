@@ -183,7 +183,7 @@ test("test gate: run_limited's watchdog never runs the hook's EXIT trap, however
 
 // At its limit run_limited first sends the command's group SIGTERM, so a helper can remove its base worktree, and
 // kills the group only when it is still there a few seconds later. The 4 s limit (at least 4 s, since a limit holds
-// for between its value and one second more) leaves a loaded machine's bash time to set its TERM trap before the
+// for between its value and one second more, and the watchdog polls once a second) leaves a loaded machine's bash time to set its TERM trap before the
 // SIGTERM comes (at 1 s a slow start died on the default action and never cleaned up).
 test("test gate: run_limited terminates the command before it kills it, and kills a group that ignores the terminate", () => {
   const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
