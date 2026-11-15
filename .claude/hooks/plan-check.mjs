@@ -21,9 +21,11 @@
 //                         "Stall"). Counted per slice since the stall began. ORCH_STALL_GATE=off turns it off.
 //   not_in_plan           in a planned run whose plan has parseable slice lines: the SLICE must be planned (or added
 //                         by a REPLAN) and its FILES a subset of the planned FILES (normalizeFiles against the project
-//                         dir; a planned folder or glob covers what is under it). Without plan slice lines, or for a
+//                         dir; a planned folder covers what is under it, a planned glob only what it matches: `*` in
+//                         one segment, `**` across segments, `?` one character). Without plan slice lines, or for a
 //                         planned slice without FILES, this skips with a logged reason. Counted per slice.
-//   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS.
+//   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS
+//                         (both normalized; entries overlap when some path could match both).
 //   dependency_cycle      DEPENDS closes a cycle.
 //   worktree_base_not_head  (after the two above, with the usual two-block guard per slice) tool_input.isolation is
 //                         "worktree", the effective worktree.baseRef (first of <project>/.claude/settings.local.json,
@@ -100,7 +102,7 @@
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -451,7 +453,7 @@ function draftsText(scope) {
       }
       keys = openRun ? [String(openRun.id)] : [String(runs.length), `none-${runs.length}`];
     }
-    const made = readJsonl(stateDir, CREATE_LOG).filter(
+    const made = readJsonl(stateDir, CREATE_LOG, sid).filter(
       (e) => e.session_id === sid && e.decision === "allow" && typeof e.skill === "string" && typeof e.draft === "string" && keys.includes(String(e.run)),
     );
     /** @type {{ name: string, path: string }[]} */
@@ -722,6 +724,9 @@ let skillInfo = skillSlice ? { name: h.skill, target: h.target ?? "private", upd
 let skillReady = false;
 
 const lock = join(stateDir, "plan-check.lock");
+// The owner token written into the lock at creation. The lock is removed only while it still holds this token: a lock
+// older than STALE_MS may have been taken over by another launch, whose lock is not ours to remove.
+const lockOwner = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let locked = false;
 try {
   ensureStateDir();
@@ -730,6 +735,11 @@ try {
     try {
       mkdirSync(lock);
       locked = true;
+      try {
+        writeFileSync(join(lock, "owner"), lockOwner);
+      } catch {
+        // no token: the lock is left to go stale rather than removed unchecked
+      }
     } catch {
       try {
         if (Date.now() - statSync(lock).mtimeMs > STALE_MS) rmSync(lock, { recursive: true, force: true });
@@ -751,7 +761,7 @@ try {
   // unreadable logs: decide as if nothing ran
 }
 const { runs, open, records } = state;
-const prior = readJsonl(stateDir, LOG).filter((e) => e.session_id === sessionId); // unreadable: as if nothing was launched
+const prior = readJsonl(stateDir, LOG, sessionId).filter((e) => e.session_id === sessionId); // unreadable: as if nothing was launched
 
 // The run this launch is scoped to. With no run open, launches since the last run share the key none-<last run id>;
 // a light launch then opens run <last id + 1> (foldRuns opens it at this launch's record) and sees both keys.
@@ -800,7 +810,13 @@ function decide(decision, reason, message) {
     const { name, ...rest } = skillInfo;
     createLog({ decision, reason, skill: name, ...rest, slice, files, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}) });
   }
-  if (locked) rmSync(lock, { recursive: true, force: true });
+  if (locked) {
+    try {
+      if (readFileSync(join(lock, "owner"), "utf8") === lockOwner) rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // taken over, already gone or not removable: the decision stands
+    }
+  }
   if (decision === "block") {
     try {
       writeSync(2, `${message}\n`);
@@ -859,7 +875,7 @@ if (skillInfo) {
       if (repos.some((r) => existsSync(join(r, "skills", name))) || (await installedSkill(name))) {
         gate("skill_exists", `Plan check: a skill named ${name} already exists (in a skills repository or installed). Pick another name, name the existing skill on a SKILLS line instead, or, to change that skill, add the line UPDATE: yes.`);
       }
-      const made = readJsonl(stateDir, CREATE_LOG).filter(
+      const made = readJsonl(stateDir, CREATE_LOG, sessionId).filter(
         (e) => e.session_id === sessionId && e.decision === "allow" && e.update !== true && typeof e.skill === "string" && e.skill !== name && scope.includes(String(e.run)),
       );
       const other = made.at(-1)?.skill;
@@ -903,14 +919,98 @@ if (open && st?.stalled && stallGateOn(process.env)) {
   gaveUp.push("replan_required_gave_up");
 }
 
-// A glob counts as its literal prefix; two paths overlap when equal or when one is a folder of the other.
+// FILES globs: `*` matches within one path segment, `**` (a whole segment) across segments, `?` one character. An entry
+// without glob characters is a file or a folder, so it also stands for what is under it. Entries are compared after
+// normalizeFiles against the project folder (a skill slice's are already resolved against its draft), so `./x`,
+// `src/../x` and `/abs/proj/x` are one path.
+const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
 /** @param {string} p */
-const base = (p) => p.replace(/\*.*$/, "").replace(/\/+$/, "");
-/** @param {string} a @param {string} b */
+const isGlob = (p) => /[*?]/.test(p);
+/**
+ * A plain entry names a file, not a folder, when it is a file on disk, or, when it does not exist, when its last segment
+ * has an extension (`a.py`; not `.claude` or `src`). Anything else may be a folder. @param {string} p
+ */
+const fileLike = (p) => {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return /[^/.][^/]*\.[A-Za-z0-9]+$/.test(p);
+  }
+};
+/** Path segments; a plain entry that may be a folder gets a trailing `**` (what is under it). @param {string} p */
+const segsOf = (p, under = !isGlob(p) && !fileLike(p)) => [...p.split("/").filter(Boolean), ...(under ? ["**"] : [])];
+/** One segment pattern as a regular expression. @param {string} g */
+const segRe = (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, "[^/]*").replace(/\?/g, "[^/]")}$`);
+/** Could one segment match both segment patterns? A walk over the product of the two patterns. @param {string} x @param {string} y */
+const segMeet = (x, y) => {
+  if (!isGlob(x)) return segRe(y).test(x);
+  if (!isGlob(y)) return segRe(x).test(y);
+  const seen = new Set();
+  /** @type {[number, number][]} */
+  const todo = [[0, 0]];
+  while (todo.length) {
+    const [i, j] = /** @type {[number, number]} */ (todo.pop());
+    const key = `${i},${j}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (i === x.length && j === y.length) return true;
+    if (x[i] === "*") todo.push([i + 1, j]);
+    if (y[j] === "*") todo.push([i, j + 1]);
+    if (i < x.length && j < y.length) {
+      const [a, b] = [x[i], y[j]];
+      if (a === "*" || b === "*" || a === "?" || b === "?" || a === b) todo.push([a === "*" ? i : i + 1, b === "*" ? j : j + 1]);
+    }
+  }
+  return false;
+};
+/** Could one path match both segment lists? @param {string[]} a @param {string[]} b @returns {boolean} */
+const meet = (a, b, memo = new Map(), i = 0, j = 0) => {
+  const key = `${i},${j}`;
+  if (memo.has(key)) return memo.get(key);
+  let r;
+  if (i === a.length && j === b.length) r = true;
+  else if (a[i] === "**") r = meet(a, b, memo, i + 1, j) || (j < b.length && meet(a, b, memo, i, j + 1));
+  else if (b[j] === "**") r = meet(a, b, memo, i, j + 1) || (i < a.length && meet(a, b, memo, i + 1, j));
+  else r = i < a.length && j < b.length && segMeet(a[i] ?? "", b[j] ?? "") && meet(a, b, memo, i + 1, j + 1);
+  memo.set(key, r);
+  return r;
+};
+/**
+ * Does every path matching segment list `l` match `p`? Sound but not complete: a case it cannot show is false.
+ * @param {string[]} p @param {string[]} l @returns {boolean}
+ */
+const within = (p, l, memo = new Map(), i = 0, j = 0) => {
+  const key = `${i},${j}`;
+  if (memo.has(key)) return memo.get(key);
+  let r;
+  if (i === p.length) r = j === l.length;
+  else if (p[i] === "**") r = within(p, l, memo, i + 1, j) || (j < l.length && within(p, l, memo, i, j + 1));
+  else if (j === l.length || l[j] === "**") r = false;
+  else {
+    const [ps, ls] = [p[i] ?? "", l[j] ?? ""];
+    r = (isGlob(ls) ? ps === ls || /^\*+$/.test(ps) : segRe(ps).test(ls)) && within(p, l, memo, i + 1, j + 1);
+  }
+  memo.set(key, r);
+  return r;
+};
+/** Two normalized entries overlap when some path could match both; what cannot be decided overlaps. @param {string} a @param {string} b */
 const overlaps = (a, b) => {
-  const [x, y] = [base(a), base(b)];
-  if (!x || !y) return true;
-  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+  try {
+    return a === b || meet(segsOf(a), segsOf(b));
+  } catch {
+    return true;
+  }
+};
+/**
+ * A normalized planned entry covers a normalized launched one: a planned glob only what matches it, a planned folder
+ * what is under it. @param {string} p @param {string} f
+ */
+const covers = (p, f) => {
+  try {
+    return p === f || within(segsOf(p), segsOf(f, false));
+  } catch {
+    return false;
+  }
 };
 
 // Plan conformance: the slice and its files must be in the plan of an open planned run.
@@ -922,14 +1022,8 @@ else {
   if (!planned?.planned) problem = `slice ${slice} is not in the plan of run ${open.id} (planned: ${open.planned.join(", ")})`;
   else if (!planned.files.length) skips.push("not_in_plan:no_planned_files");
   else {
-    const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
     // A slice the plan marks KIND: skill with a SKILL name has its planned FILES in that skill's draft worktree.
     const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir);
-    /** A planned path covers itself, what is under it as a folder, and what its glob prefix starts. @param {string} p @param {string} f */
-    const covers = (p, f) => {
-      const [x, y] = [base(p), base(f)];
-      return !!x && (x === y || y.startsWith(`${x}/`) || (p.includes("*") && y.startsWith(x)));
-    };
     const extra = files.filter((f) => {
       const n = normalizeFiles([f], dir)[0];
       return !n || !allowed.some((p) => covers(p, n));
@@ -967,7 +1061,14 @@ function plannedDraft(id) {
 const clashes = [];
 for (const e of launched) {
   if (e.slice === slice || depends.includes(e.slice)) continue;
-  for (const f of files) for (const g of e.files ?? []) if (overlaps(f, g)) clashes.push(`${f} (owned by ${e.slice})`);
+  // FILES are logged as written and compared normalized; an entry that does not normalize is compared as written.
+  /** @type {string[]} */
+  const owned = (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
+  const theirs = owned.map((g) => normalizeFiles([g], dir)[0] ?? g);
+  for (const f of files) {
+    const n = normalizeFiles([f], dir)[0] ?? f;
+    if (theirs.some((g) => overlaps(n, g))) clashes.push(`${f} (owned by ${e.slice})`);
+  }
 }
 // file_overlap and dependency_cycle block every time, as before this hook was scoped to runs: two owners of one file,
 // or a cycle, is a broken plan that letting the launch through would not fix (C2: no existing block is weakened).
