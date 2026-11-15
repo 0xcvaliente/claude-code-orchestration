@@ -4,6 +4,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-15
+
+1.4.0 lets the orchestrator use skills, lets a run draft one new skill, and opens the orchestration pane by itself only inside herdr. Upgrading: three new plugin settings (`skill_create`, `skills_repo_private`, `skills_repo_public`, all empty by default); no existing setting changed. In a plain terminal the pane no longer opens unasked: type `/orchestration` to see it.
+
 ### Added
 
 - **The orchestrator can load skills.** Its tools gain `Skill` (`NATIVE_TOOLS.orchestrator` in `src/config.ts`; checked live on Claude Code 2.1.325: a main-thread agent whose tools name `Skill` sees the installed skills and can load one). Before planning it may load at most two installed skills that shape the plan itself (domain rules, architecture, a threat model), because each loaded skill stays in its context for the whole run; every other fitting skill still goes to the workers by name on `SKILLS:` lines. The route skill and the session nudge carry the same rule.
@@ -16,6 +20,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Changed
 
+- **The orchestration pane opens by itself only inside herdr.** A typed prompt, an orchestration agent's start and a route verdict open it only when Claude Code was started in herdr (`TERM_PROGRAM` starting with `herdr`, or `HC_TERMINAL_SOCKET` set, read with `$.env.get`); in any other terminal it stays closed and the chat keeps the full width, and the "type /orchestration" toast is not shown. `/orchestration` still opens it everywhere. The check reads how the session was started, not where it is viewed: a session started in herdr and attached from another terminal still opens it.
 - **A reviewer on opus or above gets up to 2 suggested skills** (was 1). The limit follows the launch's effective model: the call's `model`, else the agent file's. A sonnet reviewer, or a launch whose model cannot be ranked, keeps 1. Implementers and researchers keep 3. No model default changed.
 
 ## [1.3.0] - 2026-11-14
@@ -153,6 +158,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.4.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.0
 [1.3.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.3.0
 [1.2.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.2
 [1.2.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.1
