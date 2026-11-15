@@ -10,7 +10,8 @@ orch_detect_test_cmd() {
     printf '%s\n' "$ORCH_TEST_CMD"
     return 0
   fi
-  if [ -f "$dir/package.json" ] && node -e 'try{process.exit(typeof JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).scripts.test==="string"?0:1)}catch{process.exit(1)}' "$dir/package.json" 2>/dev/null; then
+  # npm init's placeholder (echo "Error: no test specified" && exit 1) is no test command: go on as if there were none.
+  if [ -f "$dir/package.json" ] && node -e 'try{const t=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).scripts.test;process.exit(typeof t==="string"&&!t.includes("no test specified")?0:1)}catch{process.exit(1)}' "$dir/package.json" 2>/dev/null; then
     echo "npm test --silent"
     return 0
   fi
