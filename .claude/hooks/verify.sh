@@ -41,6 +41,13 @@
 #               stays); a bugfix check that has no time or is killed blocks as unverified (bugfix_timeout), counted
 #               with the other bugfix blocks.
 #   So test run + base run (or bugfix check) <= 870 s < 900 s.
+#   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
+#   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
+#   less those 5 s, and only a timed-out test run can add them (875 s < 900 s).
+# Temp folder: one mktemp folder per hook run, removed by the EXIT trap of the main shell only (subshells are ended
+#   with SIGKILL: a subshell that gets SIGTERM before it has reset its inherited traps would run that trap and remove the
+#   folder mid-run). Removed from outside anyway, it is made again before each use; a bugfix check whose input or
+#   answer was lost with it blocks as unverified (bugfix_tmp_lost, counted with the other bugfix blocks), never allows.
 # Only portable tools: bash job control (set -m) for the process group, kill, sleep 1 and bash's SECONDS.
 # Plugin userConfig: each ORCH_<KEY> setting falls back to CLAUDE_PLUGIN_OPTION_<KEY> when unset (state.mjs mirrors it).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
@@ -87,6 +94,7 @@ budget="$(pos_int "${ORCH_HOOK_BUDGET_S:-}" 870)"
 test_limit="$(pos_int "${ORCH_TEST_TIMEOUT_S:-}" 600)"
 base_limit="$(pos_int "${ORCH_BASE_TIMEOUT_S:-}" 300)"
 time_left() { printf '%s' "$((budget - SECONDS))"; }
+LIM_GRACE_S=5 # run_limited: seconds between the SIGTERM at a limit and the SIGKILL
 
 # Milliseconds, like the node hooks' records, so foldRuns orders a test-gate record against a stop of the same second.
 # node is there wherever the hooks run (the other SubagentStop hooks are node); date's whole seconds only without it.
@@ -105,11 +113,9 @@ log_gate() { # decision reason [extra JSON fields: counts only]
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
 # own group on bash 3.2 and later, without a terminal; the watchdog polls once a second.
 run_limited() { # limit infile outfile errfile cmd...
-  local limit="$1" inf="$2" outf="$3" errf="$4" pid wd flag
+  local limit="$1" inf="$2" outf="$3" errf="$4" pid wd end
   shift 4
   lim_rc=0 lim_timed_out=0
-  flag="$outf.timedout"
-  rm -f "$flag"
   # The job's group is a background group. When the hook has a controlling terminal (hooks normally have none), a
   # test that reads /dev/tty would stop on SIGTTIN and only end at the limit; ignored here and so in the job (an
   # ignored signal stays ignored across exec), such a read fails at once instead, and a terminal write goes through.
@@ -122,24 +128,44 @@ run_limited() { # limit infile outfile errfile cmd...
   fi
   pid=$!
   set +m
+  end=$((SECONDS + limit)) # the watchdog and the timeout verdict below share it
+  # The watchdog: at the limit it sends the group SIGTERM (bugfix-check.mjs then removes its base worktree), and SIGKILL
+  # when the leader is still there after LIM_GRACE_S seconds. Its first act is to drop the EXIT trap it inherits.
   (
-    end=$((SECONDS + limit))
+    trap - EXIT
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$SECONDS" -ge "$end" ]; then
-        : >"$flag"
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+        g=0
+        while [ "$g" -lt "${LIM_GRACE_S:-5}" ] && kill -0 "$pid" 2>/dev/null; do
+          sleep 1
+          g=$((g + 1))
+        done
         kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-        break
+        exit 124
       fi
       sleep 1
     done
-  ) &
+    exit 0
+  ) >/dev/null 2>&1 &
   wd=$!
   wait "$pid" 2>/dev/null
   lim_rc=$?
-  kill "$wd" 2>/dev/null
-  wait "$wd" 2>/dev/null
-  if [ -e "$flag" ]; then lim_timed_out=1; fi
-  rm -f "$flag"
+  # Timed out is the hook's own fact, never a file the command could delete: the watchdog exits 124 when it signalled
+  # the run, whatever status the run then returned (a suite may exit 0 on SIGTERM). Before the limit it cannot have
+  # fired, so it is stopped with SIGKILL, never SIGTERM: a subshell that gets SIGTERM before it has reset the traps it
+  # inherited runs the hook's EXIT trap, which removed the hook's temp folder while the hook still ran (seen on loaded
+  # machines). From the limit on it is waited for: it ends within its grace.
+  if [ "$SECONDS" -lt "$end" ]; then
+    kill -KILL "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null
+  else
+    wait "$wd" 2>/dev/null
+    if [ "$?" = 124 ]; then
+      lim_timed_out=1
+      kill -KILL -- "-$pid" 2>/dev/null # the leader ended on the SIGTERM: its group's stragglers go now
+    fi
+  fi
   return 0
 }
 
@@ -149,15 +175,18 @@ if [ -z "$work" ] || [ ! -d "$work" ]; then
   mkdir -p "$work" 2>/dev/null || true
 fi
 trap 'rm -rf "$work" 2>/dev/null' EXIT
+# The folder can still be removed from outside while the hook runs (a suite or a cleaner that sweeps TMPDIR). Before
+# each use it is made again; when that fails the caller treats it like no time for the check (never a silent allow).
+ensure_work() { [ -d "$work" ] || mkdir -p "$work" 2>/dev/null; }
 
 # Run bugfix-check.mjs <mode> with $2 on stdin and read its answer into chk_decision, chk_reason, chk_extra and
 # chk_message. An empty decision is no opinion (also when node is missing or the helper fails). The reason keeps only
 # [a-z_] and the extra only JSON count characters, so the log line stays valid JSON and holds no test output.
 # $3 is the number of base runs the mode may make: each gets min(ORCH_BASE_TIMEOUT_S, its share of the time left less
-# 10 s), and the helper is killed when the budget runs out. chk_no_time is 1 when there was no time to run it or it was
-# killed (then the decision is empty).
+# 10 s), and the helper is stopped when the budget runs out. chk_no_time is 1 when there was no time to run it or it was
+# stopped, and also (with chk_tmp_lost) when its input or answer was lost with the temp folder; the decision is empty.
 check() { # mode stdin runs
-  chk_decision="" chk_reason="" chk_extra="" chk_message="" chk_no_time=0
+  chk_decision="" chk_reason="" chk_extra="" chk_message="" chk_no_time=0 chk_tmp_lost=0
   local res left share
   left="$(time_left)"
   share=$(((left - 10) / $3))
@@ -166,11 +195,18 @@ check() { # mode stdin runs
     chk_no_time=1
     return 0
   fi
-  printf '%s' "$2" >"$work/check.in" 2>/dev/null || return 0
-  run_limited "$left" "$work/check.in" "$work/check.out" /dev/null \
+  if ! { ensure_work && printf '%s' "$2" >"$work/check.in"; } 2>/dev/null; then
+    chk_no_time=1 chk_tmp_lost=1
+    return 0
+  fi
+  run_limited "$((left - LIM_GRACE_S))" "$work/check.in" "$work/check.out" /dev/null \
     env ORCH_BASE_TIMEOUT_S="$share" node "$hooks_dir/bugfix-check.mjs" "$1" --cmd "$cmd" --state "$state" --isolated "$isolated" --mode "${ORCH_BASELINE:-inform}"
   if [ "$lim_timed_out" = 1 ]; then
     chk_no_time=1
+    return 0
+  fi
+  if [ ! -f "$work/check.out" ]; then # removed with the folder during the run: the answer is lost
+    chk_no_time=1 chk_tmp_lost=1
     return 0
   fi
   [ "$lim_rc" = 0 ] || return 0
@@ -183,7 +219,7 @@ check() { # mode stdin runs
 # reads as not a bugfix slice, as when node is missing.
 is_bugfix_agent() {
   local kind
-  printf '%s' "$input" >"$work/kind.in" 2>/dev/null || return 1
+  { ensure_work && printf '%s' "$input" >"$work/kind.in"; } 2>/dev/null || return 1
   run_limited 10 "$work/kind.in" "$work/kind.out" /dev/null \
     node --input-type=module -e 'import { readFileSync } from "node:fs"; import { pathToFileURL } from "node:url"; const { agentKind } = await import(pathToFileURL(process.argv[1]).href); process.stdout.write(String(agentKind(process.argv[2], JSON.parse(readFileSync(0, "utf8")))));' "$hooks_dir/bugfix-check.mjs" "$state"
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 1
@@ -297,6 +333,7 @@ fi
 limit="$(time_left)"
 [ "$limit" -le "$test_limit" ] || limit="$test_limit"
 [ "$limit" -ge 1 ] || limit=1
+ensure_work
 run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
 rc="$lim_rc"
 timed_out="$lim_timed_out"
@@ -307,7 +344,8 @@ fi
 if [ "$rc" = 0 ]; then
   if [ "${ORCH_BUGFIX_CHECK:-}" != off ] && [ "$agent_type" = implementer ]; then
     check bugfix "$input" 2
-    if [ "$chk_no_time" = 1 ] && is_bugfix_agent; then
+    # A temp folder that could not be made again leaves the brief unread too: treated as a bugfix agent (blocks).
+    if [ "$chk_no_time" = 1 ] && { is_bugfix_agent || { [ "$chk_tmp_lost" = 1 ] && ! ensure_work; }; }; then
       # No time left to check the reproduction test, or the check was killed: unverified, so it blocks like the
       # helper's own unverified blocks and shares their cap (bugfix-check.mjs counts every bugfix_ block). Only for a
       # KIND: bugfix agent: any other agent passes as before.
@@ -318,6 +356,11 @@ if [ "$rc" = 0 ]; then
       if [ "${bblocks:-0}" -ge "$MAX_BLOCKS" ]; then
         log_gate allow bugfix_unverified_gave_up
         exit 0
+      fi
+      if [ "$chk_tmp_lost" = 1 ]; then
+        log_gate block bugfix_tmp_lost
+        echo "KIND: bugfix: unverified. The test gate's temporary folder under ${TMPDIR:-/tmp} was removed while the gate ran, so the check of the reproduction test against the base could not run or its answer was lost. Stop whatever cleans that folder, or report the bug as unverified." >&2
+        exit 2
       fi
       log_gate block bugfix_timeout
       echo "KIND: bugfix: unverified. The check of the reproduction test against the base did not finish within the test gate's time budget ($budget seconds for the whole gate). Make the test suite faster, or report the bug as unverified." >&2
