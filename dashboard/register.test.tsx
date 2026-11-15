@@ -11,7 +11,11 @@ const PANE = {
   props: { title: 'Orchestration', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
 } as const
 
-test('the pane follows an implementer from start to its STATUS line', async ($, on) => {
+// The default limit of a test is 5 s. These tests mount the pane at many widths or advance the clock by minutes of 250 ms pulses, which takes
+// 2 to 5 s on an idle machine and several times that under load, so they get a wider limit.
+const SLOW = { timeoutMs: 30000 }
+
+test('the pane follows an implementer from start to its STATUS line', SLOW, async ($, on) => {
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -690,7 +694,7 @@ test('triage fork: sizing draws all three routes dim, with no marker and no link
   }
 })
 
-test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', async ($, on) => {
+test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', SLOW, async ($, on) => {
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   await $.turn.complete(mainDone('answer'))
@@ -902,7 +906,7 @@ test('a spawn over two minutes after the last agent, while the main turn is open
   expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true)
 })
 
-test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', async ($, on) => {
+test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(300_000) // five minutes: still open
@@ -920,13 +924,14 @@ test('stale work (no turn.complete, last agent over ten minutes ago) is signed o
 const mountLive = ($: any) => $.ui.mount({ ...PANE, surface: 'terminal' })
 const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => x.text ?? '') as string[]
 
-// ~2400 timer redraws of the live pane take about 5 s on a loaded machine, so the default 5 s limit is too tight
-test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', { timeoutMs: 15000 }, async ($, on) => {
+// The pane is mounted only for the last seconds: a mounted pane redraws on each of the ~2400 pulses of the ten minutes before, which took
+// about 30 s and timed the test out. Unmounted, a pulse only writes the tick.
+test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
-  const ui = await mountLive($)
-  expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
+  expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
   for (let i = 0; i < 59; i++) await clock.advance(10_000) // 590 s of 250 ms pulses: still open
+  const ui = await mountLive($)
   expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
   for (let i = 0; i < 12; i++) await clock.advance(1000) // the pulse that finds it stale draws once more
   const t = await liveTexts(ui)
@@ -958,7 +963,7 @@ test('the timer ticks while work is open with no agents and stops, after a last 
   await ui.unmount()
 })
 
-test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', async ($, on) => {
+test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(700_000) // a long build, no turn.complete yet
@@ -1174,7 +1179,7 @@ test('stage loops: re-plan, retry and rebuild appear when their condition is met
   await ui.unmount()
 })
 
-test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', async ($, on) => {
+test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', SLOW, async ($, on) => {
   await boot($, on)
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
   await finish($, 'p1', FAIL)
@@ -1412,7 +1417,7 @@ test('slice diagram: a running first card ends the trunk dot above its own fork;
   expect(rowsSeen.size).toBe(2)
 })
 
-test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', async ($, on) => {
+test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', SLOW, async ($, on) => {
   await boot($, on, { route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
   const WIDE = [24, 28, 32, 36, 39, 40, 44, 52, 60, 64, 80, 99, 100, 120, 140]
