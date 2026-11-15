@@ -72,7 +72,7 @@ const REWRITE_MIN = 20000; // a cache write this large after the first request, 
  * Claude Code writes one transcript line per content block, each carrying the message's usage, so each usage field
  * is the maximum over the lines of one message id (a partial usage on an early line cannot undercount), then summed
  * over messages. "<synthetic>" messages (harness-made, no API call) are skipped.
- * max_turns_hit: how the transcript ends when the SubagentStop hook reads it, which is the only time this runs. A
+ * max_turns_hit: how the transcript ends when the SubagentStop hook reads it (turn-budget.mjs uses only turns). A
  * maxTurns stop ends the transcript on the tool_result of the last turn's tool call, with no assistant message after
  * it (seen in 2.1.316 transcripts), but such a stop fires no SubagentStop (docs/research-2026-11-10.md, Check A;
  * .claude/rules/agents.md, implementer_unfinished), so this field never records one: those agents show as started
