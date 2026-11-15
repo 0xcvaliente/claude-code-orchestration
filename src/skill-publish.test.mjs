@@ -1,6 +1,7 @@
 // scripts/skill-publish.mjs against local temporary git repositories: the skills repository's origin is a bare
 // repository in a temp folder, the draft is a git worktree under a temporary CLAUDE_CONFIG_DIR, and `gh` is a fake on
 // PATH that logs its arguments and answers like gh would. Nothing reaches a real remote and no model runs.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

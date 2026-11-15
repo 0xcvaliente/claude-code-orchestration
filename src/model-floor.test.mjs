@@ -1,5 +1,6 @@
 // The haiku rule in plan-check.mjs: a launch of one of this plugin's own agents on a haiku model is raised to sonnet
 // unless ORCH_ALLOW_HAIKU=1 (or the plugin option). Run as a hook in a throwaway project with the hooks copied in.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

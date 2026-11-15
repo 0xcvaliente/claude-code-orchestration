@@ -1,4 +1,5 @@
 // node --test bench/charts.test.mjs
+import "../src/test-tmp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { renderAll } from "./charts.mjs";

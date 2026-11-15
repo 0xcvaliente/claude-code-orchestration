@@ -102,7 +102,7 @@
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -122,6 +122,11 @@ const BUILTINS = builtinAgents();
 const ROUTED_TYPES = new Set(["researcher", "orchestration:researcher"]);
 const ROUTE_LOG = "reads-route.jsonl";
 const ROUTER_BUDGET_MS = 15_000; // under the hook timeout the wiring slice sets; profiling past it skips routing
+// The most ORCH_READ_ROUTER_BUDGET_MS may give the profiler. A researcher launch takes no lock and runs no git, so its
+// worst case is this child plus node startup, the skill catalog scan of the hints and the log reads: 40 s leaves 20 s
+// of the 60 s hook timeout for those (file-system work with no timeout of its own), as the implementer path's fixed
+// waits (lock 5 s, at most seven 5 s git calls) leave 20 s for its scans.
+const ROUTER_BUDGET_MAX_MS = 40_000;
 /** @type {Record<string, number>} */
 const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
 // Skill hints go only to this plugin's own workers: the project's copy or the plugin's namespaced one.
@@ -625,7 +630,8 @@ function routeRead() {
     }
   });
   const budgetEnv = Number(env.ORCH_READ_ROUTER_BUDGET_MS);
-  const budget = Number.isFinite(budgetEnv) && budgetEnv > 0 ? Math.min(budgetEnv, 50_000) : ROUTER_BUDGET_MS;
+  // Clamped at ROUTER_BUDGET_MAX_MS so the hook decides before its 60 s timeout (a hook killed there does not decide).
+  const budget = Number.isFinite(budgetEnv) && budgetEnv > 0 ? Math.min(budgetEnv, ROUTER_BUDGET_MAX_MS) : ROUTER_BUDGET_MS;
 
   /** @type {any} */
   let r = null;
@@ -636,7 +642,7 @@ function routeRead() {
     const script = `import { profileSources } from ${JSON.stringify(profiler)};
 let s = ""; process.stdin.setEncoding("utf8"); for await (const c of process.stdin) s += c;
 const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.list, a.opts)));`;
-    const opts = { read: h.read ?? undefined, risky: h.risky, cacheDir: join(stateDir, "read-cache") };
+    const opts = { read: h.read ?? undefined, risky: h.risky, cacheDir: join(stateDir, "read-cache"), projectDir: dir };
     const out = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       input: JSON.stringify({ list: sources, opts }),
       encoding: "utf8",
@@ -929,13 +935,138 @@ const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && 
 /** @param {string} p */
 const isGlob = (p) => /[*?]/.test(p);
 /** A regular file on disk; anything else (a folder, or nothing yet) may hold paths under it. @param {string} p */
-const fileLike = (p) => {
+const onDiskFile = (p) => {
   try {
     return statSync(p).isFile();
   } catch {
     return false;
   }
 };
+/** What canon() found on disk for each canonical entry, since a case-folded name may not exist as written. */
+/** @type {Map<string, boolean>} */
+const fileKind = new Map();
+/** @param {string} p */
+const fileLike = (p) => fileKind.get(p) ?? onDiskFile(p);
+/**
+ * Is the project folder on a case-insensitive file system (the macOS default)? Probed once per launch: the folder
+ * reached under a name with swapped case is the same inode. A folder name without letters cannot tell: case-sensitive.
+ * ORCH_TEST_CASE_INSENSITIVE ("1" or "0") is a test seam that replaces the probe so the rule is tested on Linux; it is
+ * not a user switch. Never throws.
+ */
+const caseInsensitive = (() => {
+  const seam = process.env.ORCH_TEST_CASE_INSENSITIVE;
+  if (seam === "1" || seam === "0") return seam === "1";
+  try {
+    const real = realpathSync(dir);
+    const swapped = real.replace(/[A-Za-z]/g, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+    if (swapped === real) return false;
+    const [a, b] = [statSync(real), statSync(swapped)];
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+})();
+/**
+ * One name for a normalized entry: the fixed leading folders (all of it, for a plain entry) resolved through the file
+ * system as far as they exist (the deepest existing ancestor's real path plus the remaining segments, so a symlink and
+ * its target are one name; a dangling link or a path not on disk yet stays as written), then case-folded on a
+ * case-insensitive file system. A glob's pattern part is never resolved here; names() adds the symlinks its first
+ * wildcard segment matches. Never throws: on any error, the entry.
+ * Out of reach (other names for one file this check does not see), with link -> src beside src/a.ts: a symlink
+ * reached only through a `**` segment (the entry `**` then link/a.ts) or through a wildcard segment after the first
+ * (t*, then l*, then a.ts); a hard link (h.ts); two Unicode normal forms of one name on a file system that folds them.
+ * @param {string} p
+ */
+const canon = (p) => {
+  /** @type {Map<string, string>} */
+  const memo = canon.memo;
+  const hit = memo.get(p);
+  if (hit !== undefined) return hit;
+  let out = p;
+  try {
+    if (p.startsWith("/")) {
+      const segs = p.split("/").filter(Boolean);
+      const g = segs.findIndex(isGlob);
+      const fixed = g === -1 ? segs : segs.slice(0, g);
+      const rest = g === -1 ? [] : segs.slice(g);
+      let real = null;
+      let k = fixed.length;
+      for (; k >= 0; k--) {
+        try {
+          real = realpathSync(`/${fixed.slice(0, k).join("/")}`);
+          break;
+        } catch {
+          // not on disk (or a dangling link): try its parent
+        }
+      }
+      if (real !== null) {
+        const tail = [...fixed.slice(k), ...rest];
+        out = tail.length ? `${real === "/" ? "" : real}/${tail.join("/")}` : real;
+      }
+    }
+  } catch {
+    out = p;
+  }
+  const isFile = !isGlob(out) && onDiskFile(out);
+  if (caseInsensitive) out = out.toLowerCase();
+  if (isFile) fileKind.set(out, true);
+  memo.set(p, out);
+  return out;
+};
+canon.memo = new Map();
+const ALIAS_CAP = 32;
+/**
+ * Every name of a normalized entry: its canon(), and for a glob whose first wildcard segment is not the last (and not
+ * `**`) one alias per symlink to a folder that segment matches in its fixed leading folder (one readdir, no recursion):
+ * the link's real path followed by the rest of the pattern. null when it cannot be decided (more than ALIAS_CAP links,
+ * or an error): the caller treats that as an overlap. Never throws.
+ * @param {string} p @returns {string[] | null}
+ */
+const names = (p) => {
+  /** @type {Map<string, string[] | null>} */
+  const memo = names.memo;
+  if (memo.has(p)) return memo.get(p) ?? null;
+  /** @type {string[] | null} */
+  let out;
+  try {
+    const c = canon(p);
+    out = [c];
+    const segs = c.split("/").filter(Boolean);
+    const g = segs.findIndex(isGlob);
+    if (c.startsWith("/") && g !== -1 && g < segs.length - 1 && segs[g] !== "**") {
+      const folder = `/${segs.slice(0, g).join("/")}`;
+      /** @type {import("node:fs").Dirent[] | null} */
+      let ents = null;
+      try {
+        ents = readdirSync(folder, { withFileTypes: true });
+      } catch (err) {
+        const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") out = null;
+      }
+      const re = segRe(segs[g] ?? "");
+      const rest = segs.slice(g + 1).join("/");
+      for (const e of ents ?? []) {
+        if (!out) break;
+        if (!e.isSymbolicLink() || !re.test(caseInsensitive ? e.name.toLowerCase() : e.name)) continue;
+        let real;
+        try {
+          const at = join(folder, e.name);
+          if (!statSync(at).isDirectory()) continue;
+          real = realpathSync(at);
+        } catch {
+          continue; // a dangling link names nothing
+        }
+        if (out.length > ALIAS_CAP) out = null;
+        else out.push(canon(`${real === "/" ? "" : real}/${rest}`));
+      }
+    }
+  } catch {
+    out = null;
+  }
+  memo.set(p, out);
+  return out;
+};
+names.memo = new Map();
 /** Path segments; a plain entry that may be a folder gets a trailing `**` (what is under it). @param {string} p */
 const segsOf = (p, under = !isGlob(p) && !fileLike(p)) => [...p.split("/").filter(Boolean), ...(under ? ["**"] : [])];
 /** One segment pattern as a regular expression. @param {string} g */
@@ -1022,10 +1153,10 @@ else {
   else if (!planned.files.length) skips.push("not_in_plan:no_planned_files");
   else {
     // A slice the plan marks KIND: skill with a SKILL name has its planned FILES in that skill's draft worktree.
-    const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir);
+    const allowed = normalizeFiles(planned.files, plannedDraft(slice) ?? dir).flatMap((p) => names(p) ?? [canon(p)]);
     const extra = files.filter((f) => {
       const n = normalizeFiles([f], dir)[0];
-      return !n || !allowed.some((p) => covers(p, n));
+      return !n || !allowed.some((p) => covers(p, canon(n)));
     });
     if (extra.length) problem = `slice ${slice} lists FILES outside its planned FILES: ${extra.join(", ")} (planned: ${planned.files.join(", ")})`;
   }
@@ -1063,10 +1194,11 @@ for (const e of launched) {
   // FILES are logged as written and compared normalized; an entry that does not normalize is compared as written.
   /** @type {string[]} */
   const owned = (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
-  const theirs = owned.map((g) => normalizeFiles([g], dir)[0] ?? g);
+  // Each entry with all its names (names()); an entry whose names cannot be decided overlaps.
+  const theirs = owned.map((g) => names(normalizeFiles([g], dir)[0] ?? g));
   for (const f of files) {
-    const n = normalizeFiles([f], dir)[0] ?? f;
-    if (theirs.some((g) => overlaps(n, g))) clashes.push(`${f} (owned by ${e.slice})`);
+    const mine = names(normalizeFiles([f], dir)[0] ?? f);
+    if (theirs.some((t) => !t || !mine || mine.some((n) => t.some((g) => overlaps(n, g))))) clashes.push(`${f} (owned by ${e.slice})`);
   }
 }
 // file_overlap and dependency_cycle block every time, as before this hook was scoped to runs: two owners of one file,

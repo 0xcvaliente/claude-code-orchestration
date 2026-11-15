@@ -117,7 +117,7 @@ One slice's life:
 | Researcher / explorer | Sonnet, low | read-only, read-only `git`, `WebSearch`, `WebFetch`, `Skill` | Answers one narrow question with evidence: file paths, or URLs for web sources |
 | Implementer / writer | Opus, medium | every tool except `Agent` | Builds one slice: code, a document, an analysis or an operation |
 | Reviewer / verifier | Sonnet, medium | read, bash, `WebSearch`, `WebFetch`, `Skill`; never edits | Independent check of one slice or result |
-| Integrator | Sonnet, low | read, bash | Code in git only: checkpoint commits, merges passing branches, runs the acceptance check, never resolves conflicts |
+| Integrator | Sonnet, low | read, bash | Code in git only: checkpoint commits, merges passing branches, runs the acceptance checks and then the project's whole suite once, never resolves conflicts |
 | Triager | Sonnet, low | read-only | Sizes a task for the router |
 | Plain session (`npm run auto`) / solo | Opus, medium | as the session allows | Does a small task alone, with no agents |
 
@@ -134,8 +134,8 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 | Gate | Hook | What it does |
 |---|---|---|
-| Plan check | `plan-check.mjs`, PreToolUse on `Agent` | Blocks an implementer brief without `SLICE:`/`FILES:` (`missing_lines`), with files another slice owns (`file_overlap`: paths compared normalised, two entries overlap when some path could match both), a dependency cycle (`dependency_cycle`), a start before the plan review finished (`no_plan_review`) and, while a run is open, a slice or file outside the reviewed plan (`not_in_plan`; a planned folder covers what is under it, a planned glob only what it matches: `*` within one segment, `**` across segments, `?` one character), fork and built-in subagents (`builtin_agent_in_run`), the next implementer of a stalled slice (`replan_required`) and an implementer launched with `isolation: "worktree"` whose worktree would start from the remote default branch while HEAD differs from it (`worktree_base_not_head`: the effective `worktree.baseRef` is not `"head"`) |
-| Test gate | `verify.sh`, SubagentStop of an implementer | Runs the tests wherever there is a test command; blocks with the output while they fail. Test baseline and bugfix check below |
+| Plan check | `plan-check.mjs`, PreToolUse on `Agent` | Blocks an implementer brief without `SLICE:`/`FILES:` (`missing_lines`), with files another slice owns (`file_overlap`: paths compared normalised, a symlink and its target, and on a case-insensitive file system two names that differ only in case, count as one file, and two entries overlap when some path could match both), a dependency cycle (`dependency_cycle`), a start before the plan review finished (`no_plan_review`) and, while a run is open, a slice or file outside the reviewed plan (`not_in_plan`; a planned folder covers what is under it, a planned glob only what it matches: `*` within one segment, `**` across segments, `?` one character), fork and built-in subagents (`builtin_agent_in_run`), the next implementer of a stalled slice (`replan_required`) and an implementer launched with `isolation: "worktree"` whose worktree would start from the remote default branch while HEAD differs from it (`worktree_base_not_head`: the effective `worktree.baseRef` is not `"head"`) |
+| Test gate | `verify.sh`, SubagentStop of an implementer | Runs the tests wherever there is a test command; blocks with the output while they fail. Test baseline and bugfix check below. Since it runs the whole suite at every implementer stop, and the integrator runs it once more after the merge, a slice's acceptance check is the narrowest command that proves the slice and a brief never also asks a worker to run the whole suite |
 | Quote check | `quote-check.mjs`, a researcher's hand-back and SubagentStop | Blocks a researcher once when a `QUOTE:` line's text is not found in its source; in auto mode before the report is delivered |
 | Report check | `handback-check.mjs`, PreToolUse on `SubagentHandback` | In auto mode, sends a worker's report back once, before it is delivered, when it has no `STATUS` line or a reviewer's pass leaves a checked id unanswered |
 | Guards | `researcher-guard.mjs`, `egress-guard.mjs` | Deny a researcher's Bash command that is not read-only (read-only git, counting, and search with `grep`, `rg`, `find`, `head`, `tail`, `cat`; of redirections only `2>/dev/null` and `2>&1`), and a reviewer's `WebFetch` to a host its brief and its slice's planned files do not name |
@@ -158,7 +158,7 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 - **Test baseline.** When the tests fail at an implementer stop and the tree has changes against its base, `bugfix-check.mjs` runs the same command in a clean detached worktree of the base (limited to `ORCH_BASE_TIMEOUT_S`, default 300, and to the time left in the test gate's budget, `ORCH_HOOK_BUDGET_S`; cached per base commit and command). Three modes: `inform` (the default) still blocks and lists the qualified failing tests that also fail on the base as probably pre-existing; `allow` (opt-in, heuristic) lets the implementer finish with `tests_failed_baseline` when every failing test, qualified by its file or package, also fails on the base, while unqualified names, crash markers and a base run that timed out keep the block; `off` runs no base.
 - **Bugfix check.** For a `KIND: bugfix` slice, after its tests pass, the test gate checks that a test file was changed or added and that it fails on the base. Otherwise it blocks and says what is missing; after two blocks it allows with `bugfix_unverified_gave_up`. A check that runs out of time blocks with `bugfix_timeout`, and one whose temp folder was removed while it ran with `bugfix_tmp_lost`; both count toward those two blocks.
 - **Quote check.** Each researcher `QUOTE: <locator> | <verbatim text>` is searched in the whole file the locator names (text as is; PDF, xlsx, docx and pptx through a cached text conversion). A quote not found blocks the researcher once; URLs, images and scans with no text layer are unverifiable and never block.
-- **Guards.** `researcher-guard.mjs` allows only commands from the researcher's read-only Bash list, with no redirection, substitution or expansion; the one exception is a stderr redirection written exactly `2>/dev/null` or `2>&1` as a word of its own (`2> /dev/null` with a space is refused). Since 1.2.0 the list includes search and paging (`grep`, `rg`, `find`, `head`, `tail`, `cat`) in forms that cannot write a file or start a program: `find` without `-exec`, `-ok`, `-delete` and `-fprint`, `grep` and `rg` with long options from a fixed list (and no `rg -z` or `grep -Q`), `head` and `tail` without follow in any spelling, none of them on a `/dev/` device other than `/dev/null` (also as an option's value, `--file=/dev/zero`), no glob in an option's name (`tail -?`, `rg -g*.md x`; quote the glob or use the long form), and a lone `--` never ends the check. On macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose tools also name Bash, so without these the researcher could only read whole files. `egress-guard.mjs` allows a reviewer's fetch only to hosts named in its brief or its slice's planned files; an unreadable brief allows and logs `egress_unverified`. Both are deny-only and not a boundary.
+- **Guards.** `researcher-guard.mjs` allows only commands from the researcher's read-only Bash list, with no redirection, substitution or expansion; the one exception is a stderr redirection written exactly `2>/dev/null` or `2>&1` as a word of its own (`2> /dev/null` with a space is refused). Since 1.2.0 the list includes search and paging (`grep`, `rg`, `find`, `head`, `tail`, `cat`) in forms that cannot write a file or start a program: `find` without `-exec`, `-ok`, `-delete` and `-fprint`, `grep` and `rg` with long options from a fixed list (and no `rg -z` or `grep -Q`), `head` and `tail` without follow in any spelling, none of them on a `/dev/` device other than `/dev/null` (also as an option's value, `--file=/dev/zero`), no glob in an option's name (`tail -?`, `rg -g*.md x`; quote the glob or use the long form), and a lone `--` never ends the check. On macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose tools also name Bash, so without these the researcher could only read whole files. `egress-guard.mjs` allows a reviewer's fetch only to hosts named in its brief or its slice's planned files, or in the coordinator's message that resumed it (`SendMessage`); no other later record, such as a tool result, a fetched page or a compaction summary, adds a host. An unreadable brief allows and logs `egress_unverified`. Both are deny-only and not a boundary.
 - **Context after compaction.** `compact-context.mjs` (SessionStart, matcher `compact`) puts the open run's planned slices, their states and the constraint texts back in context.
 - **Native Bash judge** (opt-in since 0.3.0, `ORCH_JUDGE=native`): since 0.4.0 the hook is registered with `onFailure: "block"` and a 120 s timeout, behind a wrapper that exits 0 when `node` is missing, so a crash or timeout refuses the command. Details in [docs/bash-judge.md](docs/bash-judge.md#native-hook-030).
 
@@ -409,6 +409,7 @@ The full list, with the evidence for each, is in [docs/native-mode.md](docs/nati
 - The test baseline's `allow` mode is heuristic (runner output cannot be parsed completely), which is why `inform` is the default.
 - The quote check trusts any file whose real path is inside the read cache, and it cannot check a value read from a scan.
 - The egress guard reads planned files from the shared tree, so hosts in a file that exists only on an isolated branch are denied (it fails safe). The guards are not a boundary.
+- The plan check's overlap rule does not see every name of one file: a symlink reached only through `**` or a wildcard segment after the first, a hard link, and two Unicode normal forms (NFC, NFD) of one name are taken for different files.
 - The skill catalog does not see plugins loaded with `--plugin-dir` or skills bundled with Claude Code; explicit `SKILLS:` names for them still reach the worker, marked as not found.
 - Headless runs keep no subagent transcripts by default, so telemetry v2's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set.
 - No WorktreeCreate hook ships; `worktree.baseRef: "head"` is the way to start worktrees from the local HEAD. Settings load from the folder a session started in; the plan check blocks an isolated implementer launch that would start from the remote default branch while HEAD differs (`worktree_base_not_head`).
@@ -483,7 +484,7 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_HOOK_BUDGET_S` | `verify.sh` | The whole test gate's time, default 870 (below the 900 s hook timeout); the test run, the base run and the bugfix check share it, and a bugfix check that runs out blocks with `bugfix_timeout`. Environment only, no plugin setting |
 | `ORCH_TURN_WARNING` | `turn-budget.mjs` | `off` turns off the turn warning (once per agent, at 80% of its maxTurns, our researcher, implementer, reviewer or integrator is told to commit and report). Environment only, no plugin setting |
 | `ORCH_SOURCES_NOTE` | `plan-check.mjs` | `off` turns off the coverage note appended to our researcher's launch when its `SOURCES:` names two or more local files. Environment only, no plugin setting |
-| `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | The read router's profiling budget, default 15000 |
+| `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | The read router's profiling budget, default 15000, at most 40000 (under the hook's 60 s timeout) |
 | `ORCH_JUDGE_MODEL`, `ORCH_JUDGE_CLAUDE_BIN` | `judge-hook.mjs` | The native judge's model (default `opus`) and binary |
 | `ORCH_MODEL_PLANNER`, `_EXPLORER`, `_WRITER`, `_VERIFIER`, `_TRIAGER`, `_SOLO` | SDK | Override a role's model |
 | `ORCH_MODEL_JUDGE`, `ORCH_JUDGE_AUDIT` | SDK | The Bash judge's model (default `claude-opus-5-5`) and audit file |
@@ -499,8 +500,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 
 | Script | What it does |
 |---|---|
-| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin` |
-| `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls) and type check |
+| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time (`scripts/check.mjs`), each step's output printed whole under its own header |
+| `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls; one temp root, removed at the end) and type check |
 | `npm run check-agents`, `npm run sync-agents` | Detect or fix drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
 | `npm run auto`, `npm run native`, `npm run route` | Headless native run with or without triage; triage only |
@@ -533,7 +534,7 @@ dist/plugin/, dist/dashboard/   the built plugin and the dashboard mod alone (co
 dashboard/           the live pane (source for both builds)
 statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
-scripts/             auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
+scripts/             check.mjs (`npm run check`), run-tests.mjs (`npm test`), auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
                      claude-update.mjs (the check to run after a Claude Code update), skill-publish.mjs (a person
                      publishes a draft skill),
                      run-result.mjs and log-run.mjs (a headless run's one result document and its row in runs.jsonl)
@@ -548,13 +549,13 @@ docs/                native-mode.md, brief-grammar.md, skills.md, dashboard.md, 
 
 ```bash
 npm install
-npm run check            # typecheck, tests, check-agents, check-plugin; CI runs it on push and pull request to main
+npm run check            # typecheck, tests, check-agents, check-plugin, side by side; CI runs it on push and pull request to main
 npm run build-plugin     # after any change under .claude/ or dashboard/
 npm run test-dashboard   # the dashboard's own test (needs the claude CLI)
 npm run bench -- --matrix bench/matrix/<name>.json   # a benchmark campaign (paid)
 npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # a bounded eval smoke run (paid)
 ```
 
-Rules for contributors are in `CLAUDE.md` and `.claude/rules/agents.md`. In short: change models, effort and triage thresholds in `src/config.ts` and run `npm run sync-agents`; rebuild the plugin after touching agents, skills or hooks; the session nudge, the `route` skill and the orchestrator describe the same three routes, so change them together; name switches only in maintainer text.
+Rules for contributors are in `CLAUDE.md` and `.claude/rules/agents.md`. In short: change models, effort and triage thresholds in `src/config.ts` and run `npm run sync-agents`; rebuild the plugin after touching agents, skills or hooks; every test file imports `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) as its first import, so a file run on its own removes its temp folders (`src/test-tmp.test.mjs` fails otherwise); the session nudge, the `route` skill and the orchestrator describe the same three routes, so change them together; name switches only in maintainer text.
 
 The diagrams are SVGs in `docs/diagrams/`, in a light and a dark version. To change one, edit its `*.scene.json` (or the sequence in `build.py`) and run `python3 docs/diagrams/build.py`; it uses the diagram-craft skill's renderer.

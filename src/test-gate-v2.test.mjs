@@ -1,5 +1,6 @@
 // Test gate 0.4.0: the test baseline, the KIND: bugfix check (both in .claude/hooks/bugfix-check.mjs, called by
 // verify.sh) and the plugin userConfig bridge (state.mjs and verify.sh). Real temporary git repos, as in hooks.test.ts.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";

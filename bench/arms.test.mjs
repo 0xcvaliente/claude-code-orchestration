@@ -1,5 +1,6 @@
 // The N-UC and W-mix arms' command lines, environment and .claude/ contents. No model calls: native-launch.sh runs against a
 // fake `claude` on PATH that prints its arguments and two environment variables.
+import "../src/test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

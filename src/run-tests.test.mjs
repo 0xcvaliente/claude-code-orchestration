@@ -1,5 +1,6 @@
 // `npm test` runs through scripts/run-tests.mjs, which gives the suites one temp root and removes it at the end, so a run
 // leaves nothing in the system temp dir. Run directly (`npx tsx --test src/x.test.ts`), a test file has no such root.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";

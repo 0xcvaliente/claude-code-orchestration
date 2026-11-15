@@ -3,6 +3,7 @@
 // worktree is created the way plan-check's facts block says (git worktree add -b skill/<name> <draft> <base>) under a
 // temporary CLAUDE_CONFIG_DIR, and launch records are written with brief.mjs's launchRecord, as journal.mjs writes
 // them. HOME, CLAUDE_CONFIG_DIR and the state dir are temp folders: nothing touches the real ~/.claude or skills repos.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
