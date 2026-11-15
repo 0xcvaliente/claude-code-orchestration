@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdtempSync, readFileSync, realpathSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -467,6 +467,51 @@ test("profiles hold parsed fields only: no file text in the result", { skip: POP
   const p = profileSources([fx("text.pdf"), fx("plain.txt")], { read: "extract", cacheDir: tmp() });
   const json = JSON.stringify(p);
   assert.doesNotMatch(json, /pilot|survey/);
+});
+
+test("a SOURCES symlink in the project that leads outside it is tiered by extension, never read or cached", () => {
+  const proj = tmp();
+  const outside = tmp();
+  writeFileSync(join(outside, "x.pdf"), "%PDF-1.4\n");
+  writeFileSync(join(outside, "notes"), "secret text\n");
+  writeFileSync(join(proj, "in.pdf"), "%PDF-1.4\n");
+  symlinkSync(join(outside, "x.pdf"), join(proj, "out.pdf"));
+  symlinkSync(join(outside, "notes"), join(proj, "notes"));
+  symlinkSync(join(proj, "in.pdf"), join(proj, "inside.pdf"));
+  const tools = { pdfinfo: PDFINFO(1), pdftotext: `${prose(900)}\f`, pdfimages: NO_IMAGES };
+  /** @param {string[]} calls */
+  const spy = (calls) => {
+    const inner = canned(tools);
+    /** @type {import("../.claude/hooks/file-profile.mjs").ToolRunner} */
+    const run = (cmd, args, o) => {
+      calls.push(cmd);
+      return inner(cmd, args, o);
+    };
+    return run;
+  };
+
+  /** @type {string[]} */
+  const calls = [];
+  const cacheDir = tmp();
+  const out = profileFile(join(proj, "out.pdf"), { cacheDir, run: spy(calls), projectDir: proj });
+  assert.deepEqual(calls, [], "no tool runs on a file outside the project");
+  assert.equal(out.textPath, undefined);
+  assert.deepEqual(readdirSync(cacheDir), [], "nothing cached");
+  assert.deepEqual([out.kind, out.tier], ["pdf", "sonnet"]);
+  assert.match(out.reasons.join("; "), /outside the project/);
+  const notes = profileFile(join(proj, "notes"), { cacheDir, projectDir: proj });
+  assert.deepEqual([notes.tier, notes.reasons.some((r) => /sniffed/.test(r))], ["sonnet", false], "no extension: not sniffed");
+  const all = profileSources([join(proj, "out.pdf")], { cacheDir, run: spy(calls), projectDir: proj });
+  assert.equal(all.files[0]?.textPath, undefined, "profileSources passes projectDir on");
+  assert.deepEqual(calls, []);
+
+  // A link that stays inside the project, a direct path outside it, and no projectDir: profiled as before.
+  const inside = profileFile(join(proj, "inside.pdf"), { cacheDir: tmp(), run: spy(calls), projectDir: proj });
+  assert.equal(typeof inside.textPath, "string");
+  const direct = profileFile(join(outside, "x.pdf"), { cacheDir: tmp(), run: canned(tools), projectDir: proj });
+  assert.equal(typeof direct.textPath, "string", "a path outside the project given directly is profiled as before");
+  const noDir = profileFile(join(proj, "out.pdf"), { cacheDir: tmp(), run: canned(tools) });
+  assert.equal(typeof noDir.textPath, "string", "without projectDir nothing changes");
 });
 
 /** @param {string} p */

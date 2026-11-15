@@ -75,6 +75,8 @@ export const READ_TIERS = Object.freeze({
  * @property {ReadKind} [read]
  * @property {string} [cacheDir]
  * @property {ToolRunner} [run]
+ * @property {string} [projectDir] the project folder: a path inside it whose real path (through a symlink) leads outside
+ *   it is tiered by extension and never read or cached; without it, or for a path outside it given directly, no change
  */
 
 const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
@@ -254,7 +256,7 @@ function byExtension(p, tier, why) {
 
 /**
  * @param {FileProfile} p @param {string} abs @param {import("node:fs").Stats} st
- * @param {Required<Omit<ProfileOptions, "read">> & { read?: ReadKind }} o
+ * @param {Required<Omit<ProfileOptions, "read" | "projectDir">> & { read?: ReadKind }} o
  */
 function profilePdf(p, abs, st, o) {
   const t = READ_TIERS;
@@ -388,7 +390,7 @@ const byNumber = (a, b) => Number(/(\d+)\.xml$/.exec(a)?.[1] ?? 0) - Number(/(\d
 
 /**
  * @param {FileProfile} p @param {string} abs @param {import("node:fs").Stats} st
- * @param {Required<Omit<ProfileOptions, "read">> & { read?: ReadKind }} o
+ * @param {Required<Omit<ProfileOptions, "read" | "projectDir">> & { read?: ReadKind }} o
  */
 function profileZip(p, abs, st, o) {
   const t = READ_TIERS;
@@ -498,6 +500,10 @@ function profileFileUnsafe(path, opts) {
   }
   p.bytes = st.size;
   const real = (() => { try { return realpathSync(abs); } catch { return abs; } })();
+  if (leavesProject(abs, real, opts.projectDir)) {
+    p.kind = kindOfExt(ext) ?? "binary";
+    return byExtension(p, p.kind === "text" || p.kind === "code" ? "haiku" : "sonnet", "symlink to a file outside the project, not read");
+  }
   let kind = kindOfExt(ext);
   if (!kind) {
     try {
@@ -538,6 +544,26 @@ function profileFileUnsafe(path, opts) {
   return kind === "pdf" ? profilePdf(p, real, st, o) : profileZip(p, real, st, o);
 }
 
+/** @param {string} child @param {string} parent */
+const isUnder = (child, parent) => child === parent || child.startsWith(parent.endsWith("/") ? parent : `${parent}/`);
+
+/**
+ * A path named inside the project folder whose real path is outside it (a symlink leading out). A path outside the
+ * project given directly, or no project folder, is not. Never throws (any failure: false, as before this check).
+ * @param {string} abs @param {string} real @param {string | undefined} projectDir
+ */
+function leavesProject(abs, real, projectDir) {
+  try {
+    if (typeof projectDir !== "string" || !projectDir) return false;
+    const dir = resolve(projectDir);
+    const realDir = (() => { try { return realpathSync(dir); } catch { return dir; } })();
+    if (!isUnder(abs, dir) && !isUnder(abs, realDir)) return false;
+    return !isUnder(real, realDir);
+  } catch {
+    return false;
+  }
+}
+
 /** @param {string} url @returns {FileProfile} */
 function profileUrl(url) {
   /** @type {URL | undefined} */
@@ -559,12 +585,12 @@ const QUESTION_TIER = { lookup: "haiku", extract: "haiku", judge: "sonnet" };
  * Profile every source of a read and pick the overall tier: the highest of the file tiers, the question tier
  * (READ: lookup/extract -> haiku, judge -> sonnet) and opus for a RISKY slice.
  * @param {string[]} list paths or URLs
- * @param {{ read?: ReadKind, risky?: boolean, cacheDir?: string, run?: ToolRunner }} [opts]
+ * @param {{ read?: ReadKind, risky?: boolean, cacheDir?: string, run?: ToolRunner, projectDir?: string }} [opts]
  */
 export function profileSources(list, opts = {}) {
   if (!opts || typeof opts !== "object") opts = {};
   const sources = Array.isArray(list) ? list : [];
-  const files = sources.map((src) => profileFile(src, { read: opts.read, cacheDir: opts.cacheDir, run: opts.run }));
+  const files = sources.map((src) => profileFile(src, { read: opts.read, cacheDir: opts.cacheDir, run: opts.run, projectDir: opts.projectDir }));
   /** @type {string[]} */
   const reasons = [];
   /** @type {Tier} */

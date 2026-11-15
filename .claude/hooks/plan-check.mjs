@@ -642,7 +642,7 @@ function routeRead() {
     const script = `import { profileSources } from ${JSON.stringify(profiler)};
 let s = ""; process.stdin.setEncoding("utf8"); for await (const c of process.stdin) s += c;
 const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.list, a.opts)));`;
-    const opts = { read: h.read ?? undefined, risky: h.risky, cacheDir: join(stateDir, "read-cache") };
+    const opts = { read: h.read ?? undefined, risky: h.risky, cacheDir: join(stateDir, "read-cache"), projectDir: dir };
     const out = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       input: JSON.stringify({ list: sources, opts }),
       encoding: "utf8",
