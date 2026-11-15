@@ -4,6 +4,11 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Fixed
+
+- **`npm test` left its temporary folders behind.** The tests create thousands of temp folders per run (git repositories, state dirs, fake homes) and most never removed theirs; after a day of runs they used every inode of a tmpfs `/tmp`, and unrelated commands failed with `ENOSPC`. `npm test` now runs through `scripts/run-tests.mjs`, which gives the two suites one temp root (`TMPDIR`, `TMP`, `TEMP`) and removes it at the end, also on an interrupt. `ORCH_KEEP_TEST_TMP=1` keeps the folder and prints its path.
+- **Two dashboard tests timed out in `npm run test-dashboard`.** "stale work: the timer draws a last redraw" kept the pane mounted through ten minutes of 250 ms pulses, about 2400 redraws and 30 s against a 15 s limit; it now mounts the pane for the last seconds only (under 4 s) and checks the same sign-off. The tests that draw the pane at many widths or advance the clock by minutes took 2 to 5 s against the default 5 s limit and get 30 s (`SLOW` in `dashboard/register.test.tsx`).
+
 ## [1.4.1] - 2026-11-15
 
 1.4.1 hardens the Bash judge and the researcher guard. Upgrading: no setting changed. A quoted word that starts with an exec-env name and `=` (`PATH=`, `GIT_SSH_COMMAND=`, ...) is now denied on a line that runs git, rm or a shell, as the unquoted word already was, even when it is only an argument such as `git log --grep 'PATH='`: run that search as its own command. For a researcher, an unquoted glob in an option is denied: write `rg -g '*.md' x`.
