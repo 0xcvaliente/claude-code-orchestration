@@ -113,11 +113,9 @@ log_gate() { # decision reason [extra JSON fields: counts only]
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
 # own group on bash 3.2 and later, without a terminal; the watchdog polls once a second.
 run_limited() { # limit infile outfile errfile cmd...
-  local limit="$1" inf="$2" outf="$3" errf="$4" pid wd flag
+  local limit="$1" inf="$2" outf="$3" errf="$4" pid wd end
   shift 4
   lim_rc=0 lim_timed_out=0
-  flag="$outf.timedout"
-  rm -f "$flag"
   # The job's group is a background group. When the hook has a controlling terminal (hooks normally have none), a
   # test that reads /dev/tty would stop on SIGTTIN and only end at the limit; ignored here and so in the job (an
   # ignored signal stays ignored across exec), such a read fails at once instead, and a terminal write goes through.
@@ -130,14 +128,13 @@ run_limited() { # limit infile outfile errfile cmd...
   fi
   pid=$!
   set +m
+  end=$((SECONDS + limit)) # the watchdog and the timeout verdict below share it
   # The watchdog: at the limit it sends the group SIGTERM (bugfix-check.mjs then removes its base worktree), and SIGKILL
   # when the leader is still there after LIM_GRACE_S seconds. Its first act is to drop the EXIT trap it inherits.
   (
     trap - EXIT
-    end=$((SECONDS + limit))
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$SECONDS" -ge "$end" ]; then
-        : >"$flag"
         kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
         g=0
         while [ "$g" -lt "${LIM_GRACE_S:-5}" ] && kill -0 "$pid" 2>/dev/null; do
@@ -145,23 +142,30 @@ run_limited() { # limit infile outfile errfile cmd...
           g=$((g + 1))
         done
         kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
-        break
+        exit 124
       fi
       sleep 1
     done
+    exit 0
   ) >/dev/null 2>&1 &
   wd=$!
   wait "$pid" 2>/dev/null
   lim_rc=$?
-  # SIGKILL, never SIGTERM: a subshell that gets SIGTERM before it has reset the traps it inherited runs the hook's
-  # EXIT trap, which removed the hook's temp folder while the hook still ran (seen on loaded machines).
-  kill -KILL "$wd" 2>/dev/null
-  wait "$wd" 2>/dev/null
-  if [ -e "$flag" ]; then
-    lim_timed_out=1
-    kill -KILL -- "-$pid" 2>/dev/null # the leader ended on the SIGTERM: its group's stragglers go now
+  # Timed out is the hook's own fact, never a file the command could delete: the watchdog exits 124 when it signalled
+  # the run, whatever status the run then returned (a suite may exit 0 on SIGTERM). Before the limit it cannot have
+  # fired, so it is stopped with SIGKILL, never SIGTERM: a subshell that gets SIGTERM before it has reset the traps it
+  # inherited runs the hook's EXIT trap, which removed the hook's temp folder while the hook still ran (seen on loaded
+  # machines). From the limit on it is waited for: it ends within its grace.
+  if [ "$SECONDS" -lt "$end" ]; then
+    kill -KILL "$wd" 2>/dev/null
+    wait "$wd" 2>/dev/null
+  else
+    wait "$wd" 2>/dev/null
+    if [ "$?" = 124 ]; then
+      lim_timed_out=1
+      kill -KILL -- "-$pid" 2>/dev/null # the leader ended on the SIGTERM: its group's stragglers go now
+    fi
   fi
-  rm -f "$flag"
   return 0
 }
 

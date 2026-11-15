@@ -194,8 +194,50 @@ test("test gate: run_limited terminates the command before it kills it, and kill
   assert.match(r.stdout, /polite:1\nstubborn:1\n/);
   assert.equal(readFileSync(join(dir, "cleaned"), "utf8"), "cleaned\n", "the command got a SIGTERM and could clean up");
   const child = Number(readFileSync(join(dir, "child.pid"), "utf8"));
-  assert.ok(child > 0 && !alive(child), "a group that ignores SIGTERM is killed after the grace");
+  assert.ok(child > 0 && goneSoon(child), "a group that ignores SIGTERM is killed after the grace");
   assert.ok(Date.now() - t0 < 40000, `took ${Date.now() - t0} ms`);
+});
+
+/**
+ * True once `pid` has ended: gone, or a zombie (killed, not yet reaped by its new parent). Polls for up to 10 s, since
+ * a killed process can still answer `kill(pid, 0)` for a moment on a loaded machine. @param {number} pid
+ */
+function goneSoon(pid) {
+  const t0 = Date.now();
+  for (;;) {
+    const stat = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+    if (stat === "" || stat.startsWith("Z")) return true;
+    if (Date.now() - t0 > 10000) return false;
+    spawnSync("sleep", ["0.1"]);
+  }
+}
+
+// A suite that removes the hook's temp folder and exits 0 on the SIGTERM at its limit is still a timeout (a block):
+// the timeout verdict is the hook's own, not a flag file in that folder.
+test("test gate: a suite that deletes the gate's temp folder and exits 0 on SIGTERM at the limit still blocks as timed out", () => {
+  const { dir } = changedRepo(null);
+  const cmd = 'rm -rf "$TMPDIR"/orch-verify.*; trap "exit 0" TERM; sleep 100 & wait';
+  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_TEST_TIMEOUT_S: "3", ORCH_BASELINE: "off" }, limitMs: 60000 });
+  assert.equal(r.status, 2, `blocks: ${r.stderr}`);
+  assert.deepEqual([lastTest(dir).decision, lastTest(dir).reason, lastTest(dir).timed_out], ["block", "tests_failed", 1]);
+  assert.match(r.stderr, /did not finish within 3 seconds/);
+});
+
+// The folder is removed again while the helper runs (its base run runs the same command, with the same TMPDIR): the
+// helper's answer is lost with it, so a KIND: bugfix stop blocks with bugfix_tmp_lost and never allows.
+test("test gate: a KIND: bugfix check whose answer is lost with the temp folder blocks with bugfix_tmp_lost", () => {
+  const bug = changedRepo("bugfix");
+  write(bug.dir, { "tests/value_test.sh": '. ./app.sh; [ "$VALUE" = 2 ]\n' });
+  const cmd = 'rm -rf "$TMPDIR"/orch-verify.*; for f in tests/*_test.sh; do bash "$f" || { echo "FAILED $f::case - no"; exit 1; }; done';
+  const env = { ORCH_TEST_CMD: cmd };
+  const r = gate(bug.dir, { transcript: bug.transcript, env });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([lastTest(bug.dir).decision, lastTest(bug.dir).reason], ["block", "bugfix_tmp_lost"]);
+  assert.match(r.stderr, /KIND: bugfix: unverified\. The test gate's temporary folder/);
+  // It shares the bugfix cap: a second block, then the give-up allow, never tests_passed.
+  assert.equal(gate(bug.dir, { transcript: bug.transcript, env }).status, 2);
+  assert.equal(gate(bug.dir, { transcript: bug.transcript, env }).status, 0);
+  assert.equal(lastTest(bug.dir).reason, "bugfix_unverified_gave_up");
 });
 
 /** A committed repo with a code change and a transcript whose brief has `kind`. @param {string | null} kind */
