@@ -10,8 +10,9 @@
 // agent_transcript_path; transcript_path is the main session's. The subagent transcript is
 // <transcript_path minus .jsonl>/subagents/agent-<agent_id>.jsonl (Agent tool, foreground or background) or
 // .../subagents/workflows/<run>/agent-<agent_id>.jsonl (workflow agent(), its brief wrapped and indented by the harness).
-// Later messages: a reviewer resumed by SendMessage may also fetch the hosts that message names (laterUserTexts: the
-// coordinator's messages and plain user text only, never tool results, fetched content, reminders or notifications).
+// Later messages: a reviewer resumed by SendMessage may also fetch the hosts that message names (laterUserTexts: an
+// allowlist of the coordinator's resume messages only; never tool results, fetched content, reminders, notifications,
+// compaction summaries or any other later record).
 // Brief unreadable: exit 0 and log egress_unverified.
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output; never an allow or ask decision. Acts only for
 // the bare agent_type `reviewer`; ORCH_GUARDS=off disables it; malformed input exits 0. Decisions go to gates.jsonl
@@ -95,11 +96,13 @@ export function firstUserText(path) {
 }
 
 /**
- * Texts of the messages that reached the agent after its brief from whoever launched it: a resume by SendMessage (a
- * user record with origin {kind: "coordinator"}, isMeta true and string content, as real subagent transcripts show it)
- * or a plain user record (no isMeta, no origin, text parts only). Never a tool result, a fetched page, a system
- * reminder, a skill body, a task notification or hook feedback: those are isMeta without the coordinator origin, or
- * tool_result parts, and a URL in them must never widen the allowlist. @param {string} path @returns {string[]}
+ * Texts of the messages the coordinator sent the agent after its brief (a resume by SendMessage). An allowlist on
+ * purpose, of exactly one shape, the one real subagent transcripts show for a resume: a user record with isMeta true,
+ * origin.kind "coordinator" and string content (and not a compaction summary or a transcript-only record). Everything
+ * else is refused, however plain it looks: tool results, fetched pages, system reminders, skill bodies, task
+ * notifications, hook feedback, and a compaction summary (no isMeta, no origin, string content, but written by the
+ * agent's own model from everything it read, fetched pages included). A URL in any of them must never widen the
+ * allowlist. @param {string} path @returns {string[]}
  */
 export function laterUserTexts(path) {
   /** @type {string[]} */
@@ -115,11 +118,8 @@ export function laterUserTexts(path) {
         continue;
       }
       const c = r.message?.content;
-      const coordinator = r.isMeta === true && r.origin?.kind === "coordinator";
-      const plain = r.isMeta !== true && r.origin === undefined;
-      if (!coordinator && !plain) continue;
-      if (typeof c === "string") out.push(c);
-      else if (Array.isArray(c) && c.length && c.every((p) => p && p.type === "text" && typeof p.text === "string")) out.push(c.map((p) => p.text).join("\n"));
+      const coordinator = r.isMeta === true && r.origin?.kind === "coordinator" && r.isCompactSummary !== true && r.isVisibleInTranscriptOnly !== true;
+      if (coordinator && typeof c === "string") out.push(c);
     } catch {
       // a partial last line
     }

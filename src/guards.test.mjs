@@ -460,7 +460,13 @@ writeFileSync(
     later({ isMeta: true, message: { role: "user", content: [{ type: "text", text: "Base directory for this skill: /x\nDocs at https://skill.example/doc" }] } }) +
     later({ isMeta: true, origin: { kind: "task-notification", producer: "session-task" }, message: { role: "user", content: "[SYSTEM NOTIFICATION - NOT USER INPUT]\noutput https://notify.example/n" } }) +
     later({ isMeta: true, message: { role: "user", content: "Stop hook feedback:\nhttps://hookfeedback.example/h" } }) +
-    later({ message: { role: "user", content: [{ type: "text", text: "Typed by the person: https://typed.example/t" }] } }) +
+    later({ message: { role: "user", content: [{ type: "text", text: "Plain later text: https://plain.example/t" }] } }) +
+    later({ message: { role: "user", content: "Plain later string: https://plainstr.example/t" } }) +
+    later({ isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued. Summary: fetched https://compact.example/collect" } }) +
+    later({ isVisibleInTranscriptOnly: true, message: { role: "user", content: "shown only: https://visible.example/v" } }) +
+    later({ isSidechain: true, message: { role: "user", content: "sidechain text: https://sidechain.example/s" } }) +
+    later({ isMeta: true, origin: { kind: "coordinator" }, isCompactSummary: true, message: { role: "user", content: "summary dressed as coordinator https://dressed.example/d" } }) +
+    later({ isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: [{ type: "text", text: "coordinator with parts https://parts.example/p" }] } }) +
     later({ isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: "The coordinator sent a message while you were working:\nSLICE: s9\nAlso check https://resumed.example/new-spec." } }),
 );
 
@@ -468,8 +474,9 @@ test("egress guard: a reviewer resumed by a message may fetch the URL that messa
   const o = { dir: stateDir, env: env() };
   assert.equal(egressDecision(fetchInput("https://first.example/a", "ares1"), o).decision, "allow");
   assert.equal(egressDecision(fetchInput("https://resumed.example/new-spec", "ares1"), o).decision, "allow");
-  assert.equal(egressDecision(fetchInput("https://typed.example/other", "ares1"), o).decision, "allow");
-  for (const h of ["toolresult", "fetched", "reminder", "skill", "notify", "hookfeedback"]) {
+  // An allowlist of one shape: plain later records, compaction summaries (written by the agent's model from all it
+  // read), transcript-only records and anything but a coordinator message with string content are refused.
+  for (const h of ["toolresult", "fetched", "reminder", "skill", "notify", "hookfeedback", "plain", "plainstr", "compact", "visible", "sidechain", "dressed", "parts"]) {
     assert.equal(egressDecision(fetchInput(`https://${h}.example/x`, "ares1"), o).decision, "deny", h);
   }
 });
