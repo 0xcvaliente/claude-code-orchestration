@@ -110,8 +110,16 @@ run_limited() { # limit infile outfile errfile cmd...
   lim_rc=0 lim_timed_out=0
   flag="$outf.timedout"
   rm -f "$flag"
+  # The job's group is a background group. When the hook has a controlling terminal (hooks normally have none), a
+  # test that reads /dev/tty would stop on SIGTTIN and only end at the limit; ignored here and so in the job (an
+  # ignored signal stays ignored across exec), such a read fails at once instead, and a terminal write goes through.
+  trap '' TTIN TTOU
   set -m
-  "$@" <"$inf" >"$outf" 2>"$errf" &
+  if [ "$errf" = "$outf" ]; then
+    "$@" <"$inf" >"$outf" 2>&1 & # one open file: both streams in the order written, as 2>&1 always did
+  else
+    "$@" <"$inf" >"$outf" 2>"$errf" &
+  fi
   pid=$!
   set +m
   (
@@ -236,18 +244,13 @@ only_prose_changed() {
   [ "$seen" = 1 ]
 }
 
-# A string field of the event JSON, with its escapes \" \\ and \/ undone (sed -E and bash only: both exist wherever
-# the hook runs). The value is a run of non-quote, non-backslash characters or backslash pairs, so an escaped quote
-# does not end it. Any other escape (\n, \uXXXX) is left as it is; for cwd that names no folder, so the project dir
-# is used, as before.
+# A string field of the event JSON, with its escapes \" \\ and \/ undone (sed -E only: it exists wherever the hook
+# runs). The value is a run of non-quote, non-backslash characters or backslash pairs, so an escaped quote does not
+# end it. The second sed scans left to right and replaces each pair once, so \\" reads as \ then the closing quote;
+# no bash pattern replacement is used, since bash 4.2 and older (macOS /bin/bash 3.2) keep quotes in its replacement.
+# Any other escape (\n, \uXXXX) is left as it is; for cwd that names no folder, so the project dir is used, as before.
 json_str() { # key
-  local v bs='\' q='"' sl='/' mark=$'\001' # a raw control character never appears in JSON text
-  v="$(printf '%s' "$input" | sed -n -E 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n1)"
-  v="${v//"$bs$bs"/"$mark"}"
-  v="${v//"$bs$q"/"$q"}"
-  v="${v//"$bs$sl"/"$sl"}"
-  v="${v//"$mark"/"$bs"}"
-  printf '%s' "$v"
+  printf '%s' "$input" | sed -n -E 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n1 | sed -E 's/\\(["\\/])/\1/g'
 }
 agent_type="$(json_str agent_type)"
 agent_id="$(json_str agent_id)"

@@ -335,6 +335,62 @@ test("test gate: its record's ts has milliseconds and is not earlier than the st
   assert.equal(runs[0]?.slices.a?.isolatedTestFailure, true);
 });
 
+// ---- Follow-up: the test run keeps stdout and stderr in one stream, in the order written (as 2>&1 did). ----
+
+test("test gate: stdout and stderr of the suite both reach the block message whole", () => {
+  const dir = tmp("orch-gh-streams-");
+  const cmd = 'echo "not ok 1 - src/a.test.mjs real failure"; echo "npm ERR! Test failed" >&2; exit 1';
+  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASELINE: "off" } });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^not ok 1 - src\/a\.test\.mjs real failure$/m);
+  assert.match(r.stderr, /^npm ERR! Test failed$/m);
+  assert.ok(r.stderr.indexOf("not ok 1") < r.stderr.indexOf("npm ERR!"), "in the order written");
+});
+
+test("test gate: the baseline still parses a failing test's name when the suite also writes to stderr", () => {
+  const dir = tmp("orch-gh-base-");
+  git(dir, "init", "-q");
+  write(dir, { "failures.txt": "FAILED tests/test_a.py::a - boom\n", "app.js": "export {};\n" });
+  git(dir, "add", "-A");
+  git(dir, "commit", "-q", "-m", "init");
+  write(dir, { "app.js": "export const x = 1;\n" });
+  const cmd = 'cat failures.txt; echo "npm ERR! the test command failed with a message longer than the failure line" >&2; ! test -s failures.txt';
+  const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASELINE: "allow" } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(lastTest(dir).reason, "tests_failed_baseline");
+});
+
+// With a controlling terminal (util-linux `script` gives one), a suite that reads /dev/tty must not stop on SIGTTIN in
+// its background process group and be counted as a timeout. Skipped where `script -qec` is not util-linux's.
+const hasScript = spawnSync("script", ["-qec", "true", "/dev/null"], { stdio: "ignore" }).status === 0;
+test("test gate: with a controlling terminal, a suite that reads /dev/tty fails at once instead of stopping", { skip: hasScript ? false : "no util-linux script" }, () => {
+  const dir = tmp("orch-gh-tty-");
+  const input = join(dir, "in.json");
+  writeFileSync(input, JSON.stringify({ agent_type: "implementer", agent_id: "t1", cwd: dir, session_id: "s1" }));
+  const cmd = 'read -t 20 x </dev/tty; exit 1';
+  const inner = `CLAUDE_PROJECT_DIR='${dir}' ORCH_TEST_TIMEOUT_S=8 ORCH_BASELINE=off ORCH_TEST_CMD='${cmd}' bash '${hook("verify.sh")}' <'${input}' >/dev/null 2>&1`;
+  const t0 = Date.now();
+  spawnSync("script", ["-qec", inner, "/dev/null"], { env: cleanEnv(), stdio: "ignore", timeout: 60000 });
+  const rec = lastTest(dir);
+  assert.equal(rec?.reason, "tests_failed");
+  assert.equal(rec?.timed_out, undefined, "not counted as a timeout");
+  assert.ok(Date.now() - t0 < 7000, `took ${Date.now() - t0} ms`);
+});
+
+// ---- Follow-up: json_str unescapes the same way on bash 3.2 through 5 (compat32 and compat42 keep quotes in a
+// quoted pattern replacement). ----
+
+test("verify.sh json_str: a value with a space, \\\", \\\\ and \\/ reads the same in default, compat32 and compat42 mode", () => {
+  const fn = spawnSync("sed", ["-n", "/^json_str() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
+  assert.match(fn, /^json_str\(\) \{/);
+  const input = String.raw`{"session_id":"s1","cwd":"/tmp/a \"b\" c\\d\/e","agent_id":"x"}`;
+  for (const mode of ["", "shopt -s compat32 2>/dev/null || exit 3", "shopt -s compat42 2>/dev/null || exit 3"]) {
+    const r = spawnSync("bash", ["-c", `${mode}\n${fn}\ninput="$1"\nprintf '%s|%s|%s' "$(json_str cwd)" "$(json_str agent_id)" "$(json_str session_id)"`, "x", input], { encoding: "utf8" });
+    if (r.status === 3) continue; // this bash has no such compat level
+    assert.equal(r.stdout, '/tmp/a "b" c\\d/e|x|s1', mode || "default");
+  }
+});
+
 // ---- 5. A cwd with an escaped quote or backslash is read as the path it names. ----
 
 test("test gate: a cwd containing a quote and a backslash is where the tests run", () => {
