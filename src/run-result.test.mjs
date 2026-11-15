@@ -110,3 +110,31 @@ test("log-run.mjs: a document without orch_totals keeps its own num_turns and du
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+// A run cut short: claude dies after an interim wake-up, so the last result in the stream is not the final answer.
+const CUT = STREAM.slice(0, 3);
+
+test("reduce: a run cut short after an interim result carries claude's exit code and complete: false", async () => {
+  const doc = JSON.parse(await reduce(CUT, 1000, 137));
+  assert.equal(doc.result, "still running");
+  assert.deepEqual(doc.orch_totals, { results: 1, turns: 6, wall_ms: 1000, exit_code: 137, complete: false });
+  const whole = JSON.parse(await reduce(STREAM, 1000, 0));
+  assert.deepEqual(whole.orch_totals, { results: 3, turns: 9, wall_ms: 1000, exit_code: 0, complete: true });
+});
+
+test("orchestrate.sh: a run cut short is logged with its exit code and complete: false; the exit status passes through", () => {
+  const { r, log } = runOrchestrate(`${CUT.join("\n")}\n`, 137);
+  assert.equal(r.status, 137);
+  const doc = JSON.parse(r.stdout);
+  assert.equal(doc.result, "still running");
+  assert.equal(doc.orch_totals.exit_code, 137);
+  assert.equal(doc.orch_totals.complete, false);
+  assert.equal(log[0].exit_code, 137);
+  assert.equal(log[0].complete, false);
+  assert.equal(log[0].turns, 6);
+  const full = runOrchestrate(`${STREAM.join("\n")}\n`);
+  assert.deepEqual([full.log[0].exit_code, full.log[0].complete], [0, true]);
+  // An error text has no orch_totals: the exit code still reaches the log.
+  const text = runOrchestrate("error: not logged in\n", 3);
+  assert.deepEqual([text.log[0].exit_code, text.log[0].complete], [3, false]);
+});
