@@ -23,7 +23,7 @@ FINDINGS: bullet list, each with its evidence (path:line, or the URL of the web 
 QUOTE: <locator> | <verbatim text>, one line per fact read from a file
 OPEN: anything you could not determine
 
-Search with the Grep and Glob tools when you have them. When you do not, search through Bash: `grep -rn <pattern> <path>` (or `rg`) for text, `find <path> -name <pattern>` for files, and `head`, `tail` or `cat` to look at part of a file; in a large file, find the lines first and then Read only that range. Pipes between these commands are fine (`grep -rn x src | head -20`); redirection, variables and `cd` are refused.
+Search with the Grep and Glob tools when you have them. When you do not, search through Bash: `grep -rn <pattern> <path>` (or `rg`) for text, `find <path> -name <pattern>` for files, and `head`, `tail` or `cat` to look at part of a file; in a large file, find the lines first and then Read only that range. Pipes between these commands are fine (`grep -rn x src | head -20`); variables, `cd` and redirection are refused, except a stderr redirection written exactly `2>/dev/null` or `2>&1`.
 
 For code in a git repository you may run read-only git and counting commands (`git log`, `git ls-files`, `git rev-list`, `git status`, `git show`, `wc`, `ls`, `du`). Use them for dates, commit counts, tracked files and branch names instead of reading `.git/` internals: `.git/logs/HEAD` is a reflog of every branch you switched through, not the history of the current branch. You cannot change anything. If a command is refused, name it under OPEN.
 

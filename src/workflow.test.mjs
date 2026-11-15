@@ -29,9 +29,9 @@ const slice = (id, o = {}) => ({ id, goal: `goal ${id}`, files: [`${id}.txt`], a
 // `planReview(prompt)` answers plan:review (default pass), `recheck(label, prompt)` the planner's re-ask after a failed plan
 // check (default null: the planner returns nothing, so the plan is fixed in code), `revise(prompt)` plan:revise (default
 // null) and `refute(label, prompt)` the refute pass (default: every gap stands).
-/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any, planReview?: (prompt: string) => any, recheck?: (label: string, prompt: string) => any, revise?: (prompt: string) => any, refute?: (label: string, prompt: string) => any, integrate?: (branches: string[], prompt: string) => any }} RunOpts */
+/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any, planReview?: (prompt: string) => any, recheck?: (label: string, prompt: string) => any, revise?: (prompt: string) => any, refute?: (label: string, prompt: string) => any, integrate?: (branches: string[], prompt: string) => any, suite?: unknown }} RunOpts */
 /** @param {RunOpts} [opts] */
-async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement, planReview = () => ({ pass: true, gaps: [] }), recheck = () => null, revise = () => null, refute = () => ({ gaps: [] }), integrate } = {}) {
+async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement, planReview = () => ({ pass: true, gaps: [] }), recheck = () => null, revise = () => null, refute = () => ({ gaps: [] }), integrate, suite } = {}) {
   /** @type {any[]} */
   const calls = [];
   /** @type {string[]} */
@@ -43,7 +43,7 @@ async function run({ args = {}, slices, constraints, replan = { slices: [] }, qu
     calls.push({ prompt, opts });
     const { label = "", agentType } = opts;
     if (label === "plan:questions") return { questions };
-    if (label === "plan:slices") return constraints ? { constraints, slices } : { slices };
+    if (label === "plan:slices") return { ...(constraints ? { constraints, slices } : { slices }), ...(suite === undefined ? {} : { suite }) };
     if (label === "plan:replan") return replan;
     if (label === "plan:review") return planReview(prompt);
     if (label === "plan:revise") return revise(prompt);
@@ -137,6 +137,30 @@ test("code: false runs a wave in the shared folder with no checkpoint, integrato
   assert.ok(!l.includes("checkpoint") && !l.includes("integrate"));
   assert.ok(implementers(r.calls).every((c) => !c.opts.isolation && /Do not commit\./.test(c.prompt)));
   assert.equal(r.result.passed, 2);
+});
+
+test("the planner asks for the narrowest acceptance command and the reviewer leaves the whole suite to the test gate", async () => {
+  for (const code of [true, false]) {
+    const r = await run({ args: { code }, slices: [slice("a")] });
+    const plan = r.calls.find((c) => c.opts.label === "plan:slices");
+    assert.match(plan.prompt, /narrowest command that proves the slice/, `code: ${code}`);
+    assert.match(plan.prompt, /test gate already runs the project's whole suite when each implementer stops/, `code: ${code}`);
+  }
+  const r = await run({ slices: [slice("a")] });
+  const rv = reviewers(r.calls).find((c) => c.opts.label === "review:a#1");
+  assert.match(rv.prompt, /run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped/);
+});
+
+test("the plan's suite command: the integrator runs it after merging; missing, non-string or multi-line leaves its brief as before", async () => {
+  /** @param {unknown} [suite] */
+  const brief = async (suite) => {
+    const r = await run({ args: { baseRefHead: true }, slices: [slice("a"), slice("b")], suite });
+    return r.calls.find((c) => c.opts.label === "integrate").prompt;
+  };
+  const without = await brief();
+  assert.equal(without, "Merge these branches in order and run the checks:\nwt-build:a#1\nwt-build:b#1\nChecks:\na: check a\nb: check b\nReturn status, merged (the branches you merged) and open (what stayed unmerged or failed).");
+  assert.match(await brief("  npm test  "), /\nb: check b\nThen run the project's whole test suite once: npm test\nReturn status,/);
+  for (const bad of [42, ["npm test"], { cmd: "npm test" }, "", "   ", "npm test\nrm x", "x".repeat(301)]) assert.equal(await brief(bad), without, `suite ${JSON.stringify(bad)} counts as empty`);
 });
 
 test("the plan is bounded to 6 slices by default and by args.maxSlices", async () => {
