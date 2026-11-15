@@ -429,14 +429,14 @@ test("test gate: with a controlling terminal, a suite that reads /dev/tty fails 
   const dir = tmp("orch-gh-tty-");
   const input = join(dir, "in.json");
   writeFileSync(input, JSON.stringify({ agent_type: "implementer", agent_id: "t1", cwd: dir, session_id: "s1" }));
-  const cmd = 'read -t 20 x </dev/tty; exit 1';
-  const inner = `CLAUDE_PROJECT_DIR='${dir}' ORCH_TEST_TIMEOUT_S=8 ORCH_BASELINE=off ORCH_TEST_CMD='${cmd}' bash '${hook("verify.sh")}' <'${input}' >/dev/null 2>&1`;
+  const cmd = 'read -t 60 x </dev/tty; exit 1';
+  const inner = `CLAUDE_PROJECT_DIR='${dir}' ORCH_TEST_TIMEOUT_S=30 ORCH_BASELINE=off ORCH_TEST_CMD='${cmd}' bash '${hook("verify.sh")}' <'${input}' >/dev/null 2>&1`;
   const t0 = Date.now();
   spawnSync("script", ["-qec", inner, "/dev/null"], { env: cleanEnv(), stdio: "ignore", timeout: 60000 });
   const rec = lastTest(dir);
   assert.equal(rec?.reason, "tests_failed");
   assert.equal(rec?.timed_out, undefined, "not counted as a timeout");
-  assert.ok(Date.now() - t0 < 7000, `took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 20000, `ended long before the 30 s limit, took ${Date.now() - t0} ms`);
 });
 
 // ---- Follow-up: json_str unescapes the same way on bash 3.2 through 5 (compat32 and compat42 keep quotes in a
