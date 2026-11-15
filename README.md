@@ -134,7 +134,7 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 | Gate | Hook | What it does |
 |---|---|---|
-| Plan check | `plan-check.mjs`, PreToolUse on `Agent` | Blocks an implementer brief without `SLICE:`/`FILES:` (`missing_lines`), with files another slice owns (`file_overlap`), a dependency cycle (`dependency_cycle`), a start before the plan review finished (`no_plan_review`) and, while a run is open, a slice or file outside the reviewed plan (`not_in_plan`), fork and built-in subagents (`builtin_agent_in_run`) and the next implementer of a stalled slice (`replan_required`) |
+| Plan check | `plan-check.mjs`, PreToolUse on `Agent` | Blocks an implementer brief without `SLICE:`/`FILES:` (`missing_lines`), with files another slice owns (`file_overlap`), a dependency cycle (`dependency_cycle`), a start before the plan review finished (`no_plan_review`) and, while a run is open, a slice or file outside the reviewed plan (`not_in_plan`), fork and built-in subagents (`builtin_agent_in_run`), the next implementer of a stalled slice (`replan_required`) and an implementer launched with `isolation: "worktree"` whose worktree would start from the remote default branch while HEAD differs from it (`worktree_base_not_head`: the effective `worktree.baseRef` is not `"head"`) |
 | Test gate | `verify.sh`, SubagentStop of an implementer | Runs the tests wherever there is a test command; blocks with the output while they fail. Test baseline and bugfix check below |
 | Quote check | `quote-check.mjs`, a researcher's hand-back and SubagentStop | Blocks a researcher once when a `QUOTE:` line's text is not found in its source; in auto mode before the report is delivered |
 | Report check | `handback-check.mjs`, PreToolUse on `SubagentHandback` | In auto mode, sends a worker's report back once, before it is delivered, when it has no `STATUS` line or a reviewer's pass leaves a checked id unanswered |
@@ -209,6 +209,7 @@ Workflow agents get neither: they make no Agent tool call, so they never reach t
 - **Telemetry v2.** At SubagentStop `telemetry.mjs` reads the agent's transcript and records `tokens` (input, output, cache read, cache write, and since 1.2.0 `cache_write_1h`, the part written at the one-hour lifetime), `turns`, `models`, `max_turns_hit` and `cache_rewrites` (requests after the agent's first that wrote most of their context to the cache again: a cache that went cold in mid-run): numbers and model names only. A subagent that stops at its turn limit fires no SubagentStop, so `max_turns_hit` cannot see it; the report lists agents that started and never stopped instead. Headless runs pass `--no-session-persistence` by default and keep no subagent transcripts, so these fields are empty there. `ORCH_SESSION_PERSISTENCE=1` drops that flag, so headless runs (`npm run native`, `npm run auto`, the bench) write transcripts and the fields fill in ([docs/data/live-checks-telemetry.md](docs/data/live-checks-telemetry.md)). The cost is a session transcript under `~/.claude/projects/` per run.
 - **File trail.** The journal's implementer stop record carries `files_touched`, taken from tool calls (plus git in an isolated worktree), never from the reply.
 - **Read log.** `read-log.mjs` (PostToolUse on `Read|WebFetch`) writes one line per call to `reads.jsonl`: path, extension, size, pages and kind, or the host only for WebFetch. Never content.
+- **Turn warning.** `turn-budget.mjs` (PostToolUse, no matcher) counts a worker's turns from its transcript and, the first time our researcher, implementer, reviewer or integrator has used 80% of its maxTurns, adds as context: "You have used N of your M turns. Commit your work and report now; list what is unfinished under OPEN." An agent that reaches its limit stops without a report. Once per agent, never blocks; an sh pre-filter starts node only for a subagent's tool call (`ORCH_TURN_WARNING=off`).
 - `npm run report -- /path/to/repo` renders the logs as `report.html` beside them, with a table per role (tokens by kind, turns, models, max-turn hits; one count per agent, from its last stop record, since each record is a running total), the agents that started and never stopped, an estimated cost by role and model at list prices (`scripts/prices.mjs`; an estimate for comparing roles and models, not a bill), and reads by kind and role.
 
 The plugin's hooks log to `$CLAUDE_PLUGIN_DATA/state/<project path>` (a per-user dir), not to your project. In a repo that registers its own copy of the hooks, such as this one, they log to `.claude/state/` and the plugin's copies step aside so nothing runs twice.
@@ -410,7 +411,7 @@ The full list, with the evidence for each, is in [docs/native-mode.md](docs/nati
 - The egress guard reads planned files from the shared tree, so hosts in a file that exists only on an isolated branch are denied (it fails safe). The guards are not a boundary.
 - The skill catalog does not see plugins loaded with `--plugin-dir` or skills bundled with Claude Code; explicit `SKILLS:` names for them still reach the worker, marked as not found.
 - Headless runs keep no subagent transcripts by default, so telemetry v2's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set.
-- No WorktreeCreate hook ships; `worktree.baseRef: "head"` is the way to start worktrees from the local HEAD. Settings load from the folder a session started in.
+- No WorktreeCreate hook ships; `worktree.baseRef: "head"` is the way to start worktrees from the local HEAD. Settings load from the folder a session started in; the plan check blocks an isolated implementer launch that would start from the remote default branch while HEAD differs (`worktree_base_not_head`).
 - A long-lived agent-team teammate listed as running keeps the review gate deferring. `file_overlap` and `dependency_cycle` block with no give-up.
 - The eval suite (`npm run eval`) has not been smoke-run.
 - The dashboard counts a run as stale after 10 minutes with no agent running, not after `ORCH_RUN_STALE_MIN`.
@@ -480,6 +481,8 @@ The gate switches with a plugin setting are in [Switches and plugin settings](#s
 | `ORCH_BASE_TIMEOUT_S` | `bugfix-check.mjs` | Time limit of a test-baseline base run, default 300; `verify.sh` lowers it to the time left in its budget |
 | `ORCH_TEST_TIMEOUT_S` | `verify.sh` | Time limit of the test gate's test run, default 600; a suite that runs longer is killed with its children and blocks as a test failure (`timed_out`, `limit_s`). Environment only, no plugin setting |
 | `ORCH_HOOK_BUDGET_S` | `verify.sh` | The whole test gate's time, default 870 (below the 900 s hook timeout); the test run, the base run and the bugfix check share it, and a bugfix check that runs out blocks with `bugfix_timeout`. Environment only, no plugin setting |
+| `ORCH_TURN_WARNING` | `turn-budget.mjs` | `off` turns off the turn warning (once per agent, at 80% of its maxTurns, our researcher, implementer, reviewer or integrator is told to commit and report). Environment only, no plugin setting |
+| `ORCH_SOURCES_NOTE` | `plan-check.mjs` | `off` turns off the coverage note appended to our researcher's launch when its `SOURCES:` names two or more local files. Environment only, no plugin setting |
 | `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | The read router's profiling budget, default 15000 |
 | `ORCH_JUDGE_MODEL`, `ORCH_JUDGE_CLAUDE_BIN` | `judge-hook.mjs` | The native judge's model (default `opus`) and binary |
 | `ORCH_MODEL_PLANNER`, `_EXPLORER`, `_WRITER`, `_VERIFIER`, `_TRIAGER`, `_SOLO` | SDK | Override a role's model |
@@ -517,7 +520,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
   agents/            orchestrator, researcher, implementer, integrator, reviewer
   hooks/             plan-check.mjs (plan check, read router, skill hints), verify.sh and bugfix-check.mjs (test gate,
                      baseline, bugfix check), review-gate.mjs, quote-check.mjs, researcher-guard.mjs, egress-guard.mjs,
-                     compact-context.mjs, journal.mjs, telemetry.mjs, read-log.mjs, nudge.mjs, brief.mjs (the parser),
+                     compact-context.mjs, journal.mjs, telemetry.mjs, read-log.mjs, turn-budget.mjs (turn warning),
+                     nudge.mjs, brief.mjs (the parser),
                      run.mjs, state.mjs, file-profile.mjs, skill-catalog.mjs, skill-hint.mjs, judge-hook.mjs,
                      judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
                      built-in subagent types), skill-gate.mjs (the skill gate), skill-seal.mjs (a draft skill's seal)
