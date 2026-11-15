@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -158,6 +158,42 @@ test("statusline: a git status cut off at the limit is killed, with everything i
     assert.match(plain(r.stdout), /🌿 main/);
     spawnSync("sleep", ["0.3"]);
     assert.deepEqual(alive(), []);
+  } finally {
+    spawnSync("pkill", ["-f", marker]);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("statusline: killed during a stalled git status, it leaves no process and no temp file behind", skipNoJq, async () => {
+  const marker = `slterm${process.pid}x${Date.now()}`;
+  const dir = mkdtempSync(join(tmpdir(), `${marker}-`));
+  const alive = () =>
+    spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((l) => l.includes(marker));
+  try {
+    const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+    const bin = join(dir, "bin");
+    const repo = join(dir, "repo");
+    const tmp = join(dir, "tmp");
+    spawnSync("mkdir", ["-p", bin, repo, tmp]);
+    gitIn(repo, "init", "-q", "-b", "main");
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) sh -c 'sleep 30; : ${marker}'; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
+    chmodSync(join(bin, "git"), 0o755);
+    const child = spawn("bash", [script], { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: tmp } });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.stdout.resume();
+    child.stdin.end(JSON.stringify(base));
+    const exited = new Promise((res) => child.on("exit", res));
+    await new Promise((res) => setTimeout(res, 500));
+    assert.ok(alive().length > 0, "the fake git status should be running when the script is killed");
+    child.kill("SIGTERM");
+    await exited;
+    await new Promise((res) => setTimeout(res, 200));
+    assert.deepEqual(alive(), []);
+    assert.deepEqual(readdirSync(tmp), []);
+    assert.equal(stderr, "");
   } finally {
     spawnSync("pkill", ["-f", marker]);
     rmSync(dir, { recursive: true, force: true });
