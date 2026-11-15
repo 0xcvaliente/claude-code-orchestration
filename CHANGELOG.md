@@ -4,6 +4,19 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+### Changed
+
+- **The exec-env rule reads a word's static prefix, quoted or not** (`.claude/hooks/judge-core.mjs`, `src/judge.ts`, [docs/bash-judge.md](docs/bash-judge.md#25-the-exec-env-rule)). The static prefix is the text of a word's literal pieces joined, quoted or not, up to its first dynamic or glob piece. When it starts with an exec-env name (`PATH`, `PAGER`, `GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) and `=` or the append form `+=`, the line has an exec-env assignment, wherever the word stands and whatever command precedes it. So `env "PATH=/x" git status`, `env PA"TH=/x" git status`, `export "GIT_SSH_COMMAND=sh -c id"; git fetch` and `PAGER+=evil git log` are denied on a line that runs git, rm or a shell, like the unquoted form was on 1.4.0. The judge no longer models where `env`'s or a launcher's own words end; a word is an assignment by its spelling alone. Out of reach, as before: a dynamic name part (`env ${P}ATH=/x git status`), `env -S` strings, and assignments never spelled `NAME=` (`read PATH`, `printf -v PATH`).
+- **Cost of that rule (accepted).** Such a word is denied on a line that runs git, rm or a shell even when it is only an argument: `git log --grep 'PATH='`, `grep 'PATH=' f && git status`. The deny message says to run the search or echo as its own command. `grep -rn 'PATH=' src` alone still passes.
+
+### Fixed
+
+- **`find ... -rm` passed the judge.** `-rm` is bfs's name for `-delete`, and `find` with either is now denied (`judge-core.mjs`, `src/judge.ts`).
+- **A long command could outlast the judge hook's timeout.** The judge's analysis was quadratic or exponential in the number of words: a command of 20,000 words took seconds (one form took about 27 s on 1.4.0) and a hook killed at its timeout does not block. The analysis no longer rescans earlier words for each word and stops at the first deny, and the same command now takes well under a second (about 0.15 s) (`judge-core.mjs`, `src/judge.ts`, tested in `src/judge-hook.test.mjs` and `src/judge.test.ts`).
+- **The judge hook parsed every session's prompts.** `judge-hook.mjs` skips a line of `prompts.jsonl` that cannot hold this session's id before parsing it; the session check after parsing still decides.
+- **The researcher guard missed a device path attached to an option and a glob in an option name** (`researcher-guard.mjs`). `grep --file=/dev/zero x` and `grep -f/dev/zero x` are denied like `grep x /dev/zero`; `/dev/null` stays allowed in each place. A glob in an option's name (`tail -?`, `rg -g*.md x`) is denied in any command, because the shell may expand it into another option, such as `-f` or `-delete`; the message says to quote the glob (`rg -g '*.md' x`) or use the long form (`--glob=*.md`). A glob in a long option's value (`--include=*.ts`) still passes.
+- **Nothing proved the judge was never weaker than 1.4.0.** `src/judge-differential.test.mjs` runs the vendored 1.4.0 judge (`src/fixtures/judge-core-1.4.0.mjs`) against the current one over the judge tests, the corpus and generated forms: nothing 1.4.0 denies passes or is judged, nothing it judges passes, and a new deny comes only from the exec-env rule or `find -rm`.
+
 ## [1.4.0] - 2026-11-15
 
 1.4.0 lets the orchestrator use skills, lets a run draft one new skill, keeps the orchestration pane closed until you turn it on, and gives the test gate a time limit. Upgrading: three new plugin settings (`skill_create`, `skills_repo_private`, `skills_repo_public`, all empty by default); no existing setting changed. The pane now stays closed in every terminal, herdr included, until you type `/orchestration on`, at every session start. Two new environment switches, read from the environment only (no plugin setting): `ORCH_TEST_TIMEOUT_S` (the test run's limit, default 600 s) and `ORCH_HOOK_BUDGET_S` (the whole test gate, default 870 s).
