@@ -17,7 +17,9 @@
 // agent, the main thread and malformed input exit 0 at once. ORCH_GUARDS=off disables it.
 // Allowed only when every simple command (split on ;, &&, ||, |, & and newlines by judge-core.mjs's tokenizer) starts
 // with an allowed prefix and the command has no redirection, heredoc, command or process substitution, backticks,
-// variable expansion, assignment or function definition. Anything the tokenizer cannot read is denied.
+// variable expansion, assignment or function definition. Anything the tokenizer cannot read is denied. The one
+// exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
+// allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -74,6 +76,64 @@ function insteadOf(word) {
  * @param {string} command @returns {{ reason: string, word?: string } | null}
  */
 export function researcherViolation(command) {
+  return violation(withoutStderrNull(command));
+}
+
+// The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
+const STDERR_OK = ["2>/dev/null", "2>&1"];
+
+/**
+ * The command with each allowed stderr form blanked out, so the checks below never see it. A form counts only outside
+ * quotes and comments, after an unescaped space, tab or newline and before one or the end: `2>/dev/nullx`,
+ * `x;2>&1`, `a\ 2>/dev/null` and `2> /dev/null` stay and are refused. The tokenizer drops a redirection's fd number,
+ * so this works on the raw text. A command with ANSI-C quoting (`$'`), whose quotes this scan does not follow, is
+ * returned unchanged. Inside `$(...)` or backticks a form is blanked too, but the substitution is refused anyway.
+ * @param {string} command @returns {string}
+ */
+function withoutStderrNull(command) {
+  if (command.includes("$'")) return command;
+  let out = "";
+  /** @type {"" | "'" | '"' | "#"} */
+  let state = "";
+  let sep = false; // the previous character was an unquoted, unescaped space, tab or newline
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] ?? "";
+    const afterSep = sep;
+    sep = state === "" && /[ \t\n]/.test(c);
+    if (state === "'") {
+      if (c === "'") state = "";
+    } else if (state === '"') {
+      if (c === "\\") {
+        out += c + (command[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (c === '"') state = "";
+    } else if (state === "#") {
+      if (c === "\n") state = "";
+    } else if (c === "\\") {
+      out += c + (command[i + 1] ?? "");
+      i++;
+      continue;
+    } else if (c === "'" || c === '"') {
+      state = c;
+    } else if (c === "#" && (i === 0 || afterSep)) {
+      state = "#";
+    } else if (afterSep) {
+      const form = STDERR_OK.find((f) => command.startsWith(f, i) && (i + f.length === command.length || /[ \t\n]/.test(command[i + f.length] ?? "")));
+      if (form) {
+        out += " ".repeat(form.length);
+        i += form.length - 1;
+        continue;
+      }
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** @param {string} command @returns {{ reason: string, word?: string } | null} */
+function violation(command) {
   /** @type {any} */
   let t;
   try {

@@ -29,9 +29,9 @@ const slice = (id, o = {}) => ({ id, goal: `goal ${id}`, files: [`${id}.txt`], a
 // `planReview(prompt)` answers plan:review (default pass), `recheck(label, prompt)` the planner's re-ask after a failed plan
 // check (default null: the planner returns nothing, so the plan is fixed in code), `revise(prompt)` plan:revise (default
 // null) and `refute(label, prompt)` the refute pass (default: every gap stands).
-/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any, planReview?: (prompt: string) => any, recheck?: (label: string, prompt: string) => any, revise?: (prompt: string) => any, refute?: (label: string, prompt: string) => any }} RunOpts */
+/** @typedef {{ args?: Record<string, unknown>, slices?: any[], constraints?: any[], replan?: any, questions?: string[], verdict?: (label: string, opts: any) => any, implement?: (label: string, opts: any) => any, planReview?: (prompt: string) => any, recheck?: (label: string, prompt: string) => any, revise?: (prompt: string) => any, refute?: (label: string, prompt: string) => any, integrate?: (branches: string[], prompt: string) => any }} RunOpts */
 /** @param {RunOpts} [opts] */
-async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement, planReview = () => ({ pass: true, gaps: [] }), recheck = () => null, revise = () => null, refute = () => ({ gaps: [] }) } = {}) {
+async function run({ args = {}, slices, constraints, replan = { slices: [] }, questions = [], verdict = () => ({ pass: true, gaps: [], evidence: "ok" }), implement, planReview = () => ({ pass: true, gaps: [] }), recheck = () => null, revise = () => null, refute = () => ({ gaps: [] }), integrate } = {}) {
   /** @type {any[]} */
   const calls = [];
   /** @type {string[]} */
@@ -53,7 +53,10 @@ async function run({ args = {}, slices, constraints, replan = { slices: [] }, qu
     if (agentType === "researcher") return `answer to ${prompt}`;
     if (agentType === "implementer") return implement ? implement(label, opts) : { status: "pass", branch: opts.isolation ? `wt-${label}` : "", evidence: "ok", open: "" };
     if (agentType === "reviewer") return verdict(label, opts);
-    if (agentType === "integrator") return "merged";
+    if (agentType === "integrator") {
+      const branches = String(prompt.split("\nChecks:")[0]).split("\n").slice(1).filter(Boolean);
+      return integrate ? integrate(branches, prompt) : { status: "pass", merged: branches, open: "" };
+    }
     throw new Error(`unexpected agent call ${label}`);
   };
   /** @param {Array<() => unknown>} fns */
@@ -207,7 +210,7 @@ const launch = (dir, prompt) =>
 test("every implementer brief the script sends is skipped by plan-check.mjs; the same brief without the marker is blocked", async () => {
   const dir = hookProject();
   try {
-    const r = await run({ args: { baseRefHead: true }, slices: [slice("a"), slice("b"), slice("c", { dependsOn: ["a"] })], verdict: () => ({ pass: false, gaps: ["g"], evidence: "" }) });
+    const r = await run({ args: { baseRefHead: true }, slices: [slice("a"), slice("b"), slice("c", { dependsOn: ["a"] })], verdict: (l) => (l.startsWith("review:c") ? { pass: false, gaps: ["g"], evidence: "" } : { pass: true, gaps: [], evidence: "" }) });
     const briefs = implementers(r.calls).map((c) => c.prompt);
     assert.ok(briefs.length >= 3);
     for (const b of briefs) {
@@ -650,4 +653,64 @@ test("skills: an isolated slice's merged-result review carries its SKILLS line",
   assert.match(ra[0].prompt, /^SKILLS: tdd\nGoal: goal a\n/);
   const ia = implementers(r.calls).find((c) => c.opts.label === "build:a#1");
   assert.match(ia.prompt, /^ORCHESTRATION: workflow\nSlice a\nSKILLS: tdd\nGoal: goal a\n/);
+});
+
+test("a failing verdict with no gaps does not pass the slice: it counts as one gap and retries", async () => {
+  for (const gaps of [[], undefined, "nope"]) {
+    const r = await run({ args: { maxRetries: 1 }, slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? { pass: false, gaps, evidence: "", answers: [], open: "" } : answered([])) });
+    assert.ok(labels(r.calls).includes("build:a#2"), `gaps ${JSON.stringify(gaps)}: the slice is retried`);
+    assert.match(implementers(r.calls)[1].prompt, /Fix:\nthe reviewer failed the slice without naming a gap\n/);
+    assert.deepEqual(r.result.slices[0].attempts, 2);
+  }
+  const never = await run({ args: { maxRetries: 0 }, slices: [slice("a")], verdict: () => ({ pass: false, gaps: [], evidence: "", answers: [], open: "" }) });
+  assert.equal(never.result.slices[0].status, "failed");
+  assert.equal(never.result.passed, 0);
+});
+
+test("a slice whose dependency failed is never launched and is reported failed, and so are slices depending on it", async () => {
+  const r = await run({
+    args: { maxRetries: 0 },
+    slices: [slice("a"), slice("b", { dependsOn: ["a"] }), slice("c", { dependsOn: ["b"] }), slice("d")],
+    verdict: (l) => (l.startsWith("review:a") ? { pass: false, gaps: ["broken"], evidence: "", answers: [], open: "" } : answered([])),
+  });
+  const l = labels(r.calls);
+  assert.ok(!l.some((x) => /^(build|review):[bc]/.test(x)), "b and c are never built or reviewed");
+  const byId = Object.fromEntries(r.result.slices.map((/** @type {any} */ s) => [s.id, s]));
+  assert.equal(byId.b.status, "failed");
+  assert.deepEqual(byId.b.gaps, ["depends on failed a"]);
+  assert.equal(byId.c.status, "failed");
+  assert.deepEqual(byId.c.gaps, ["depends on failed b"]);
+  assert.equal(byId.d.status, "passed");
+  assert.ok(!r.logs.some((m) => /dependency cycle/.test(m)));
+});
+
+test("a branch the integrator left out fails its slice before review; the merged slices are reviewed", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    integrate: (branches) => ({ status: "fail", merged: branches.filter((b) => !/build:b/.test(b)), open: "conflict in b" }),
+  });
+  const l = labels(r.calls);
+  assert.ok(l.includes("review:a"));
+  assert.ok(!l.includes("review:b"), "b is not reviewed");
+  const byId = Object.fromEntries(r.result.slices.map((/** @type {any} */ s) => [s.id, s]));
+  assert.equal(byId.a.status, "passed");
+  assert.equal(byId.b.status, "failed");
+  assert.match(byId.b.gaps[0], /not merged by the integrator/);
+  const sch = r.calls.find((c) => c.opts.label === "integrate").opts.schema;
+  assert.ok(sch && sch.properties.merged && sch.properties.status, "the integrator call has a schema");
+  // A null or text result merges nothing: every slice fails, none is reviewed.
+  for (const res of [null, "merge failed"]) {
+    const x = await run({ args: { baseRefHead: true }, slices: [slice("a"), slice("b")], integrate: () => res });
+    assert.ok(!labels(x.calls).some((y) => /^review:[ab]$/.test(y)));
+    assert.equal(x.result.passed, 0, `integrator ${JSON.stringify(res)}`);
+  }
+});
+
+test("planCheck: false: a plan slice without files or dependsOn runs", async () => {
+  const bare = { id: "a", goal: "goal a", acceptance: "check a", risky: false };
+  const r = await run({ args: { planCheck: false, maxRetries: 0 }, slices: [bare], verdict: () => ({ pass: false, gaps: ["g"], evidence: "", answers: [], open: "" }), replan: { slices: [{ id: "x", goal: "goal x", acceptance: "check x", risky: false }] } });
+  assert.match(implementers(r.calls)[0].prompt, /Files you own: unspecified/);
+  assert.ok(labels(r.calls).includes("build:x#1"), "the replanned slice without files runs");
+  assert.equal(r.result.slices.find((/** @type {any} */ s) => s.id === "a").status, "replanned");
 });

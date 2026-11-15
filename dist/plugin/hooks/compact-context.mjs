@@ -3,7 +3,8 @@
 // (PostCompact cannot add context; SessionStart with source "compact" can). Prints
 // { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } } with the run's planned slices, their
 // FILES and states (passed, failed for good, retry due, reviewing, pending; attempts) and the constraint texts, capped
-// at about 1,500 characters. No open run (none, closed or stale), another SessionStart source or
+// at about 1,500 characters. Over the cap the slice lines give way first (FILES dropped, then a "+N more slices"
+// marker), so the constraint texts and the final reminder stay. No open run (none, closed or stale), another SessionStart source or
 // malformed input: exit 0 with no output. Read-only: it writes nothing.
 import { readFileSync } from "node:fs";
 import { currentReviews } from "./brief.mjs";
@@ -42,13 +43,51 @@ export function runContext(run) {
     const files = s.files.length ? ` FILES: ${s.files.slice(0, 8).join(", ")}${s.files.length > 8 ? ", ..." : ""}` : "";
     lines.push(`- ${id}: ${sliceState(s)}${s.risky ? ", RISKY" : ""}${files}`);
   }
+  /** @type {string[]} */
+  const tail = [];
   const constraints = Object.entries(run.constraints ?? {});
   if (constraints.length) {
-    lines.push("Constraints:");
-    for (const [id, text] of constraints) lines.push(`${id}: ${String(text).slice(0, 200)}`);
+    tail.push("Constraints:");
+    for (const [id, text] of constraints) tail.push(`${id}: ${String(text).slice(0, 200)}`);
   }
-  lines.push("Every slice still needs a passing review before the final report.");
-  return cap(lines.join("\n"), MAX_CONTEXT);
+  const reminder = "Every slice still needs a passing review before the final report.";
+  const full = [...lines, ...tail, reminder].join("\n");
+  if (full.length <= MAX_CONTEXT) return full;
+  // Over the cap: the constraints and the final reminder matter most after a compaction, so the slice lines give way
+  // first. Only when the header, the "+N more slices" marker, the constraints and the reminder alone do not fit is the
+  // constraints block cut, and then no slice line is shown.
+  const marker = ids.length ? `\n- +${ids.length} more slices` : "";
+  const minimal = `${lines[0]}${marker}`;
+  const constraintsText = tail.join("\n");
+  if (minimal.length + 1 + (constraintsText ? constraintsText.length + 1 : 0) + reminder.length > MAX_CONTEXT) {
+    const room = MAX_CONTEXT - minimal.length - reminder.length - 2;
+    return [minimal, cap(constraintsText, room), reminder].join("\n");
+  }
+  const end = constraintsText ? `${constraintsText}\n${reminder}` : reminder;
+  return `${fitSlices(lines, MAX_CONTEXT - end.length - 1)}\n${end}`;
+}
+
+/**
+ * The header and slice lines within `max` characters: whole when they fit, else with each slice line's FILES list
+ * dropped, else as many slice lines as fit and a "+N more slices" marker. @param {string[]} lines header first
+ * @param {number} max
+ */
+function fitSlices(lines, max) {
+  const full = lines.join("\n");
+  if (full.length <= max) return full;
+  const [head = "", ...slices] = lines.map((l, i) => (i ? l.replace(/ FILES: .*$/, "") : l));
+  const out = [head];
+  let len = head.length;
+  const marker = `- +${slices.length} more slices`.length + 1; // room for the longest marker
+  for (const [i, line] of slices.entries()) {
+    if (len + 1 + line.length + (i < slices.length - 1 ? marker : 0) > max) {
+      out.push(`- +${slices.length - i} more slices`);
+      return cap(out.join("\n"), max);
+    }
+    out.push(line);
+    len += 1 + line.length;
+  }
+  return out.join("\n");
 }
 
 if (process.argv[1]?.endsWith("compact-context.mjs")) {

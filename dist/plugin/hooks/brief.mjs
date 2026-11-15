@@ -67,11 +67,20 @@ function list(v) {
     .filter((s) => s && s.toLowerCase() !== "none");
 }
 
-/** Slice id: the first word, quotes, backticks and asterisks removed (plan-check.mjs). @param {string | undefined} v */
+/** The first word of a SLICE value with quotes, backticks and asterisks removed; "" when none. @param {string | undefined} v */
+const sliceWord = (v) => (v ?? "").replace(/[`'"*]/g, "").trim().split(/\s+/)[0] ?? "";
+
+/**
+ * Slice id, the one rule for a brief's header and a plan's SLICE lines: the first word of the value without quotes,
+ * backticks and asterisks, trailing `:,;.` removed; null when nothing is left.
+ * @param {string | undefined} v
+ */
 function sliceId(v) {
-  const id = (v ?? "").replace(/[`'"*]/g, "").trim().split(/\s+/)[0];
-  return id ? id : null;
+  return sliceWord(v).replace(/[:,;.]+$/, "") || null;
 }
+
+/** An OPEN item is empty when, without surrounding emphasis, backticks and a trailing `.;:`, it is in NOTHING. @param {string} v */
+const nothingOpen = (v) => NOTHING.has(v.toLowerCase().replace(/^[\s*_`]+|[\s*_`.;:]+$/g, ""));
 
 /** Constraint ids from a CHECKS line: C<n> tokens, upper-cased, deduplicated, in order; anything else dropped. @param {string | undefined} v */
 function checkIds(v) {
@@ -276,15 +285,15 @@ export function parsePlan(text) {
       inConstraints = true;
       continue;
     }
-    // Same as planOf in dashboard/register.tsx: a heading may precede SLICE, the id loses quotes and trailing
-    // punctuation, an id "plan" is not a slice, and text after the id ("SLICE: s1 - parser") is the goal.
-    const s = l.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*[`*]*([^\s`'"*]+)[`*]*(.*)$/i);
-    if (s) {
-      const id = (s[1] ?? "").replace(/[:,;.]+$/, "");
+    // Same as planOf in dashboard/register.tsx: a heading may precede SLICE, the id is sliceId (as in a header), an id
+    // "plan" is not a slice, and text after the id ("SLICE: s1 - parser") is the goal.
+    const s = l.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*(.*)$/i);
+    if (s && sliceWord(s[1])) {
+      const id = sliceId(s[1]);
       const own = !!id && id.toLowerCase() !== "plan";
       cur = own ? (plan.slices.find((x) => x.slice === id) ?? null) : null;
-      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }));
-      const rest = (s[2] ?? "").replace(/^[\s*`_:|—–-]+/, "").trim();
+      if (own && id && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }));
+      const rest = (s[1] ?? "").replace(/^[\s`'"*]*\S+/, "").replace(/^[\s*`_:|—–-]+/, "").trim();
       if (cur && rest && !cur.goal) cur.goal = rest;
       continue;
     }
@@ -356,7 +365,7 @@ export function parseReply(text) {
     /** @param {string} item */
     const add = (item) => {
       const v = item.trim();
-      if (!NOTHING.has(v.toLowerCase().replace(/[.;:]+$/, "").trim())) reply.open.push(v);
+      if (!nothingOpen(v)) reply.open.push(v);
     };
     add(OPEN_RE.exec(/** @type {string} */ (all[at]))?.[1] ?? "");
     let started = false;
