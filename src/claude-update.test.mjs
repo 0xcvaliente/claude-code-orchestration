@@ -180,7 +180,7 @@ test("check: the Agent SDK is found in a parent folder's node_modules, as Node r
     const repo = join(top, "repo");
     mkdirSync(repo);
     const r = check({ env: m.env, run: m.run, root: repo });
-    assert.equal(of(r, "sdk")?.status, "warn", of(r, "sdk")?.text);
+    assert.equal(of(r, "sdk")?.status, "warn", of(r, "sdk")?.text ?? "no sdk check");
     assert.match(of(r, "sdk")?.text ?? "", /Agent SDK 0\.3\.5 carries its own Claude Code 2\.1\.5/);
     const none = mkdtempSync(join(tmpdir(), "claude-update-nosdk-"));
     try {
