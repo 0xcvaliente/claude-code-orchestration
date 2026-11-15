@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -14,9 +15,11 @@ const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), prefix));
 // A clean environment: no plugin data dir or config dir from the machine running the tests.
 const envWith = (env: Record<string, string>) => ({ ...process.env, CLAUDE_PLUGIN_DATA: "", CLAUDE_CONFIG_DIR: "", HOME: tmp("orch-home-"), ...env });
 
+// tsx found as Node resolves it, so a worktree that uses a parent folder's node_modules works too.
+const tsxCli = createRequire(import.meta.url).resolve("tsx/cli");
 // --mode plain is a forced route: no model call.
 const route = (repo: string, env: Record<string, string>, ...args: string[]) =>
-  spawnSync(join(root, "node_modules", ".bin", "tsx"), [join(root, "src", "route.ts"), "--repo", repo, "--task", "t", "--mode", "plain", ...args], {
+  spawnSync(process.execPath, [tsxCli, join(root, "src", "route.ts"), "--repo", repo, "--task", "t", "--mode", "plain", ...args], {
     cwd: root,
     env: envWith(env),
     encoding: "utf8",
