@@ -628,16 +628,23 @@ function suffixAny(words: Word[], test: (w: Word) => boolean): boolean[] {
   return s;
 }
 
-/** The index of the program `env` at ws[k] runs: the first word after its options and assignments (ws.length if none). */
+/**
+ * Where the program `env` at ws[k] runs may start, never earlier than any env (GNU, BSD, uutils) would place it: the
+ * first static word after env with no `=` and no leading `-` whose previous word does not start with `-` (`--` aside).
+ * An earlier word env does not run can only be an option's value, and a value follows a word starting with `-`; so
+ * env's option table is not modelled. A dynamic word, or one after a dynamic word, is never the program. Every word
+ * before the result may be an assignment env applies (ws.length if no program is found).
+ */
 function envProgram(ws: Word[], k: number): number {
-  let i = k + 1;
-  for (; i < ws.length; i++) {
+  let prev = ws[k]!; // the word before ws[i] that env reads (redirection targets are not env's words)
+  for (let i = k + 1; i < ws.length; i++) {
     const w = ws[i]!;
     if (w.redirect) continue;
-    if (["-u", "--unset", "-C", "--chdir"].includes(w.text)) i++;
-    else if (!w.text.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text)) break;
+    const afterValue = prev.dynamic || (prev.text.startsWith("-") && prev.text !== "--");
+    if (!w.dynamic && !w.text.includes("=") && !w.text.startsWith("-") && !afterValue) return i;
+    prev = w;
   }
-  return i;
+  return ws.length;
 }
 
 function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: boolean): Classification[] {
@@ -674,7 +681,7 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set<number>();
   // Words before this index are arguments of a declaration command (export, env, ...), so a quoted one may be an
-  // assignment. For env they end at the program it runs: that program's arguments are text.
+  // assignment. For env they end at the program it runs (see envProgram): that program's arguments are text.
   let declareUntil = 0;
   let trapped = false; // a trap word already read every later word as a script
   // The first deny decides (see analyze), so the words after it are not read.
@@ -871,7 +878,9 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  * - `git -c`/`--config-env` with a key that runs a program (core.fsmonitor, core.sshCommand, core.pager, alias.*,
  *   ...), `git config` of such a key, and an exec-relevant environment assignment (GIT_SSH_COMMAND, GIT_EDITOR, PAGER,
  *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell, also a quoted one given to
- *   export, declare, typeset, local or readonly, or to env before the program it runs (`export 'PATH=/x'`).
+ *   export, declare, typeset, local or readonly, or to env before the program it runs (`export 'PATH=/x'`); env's program
+ *   is the first static word with no `=` and no leading `-` whose previous word does not start with `-` (`--` aside),
+ *   so it is never placed earlier than a real env would place it (`env -iu HOME 'PATH=/x' git status` is denied).
  * Every substitution (`$(..)`, backticks, `<(..)`), every `sh -c`-style payload, `eval`, `trap` action, `env -S`
  * string and `watch` command is read as a script of its own with the same rules (a dynamic one is denied).
  * An rm, git or sudo that appears only inside a quoted argument (`git commit -m "fix rm -rf docs"`, `echo "git push"`)
