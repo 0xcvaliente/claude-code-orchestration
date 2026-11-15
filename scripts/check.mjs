@@ -30,6 +30,14 @@ function steps() {
 }
 
 const posix = process.platform !== "win32";
+/** how long a step's pipes may stay open after its process has exited */
+const PIPE_GRACE_MS = 500;
+
+// A reader that goes away early (`node scripts/check.mjs | head -1`) makes later writes fail with EPIPE: drop them
+// quietly, the exit code still follows the steps.
+process.stdout.on("error", (e) => {
+  if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EPIPE") throw e;
+});
 /** @type {Set<import("node:child_process").ChildProcess>} */
 const running = new Set();
 /** the exit code of the signal that stopped the run, once one has */
@@ -71,11 +79,10 @@ const run = (name, command) =>
     running.add(child);
     child.stdout?.on("data", (b) => out.push(b));
     child.stderr?.on("data", (b) => out.push(b));
-    /** @param {number | null} code @param {string} [error] */
-    const finish = (code, error) => {
+    /** @param {number | null} code @param {string} [error] @param {string} [secs] */
+    const finish = (code, error, secs = ((Date.now() - started) / 1000).toFixed(1)) => {
       if (!running.delete(child)) return;
       const ok = code === 0;
-      const secs = ((Date.now() - started) / 1000).toFixed(1);
       let text = Buffer.concat(out).toString("utf8");
       if (error) text += `${error}\n`;
       if (text && !text.endsWith("\n")) text += "\n";
@@ -83,7 +90,20 @@ const run = (name, command) =>
       resolve({ name, ok });
     };
     child.on("error", (e) => finish(1, String(e)));
-    child.on("close", (code) => finish(code));
+    // A step ends when its process exits, not when its pipes close: a background process it leaves behind (a test's
+    // `sleep 60`) still holds them open. The pipes get PIPE_GRACE_MS to deliver what is already written, then they are
+    // destroyed so that such a process cannot keep check.mjs waiting. The step's time is its time to exit.
+    child.on("exit", (code) => {
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      const done = () => {
+        clearTimeout(timer);
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(code, undefined, secs);
+      };
+      const timer = setTimeout(done, PIPE_GRACE_MS);
+      child.once("close", done);
+    });
   });
 
 // The process ends by itself once every write has reached stdout: process.exit() here would drop the writes still

@@ -160,3 +160,54 @@ test("a signal to check.mjs stops the running steps", { skip: process.platform =
   while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
   assert.equal(alive(), false, "the step outlived check.mjs");
 });
+
+/** @param {string} pidFile kills the process whose pid the file holds, if any */
+const killPidFile = (pidFile) => {
+  try {
+    process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL");
+  } catch {
+    // never started, or already gone
+  }
+};
+
+test("a step that leaves a background process holding its output ends when the step exits", { skip: process.platform === "win32" && "POSIX shell" }, async () => {
+  // the step's shell exits at once; the sleep it leaves behind keeps the step's stdout open for 30 s
+  const pidFile = join(dir, "bg-pid");
+  try {
+    const r = await check([["bg", `sh -c 'sleep 30 & echo $! > "${pidFile}"; echo hi'`], ["ok", "true"]]);
+    assert.ok(r.ms < 3000, `took ${r.ms} ms`);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /=== bg: pass, \d+\.\d s ===\nhi\n/);
+    assert.match(lastLine(r.out), /^check passed: all 2 steps/);
+  } finally {
+    killPidFile(pidFile);
+  }
+});
+
+test("a step that prints 5 MB and then leaves a background process still delivers the 5 MB", { skip: process.platform === "win32" && "POSIX shell" }, async () => {
+  const pidFile = join(dir, "bg-big-pid");
+  try {
+    const r = await check([["big", `sh -c 'node "${big}" 0; sleep 30 & echo $! > "${pidFile}"'`], step("small", 0)], 1500);
+    const longest = Math.max(0, ...(r.out.match(/x+/g) ?? []).map((x) => x.length));
+    assert.equal(longest, 5_000_000, `got ${r.out.length} characters`);
+    assert.ok(r.ms < 5000, `took ${r.ms} ms`);
+    assert.equal(r.code, 0, r.out.slice(-500));
+    assert.match(lastLine(r.out), /^check passed: all 2 steps/);
+  } finally {
+    killPidFile(pidFile);
+  }
+});
+
+// `node scripts/check.mjs | head -1`: the reader goes away after the first block; the exit code still follows the steps
+for (const code of [0, 5]) {
+  test(`a reader that closes stdout early gets no EPIPE error and the steps' exit code (late step exit ${code})`, async () => {
+    const steps = [step("first", 0), step("late", code, 300)];
+    const child = spawn(process.execPath, [script], { env: { ...process.env, ORCH_CHECK_STEPS: JSON.stringify(steps) }, stdio: "pipe" });
+    let err = "";
+    child.stderr.on("data", (b) => (err += b));
+    child.stdout.once("data", () => child.stdout.destroy());
+    const exit = await new Promise((resolve) => child.on("close", (c) => resolve(c)));
+    assert.equal(exit, code === 0 ? 0 : 1, err);
+    assert.doesNotMatch(err, /EPIPE|Error/);
+  });
+}
