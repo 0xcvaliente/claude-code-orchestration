@@ -175,7 +175,7 @@ test("test gate: run_limited's watchdog never runs the hook's EXIT trap, however
   const fn = spawnSync("sed", ["-n", "/^run_limited() {/,/^}/p", hook("verify.sh")], { encoding: "utf8" }).stdout;
   assert.match(fn, /^run_limited\(\) \{/);
   const work = tmp("orch-gh-trap-");
-  const loop = 'i=0\nwhile [ "$i" -lt 40 ]; do\n  run_limited 5 /dev/null /dev/null /dev/null true\n  [ -d "$work" ] || { echo "temp folder gone after run $i"; exit 3; }\n  i=$((i + 1))\ndone\ntrap - EXIT\n';
+  const loop = 'i=0\nwhile [ "$i" -lt 40 ]; do\n  run_limited 5 /dev/null "$work/out" /dev/null true\n  [ -d "$work" ] || { echo "temp folder gone after run $i"; exit 3; }\n  i=$((i + 1))\ndone\ntrap - EXIT\n';
   const r = spawnSync("bash", ["-c", `${fn}\nwork="$1"\ntrap 'rm -rf "$work"' EXIT\n${loop}`, "x", work], { encoding: "utf8", timeout: 120000 });
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
   assert.ok(existsSync(work));
@@ -188,9 +188,9 @@ test("test gate: run_limited terminates the command before it kills it, and kill
   const dir = tmp("orch-gh-term-");
   const polite = `trap 'echo cleaned > "${dir}/cleaned"; exit 0' TERM; sleep 60 & wait`;
   const stubborn = `trap '' TERM; sleep 60 & echo $! > "${dir}/child.pid"; wait`;
-  const script = `${fn}\nrun_limited 1 /dev/null /dev/null /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 1 /dev/null /dev/null /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
+  const script = `${fn}\nrun_limited 1 /dev/null "$3/polite.out" /dev/null bash -c "$1"; echo "polite:$lim_timed_out"\nrun_limited 1 /dev/null "$3/stubborn.out" /dev/null bash -c "$2"; echo "stubborn:$lim_timed_out"\n`;
   const t0 = Date.now();
-  const r = spawnSync("bash", ["-c", script, "x", polite, stubborn], { encoding: "utf8", timeout: 60000 });
+  const r = spawnSync("bash", ["-c", script, "x", polite, stubborn, dir], { encoding: "utf8", timeout: 60000 });
   assert.match(r.stdout, /polite:1\nstubborn:1\n/);
   assert.equal(readFileSync(join(dir, "cleaned"), "utf8"), "cleaned\n", "the command got a SIGTERM and could clean up");
   const child = Number(readFileSync(join(dir, "child.pid"), "utf8"));
