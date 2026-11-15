@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -257,6 +257,100 @@ test("out of reach: two Unicode normal forms of one name are two entries, even w
   const dir = project();
   try {
     assert.equal(pairIn(dir, "café.md", "café.md", INSENSITIVE).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A preload that makes readdirSync throw `code` for the one folder `folder` (the tests run as root, so chmod 000 does not
+ * deny the read); every other call goes to the real readdirSync.
+ * @param {string} dir @param {string} folder @param {string} code
+ */
+function failingReaddir(dir, folder, code) {
+  const preload = join(dir, "readdir-fails.mjs");
+  writeFileSync(
+    preload,
+    `import fs from "node:fs"; import { syncBuiltinESMExports } from "node:module";
+const real = fs.readdirSync;
+fs.readdirSync = (p, ...rest) => { if (String(p) === ${JSON.stringify(folder)}) throw Object.assign(new Error(${JSON.stringify(code)}), { code: ${JSON.stringify(code)} }); return real(p, ...rest); };
+syncBuiltinESMExports();\n`,
+  );
+  return preload;
+}
+/** launch() with a preload. @param {string} dir @param {string} preload @param {string} prompt */
+const launchWith = (dir, preload, prompt) => {
+  /** @type {Record<string, string | undefined>} */
+  const e = { ...process.env, CLAUDE_PROJECT_DIR: dir };
+  delete e.ORCH_TEST_CASE_INSENSITIVE;
+  return spawnSync("node", ["--import", pathToFileURL(preload).href, join(dir, ".claude", "hooks", "plan-check.mjs")], {
+    input: JSON.stringify({ session_id: "s1", tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt } }),
+    env: e,
+    encoding: "utf8",
+  });
+};
+
+test("file_overlap: a glob whose fixed folder cannot be listed (EACCES) cannot be decided, so it overlaps, both ways", () => {
+  for (const [a, b] of [["sec/l*/a.ts", "other/b.ts"], ["other/b.ts", "sec/l*/a.ts"]]) {
+    const dir = project();
+    try {
+      mkdirSync(join(dir, "sec"));
+      const preload = failingReaddir(dir, realpathSync(join(dir, "sec")), "EACCES");
+      const first = launchWith(dir, preload, `SLICE: a\nFILES: ${a}\nDEPENDS: none`);
+      assert.equal(first.status, 0, first.stderr);
+      const r = launchWith(dir, preload, `SLICE: b\nFILES: ${b}\nDEPENDS: none`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], `${a} then ${b}: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("file_overlap: a missing fixed folder (ENOENT) or one that is a file (ENOTDIR) adds no aliases, so the pair is allowed", () => {
+  for (const kind of ["missing", "file"]) {
+    for (const [a, b] of [["sec/l*/a.ts", "other/b.ts"], ["other/b.ts", "sec/l*/a.ts"]]) {
+      const dir = project();
+      try {
+        if (kind === "file") writeFileSync(join(dir, "sec"), "");
+        const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b));
+        assert.equal(r.status, 0, `${kind}: ${a} then ${b}: ${r.stderr}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+// A run that planned slice a with FILES sec/l*/a.ts, where sec/lnk is a symlink to the folder real (real/a.ts on disk).
+function plannedSec() {
+  const dir = project({ reviewed: false });
+  mkdirSync(join(dir, "sec"));
+  mkdirSync(join(dir, "real"));
+  writeFileSync(join(dir, "real", "a.ts"), "");
+  symlinkSync(join(dir, "real"), join(dir, "sec", "lnk"));
+  plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: sec/l*/a.ts\nDEPENDS: none\nGOAL: a");
+  return { dir, preload: failingReaddir(dir, realpathSync(join(dir, "sec")), "EACCES") };
+}
+
+test("not_in_plan: a planned glob whose fixed folder cannot be listed covers only what the glob's text matches", () => {
+  // Listed, the planned sec/l*/a.ts also covers real/a.ts (its alias through sec/lnk). Unlisted (EACCES) that alias
+  // cannot be shown, so a launch of sec/lnk/a.ts (which canon() resolves to real/a.ts) or real/a.ts is refused.
+  // One project per refused launch: the loop guard lets a slice through after two not_in_plan blocks.
+  for (const f of ["sec/lnk/a.ts", "real/a.ts", "other/b.ts"]) {
+    const { dir, preload } = plannedSec();
+    try {
+      const r = launchWith(dir, preload, `SLICE: a\nFILES: ${f}\nDEPENDS: none`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "not_in_plan"], `${f} cannot be shown covered: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const { dir, preload } = plannedSec();
+  try {
+    const ok = launchWith(dir, preload, "SLICE: a\nFILES: sec/lx/a.ts\nDEPENDS: none");
+    assert.equal(ok.status, 0, `sec/lx/a.ts matches the planned glob's text: ${ok.stderr}`);
+    const listed = launch(dir, "SLICE: a\nFILES: sec/lnk/a.ts\nDEPENDS: none");
+    assert.equal(listed.status, 0, `listed, the alias covers sec/lnk/a.ts: ${listed.stderr}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
