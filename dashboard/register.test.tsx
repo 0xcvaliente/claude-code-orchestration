@@ -10,11 +10,8 @@ const PANE = {
   requestId: 'orchestration',
   props: { title: 'Orchestration', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
 } as const
-// The pane opens by itself only inside herdr; the tests run as a herdr session unless they say otherwise.
-const HERDR = { TERM_PROGRAM: 'herdr-mobile', HC_TERMINAL_SOCKET: '/run/herdr.sock' }
 
 test('the pane follows an implementer from start to its STATUS line', async ($, on) => {
-  mock.env(on, HERDR)
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -116,7 +113,6 @@ const texts = async ($: any, columns = 100, bodyRows = 20) => {
 }
 
 test('the router run in the main loop shows its triage and leaves the tool result alone', async ($, on) => {
-  mock.env(on, HERDR)
   const output = { stdout: `${BANNER}${ROUTE_JSON}\n`, stderr: '' }
   await setup($, on, output)
   const out = await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -140,7 +136,6 @@ const CASES: [string, unknown, string][] = [
 ]
 for (const [name, output, command] of CASES) {
   test(`${name} shows no triage and the result is untouched`, async ($, on) => {
-  mock.env(on, HERDR)
     await setup($, on, output)
     const out = await ($ as any).tool.call({ tool: 'Bash', command })
     expect(out.result).toEqual(output)
@@ -149,7 +144,6 @@ for (const [name, output, command] of CASES) {
 }
 
 test('a Bash call from a sub-agent is not the router', async ($, on) => {
-  mock.env(on, HERDR)
   await setup($, on, { stdout: `${BANNER}${ROUTE_JSON}` })
   // agentId rides on the hook's event; $.tool.call drops it, so raise the event itself where the kit allows
   const raise = ($ as any).tool.call
@@ -159,7 +153,6 @@ test('a Bash call from a sub-agent is not the router', async ($, on) => {
 })
 
 test('a verdict without facts shows its reason; with no verdict the mode is inferred', async ($, on) => {
-  mock.env(on, HERDR)
   await setup($, on, { stdout: '{"mode":"reviewed","reason":"small change, one reviewer"}' })
   await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
   const t = await texts($)
@@ -168,7 +161,6 @@ test('a verdict without facts shows its reason; with no verdict the mode is infe
 })
 
 test('with no verdict the pane infers the mode and draws only the stages it used (triage, build, review) at every width', async ($, on) => {
-  mock.env(on, HERDR)
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
@@ -201,7 +193,6 @@ const spawnImpl = (id: string, slice: string, type = 'orchestration:implementer'
   }) as never
 
 test('a stage with more cells than fit shows the latest and +N', async ($, on) => {
-  mock.env(on, HERDR)
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
@@ -216,7 +207,6 @@ test('a stage with more cells than fit shows the latest and +N', async ($, on) =
 })
 
 test('usage by model is one stacked bar with a legend row per model and no bars', async ($, on) => {
-  mock.env(on, HERDR)
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
@@ -249,7 +239,6 @@ test('usage by model is one stacked bar with a legend row per model and no bars'
 })
 
 test('a failure a later slice made good shows as fixed; a bare GAPS heading is skipped; plan and merge are labelled', async ($, on) => {
-  mock.env(on, HERDR)
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
@@ -310,12 +299,22 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   expect(t.some(x => /signed off with/.test(x))).toBe(false)
 })
 
+type Fail = { open?: boolean; close?: boolean; keys?: string[] }
 // The main session's own work: a prompt starts it with no repository and no agents, and the main turn's end finishes it.
-const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model?: (id: string) => string } = {}) => {
+const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model?: (id: string) => string; placed?: boolean; fail?: Fail } = {}) => {
   const seen: any[] = []
   const opened: any[] = []
-  on('command.register', () => ({ value: { command: 'orchestration' } }))
-  on('ui.open', (_: unknown, e: any) => (opened.push(e), { value: { isPlaced: true } }))
+  const closed: any[] = []
+  const commands: any[] = []
+  const toasts: any[] = []
+  on('command.register', (_: unknown, e: any) => (commands.push(e), { value: { command: 'orchestration' } }))
+  const timers: any[] = []
+  const fail = opts.fail ?? {}
+  // what a test breaks on the way: ui.open, ui.close and state writes of the named keys are refused
+  on('ui.open', (_: unknown, e: any) => (fail.open ? { deny: 'ui.open refused' } : (opened.push(e), { value: { isPlaced: opts.placed ?? true } })))
+  on('ui.close', (_: unknown, e: any) => (fail.close ? { deny: 'ui.close refused' } : (closed.push(e), { value: undefined })))
+  if (opts.fail) on('state.set', (_: unknown, e: any, next: any) => (fail.keys?.includes(e.key) ? { deny: `state write of ${e.key} refused` } : next(e)))
+  on('ui.toast', (_: unknown, e: any) => (toasts.push(e), { value: undefined }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => (seen.push(e), { text: e.text }))
   on('agent.spawn', (_: unknown, e: any) => ({ model: opts.model?.(e.tool_use_id) ?? 'sonnet', agentId: e.tool_use_id }))
@@ -324,22 +323,24 @@ const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model
   if (!opts.clock) {
     let now = 1000
     on('clock.now', () => ({ value: (now += 1000) }))
-    on('clock.every', () => ({ value: {} }))
+    on('clock.every', (_: unknown, e: any) => (timers.push(e), { value: {} }))
   }
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true }) // not a git repository
-  return { seen, opened }
+  return { seen, opened, closed, commands, toasts, timers }
 }
+// The pane is off until the person turns it on with the command.
+const pane = ($: any, args?: string) => $.command.run({ command: 'orchestration', ...(args === undefined ? {} : { args }) })
 const mainDone = (reason: string) =>
   ({ turnId: 'm', answer: 'the reply', durationMs: 5, isAborted: reason === 'aborted', reason, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
 const PROMPT = 'research the tide tables\nand write two lines'
 
-test('a prompt in a folder that is not a repository opens the pane and shows the input box', async ($, on) => {
-  mock.env(on, HERDR)
+test('with the pane on, a prompt in a folder that is not a repository opens the pane and shows the input box', async ($, on) => {
   const { opened } = await boot($, on)
-  expect(opened.length).toBe(0)
+  await pane($, 'on')
+  expect(opened.length).toBe(1)
   const out = await ($ as any).prompt.submit({ text: PROMPT })
   expect(out.text).toBe(PROMPT) // handed on unchanged
-  expect(opened.length).toBe(1)
+  expect(opened.length).toBe(2)
   const t = await texts($)
   expect(t.includes('▸ research the tide tables')).toBe(true)
   expect(t.some(x => /working in this session/.test(x))).toBe(true)
@@ -351,8 +352,8 @@ test('a prompt in a folder that is not a repository opens the pane and shows the
 })
 
 test('a slash command, a meta prompt and a blank prompt neither open the pane nor start work', async ($, on) => {
-  mock.env(on, HERDR)
   const { seen, opened } = await boot($, on)
+  await pane($, 'on') // on, so only the prompts themselves could open it again
   const raise = ($ as any).prompt.submit
   for (const extra of [{ text: '/review the diff', command: { name: 'review', args: 'the diff' } }, { text: 'a hint', isMeta: true }, { text: '  \n ' }]) {
     const out = await raise(extra as never)
@@ -361,12 +362,11 @@ test('a slash command, a meta prompt and a blank prompt neither open the pane no
   expect(seen.length).toBe(3)
   expect(seen.some(e => e.command)).toBe(true) // the fields reached the hook
   expect(seen.some(e => e.isMeta)).toBe(true)
-  expect(opened.length).toBe(0)
+  expect(opened.length).toBe(1) // the command's own open
   expect((await texts($)).some(x => /No orchestration agents yet/.test(x))).toBe(true)
 })
 
 test('work with no agents reads answered once the main turn ends: plain, only triage and the build drawn, this session', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await ($ as any).prompt.submit({ text: PROMPT })
   let t = await texts($)
@@ -385,7 +385,6 @@ test('work with no agents reads answered once the main turn ends: plain, only tr
 })
 
 test('an aborted main turn reads stopped before an answer', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await ($ as any).prompt.submit({ text: PROMPT })
   const out = await ($ as any).turn.complete(mainDone('aborted'))
@@ -398,7 +397,6 @@ test('an aborted main turn reads stopped before an answer', async ($, on) => {
 })
 
 test('a new prompt right after a finished run starts a clean run (new input is new work)', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.agent.spawn(spawnImpl('t1', 's1'))
   await ($ as any).turn.complete({ turnId: 'a', agentId: 't1', answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } })
@@ -411,7 +409,6 @@ test('a new prompt right after a finished run starts a clean run (new input is n
 })
 
 test('a prompt over two minutes after the last agent ended starts a clean run', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock })
   await $.agent.spawn(spawnImpl('t1', 's1'))
@@ -426,7 +423,6 @@ test('a prompt over two minutes after the last agent ended starts a clean run', 
 })
 
 test('with agents present the input box shows and the orchestrate run is unchanged', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await ($ as any).prompt.submit({ text: 'build the thing' })
   await $.agent.spawn(spawnImpl('t1', 's1'))
@@ -447,7 +443,6 @@ test('with agents present the input box shows and the orchestrate run is unchang
 })
 
 test('an orchestrate verdict with no agents yet draws only triage and the dim plan box as next', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { route: { stdout: ROUTE_JSON } })
   await ($ as any).prompt.submit({ text: 'big job' })
   await ($ as any).tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -461,7 +456,6 @@ test('an orchestrate verdict with no agents yet draws only triage and the dim pl
 })
 
 test('the arrows join input, orchestrator, triage, stages and sign-off at every width, inside both boxes', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await ($ as any).prompt.submit({ text: PROMPT })
   await ($ as any).turn.complete(mainDone('answer'))
@@ -479,7 +473,6 @@ test('the arrows join input, orchestrator, triage, stages and sign-off at every 
 })
 
 test('the redraw timer keeps running with no agent, once', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock })
   const head = async () => (await texts($)).find(x => /main · orchestrator/.test(x)) as string
@@ -498,7 +491,6 @@ test('the redraw timer keeps running with no agent, once', async ($, on) => {
 const done = (id: string) => ({ turnId: 'a', agentId: id, answer: 'built\nSTATUS: pass', durationMs: 5, isAborted: false, reason: 'answer', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
 
 test('a first spawn long after the old run keeps the input box and the verdict the new prompt came with', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock, route: { stdout: ROUTE_JSON } })
   await $.agent.spawn(spawnImpl('t1', 's1'))
@@ -516,7 +508,6 @@ test('a first spawn long after the old run keeps the input box and the verdict t
 })
 
 test('a second prompt while solo work runs keeps the verdict and the start time', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 500_000 })
   await boot($, on, { clock, route: { stdout: ROUTE_JSON } })
   await ($ as any).prompt.submit({ text: 'first line' })
@@ -539,7 +530,6 @@ const bootRoute = async ($: any, on: any) => {
 const VERDICT = { mode: 'orchestrate', reason: 'four independent slices', filesToTouch: 12, linesToChange: 340, independentSlices: 4, risky: true, code: true }
 
 test('the route tool is registered undeferred and its call is shown in the pane', async ($, on) => {
-  mock.env(on, HERDR)
   const registered = await bootRoute($, on)
   expect(registered.length).toBe(1)
   expect(registered[0].name).toBe('route')
@@ -555,7 +545,6 @@ test('the route tool is registered undeferred and its call is shown in the pane'
 })
 
 test('route input that is not valid, or from a sub-agent, is ignored with a result', async ($, on) => {
-  mock.env(on, HERDR)
   await bootRoute($, on)
   const call = ($ as any).tool.call
   for (const bad of [{ mode: 'nonsense', reason: 'x' }, { mode: 'plain' }, { mode: 'plain', reason: 5 }, { input: 'junk' }]) {
@@ -623,7 +612,6 @@ const WIDTHS = [24, 32, 36, 40, 43, 44, 47, 52, 60, 64, 80, 99, 100, 140]
 
 for (const sc of SCENES) {
   test(`triage fork: ${sc.name}`, async ($, on) => {
-  mock.env(on, HERDR)
     await sc.build($, on)
     const others = ROUTES.filter(r => r !== sc.mode)
     for (const columns of WIDTHS) {
@@ -679,7 +667,6 @@ for (const sc of SCENES) {
 }
 
 test('triage fork: sizing draws all three routes dim, with no marker and no link', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   for (const columns of [24, 36, 43, 44, 60, 100, 140]) {
@@ -704,7 +691,6 @@ test('triage fork: sizing draws all three routes dim, with no marker and no link
 })
 
 test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   await $.turn.complete(mainDone('answer'))
@@ -733,7 +719,6 @@ test('triage fork: every width from 16 to 200 stays inside the pane and the link
 })
 
 test('triage fork: under 16 columns there is no lane and the link goes straight to the first stage', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   await $.turn.complete(mainDone('answer'))
@@ -756,7 +741,6 @@ test('triage fork: under 16 columns there is no lane and the link goes straight 
 })
 
 test('triage fork: the dot runs along the link while work runs and stops when it is signed off', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock, route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
@@ -788,7 +772,6 @@ test('triage fork: the dot runs along the link while work runs and stops when it
 })
 
 test('the scroll hint counts the fork, the route boxes, the link and the lane', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   const hint = async (columns: number, bodyRows: number) => (await texts($, columns, bodyRows)).some(x => /scroll/.test(x))
@@ -814,7 +797,6 @@ const spawnWith = ($: any, id: string, prompt: string, type: string) =>
   $.agent.spawn({ tool_use_id: id, prompt, description: id, subagentType: type, provider: { plugin: 'orchestration', tier: 'user' }, parentModel: 'opus' } as never)
 
 test('a plan review is the plan review stage even when its brief has a SLICE line', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: plan\nFOCUS: gaps', 'orchestration:reviewer')
   await finish($, 'p1', 'STATUS: pass\nGAPS: none')
@@ -826,7 +808,6 @@ test('a plan review is the plan review stage even when its brief has a SLICE lin
 })
 
 test('a bold GAPS heading is skipped so the finding under it is the result', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
   await finish($, 'b1', 'built\nSTATUS: pass')
@@ -842,7 +823,6 @@ test('a bold GAPS heading is skipped so the finding under it is the result', asy
 })
 
 test('a brief that only mentions PLAN REVIEW on a later line is still a slice', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', 'SLICE: s1\nFOCUS: x\nPLAN REVIEW passed earlier; check the code', 'orchestration:reviewer')
   const t = await texts($)
@@ -851,7 +831,6 @@ test('a brief that only mentions PLAN REVIEW on a later line is still a slice', 
 })
 
 test('a dependency never launched shows as a queued card only while the run is going', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b2', 'SLICE: s2\nFILES: b.py\nDEPENDS: s9', 'orchestration:implementer')
   expect((await texts($)).some(x => /◌ s9/.test(x))).toBe(true)
@@ -863,12 +842,12 @@ test('a dependency never launched shows as a queued card only while the run is g
 })
 
 test('a prompt that is a background notification or a peer message is not new work', async ($, on) => {
-  mock.env(on, HERDR)
   const { opened } = await boot($, on)
+  await pane($, 'on')
   for (const kind of ['task-notification', 'peer', 'scheduled-trigger']) {
     await ($ as any).prompt.submit({ text: 'Another Claude session sent a message', origin: { kind } })
   }
-  expect(opened.length).toBe(0)
+  expect(opened.length).toBe(1) // the command's own open
   expect((await texts($)).some(x => /▸ Another Claude/.test(x))).toBe(false)
 })
 
@@ -881,7 +860,6 @@ const wave = async ($: any, on: any, opts: { clock?: any } = {}) => {
 }
 
 test('between two waves the orchestrator reads dispatching, the sign-off waits and merge is not skipped', async ($, on) => {
-  mock.env(on, HERDR)
   await wave($, on)
   const t = await texts($)
   expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true)
@@ -892,7 +870,6 @@ test('between two waves the orchestrator reads dispatching, the sign-off waits a
 })
 
 test('after the main turn completes the run is signed off: no merge box, passed counted', async ($, on) => {
-  mock.env(on, HERDR)
   await wave($, on)
   await $.turn.complete(mainDone('answer'))
   const t = await texts($)
@@ -904,7 +881,6 @@ test('after the main turn completes the run is signed off: no merge box, passed 
 })
 
 test('agents with no typed prompt still sign off when nothing runs', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
   await finish($, 'b1', 'built\nSTATUS: pass')
@@ -914,7 +890,6 @@ test('agents with no typed prompt still sign off when nothing runs', async ($, o
 })
 
 test('a spawn over two minutes after the last agent, while the main turn is open, keeps the run', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(130_000)
@@ -928,7 +903,6 @@ test('a spawn over two minutes after the last agent, while the main turn is open
 })
 
 test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(300_000) // five minutes: still open
@@ -948,7 +922,6 @@ const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x
 
 // ~2400 timer redraws of the live pane take about 5 s on a loaded machine, so the default 5 s limit is too tight
 test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', { timeoutMs: 15000 }, async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   const ui = await mountLive($)
@@ -966,7 +939,6 @@ test('stale work: the timer draws a last redraw when it stops, so the open pane 
   await ui.unmount()
 })
 test('the timer ticks while work is open with no agents and stops, after a last redraw, at the main turn.complete', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock })
   const ui = await mountLive($)
@@ -987,7 +959,6 @@ test('the timer ticks while work is open with no agents and stops, after a last 
 })
 
 test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(700_000) // a long build, no turn.complete yet
@@ -1001,7 +972,6 @@ test('known tradeoff: a main turn busy over ten minutes after the last agent cou
 })
 
 test('with a recorded verdict, a spawn over two minutes after the last agent while the main turn is open keeps agents and work', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock, route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
@@ -1037,7 +1007,6 @@ const retried = async ($: any, on: any) => {
 }
 
 test('a retry is its own card: attempt k/n, a red-to-amber retry connector, and the dependent hangs off the latest attempt', async ($, on) => {
-  mock.env(on, HERDR)
   await retried($, on)
   await spawnWith($, 'c1', brief('s2', 's1'), IMPL)
   const ui = await mountLive($)
@@ -1072,7 +1041,6 @@ test('a retry is its own card: attempt k/n, a red-to-amber retry connector, and 
 })
 
 test('a resume that fires agent.spawn again with the same id is a new attempt; only the latest record takes the report', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await finish($, 'b1', FAIL)
@@ -1088,7 +1056,6 @@ test('a resume that fires agent.spawn again with the same id is a new attempt; o
 })
 
 test('a resume that fires only turn.complete for an ended record keeps the old run and adds a new one', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await finish($, 'b1', FAIL)
@@ -1101,7 +1068,6 @@ test('a resume that fires only turn.complete for an ended record keeps the old r
 })
 
 test('counts: a failed attempt followed by a passing one is fixed; a failing retry leaves both failed', async ($, on) => {
-  mock.env(on, HERDR)
   await retried($, on)
   await finish($, 'b2', PASS)
   await spawnWith($, 'r2', 'SLICE: s1', REVQ)
@@ -1114,7 +1080,6 @@ test('counts: a failed attempt followed by a passing one is fixed; a failing ret
 })
 
 test('counts: when the retry fails too, both attempts stay failed', async ($, on) => {
-  mock.env(on, HERDR)
   await retried($, on)
   await finish($, 'b2', FAIL)
   const t = await texts($)
@@ -1123,7 +1088,6 @@ test('counts: when the retry fails too, both attempts stay failed', async ($, on
 })
 
 test('new plan: slices that began after the first failure are tagged; retries of an old slice are not', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await finish($, 'b1', FAIL)
@@ -1137,7 +1101,6 @@ test('new plan: slices that began after the first failure are tagged; retries of
 })
 
 test('session log: "retry k of X" on a retry spawn and "re-plan" on a plan review that follows a failed one', async ($, on) => {
-  mock.env(on, HERDR)
   await retried($, on)
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
   await finish($, 'p1', FAIL)
@@ -1149,7 +1112,6 @@ test('session log: "retry k of X" on a retry spawn and "re-plan" on a plan revie
 })
 
 test('stage loops: re-plan, retry and rebuild appear when their condition is met and take the later attempt\'s colour', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   // a failed plan review with no later one: nothing is drawn
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
@@ -1213,7 +1175,6 @@ test('stage loops: re-plan, retry and rebuild appear when their condition is met
 })
 
 test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
   await finish($, 'p1', FAIL)
@@ -1253,7 +1214,6 @@ const clocked = async ($: any, on: any, route?: unknown) => {
 }
 
 test('active path: the arrows up to the furthest running stage are amber and carry the dot, the ones past it are grey', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = await clocked($, on)
   await $.prompt.submit({ text: PROMPT })
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
@@ -1287,7 +1247,6 @@ test('active path: the arrows up to the furthest running stage are amber and car
 })
 
 test('active path: an arrow into a failed stage is red once nothing runs', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   await spawnWith($, 'b1', brief('s1'), IMPL)
@@ -1300,7 +1259,6 @@ test('active path: an arrow into a failed stage is red once nothing runs', async
 })
 
 test('active path: the main session working in a plain run lights the link and the arrow into build; it goes out when the turn ends', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = await clocked($, on, verdict('plain'))
   await $.prompt.submit({ text: PROMPT })
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -1322,7 +1280,6 @@ test('active path: the main session working in a plain run lights the link and t
 })
 
 test('active path: the loop-back carries the dot backward while a retry runs, and the retry card and its connector still render', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = await clocked($, on)
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await finish($, 'b1', PASS)
@@ -1365,7 +1322,6 @@ test('active path: the loop-back carries the dot backward while a retry runs, an
 })
 
 test('spawn on use: before a mode is known only triage shows; a stage appears with its first agent', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
   const boxes = async () => (await texts($, 100)).filter(x => BOX.test(x)).map(x => x.slice(2))
@@ -1391,7 +1347,6 @@ test('spawn on use: before a mode is known only triage shows; a stage appears wi
 })
 
 test('spawn on use: plain and reviewed draw the build as the session\'s own work and skip the rest', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { route: verdict('reviewed') })
   await $.prompt.submit({ text: PROMPT })
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -1404,7 +1359,6 @@ test('spawn on use: plain and reviewed draw the build as the session\'s own work
 })
 
 test('slice diagram: trunk forks, bus stubs, the bus and the connector under a short layer take each card\'s colour; the trunk dot stops at the lowest running card', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = await clocked($, on)
   await spawnWith($, 'a1', brief('s1'), IMPL)
   await finish($, 'a1', PASS)
@@ -1442,7 +1396,6 @@ test('slice diagram: trunk forks, bus stubs, the bus and the connector under a s
 })
 
 test('slice diagram: a running first card ends the trunk dot above its own fork; later cards get none', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = await clocked($, on)
   await spawnWith($, 'a2', brief('s2'), IMPL) // first card, running
   await spawnWith($, 'a1', brief('s1'), IMPL)
@@ -1460,7 +1413,6 @@ test('slice diagram: a running first card ends the trunk dot above its own fork;
 })
 
 test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
   const WIDE = [24, 28, 32, 36, 39, 40, 44, 52, 60, 64, 80, 99, 100, 120, 140]
@@ -1514,7 +1466,6 @@ const PLANNED = [
 const barOf = (t: string[]) => t.filter(x => /^━+$/.test(x))
 
 test('progress: the PLAN REVIEW brief lists the planned slices; each moves along as its attempts run, pass and fail', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   expect((await texts($)).some(x => x.startsWith('progress'))).toBe(false) // no plan, no slices: no bar
   await spawnWith($, 'p1', PLANNED, REVQ)
@@ -1553,7 +1504,6 @@ test('progress: the PLAN REVIEW brief lists the planned slices; each moves along
 })
 
 test('progress: a re-plan that names slices replaces the plan, one that names none keeps it, and a new run drops it', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock })
   await spawnWith($, 'p1', PLANNED, REVQ)
@@ -1582,7 +1532,6 @@ test('progress: a re-plan that names slices replaces the plan, one that names no
 })
 
 test('progress: at every width the bar fits and the plan lines are cut, not wrapped; more than 8 slices end in +N more', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const many = ['PLAN REVIEW', ...Array.from({ length: 10 }, (_, i) => `SLICE: s${i + 1}\nGOAL: ${'a long goal '.repeat(6)}`)].join('\n')
   await spawnWith($, 'p1', many, REVQ)
@@ -1609,7 +1558,6 @@ const usedOf = (t: string[]) => {
 }
 
 test('used in this session: skills, connectors, agents, tools and files, from calls that ran; a new run keeps it', async ($, on) => {
-  mock.env(on, HERDR)
   const clock = mock.clock(on, { now: 10_000 })
   coreUse(on)
   await boot($, on, { clock })
@@ -1652,7 +1600,6 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
 })
 
 test('used in this session: on a narrow pane a row keeps as many names as fit and ends in +N', async ($, on) => {
-  mock.env(on, HERDR)
   coreUse(on)
   await boot($, on)
   for (const f of ['alpha.ts', 'beta.ts', 'gamma.ts', 'delta.ts', 'epsilon.ts']) await ($ as any).tool.call({ tool: 'Edit', file_path: `/r/${f}`, old_string: 'a', new_string: 'b' })
@@ -1696,7 +1643,6 @@ test('brief grammar: the dashboard parser gives expected.json for every fixture 
 
 const RESEARCH = 'orchestration:researcher'
 test('STATUS: any fail line fails, else the first line decides; blockquotes and the template do not count', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const replies: [string, string][] = [
     ['q1', 'STATUS: fail\nfixed it after all\nSTATUS: pass'], // the old last-line rule read pass
@@ -1717,7 +1663,6 @@ test('STATUS: any fail line fails, else the first line decides; blockquotes and 
 
 const PLAN1 = 'PLAN REVIEW\nSLICE: s1 - one\nFILES: a.py\nDEPENDS: none'
 test('run: a new prompt does not close an open planned run; once every slice is final the next prompt starts clean', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const s = $ as any
   await s.prompt.submit({ text: 'build it' })
@@ -1744,7 +1689,6 @@ test('run: a new prompt does not close an open planned run; once every slice is 
 })
 
 test('run: a slice whose review failed is final only after 3 implementer attempts', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const s = $ as any
   await spawnWith($, 'p1', PLAN1, REVQ)
@@ -1767,7 +1711,6 @@ test('run: a slice whose review failed is final only after 3 implementer attempt
 })
 
 test('run: a last review with no STATUS line is no verdict (brief.mjs null): the slice is not final and the run stays open', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const s = $ as any
   await spawnWith($, 'p1', PLAN1, REVQ)
@@ -1784,7 +1727,6 @@ test('run: a last review with no STATUS line is no verdict (brief.mjs null): the
 })
 
 test('run: a light-path launch opens a run that a prompt keeps until its slice is reviewed', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const s = $ as any
   await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
@@ -1799,7 +1741,6 @@ test('run: a light-path launch opens a run that a prompt keeps until its slice i
 })
 
 test('run: a pass that still needs an opus review keeps the run open; the opus pass closes it (brief.mjs settle)', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
   const s = $ as any
   await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
@@ -1821,7 +1762,6 @@ test('run: a pass that still needs an opus review keeps the run open; the opus p
 })
 
 test('run: REPLAN extends the open run and marks the progress bar; the agents stay', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
   await finish($, 'p1', PASS)
@@ -1835,7 +1775,6 @@ test('run: REPLAN extends the open run and marks the progress bar; the agents st
 })
 
 test('waiting: the main turn ended with agents still running reads waiting for N agents, then signs off', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   const s = $ as any
   await s.prompt.submit({ text: 'go' })
@@ -1854,7 +1793,6 @@ test('waiting: the main turn ended with agents still running reads waiting for N
 })
 
 test('marks: RISKY, the opus escalation and one constraint tick per check from the latest review', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
   const plan = ['PLAN REVIEW', 'CONSTRAINTS:', 'C1: parsing never throws', 'C2: no new dependencies', 'C3: old briefs still work',
     'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'RISKY: yes', 'CHECKS: C1, C2, C3', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none'].join('\n')
@@ -1883,7 +1821,6 @@ test('marks: RISKY, the opus escalation and one constraint tick per check from t
 })
 
 test('counted reviews: low-confidence gaps read as a pass with doubt; the same gap failing twice reads as a stall until a REPLAN', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on, { model: id => (id.startsWith('q') ? 'claude-sonnet-5-5' : 'haiku') })
   const plan = ['PLAN REVIEW', 'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none'].join('\n')
   await spawnWith($, 'p1', plan, REVQ)
@@ -1915,7 +1852,6 @@ test('counted reviews: low-confidence gaps read as a pass with doubt; the same g
 })
 
 test('blocked launches: a gate denial of an Agent call is logged with its reason; another denial is not', async ($, on) => {
-  mock.env(on, HERDR)
   on('tool.call', (_: unknown, e: any) => ({
     deny: e.prompt?.includes('s9') ? 'Plan check: slice s9 is not in the plan (not_in_plan). Re-plan with REPLAN first.'
       : e.prompt?.includes('s8') ? 'Plan check: no plan review has finished in this session. Send the plan to a reviewer.'
@@ -1932,7 +1868,6 @@ test('blocked launches: a gate denial of an Agent call is logged with its reason
 })
 
 test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as done; an implementer reply with none still is', async ($, on) => {
-  mock.env(on, HERDR)
   await boot($, on)
   await spawnWith($, 'i1', brief('s1'), IMPL)
   await finish($, 'i1', 'built it')
@@ -1945,9 +1880,186 @@ test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as don
   expect(t.some(x => /^[◆✔] s1 /.test(x))).toBe(false)
 })
 
-test('in a plain terminal (not herdr) a prompt does not open the pane', async ($, on) => {
-  mock.env(on, { TERM_PROGRAM: 'iTerm.app' })
+
+// ---- On and off: the pane opens by itself only after /orchestration on in this session, in any terminal.
+const HERDR_ENV = { TERM_PROGRAM: 'herdr-mobile', HC_TERMINAL_SOCKET: '/run/herdr.sock' }
+const PLAIN_ENV = { TERM_PROGRAM: 'iTerm.app' }
+const ROUTE_VERDICT = { mode: 'orchestrate', reason: 'four independent slices' }
+
+for (const [where, env] of [['herdr', HERDR_ENV], ['a plain terminal', PLAIN_ENV]] as const) {
+  test(`off by default in ${where}: a prompt, an agent start and a route verdict open nothing, and the run is still recorded`, async ($, on) => {
+    mock.env(on, env)
+    const { opened, toasts } = await boot($, on, { placed: false })
+    await ($ as any).prompt.submit({ text: PROMPT })
+    await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+    const out = await ($ as any).tool.call({ tool: NAME, ...ROUTE_VERDICT })
+    expect(out.result).toBe('route recorded: orchestrate')
+    expect(opened.length).toBe(0)
+    expect(toasts.length).toBe(0) // the narrow-terminal hint is for a pane that is on
+    // turned on mid-run, the pane shows the run so far
+    const said = await pane($, 'on')
+    expect(said.text).toMatch(/pane is on/i)
+    expect(opened.length).toBe(1)
+    const t = await texts($)
+    expect(t.some(x => /s1/.test(x))).toBe(true)
+    expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+    expect(t.includes(`▸ ${PROMPT.split('\n')[0]}`)).toBe(true)
+  })
+}
+
+test('the command is registered with an [on|off] hint and a description that says it turns the pane on or off', async ($, on) => {
+  const { commands } = await boot($, on)
+  expect(commands.length).toBe(1)
+  expect(commands[0].name).toBe('orchestration')
+  expect(commands[0].argumentHint).toBe('[on|off]')
+  expect(commands[0].description).toMatch(/turn/i)
+  expect(commands[0].description).toMatch(/on or off/i)
+})
+
+test('/orchestration on opens the pane focused, and later prompts, agents and verdicts open it', async ($, on) => {
+  mock.env(on, PLAIN_ENV)
   const { opened } = await boot($, on)
+  const said = await pane($, 'on')
+  expect(opened.length).toBe(1)
+  expect(opened[0].id).toBe('orchestration')
+  expect(opened[0].focus).toBe(true)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(said.text).toMatch(/\/orchestration off/)
+  expect(said.text.includes('\n')).toBe(false) // one plain line
   await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(2)
+  expect(opened[1].focus).toBeFalsy() // opened unasked: the prompt keeps the keyboard
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(opened.length).toBe(3)
+  await ($ as any).tool.call({ tool: NAME, ...ROUTE_VERDICT })
+  expect(opened.length).toBe(4)
+})
+
+test('with the pane on, a terminal too narrow to seat it gets the hint once, naming /orchestration on', async ($, on) => {
+  const { toasts } = await boot($, on, { placed: false })
+  await pane($, 'on')
+  await ($ as any).prompt.submit({ text: PROMPT })
+  await ($ as any).prompt.submit({ text: 'again' })
+  expect(toasts.length).toBe(1)
+  expect(String(toasts[0].text)).toMatch(/\/orchestration on/)
+})
+
+test('/orchestration off closes the pane and later prompts open nothing', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  await pane($, 'on')
+  const said = await pane($, 'off')
+  expect(closed.length).toBe(1)
+  expect(closed[0].id).toBe('orchestration')
+  expect(said.text).toMatch(/pane is off/i)
+  expect(said.text).toMatch(/\/orchestration on/)
+  expect(said.text.includes('\n')).toBe(false)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(opened.length).toBe(1) // only the command's own open
+})
+
+test('/orchestration with no argument switches between on and off', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  let said = await pane($)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(opened.length).toBe(1)
+  expect(opened[0].focus).toBe(true)
+  said = await pane($, '  ')
+  expect(said.text).toMatch(/pane is off/i)
+  expect(closed.length).toBe(1)
+  said = await pane($)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(opened.length).toBe(2)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(3)
+})
+
+test('/orchestration with an unknown argument changes nothing and answers with the usage', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  const said = await pane($, 'maybe')
+  expect(said.text).toMatch(/\/orchestration \[on\|off\]/)
+  expect(said.text.includes('\n')).toBe(false)
   expect(opened.length).toBe(0)
+  expect(closed.length).toBe(0)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(0) // still off
+  await pane($, 'on')
+  await pane($, 'sideways')
+  await ($ as any).prompt.submit({ text: 'more' })
+  expect(opened.length).toBe(2) // still on
+  expect(closed.length).toBe(0)
+})
+
+// No hook may block or fail the event it wraps: a refused state write or ui.open still hands the event result on, and the rest of the hook's work
+// still runs. The engine reports a hook that fails and skips it, so a test sees the failure as the work the skipped hook never did.
+test('/orchestration answers with a line even when opening or closing the pane fails', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail })
+  fail.open = true
+  fail.close = true
+  const on1 = await pane($, 'on')
+  expect(on1.text).toBe('Orchestration pane is on: arrow keys scroll, Esc returns to the prompt. Type /orchestration off to turn it off.')
+  const off = await pane($, 'off')
+  expect(off.text).toBe('Orchestration pane is off. Type /orchestration on to turn it on.')
+})
+
+test('agent.spawn: a failing ui.open still returns the spawned agent and starts the redraw', async ($, on) => {
+  const fail: Fail = {}
+  const { timers, opened } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.open = true
+  const out = await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(out.agentId).toBe('b1')
+  expect(opened.length).toBe(1) // the command's own open; the spawn's was refused
+  expect(timers.length).toBeGreaterThan(0)
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+})
+
+test('agent.spawn: a failing state write still returns the spawned agent and opens the pane', async ($, on) => {
+  const fail: Fail = {}
+  const { opened } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.keys = ['agents']
+  const out = await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(out.agentId).toBe('b1')
+  expect(opened.length).toBe(2)
+})
+
+test('tool.call: a failing state write for a running agent still runs the call, returns its result and counts the tool', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail, route: 'read ok' })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  fail.keys = ['agents']
+  const out = await ($ as any).tool.call({ tool: 'Grep', pattern: 'x', agentId: 'b1' })
+  expect(out.result).toBe('read ok')
+  expect(usedOf(await texts($)).some(x => /Grep 1/.test(x))).toBe(true)
+})
+
+test('turn.complete: a failing state write for an agent still passes the turn on', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  fail.keys = ['agents', 'log']
+  const out = await finish($, 'b1', 'built\nSTATUS: pass')
+  expect(out.text).toBe('built\nSTATUS: pass')
+})
+
+test('session.start: a failing command registration still starts the session and registers the route tool', async ($, on) => {
+  const registered: any[] = []
+  on('command.register', () => ({ deny: 'no commands here' }))
+  on('tool.register', (_: unknown, e: any) => (registered.push(e), { value: { tool: NAME } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  const out = await ($ as any).session.start({ cwd: '/x', surface: 'terminal', isInteractive: true })
+  expect(out.cwd).toBe('/x')
+  expect(registered.length).toBe(1)
+})
+
+test('prompt.submit: a failing ui.open with the pane on still hands the prompt on and starts the redraw', async ($, on) => {
+  const fail: Fail = {}
+  const { timers } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.open = true
+  const out = await ($ as any).prompt.submit({ text: PROMPT })
+  expect(out.text).toBe(PROMPT)
+  expect(timers.length).toBeGreaterThan(0)
 })

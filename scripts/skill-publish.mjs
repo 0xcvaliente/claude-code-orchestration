@@ -11,13 +11,17 @@
 // exit 1 and says what to do (bad usage exits 2):
 //   1. seal       skills/<name>/provenance.json matches the files (skill-seal.mjs verify) and names this target.
 //   2. validate   python3 -I -B scripts/validate.py skills/<name> exits 0 in the draft.
-//   3. git state  the draft is clean, on skill/<name>, and the branch has a commit its base does not. The base is
-//                 --base, else the branch the repository's main checkout is on (the one the draft was made from).
-//   4. push       git push -u origin skill/<name> (never a force push).
+//   3. git state  the draft is clean, on skill/<name>, and the branch has a commit its base does not; every file under
+//                 skills/<name> is committed on the branch (an ignored or untracked file is sealed but never pushed).
+//                 The base is --base, else the branch the repository's main checkout is on (the one the draft was made
+//                 from). The branch's head commit is recorded here.
+//   4. push       refused when origin's skill/<name> exists and is neither that head nor an ancestor of it (commits the
+//                 seal never covered); else git push -u origin skill/<name> (never a force push).
 //   5. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
 //                 created it and a person must review it; an open PR for the branch is reused. Prints the URL.
 // With --merge, after those:
-//   6. merge      gh pr merge <url> --merge.
+//   6. merge      gh pr merge <url> --merge --match-head-commit <the head recorded in step 3>, so gh merges only
+//                 when the pull request's head is still the commit that was checked.
 //   7. update     the main checkout fetches origin and fast-forwards its base branch (git merge --ff-only).
 //   8. install    --install "<command>" run with sh in the main checkout, else scripts/install.sh --target claude when
 //                 that file exists, else skipped with a note.
@@ -200,7 +204,26 @@ step("Run the repository validator", `python3 -I -B scripts/validate.py skills/$
   console.log("   ok");
 });
 
+/** Every regular file under `dir`, as paths relative to it with "/" separators (links and the like are left to the seal). @param {string} dir */
+function filesUnder(dir) {
+  /** @type {string[]} */
+  const out = [];
+  /** @param {string} abs @param {string} rel */
+  const walk = (abs, rel) => {
+    for (const n of readdirSync(abs).sort()) {
+      const a = join(abs, n);
+      const r = rel ? `${rel}/${n}` : n;
+      const st = lstatSync(a);
+      if (st.isDirectory()) walk(a, r);
+      else if (st.isFile()) out.push(r);
+    }
+  };
+  walk(dir, "");
+  return out;
+}
+
 // 3. git state
+let localHead = "";
 step("Check the draft is clean and committed", `git status, git branch --show-current, git rev-list --count ${baseBranch}..${branch}`, () => {
   const st = git(draft, ["status", "--porcelain"]);
   if (!st.ok) fail(`git status failed in ${draft}:\n${tail(st)}`);
@@ -210,11 +233,34 @@ step("Check the draft is clean and committed", `git status, git branch --show-cu
   const ahead = git(draft, ["rev-list", "--count", `${baseBranch}..${branch}`]);
   if (!ahead.ok) fail(`cannot compare ${branch} with ${baseBranch}:\n${tail(ahead)}\nPass the right base with --base <branch>.`);
   if (Number(ahead.out) < 1) fail(`${branch} has no commit that ${baseBranch} lacks. Commit the draft on ${branch} first.`);
+  // The seal covers every file on disk, ignored ones too, and git status hides ignored files: each must be on the branch.
+  const tree = git(draft, ["ls-tree", "-r", "-z", "--name-only", "--full-tree", `refs/heads/${branch}`, "--", `skills/${name}`]);
+  if (!tree.ok) fail(`cannot list the files of ${branch}:\n${tail(tree)}`);
+  const onBranch = new Set(tree.out.split("\0").filter(Boolean));
+  /** @type {string[]} */
+  let onDisk = [];
+  try {
+    onDisk = filesUnder(skillDir).map((r) => `skills/${name}/${r}`);
+  } catch (e) {
+    fail(`cannot list the files of ${skillDir}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const missing = onDisk.filter((p) => !onBranch.has(p));
+  if (missing.length) fail(`${missing.length} file${missing.length === 1 ? "" : "s"} under skills/${name} ${missing.length === 1 ? "is" : "are"} not committed on ${branch} (ignored or untracked), so the pushed branch would lack what the seal lists:\n  - ${missing.join("\n  - ")}\nCommit each (git add -f for an ignored one) or delete it and seal again, then rerun.`);
+  const h = git(draft, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  if (!h.ok || !/^[0-9a-f]{40,64}$/.test(h.out)) fail(`cannot read the head commit of ${branch}:\n${tail(h)}`);
+  localHead = h.out;
   console.log(`   ok, ${ahead.out} commit${ahead.out === "1" ? "" : "s"} ahead of ${baseBranch}`);
 });
 
 // 4. push
-step("Push the branch", `git -C ${sh(draft)} push -u origin ${branch}`, () => {
+step("Push the branch", `git ls-remote origin refs/heads/${branch}; git -C ${sh(draft)} push -u origin ${branch}`, () => {
+  // Origin's branch may only be the checked head or behind it: anything else holds commits the seal never covered.
+  const remote = git(draft, ["ls-remote", "origin", `refs/heads/${branch}`]);
+  if (!remote.ok) fail(`cannot read ${branch} on origin (git ls-remote failed):\n${tail(remote)}`);
+  const remoteHead = remote.out.split(/\s+/)[0] ?? "";
+  if (remoteHead && remoteHead !== localHead && !git(draft, ["merge-base", "--is-ancestor", remoteHead, localHead]).ok) {
+    fail(`origin's ${branch} is at ${remoteHead.slice(0, 12)}, which is not the draft's head ${localHead.slice(0, 12)} or an ancestor of it: origin holds commits the seal never covered. Nothing was pushed. Look at origin's ${branch}; if those commits belong in the skill, bring them into the draft, have it reviewed and sealed again, then rerun; otherwise delete the remote branch by hand.`);
+  }
   const r = git(draft, ["push", "-u", "origin", `${branch}:${branch}`]);
   if (!r.ok) fail(`git push failed:\n${tail(r)}\nThe push never forces: if ${branch} exists on origin with other commits, look at it and resolve that by hand, then rerun.`);
   console.log("   ok");
@@ -250,9 +296,9 @@ if (!opt.merge) {
 }
 
 // 6. merge
-step("Merge the pull request", "gh pr merge <url> --merge", () => {
-  const r = run("gh", ["pr", "merge", prUrl, "--merge"], { cwd: mainCheckout });
-  if (!r.ok) fail(`gh pr merge failed:\n${tail(r)}\nMerge ${prUrl} by hand (or fix what blocks it), then rerun with --merge.`);
+step("Merge the pull request", `gh pr merge <url> --merge --match-head-commit ${localHead || "<the checked head>"}`, () => {
+  const r = run("gh", ["pr", "merge", prUrl, "--merge", "--match-head-commit", localHead], { cwd: mainCheckout });
+  if (!r.ok) fail(`gh pr merge failed:\n${tail(r)}\nIf the pull request's head is no longer ${localHead.slice(0, 12)} (the commit that was checked), someone pushed to ${branch}: look at it before anything is merged. Otherwise merge ${prUrl} by hand (or fix what blocks it), then rerun with --merge.`);
   console.log("   ok");
 });
 

@@ -88,6 +88,8 @@ declare module 'claude-code' {
   interface PluginState {
     'orchestration-dashboard': {
       agents: Agent[]; log: LogEntry[]; tick: number; main: string; triage: TriageInfo | null; work: Work | null; plan: Plan | null; used: Used; run: Run | null
+      /** Whether the person turned the pane on with /orchestration in this session: false at every session start, set only by the command. */
+      enabled: boolean
     }
   }
 }
