@@ -54,6 +54,9 @@ test("detect: npm init's placeholder test script is not a test command; detectio
   assert.equal(detect({ "package.json": placeholder, Makefile: "test:\n\ttrue\n" }), "make test");
   assert.match(detect({ "package.json": placeholder, "tests/test_a.py": "" }), /^python3 -m /);
   assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: "node --test" } }) }), "npm test --silent");
+  // Only npm's exact placeholder (whitespace trimmed) counts; a real suite that merely mentions the words still runs.
+  assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: '  echo "Error: no test specified" && exit 1 ' } }) }), "");
+  assert.equal(detect({ "package.json": JSON.stringify({ scripts: { test: 'echo "no test specified yet" && node --test' } }) }), "npm test --silent");
 });
 
 test("allow rules per runner", () => {
