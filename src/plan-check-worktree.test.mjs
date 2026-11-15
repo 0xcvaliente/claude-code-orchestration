@@ -112,6 +112,34 @@ test("worktree base: blocked when the settings set baseRef to something other th
   }
 });
 
+test("worktree base: a worktree value that is not an object with a string baseRef counts as not set", () => {
+  // Each malformed value alone (in the project settings, and in the user settings) is denied when HEAD is ahead.
+  for (const value of ["head", [], null, {}, { baseRef: 5 }]) {
+    for (const where of ["project", "user"]) {
+      const s = setup();
+      try {
+        writeJson(where === "user" ? join(s.config, "settings.json") : join(s.dir, ".claude", "settings.json"), { worktree: value });
+        const r = launch(s, impl("a", "x.py"));
+        assert.equal(r.status, 2, `${where} ${JSON.stringify(value)}`);
+        assert.equal(log(s.dir).at(-1).reason, "worktree_base_not_head");
+      } finally {
+        rmSync(s.top, { recursive: true, force: true });
+      }
+    }
+  }
+  // A malformed project file passes the lookup on: user settings that say head allow the launch.
+  for (const value of ["head", [], null, {}, { baseRef: 5 }]) {
+    const s = setup();
+    try {
+      writeJson(join(s.dir, ".claude", "settings.json"), { worktree: value });
+      writeJson(join(s.config, "settings.json"), { worktree: { baseRef: "head" } });
+      assert.equal(launch(s, impl("a", "x.py")).status, 0, JSON.stringify(value));
+    } finally {
+      rmSync(s.top, { recursive: true, force: true });
+    }
+  }
+});
+
 test("worktree base: allowed when the user, project or local settings say head", () => {
   for (const where of ["user", "project", "local"]) {
     const s = setup();

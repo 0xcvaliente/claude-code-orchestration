@@ -203,14 +203,14 @@ function sourcesNoteOn(env) {
   return String(env.ORCH_SOURCES_NOTE ?? "").trim().toLowerCase() !== "off";
 }
 
-/** How many SOURCES entries are local regular files (not http(s) URLs), resolved as the read router resolves them. Never throws. */
+/** How many distinct local regular files (not http(s) URLs) SOURCES names, resolved as the read router resolves them. Never throws. */
 function localSources() {
   try {
     const dir = projectDir();
-    return h.sources.filter((s) => {
-      if (/^https?:\/\//i.test(s)) return false;
+    const paths = h.sources.filter((s) => !/^https?:\/\//i.test(s)).map((s) => resolve(dir, s));
+    return [...new Set(paths)].filter((p) => {
       try {
-        return statSync(resolve(dir, s)).isFile();
+        return statSync(p).isFile();
       } catch {
         return false;
       }
@@ -222,9 +222,10 @@ function localSources() {
 
 /**
  * The effective worktree.baseRef: the value from the first of the project's settings.local.json, its settings.json and
- * the user settings that sets it; undefined when none sets it; null when a settings file cannot be read or parsed (the
- * check cannot decide). Never throws.
- * @returns {unknown}
+ * the user settings that sets it; undefined when none sets it. A file sets it only when `worktree` is an object with a
+ * string `baseRef`; any other value counts as not set there and the next file is consulted. An unreadable file or
+ * invalid JSON means the setting cannot be established (null) and the launch is treated as before. Never throws.
+ * @returns {string | null | undefined}
  */
 function worktreeBaseRef() {
   try {
@@ -234,7 +235,7 @@ function worktreeBaseRef() {
       if (!existsSync(f)) continue;
       const s = JSON.parse(readFileSync(f, "utf8"));
       const wt = s && typeof s === "object" ? s.worktree : undefined;
-      if (wt && typeof wt === "object" && wt.baseRef !== undefined) return wt.baseRef;
+      if (wt && typeof wt === "object" && !Array.isArray(wt) && typeof wt.baseRef === "string") return wt.baseRef;
     }
     return undefined;
   } catch {

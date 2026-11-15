@@ -102,7 +102,8 @@ test("coverage note: with router and hints off, the note alone is appended to a 
       assert.equal(launch(dir, { subagent_type: type, prompt: brief }, { ...on, ORCH_ALLOW_BUILTINS: "1" }).stdout, "", type);
     }
     // Fewer than two local regular files: a URL, a missing file or a folder does not count.
-    for (const p of ["SOURCES: table.pdf\nQ", "SOURCES: table.pdf, https://example.com/a.pdf\nQ", "SOURCES: table.pdf, missing.pdf\nQ", "SOURCES: table.pdf, .claude\nQ", "Q"]) {
+    // The same file twice (also spelled differently) is one file.
+    for (const p of ["SOURCES: table.pdf\nQ", "SOURCES: table.pdf, table.pdf\nQ", "SOURCES: table.pdf, ./table.pdf, sub/../table.pdf\nQ","SOURCES: table.pdf, https://example.com/a.pdf\nQ", "SOURCES: table.pdf, missing.pdf\nQ", "SOURCES: table.pdf, .claude\nQ", "Q"]) {
       assert.equal(launch(dir, { subagent_type: "researcher", prompt: p }, on).stdout, "", p);
     }
     // Paths resolve against the project dir, like the router's.
