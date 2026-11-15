@@ -22,11 +22,16 @@ import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BYTES = 1 << 20;
 
-/** Host of a URL, lowercased, without a leading www.; null when it does not parse. @param {string} url */
+/**
+ * Host of a URL, lowercased, without a leading www., with ":<port>" when the URL names a port other than its scheme's
+ * default (URL drops 443 for https and 80 for http, so `https://a.example:443` and `https://a.example` give the same
+ * value and `https://a.example:8443` another); null when it does not parse. @param {string} url
+ */
 export function hostOf(url) {
   try {
-    const h = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-    return h ? h.replace(/^www\./, "") : null;
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase().replace(/\.$/, "");
+    return h ? `${h.replace(/^www\./, "")}${u.port ? `:${u.port}` : ""}` : null;
   } catch {
     return null;
   }
