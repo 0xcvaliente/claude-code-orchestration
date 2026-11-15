@@ -920,21 +920,20 @@ if (open && st?.stalled && stallGateOn(process.env)) {
 }
 
 // FILES globs: `*` matches within one path segment, `**` (a whole segment) across segments, `?` one character. An entry
-// without glob characters is a file or a folder, so it also stands for what is under it. Entries are compared after
-// normalizeFiles against the project folder (a skill slice's are already resolved against its draft), so `./x`,
-// `src/../x` and `/abs/proj/x` are one path.
+// without glob characters stands for itself and everything under it, unless it exists on disk as a regular file (then
+// only itself): a name that does not exist yet may become a folder, whatever it looks like (`docs/v1.2`, `conf.d`).
+// The cost, accepted: a `**` glob beside a file that does not exist yet overlaps, since that name could be a folder.
+// Entries are compared after normalizeFiles against the project folder (a skill slice's are already resolved against
+// its draft), so `./x`, `src/../x` and `/abs/proj/x` are one path.
 const dir = process.env.CLAUDE_PROJECT_DIR || (typeof input.cwd === "string" && input.cwd) || process.cwd();
 /** @param {string} p */
 const isGlob = (p) => /[*?]/.test(p);
-/**
- * A plain entry names a file, not a folder, when it is a file on disk, or, when it does not exist, when its last segment
- * has an extension (`a.py`; not `.claude` or `src`). Anything else may be a folder. @param {string} p
- */
+/** A regular file on disk; anything else (a folder, or nothing yet) may hold paths under it. @param {string} p */
 const fileLike = (p) => {
   try {
     return statSync(p).isFile();
   } catch {
-    return /[^/.][^/]*\.[A-Za-z0-9]+$/.test(p);
+    return false;
   }
 };
 /** Path segments; a plain entry that may be a folder gets a trailing `**` (what is under it). @param {string} p */

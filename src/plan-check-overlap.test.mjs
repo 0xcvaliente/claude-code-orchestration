@@ -42,10 +42,17 @@ function plan(dir, text) {
   run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: "s1", agent_id: "p1", agent_type: "orchestration:reviewer", last_assistant_message: "STATUS: pass" });
 }
 
-/** Launch slice a with FILES `a`, then slice b with FILES `b`; returns b's result. @param {string} a @param {string} b */
-function pair(a, b) {
+/**
+ * Launch slice a with FILES `a`, then slice b with FILES `b`; returns b's result. `existing`: project files to create first.
+ * @param {string} a @param {string} b @param {string[]} [existing]
+ */
+function pair(a, b, existing = []) {
   const dir = project();
   try {
+    for (const f of existing) {
+      mkdirSync(dirname(join(dir, f)), { recursive: true });
+      writeFileSync(join(dir, f), "");
+    }
     const first = launch(dir, `SLICE: a\nFILES: ${a}\nDEPENDS: none`);
     assert.equal(first.status, 0, first.stderr);
     const r = launch(dir, `SLICE: b\nFILES: ${b}\nDEPENDS: none`);
@@ -60,9 +67,36 @@ test("file_overlap: a glob with no fixed folder overlaps only what it can match"
   assert.equal(md.status, 0, `*.md and src/a.ts share no file: ${md.stderr}`);
   const readme = pair("*.md", "README.md");
   assert.deepEqual([readme.status, readme.reason], [2, "file_overlap"], "*.md matches README.md");
-  const deep = pair("**/*.ts", "src/a.py");
-  assert.equal(deep.status, 0, `**/*.ts and src/a.py share no file: ${deep.stderr}`);
+  assert.equal(pair("*.md", "src/a.ts", ["src/a.ts"]).status, 0, "* stays in one segment, file on disk or not");
+  const deep = pair("**/*.ts", "src/a.py", ["src/a.py"]);
+  assert.equal(deep.status, 0, `**/*.ts and the regular file src/a.py share no file: ${deep.stderr}`);
+  // The stated cost: a plain entry not on disk may be a folder, so a ** glob may match something under it.
+  assert.deepEqual([pair("**/*.ts", "src/new.py").status, pair("**/*.ts", "src/new.py").reason], [2, "file_overlap"], "src/new.py may be a folder");
+  assert.equal(pair("src/*.ts", "src/new.py").status, 0, "src/*.ts cannot match src/new.py or anything under it");
   assert.deepEqual([pair("**/*.ts", "src/x/a.ts").status, pair("toolkit/*", "toolkit/toml.py").status], [2, 2]);
+});
+
+test("file_overlap: a plain entry not on disk may be a folder, whatever its name looks like", () => {
+  for (const [a, b] of /** @type {[string, string][]} */ ([
+    ["docs/v1.2", "docs/v1.2/x.md"],
+    ["docs/v1.2/x.md", "docs/v1.2"],
+    ["conf.d", "conf.d/site.conf"],
+    ["conf.d/site.conf", "conf.d"],
+  ])) {
+    const r = pair(a, b);
+    assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${a} then ${b}`);
+  }
+});
+
+test("not_in_plan: a planned plain entry not on disk covers what is under it", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: docs/v1.2\nDEPENDS: none\nGOAL: a");
+    const r = launch(dir, "SLICE: a\nFILES: docs/v1.2/x.md\nDEPENDS: none");
+    assert.equal(r.status, 0, r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("file_overlap: glob beside glob", () => {
