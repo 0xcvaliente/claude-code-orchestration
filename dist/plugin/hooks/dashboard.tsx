@@ -690,11 +690,18 @@ const sceneOf = (list: Agent[], ghosts: boolean) => {
 
 type PaneApi = {
   ui: { open(o: { id: string; title: string }): Promise<{ isPlaced: boolean }>; toast(text: string, o: { timeoutMs: number }): unknown }
+  env: { get(name: string): Promise<string | undefined> }
 }
+
+// The pane opens by itself only inside herdr (its terminal sets TERM_PROGRAM=herdr-* and HC_TERMINAL_SOCKET). In a plain terminal it stays
+// closed, so the chat keeps the full width; /orchestration still opens it there.
+const inHerdr = async ($: PaneApi) =>
+  ((await $.env.get('TERM_PROGRAM')) ?? '').startsWith('herdr') || !!(await $.env.get('HC_TERMINAL_SOCKET'))
 
 let told = false // the one-line hint for a terminal too narrow to seat the pane by itself
 // Unasked, a pane seats only from 144 columns; on a narrower terminal it waits, so say how to open it.
 const openPane = async ($: PaneApi) => {
+  if (!(await inHerdr($))) return
   const opened = await $.ui.open({ id: PANE, title: 'Orchestration' })
   if (!opened.isPlaced && !told) {
     told = true
