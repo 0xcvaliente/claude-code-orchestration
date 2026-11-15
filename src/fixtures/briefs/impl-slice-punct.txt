@@ -1,0 +1,5 @@
+SLICE: A2.
+FILES: c.py
+DEPENDS: none
+
+Fix the parser.
