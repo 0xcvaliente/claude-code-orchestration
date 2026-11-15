@@ -31,11 +31,19 @@ process.exit(Number(code));
 /** @param {string} tag @param {number} code @param {number} [sleepMs] @param {string} [pidFile] @returns {[string, string]} */
 const step = (tag, code, sleepMs = 0, pidFile = "") => [tag, `node "${stub}" ${tag} ${code} ${sleepMs} ${pidFile ? `"${pidFile}"` : ""}`];
 
-/** @param {[string, string][]} steps @returns {Promise<{ code: number | null, out: string, ms: number }>} */
-const check = (steps) =>
+/**
+ * Runs check.mjs with `steps`, its stdout and stderr through pipes. `slowMs` leaves stdout unread that long, as a slow
+ * reader (`| wc -c`, a CI log collector) would, so the pipe fills and check.mjs's writes queue up.
+ * @param {[string, string][]} steps @param {number} [slowMs] @returns {Promise<{ code: number | null, out: string, ms: number }>}
+ */
+const check = (steps, slowMs = 0) =>
   new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn(process.execPath, [script], { env: { ...process.env, ORCH_CHECK_STEPS: JSON.stringify(steps) } });
+    const child = spawn(process.execPath, [script], { env: { ...process.env, ORCH_CHECK_STEPS: JSON.stringify(steps) }, stdio: "pipe" });
+    if (slowMs) {
+      child.stdout.pause();
+      setTimeout(() => child.stdout.resume(), slowMs);
+    }
     let out = "";
     child.stdout.on("data", (b) => (out += b));
     child.stderr.on("data", (b) => (out += b));
@@ -100,6 +108,31 @@ test("the steps run at the same time", async () => {
   const r = await check([step("alpha", 0, 1000), step("beta", 0, 1000)]);
   assert.equal(r.code, 0, r.out);
   assert.ok(r.ms < 2000, `took ${r.ms} ms`);
+});
+
+// 5 MB of output read through a pipe (as CI reads it): nothing may be lost to an exit while writes are still queued
+const big = join(dir, "big.mjs");
+writeFileSync(big, `process.stdout.write("x".repeat(5_000_000) + "\\n"); process.exitCode = Number(process.argv[2]);\n`);
+for (const code of [0, 4]) {
+  test(`a step's 5 MB of output and the summary line all arrive through a pipe (step exit ${code})`, async () => {
+    const r = await check([["big", `node "${big}" ${code}`], step("small", 0)], 1500);
+    const longest = Math.max(0, ...(r.out.match(/x+/g) ?? []).map((x) => x.length));
+    assert.equal(longest, 5_000_000, `got ${r.out.length} characters`);
+    if (code === 0) {
+      assert.equal(r.code, 0);
+      assert.match(lastLine(r.out), /^check passed: all 2 steps/);
+    } else {
+      assert.equal(r.code, 1);
+      assert.match(lastLine(r.out), /^check failed: big \(1 of 2/);
+    }
+  });
+}
+
+test("an empty step list is an error, never a pass", async () => {
+  const r = await check([]);
+  assert.notEqual(r.code, 0);
+  assert.doesNotMatch(r.out, /check passed/);
+  assert.match(r.out, /no steps/);
 });
 
 test("a signal to check.mjs stops the running steps", { skip: process.platform === "win32" && "process groups are POSIX" }, async () => {

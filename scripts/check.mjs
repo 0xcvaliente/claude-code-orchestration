@@ -25,6 +25,7 @@ function steps() {
   if (!Array.isArray(parsed) || !parsed.every((s) => Array.isArray(s) && s.length === 2 && s.every((x) => typeof x === "string"))) {
     throw new Error("ORCH_CHECK_STEPS must be a JSON array of [name, command] pairs");
   }
+  if (parsed.length === 0) throw new Error("ORCH_CHECK_STEPS names no steps: an empty check must never pass");
   return parsed;
 }
 
@@ -51,18 +52,12 @@ for (const sig of /** @type {const} */ (["SIGINT", "SIGTERM", "SIGHUP"])) {
     if (stopped) return;
     stopped = code;
     for (const child of running) stop(child, sig);
-    // give the steps a moment to clean up (the test runner removes its temp root on SIGTERM), then make sure
-    const timer = setTimeout(() => {
+    // the steps get 5 s to clean up (the test runner removes its temp root on SIGTERM), then SIGKILL. The run then ends
+    // as usual below, with the exit code of the signal. A step whose pipes stay open past 10 s ends it the hard way.
+    setTimeout(() => {
       for (const child of running) stop(child, "SIGKILL");
-      process.exit(code);
-    }, 5000);
-    const wait = setInterval(() => {
-      if (running.size === 0) {
-        clearInterval(wait);
-        clearTimeout(timer);
-        process.exit(code);
-      }
-    }, 50);
+    }, 5000).unref();
+    setTimeout(() => process.exit(code), 10000).unref();
   });
 }
 
@@ -91,18 +86,29 @@ const run = (name, command) =>
     child.on("close", (code) => finish(code));
   });
 
+// The process ends by itself once every write has reached stdout: process.exit() here would drop the writes still
+// queued for a pipe (CI reads stdout through one), with the summary line among them.
 const started = Date.now();
-const list = steps();
-const results = await Promise.all(list.map(([name, command]) => run(name, command)));
-if (stopped) {
-  process.stdout.write(`\ncheck stopped by a signal (exit ${stopped})\n`);
-  process.exit(stopped);
+/** @type {[string, string][]} */
+let list = [];
+try {
+  list = steps();
+} catch (e) {
+  process.stderr.write(`check: ${e instanceof Error ? e.message : String(e)}\n`);
+  process.exitCode = 2;
 }
-const failed = results.filter((r) => !r.ok).map((r) => r.name);
-const secs = ((Date.now() - started) / 1000).toFixed(1);
-if (failed.length) {
-  process.stdout.write(`\ncheck failed: ${failed.join(", ")} (${failed.length} of ${list.length} steps, ${secs} s)\n`);
-  process.exit(1);
+if (list.length) {
+  const results = await Promise.all(list.map(([name, command]) => run(name, command)));
+  const failed = results.filter((r) => !r.ok).map((r) => r.name);
+  const secs = ((Date.now() - started) / 1000).toFixed(1);
+  if (stopped) {
+    process.stdout.write(`\ncheck stopped by a signal (exit ${stopped})\n`);
+    process.exitCode = stopped;
+  } else if (failed.length) {
+    process.stdout.write(`\ncheck failed: ${failed.join(", ")} (${failed.length} of ${list.length} steps, ${secs} s)\n`);
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(`\ncheck passed: all ${list.length} steps (${list.map(([n]) => n).join(", ")}), ${secs} s\n`);
+    process.exitCode = 0;
+  }
 }
-process.stdout.write(`\ncheck passed: all ${list.length} steps (${list.map(([n]) => n).join(", ")}), ${secs} s\n`);
-process.exit(0);
