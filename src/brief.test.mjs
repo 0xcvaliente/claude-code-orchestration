@@ -212,6 +212,25 @@ test("OPEN: empty, none, - and n/a mean nothing; an inline value and list lines 
   assert.deepEqual(parseReply("No open field at all").open, []);
 });
 
+test("OPEN: emphasis or backticks around an empty value mean nothing; a note after none is an item", () => {
+  for (const v of ["**OPEN: none**", "OPEN: _none_", "OPEN: `none`", "**OPEN: `none`**", "OPEN: *n/a*", "OPEN: **None.**", "OPEN: `-`", "OPEN:\n- _nothing_"])
+    assert.deepEqual(parseReply(v).open, [], v);
+  assert.deepEqual(parseReply("OPEN: none (a note)").open, ["none (a note)"]);
+});
+
+test("slice id: first word without quotes, backticks and *, trailing :,;. removed, the same in a header and a plan", () => {
+  for (const [v, id] of [["A1", "A1"], ["A1.", "A1"], ['"A1"', "A1"], ["`A1`:", "A1"], ["**A1**, the parser", "A1"], ["'A1';", "A1"]]) {
+    assert.equal(parseHeader(`SLICE: ${v}`).slice, id, `header ${v}`);
+    assert.deepEqual(parsePlan(`PLAN REVIEW\nSLICE: ${v}`).slices.map((s) => s.slice), [id], `plan ${v}`);
+  }
+  const p = parsePlan(["PLAN REVIEW", "SLICE: A0", "FILES: a.py", 'SLICE: "A1" - parser', "FILES: b.py", "RISKY: yes", "CHECKS: C1"].join("\n"));
+  assert.deepEqual(p.slices, [
+    { slice: "A0", files: ["a.py"], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null },
+    { slice: "A1", files: ["b.py"], depends: [], goal: "parser", risky: true, checks: ["C1"], kind: null, skill: null, target: null },
+  ]);
+  assert.equal(parseHeader("SLICE: .").slice, null);
+});
+
 test("answers: pass (cmd) with -> or →, pass (read), fail; quotes and templates ignored; a later fail wins", () => {
   const r = parseReply(
     [

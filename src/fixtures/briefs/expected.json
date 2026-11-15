@@ -490,6 +490,45 @@
       "skillsSkipped": []
     }
   },
+  "impl-slice-punct.txt": {
+    "header": {
+      "slice": "A2",
+      "files": [
+        "c.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
   "impl-workflow.txt": {
     "header": {
       "slice": "s2",
@@ -835,6 +874,102 @@
       "skillsSkipped": []
     }
   },
+  "plan-slice-ids.txt": {
+    "header": {
+      "slice": "A0",
+      "files": [
+        "a.py"
+      ],
+      "depends": [],
+      "path": null,
+      "risky": true,
+      "checks": [
+        "C1"
+      ],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": true,
+      "replan": null,
+      "constraints": {},
+      "slices": [
+        {
+          "slice": "A0",
+          "files": [
+            "a.py"
+          ],
+          "depends": [],
+          "goal": "setup",
+          "risky": false,
+          "checks": [],
+          "kind": null,
+          "skill": null,
+          "target": null
+        },
+        {
+          "slice": "A1",
+          "files": [
+            "b.py"
+          ],
+          "depends": [],
+          "goal": "parser",
+          "risky": true,
+          "checks": [
+            "C1"
+          ],
+          "kind": null,
+          "skill": null,
+          "target": null
+        },
+        {
+          "slice": "A2",
+          "files": [
+            "c.py"
+          ],
+          "depends": [],
+          "goal": null,
+          "risky": false,
+          "checks": [],
+          "kind": null,
+          "skill": null,
+          "target": null
+        },
+        {
+          "slice": "A3",
+          "files": [
+            "d.py"
+          ],
+          "depends": [],
+          "goal": "cli",
+          "risky": false,
+          "checks": [],
+          "kind": null,
+          "skill": null,
+          "target": null
+        }
+      ]
+    },
+    "reply": {
+      "status": null,
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
   "reply-blockquote-then-pass.txt": {
     "header": {
       "slice": null,
@@ -1130,6 +1265,82 @@
     "reply": {
       "status": "pass",
       "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "reply-open-emphasis.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [],
+      "answers": {},
+      "gaps": [],
+      "quotes": [],
+      "draft": null,
+      "skillsUsed": [],
+      "skillsSkipped": []
+    }
+  },
+  "reply-open-note.txt": {
+    "header": {
+      "slice": null,
+      "files": [],
+      "depends": [],
+      "path": null,
+      "risky": false,
+      "checks": [],
+      "focus": null,
+      "workflow": false,
+      "sources": [],
+      "read": null,
+      "kind": null,
+      "validate": false,
+      "skills": [],
+      "skill": null,
+      "target": null,
+      "update": false,
+      "drafts": []
+    },
+    "plan": {
+      "isPlanReview": false,
+      "replan": null,
+      "constraints": {},
+      "slices": []
+    },
+    "reply": {
+      "status": "pass",
+      "open": [
+        "none (a note)"
+      ],
       "answers": {},
       "gaps": [],
       "quotes": [],

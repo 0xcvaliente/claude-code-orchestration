@@ -49,7 +49,11 @@ const lineValue = (l: string, key: string) => {
 }
 const listOf = (v: string | undefined) =>
   (v ?? '').split(',').map(s => s.trim().replace(/^[`'"]+|[`'"]+$/g, '').replace(/^\.\//, '')).filter(s => s && s.toLowerCase() !== 'none')
-const sliceId = (v: string | undefined) => (v ?? '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0] || null
+// Slice id, one rule for a header and a plan: the first word without quotes, backticks and asterisks, trailing :,;. removed.
+const sliceWord = (v: string | undefined) => (v ?? '').replace(/[`'"*]/g, '').trim().split(/\s+/)[0] ?? ''
+const sliceId = (v: string | undefined) => sliceWord(v).replace(/[:,;.]+$/, '') || null
+// An OPEN item is empty when, without surrounding emphasis, backticks and a trailing .;:, it is in NOTHING.
+const nothingOpen = (v: string) => NOTHING.has(v.toLowerCase().replace(/^[\s*_`]+|[\s*_`.;:]+$/g, ''))
 const checkIds = (v: string | undefined) => [...new Set(((v ?? '').match(/\bC\d+\b/gi) ?? []).map(s => s.toUpperCase()))]
 const yes = (v: string | undefined) => /^\**[ \t]*yes\b/i.test(v ?? '')
 // The first word, lower-cased, without quotes, backticks, asterisks, underscores or trailing punctuation (KIND, READ, VALIDATE).
@@ -160,13 +164,13 @@ export const parsePlan = (text: unknown): ParsedPlan => {
       inConstraints = true
       continue
     }
-    const s = l.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*[`*]*([^\s`'"*]+)[`*]*(.*)$/i)
-    if (s) {
-      const id = (s[1] ?? '').replace(/[:,;.]+$/, '')
+    const s = l.match(/^[ \t>*_`#-]*SLICE:\**[ \t]*(.*)$/i)
+    if (s && sliceWord(s[1])) {
+      const id = sliceId(s[1])
       const own = !!id && id.toLowerCase() !== 'plan'
       cur = own ? (plan.slices.find(x => x.slice === id) ?? null) : null
-      if (own && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }))
-      const rest = (s[2] ?? '').replace(/^[\s*`_:|—–-]+/, '').trim()
+      if (own && id && !cur) plan.slices.push((cur = { slice: id, files: [], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null }))
+      const rest = (s[1] ?? '').replace(/^[\s`'"*]*\S+/, '').replace(/^[\s*`_:|—–-]+/, '').trim()
       if (cur && rest && !cur.goal) cur.goal = rest
       continue
     }
@@ -239,7 +243,7 @@ export const parseReply = (text: unknown): Reply => {
   if (at !== -1) {
     const addItem = (item: string) => {
       const v = item.trim()
-      if (!NOTHING.has(v.toLowerCase().replace(/[.;:]+$/, '').trim())) reply.open.push(v)
+      if (!nothingOpen(v)) reply.open.push(v)
     }
     addItem(OPEN_RE.exec(all[at] as string)?.[1] ?? '')
     let started = false

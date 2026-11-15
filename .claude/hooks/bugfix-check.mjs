@@ -17,7 +17,8 @@
 //             and the base run with those files copied in must show at least one new qualified failing test that
 //             lives in a copied file, compared with the base run without them. Blocks say what is missing; after two
 //             such blocks for the agent it allows with bugfix_unverified_gave_up.
-// Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed; each base run first
+// Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
+// SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
 // a branch. node_modules is symlinked from the main worktree only, and only when the base's lock files match the main
 // worktree's; otherwise there is no base run. A base run runs in its own process group, limited to
@@ -295,6 +296,8 @@ export function runGroup(cmd, cwd, ms) {
     /** @type {NodeJS.Timeout | undefined} */
     let grace;
     const child = spawn("bash", ["-c", cmd], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const pid = child.pid;
+    if (pid) liveGroups.add(pid);
     const take = (/** @type {Buffer} */ b) => {
       if (out.length < 16 * 1024 * 1024) out += b.toString("utf8");
     };
@@ -304,6 +307,7 @@ export function runGroup(cmd, cwd, ms) {
     const finish = (rc) => {
       if (done) return;
       done = true;
+      if (pid) liveGroups.delete(pid);
       clearTimeout(timer);
       if (grace) clearTimeout(grace);
       child.stdout?.destroy();
@@ -349,6 +353,8 @@ export async function runInBase(info, cwd, cmd, prepare) {
   pruneStale(info.top);
   const dir = mkdtempSync(join(tmpdir(), BASE_PREFIX));
   const wt = join(dir, "wt");
+  const entry = { top: info.top, dir, wt };
+  liveBases.add(entry); // before `worktree add`, so a signal during or after it still removes the worktree
   try {
     if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return { cause: "worktree_add_failed" };
     for (const d of nmDirs) {
@@ -360,9 +366,47 @@ export async function runInBase(info, cwd, cmd, prepare) {
     const r = await runGroup(cmd, runDir, baseTimeoutMs());
     return { rc: r.rc, timedOut: r.timedOut, failures: parseFailures(r.out, wt) };
   } finally {
-    git(info.top, ["worktree", "remove", "--force", wt]);
-    rmSync(dir, { recursive: true, force: true });
-    git(info.top, ["worktree", "prune"]);
+    liveBases.delete(entry);
+    removeBase(entry);
+  }
+}
+
+// What a signal must clean up: the process groups of running base runs and the base worktrees that exist now.
+/** @type {Set<number>} */
+const liveGroups = new Set();
+/** @type {Set<{ top: string, dir: string, wt: string }>} */
+const liveBases = new Set();
+
+/** @param {{ top: string, dir: string, wt: string }} b */
+function removeBase(b) {
+  git(b.top, ["worktree", "remove", "--force", b.wt]);
+  try {
+    rmSync(b.dir, { recursive: true, force: true });
+  } catch {
+    // a file still held open: the stale sweep of a later run removes it
+  }
+  git(b.top, ["worktree", "prune"]);
+}
+
+/**
+ * verify.sh stops the helper with SIGTERM when its time budget runs out (SIGKILL only 5 s later); a `finally` does not
+ * run when a signal ends the process, so the base worktree stayed registered (pinning the base commit) and its folder
+ * stayed in TMPDIR. On SIGTERM, SIGINT or SIGHUP: kill the base runs' groups, remove every base worktree, its record
+ * and its folder, and exit with no answer (verify.sh then treats the check as not done in time).
+ */
+export function installSignalCleanup() {
+  for (const [sig, code] of /** @type {const} */ ([["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]])) {
+    process.on(sig, () => {
+      for (const pid of liveGroups) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      for (const b of liveBases) removeBase(b);
+      process.exit(code);
+    });
   }
 }
 
@@ -616,6 +660,7 @@ async function main() {
 }
 
 if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
+  installSignalCleanup();
   main().then(
     () => process.exit(0),
     () => process.exit(0),
