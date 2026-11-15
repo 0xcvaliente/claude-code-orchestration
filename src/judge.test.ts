@@ -75,6 +75,7 @@ const CASES: Array<[string, BashClass]> = [
   ["cd x && rm -rf y", "deny"],
   ["find . -exec rm -rf {} +", "deny"],
   ["find . -name x.o -delete", "deny"],
+  ["find . -name '*.ts' -rm", "deny"], // bfs's name for -delete
   ["rm -rf build > log.txt", "deny"],
   ["rm -rf build\nls", "deny"],
   ["echo rm -rf x", "deny"], // an unquoted rm word is read as a command: over-blocked on purpose
@@ -279,6 +280,16 @@ const CASES: Array<[string, BashClass]> = [
   ["PAGER=x git log", "deny"],
   ["EDITOR=x git commit", "deny"],
   ["export GIT_PAGER=x && git log", "deny"],
+  // A quoted assignment is still one when a declaration command (export, declare, env, ...) takes it as its argument.
+  ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
+  ["export 'PATH=/tmp/x'; git status", "deny"],
+  ["export \"PATH\"=/tmp/x; git status", "deny"],
+  ["declare -x 'GIT_PAGER=x'; git log", "deny"],
+  ["typeset 'EDITOR=x'; git commit", "deny"],
+  ["env 'PAGER=x' git log", "deny"],
+  ["command export 'PATH=/tmp/x'; git status", "deny"],
+  ["grep 'PATH=' .envrc && git status", "pass"], // quoted text that no declaration takes is data
+  ["git log --grep 'PAGER=x'", "pass"],
   ["PATH=/tmp/evil:$PATH git status", "deny"],
   ["LD_PRELOAD=/x.so rm file", "deny"],
   ["BASH_ENV=/x bash run.sh", "deny"],
@@ -440,6 +451,21 @@ test("classify: floor, judged and pass cases", () => {
   assert.ok(CASES.length >= 60, `${CASES.length} cases`);
   const wrong = CASES.filter(([cmd, want]) => classify(cmd, CWD) !== want).map(([cmd, want]) => `${JSON.stringify(cmd)}: want ${want}, got ${classify(cmd, CWD)}`);
   assert.deepEqual(wrong, []);
+});
+
+test("classify: a command of 20,000 words is analysed in linear time (the hook decides before its timeout)", () => {
+  const many = (w: string) => Array(20000).fill(w).join(" ");
+  const commands = [
+    ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => `echo ${many(w)}`),
+    `${many("A=1")} ls`, // every word an assignment
+    `echo x${"$a".repeat(20000)}`, // one word of 20,000 expansions (could it be rm?)
+  ];
+  for (const cmd of commands) {
+    const t = performance.now();
+    classifyDetail(cmd, CWD);
+    const ms = performance.now() - t;
+    assert.ok(ms < 2000, `${cmd.slice(0, 30)}...: ${Math.round(ms)} ms`);
+  }
 });
 
 test("tokenize: words carry their literal text and whether the shell decides them", () => {

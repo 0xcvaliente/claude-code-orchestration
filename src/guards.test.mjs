@@ -58,6 +58,10 @@ const ALLOWED = [
   "tail --lines=5 a.txt",
   "head --bytes=100 a.txt | wc -c",
   "cat a.txt /dev/null",
+  "grep --file=/dev/null x .",
+  "rg -f/dev/null x .",
+  "grep -rn foo . --include=*.ts --exclude-dir=node_*", // a glob in an option's value, not its name
+  "ls src/*.ts README*",
   "rg -n --glob '*.mjs' tokenize .claude/hooks",
   "find . -name '*.md' -type f",
   "find src -maxdepth 2 -newer package.json | wc -l",
@@ -122,6 +126,17 @@ const DENIED = [
   ["head /dev/urandom", /device that may never end/],
   ["grep x /dev/zero", /device that may never end/],
   ["tail /dev/zero", /device that may never end/],
+  // A device attached to an option is read all the same.
+  ["grep --file=/dev/zero x", /device that may never end/],
+  ["rg -f/dev/urandom x", /device that may never end/],
+  ["grep -rf/dev/urandom x .", /device that may never end/],
+  ["tail --lines=5 --verbose=/dev/zero", /device that may never end/],
+  // A glob in an option's name expands to whatever option a file of that name spells (`-?` to `-f`, `-delet[e]` to -delete).
+  ["tail -? log.txt", /glob in an option/],
+  ["find . -delet[e]", /glob in an option/],
+  ["find . -de*", /glob in an option/],
+  ["rg --glob* x .", /glob in an option/],
+  ["git log -?", /glob in an option/],
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],
