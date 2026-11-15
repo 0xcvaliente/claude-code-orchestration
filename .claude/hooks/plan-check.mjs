@@ -25,6 +25,13 @@
 //                         planned slice without FILES, this skips with a logged reason. Counted per slice.
 //   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS.
 //   dependency_cycle      DEPENDS closes a cycle.
+//   worktree_base_not_head  (after the two above, with the usual two-block guard per slice) tool_input.isolation is
+//                         "worktree", the effective worktree.baseRef (first of <project>/.claude/settings.local.json,
+//                         <project>/.claude/settings.json, <CLAUDE_CONFIG_DIR or ~/.claude>/settings.json that sets it)
+//                         is not "head", and HEAD in input.cwd differs from refs/remotes/origin/HEAD: the worktree would
+//                         start from the remote default branch. Anything it cannot establish lets the launch through.
+// Coverage note: a launch of our researcher whose SOURCES name two or more local regular files gets a coverage note
+// appended through the allow with updatedInput below (ORCH_SOURCES_NOTE=off turns it off).
 // Same slice id again (a retry) keeps its own files. Every decision goes to plan-check.jsonl in the state dir with
 // the run it was scoped to (`run`); entries of older versions carry no `run` and count in a scope only when newer than
 // the latest run's opening (in every scope when the session has no runs).
@@ -93,7 +100,7 @@
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -118,6 +125,9 @@ const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
 // Skill hints go only to this plugin's own workers: the project's copy or the plugin's namespaced one.
 const HINTED_TYPES = new Set(["implementer", "orchestration:implementer", "researcher", "orchestration:researcher", "reviewer", "orchestration:reviewer"]);
 const SKILL_LOG = "skills.jsonl";
+// Appended to our own researcher's brief when its SOURCES name two or more local files (ORCH_SOURCES_NOTE=off: none).
+const COVERAGE_NOTE =
+  "\n\nCoverage: read every SOURCES file in full before you judge, with several Read calls in one turn. End your report with a line `FILES-READ:` naming each file and the lines you read; a file you did not read goes under OPEN.";
 // The haiku rule covers every agent of this plugin: the project's copy or the plugin's namespaced one.
 const OWN_TYPES = new Set(OWN_AGENTS.flatMap((a) => [a, `orchestration:${a}`]));
 const FLOOR_MODEL = "sonnet";
@@ -180,11 +190,56 @@ if (role === "implementer") {
   }
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
   const drafts = !builtin && HINTED_TYPES.has(type) ? draftsText(null) : "";
-  if (routed || block || drafts || floored) {
+  const coverage = !builtin && ROUTED_TYPES.has(type) && sourcesNoteOn(process.env) && typeof tool.prompt === "string" && localSources() >= 2 ? COVERAGE_NOTE : "";
+  if (routed || block || drafts || coverage || floored) {
     const raised = !!routed?.raised;
-    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}${drafts}` });
+    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}${drafts}${coverage}` });
   }
   process.exit(0);
+}
+
+/** ORCH_SOURCES_NOTE: the researcher coverage note is on unless "off" (any case). @param {Record<string, string | undefined>} env */
+function sourcesNoteOn(env) {
+  return String(env.ORCH_SOURCES_NOTE ?? "").trim().toLowerCase() !== "off";
+}
+
+/** How many SOURCES entries are local regular files (not http(s) URLs), resolved as the read router resolves them. Never throws. */
+function localSources() {
+  try {
+    const dir = projectDir();
+    return h.sources.filter((s) => {
+      if (/^https?:\/\//i.test(s)) return false;
+      try {
+        return statSync(resolve(dir, s)).isFile();
+      } catch {
+        return false;
+      }
+    }).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The effective worktree.baseRef: the value from the first of the project's settings.local.json, its settings.json and
+ * the user settings that sets it; undefined when none sets it; null when a settings file cannot be read or parsed (the
+ * check cannot decide). Never throws.
+ * @returns {unknown}
+ */
+function worktreeBaseRef() {
+  try {
+    const dir = projectDir();
+    const files = [join(dir, ".claude", "settings.local.json"), join(dir, ".claude", "settings.json"), join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "settings.json")];
+    for (const f of files) {
+      if (!existsSync(f)) continue;
+      const s = JSON.parse(readFileSync(f, "utf8"));
+      const wt = s && typeof s === "object" ? s.worktree : undefined;
+      if (wt && typeof wt === "object" && wt.baseRef !== undefined) return wt.baseRef;
+    }
+    return undefined;
+  } catch {
+    return null;
+  }
 }
 
 /** ORCH_READ_ROUTER: the router runs only on "on" (any case). @param {Record<string, string | undefined>} env */
@@ -930,5 +985,25 @@ while (stack.length) {
   if (seen.has(s)) continue;
   seen.add(s);
   stack.push(...(deps.get(s) ?? []));
+}
+
+// Worktree base: an isolated launch whose worktree would start from origin's default branch while the checked-out HEAD
+// differs (the session did not load a settings file with worktree.baseRef "head"). Anything it cannot establish allows.
+if (tool.isolation === "worktree" && typeof input.cwd === "string" && input.cwd) {
+  const baseRef = worktreeBaseRef();
+  if (baseRef !== null && baseRef !== "head") {
+    const headSha = git(input.cwd, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+    const originSha = headSha ? git(input.cwd, ["rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD^{commit}"]) : null;
+    if (headSha && originSha && headSha !== originSha) {
+      if (blocks("worktree_base_not_head", (e) => e.slice === slice) < MAX_BLOCKS) {
+        decide(
+          "block",
+          "worktree_base_not_head",
+          `Plan check: slice ${slice} is launched with isolation "worktree", but worktree.baseRef is not "head" in the settings this session loaded, so the worktree would start from the remote default branch (${originSha.slice(0, 7)}) and miss the checked-out work (HEAD ${headSha.slice(0, 7)}). Set worktree.baseRef to "head" in the user settings or in the settings of the folder the session was started in, or run the slices one after another without isolation.`,
+        );
+      }
+      gaveUp.push("worktree_base_not_head_gave_up");
+    }
+  }
 }
 decide("allow", gaveUp[0] ?? (light && !reviewed ? "light_path" : "ok"));
