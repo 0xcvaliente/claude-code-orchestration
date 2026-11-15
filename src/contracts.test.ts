@@ -321,7 +321,17 @@ test("every place that states the acceptance check asks for the narrowest comman
     assert.match(text, /test gate runs the project's whole suite when (an|the|each) implementer stops|test gate runs the project's whole suite when you stop/, `${file} says the test gate runs the whole suite`);
     assert.match(text, /once more after (integration|the merge)/, `${file} says the whole suite runs once more after integration`);
   }
+  assert.match(read(IMPLEMENTER), /run the whole suite only when your brief asks for it/, `${IMPLEMENTER} runs the whole suite only when asked`);
+  for (const [file, text] of texts.slice(1)) {
+    assert.match(text, /a brief never also asks a worker to run the whole suite/, `${file} keeps the whole suite out of worker briefs`);
+    assert.match(text, /the integrator's brief is the one that names the project's whole suite/, `${file} names the integrator's brief as the exception`);
+  }
+  const review = read(ORCH).split("\n").find((l) => l.startsWith("5. Review"))!;
+  assert.match(review, /slice's own acceptance check/, "a slice's reviewer runs the slice's own check");
+  assert.doesNotMatch(review, /npm --prefix <worktree> test/, "the review example is not the whole suite");
+  assert.match(review, /only the integrator's brief names the whole suite/, "step 5 says which brief names the whole suite");
   const workflow = read(".claude/workflows/orchestrate.js");
   assert.equal(workflow.match(/narrowest command that proves the slice/g)?.length, 2, "both planner rules (code and not code) ask for the narrowest command");
   assert.match(workflow, /not the project's whole suite: the test gate already ran it/, "the reviewer brief leaves the whole suite to the test gate");
+  assert.match(workflow, /the command that runs the project's whole test suite, or empty when there is none/, "the planner is asked for the whole-suite command");
 });
