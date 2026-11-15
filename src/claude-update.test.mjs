@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,8 @@ import { BUILTIN_AGENTS } from "../.claude/hooks/builtin-agents.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = JSON.parse(readFileSync(join(root, "dist", "plugin", ".claude-plugin", "plugin.json"), "utf8")).version;
-const SDK = JSON.parse(readFileSync(join(root, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json"), "utf8")).version;
+// Resolved as Node resolves it, so a worktree that uses a parent folder's node_modules works too.
+const SDK = JSON.parse(readFileSync(join(dirname(createRequire(join(root, "package.json")).resolve("@anthropic-ai/claude-agent-sdk")), "package.json"), "utf8")).version;
 const CC = `2.1.${SDK.split(".")[2]}`; // the Claude Code this SDK carries
 const ID = "orchestration@claude-code-orchestration";
 const HELP = `${HEADLESS_FLAGS.map((f) => `  ${f} <value>   text`).join("\n")}\n`;
@@ -166,6 +168,44 @@ test("check: an Agent SDK that carries another Claude Code is a note with the co
   }
 });
 
+test("check: the Agent SDK is found in a parent folder's node_modules, as Node resolves it (a worktree)", () => {
+  const top = mkdtempSync(join(tmpdir(), "claude-update-sdk-"));
+  const m = machine({ version: "2.1.999 (Claude Code)" });
+  try {
+    const pkg = join(top, "node_modules", "@anthropic-ai", "claude-agent-sdk");
+    mkdirSync(pkg, { recursive: true });
+    // Like the real package: an exports map with no ./package.json entry.
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "@anthropic-ai/claude-agent-sdk", version: "0.3.5", type: "module", exports: { ".": { default: "./sdk.mjs" } } }));
+    writeFileSync(join(pkg, "sdk.mjs"), "export {};\n");
+    const repo = join(top, "repo");
+    mkdirSync(repo);
+    const r = check({ env: m.env, run: m.run, root: repo });
+    assert.equal(of(r, "sdk")?.status, "warn", of(r, "sdk")?.text ?? "no sdk check");
+    assert.match(of(r, "sdk")?.text ?? "", /Agent SDK 0\.3\.5 carries its own Claude Code 2\.1\.5/);
+    const none = mkdtempSync(join(tmpdir(), "claude-update-nosdk-"));
+    try {
+      const r2 = check({ env: m.env, run: m.run, root: none });
+      assert.deepEqual([of(r2, "sdk")?.status, /not installed here/.test(of(r2, "sdk")?.text ?? "")], ["ok", true]);
+    } finally {
+      rmSync(none, { recursive: true, force: true });
+    }
+  } finally {
+    m.done();
+    rmSync(top, { recursive: true, force: true });
+  }
+});
+
+test("check: a plugin read from a sibling folder whose name starts with the checkout's is not this checkout", () => {
+  for (const [folder, want] of /** @type {[string, string][]} */ ([[`${root}-old`, "fail"], [root, "ok"], [join(root, "sub"), "ok"]])) {
+    const m = machine({ plugin: { id: ID, version: "0.0.1", folderVersion: VERSION, readFromFolder: folder, enabled: true } });
+    try {
+      assert.equal(of(check({ env: m.env, run: m.run, root }), "plugin")?.status, want, folder);
+    } finally {
+      m.done();
+    }
+  }
+});
+
 test("check: the plugin off is a note that only --enable changes; a stale install fails and --fix updates it", () => {
   /** @type {[any, string, { fix?: boolean, enable?: boolean }, string[]][]} */
   const cases = [
@@ -207,6 +247,13 @@ test("--write-source adds a new built-in to builtin-agents.mjs and permissions.d
     assert.deepEqual(settings.hooks, original.hooks);
     assert.equal(writeSource(copy, ["deep-search"]), true, "running it again changes nothing");
     assert.equal(readFileSync(join(copy, ".claude", "hooks", "builtin-agents.mjs"), "utf8").match(/deep-search/g)?.length, 1);
+    // A deny list without the Agent(fork) line: neither file is touched.
+    const noFork = `{\n  "permissions": {\n    "deny": [\n      "Agent(Explore)"\n    ]\n  }\n}\n`;
+    writeFileSync(join(copy, ".claude", "settings.json"), noFork);
+    const listBefore = readFileSync(join(copy, ".claude", "hooks", "builtin-agents.mjs"), "utf8");
+    assert.equal(writeSource(copy, ["brand-new"]), false, "no Agent(fork) line: nothing is written");
+    assert.equal(readFileSync(join(copy, ".claude", "hooks", "builtin-agents.mjs"), "utf8"), listBefore, "the block list is unchanged");
+    assert.equal(readFileSync(join(copy, ".claude", "settings.json"), "utf8"), noFork, "settings.json is unchanged");
     writeFileSync(join(copy, ".claude", "settings.json"), "{}");
     assert.equal(writeSource(copy, ["x"]), false, "no deny list: nothing is written");
   } finally {
