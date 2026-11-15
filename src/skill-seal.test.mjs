@@ -1,5 +1,6 @@
 // skill-seal.mjs: seal() and verify() on temp skill folders, and the CLI's exit codes. Nothing here touches a real
 // skills repository or the real ~/.claude.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

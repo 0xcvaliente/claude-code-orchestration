@@ -1,6 +1,7 @@
 // scripts/run-result.mjs: the event stream of a headless run becomes one result document with the run's totals, and
 // scripts/log-run.mjs logs those totals. Regression for the run of 2026-11-14 that took two minutes and eleven turns
 // and was logged as 8320 ms and one turn (the last wake-up only).
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

@@ -1,3 +1,4 @@
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

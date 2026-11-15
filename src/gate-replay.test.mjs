@@ -2,6 +2,7 @@
 // (telemetry SubagentStart/SubagentStop plus a Stop row where the old gate decided): only ts, hook_event_name, renamed
 // agent_id/session_id, agent_type and status. Timestamps are shifted to end just before now, so the gate's
 // "start younger than ORCH_RUN_STALE_MIN" fallback sees them as recent. Nothing here reads ~/.claude.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

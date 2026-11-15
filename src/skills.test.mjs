@@ -1,6 +1,7 @@
 // Skill hints: skill-catalog.mjs (installed skills), skill-hint.mjs (picks) and their use in plan-check.mjs, run as a
 // hook in a throwaway project. Every catalog here comes from temp roots (a temp CLAUDE_CONFIG_DIR or ORCH_SKILL_ROOTS),
 // never the real HOME.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

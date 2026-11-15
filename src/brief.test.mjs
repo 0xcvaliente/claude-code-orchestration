@@ -1,5 +1,6 @@
 // brief.mjs against docs/brief-grammar.md: every fixture in src/fixtures/briefs against expected.json (the dashboard can
 // reuse the same pair as a contract test), then one test per rule of the spec, and parity with today's hooks.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

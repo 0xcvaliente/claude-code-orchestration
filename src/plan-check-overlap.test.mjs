@@ -1,5 +1,6 @@
 // plan-check.mjs: globs in FILES (not_in_plan and file_overlap), path normalisation in file_overlap, session-filtered
 // log reads and the lock's ownership. Driven like src/plan-hooks.test.mjs: a throwaway project with the hooks copied in.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

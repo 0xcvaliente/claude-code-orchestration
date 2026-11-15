@@ -1,4 +1,5 @@
 // scripts/tokens.mjs: the shared token helpers for the native path's log, report and compare scripts.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { formatTokens } from "../scripts/tokens.mjs";
