@@ -4,6 +4,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-15
+
+1.4.1 hardens the Bash judge and the researcher guard. Upgrading: no setting changed. A quoted word that starts with an exec-env name and `=` (`PATH=`, `GIT_SSH_COMMAND=`, ...) is now denied on a line that runs git, rm or a shell, as the unquoted word already was, even when it is only an argument such as `git log --grep 'PATH='`: run that search as its own command. For a researcher, an unquoted glob in an option is denied: write `rg -g '*.md' x`.
+
 ### Changed
 
 - **The exec-env rule reads a word's static prefix, quoted or not** (`.claude/hooks/judge-core.mjs`, `src/judge.ts`, [docs/bash-judge.md](docs/bash-judge.md#25-the-exec-env-rule)). The static prefix is the text of a word's literal pieces joined, quoted or not, up to its first dynamic or glob piece. When it starts with an exec-env name (`PATH`, `PAGER`, `GIT_SSH_COMMAND`, `LD_PRELOAD`, ...) and `=` or the append form `+=`, the line has an exec-env assignment, wherever the word stands and whatever command precedes it. So `env "PATH=/x" git status`, `env PA"TH=/x" git status`, `export "GIT_SSH_COMMAND=sh -c id"; git fetch` and `PAGER+=evil git log` are denied on a line that runs git, rm or a shell, like the unquoted form was on 1.4.0. The judge no longer models where `env`'s or a launcher's own words end; a word is an assignment by its spelling alone. Out of reach, as before: a dynamic name part (`env ${P}ATH=/x git status`), `env -S` strings, and assignments never spelled `NAME=` (`read PATH`, `printf -v PATH`).
@@ -185,6 +189,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.4.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.1
 [1.4.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.0
 [1.3.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.3.0
 [1.2.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.2.2
