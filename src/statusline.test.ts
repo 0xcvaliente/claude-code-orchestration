@@ -132,3 +132,34 @@ test("statusline: a git status that stalls is cut off after about a second, with
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("statusline: a git status cut off at the limit is killed, with everything it started", skipNoJq, () => {
+  const marker = `slmark${process.pid}x${Date.now()}`;
+  const dir = mkdtempSync(join(tmpdir(), `${marker}-`));
+  const alive = () =>
+    spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" })
+      .stdout.split("\n")
+      .filter((l) => l.includes(marker));
+  try {
+    const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+    const bin = join(dir, "bin");
+    const repo = join(dir, "repo");
+    spawnSync("mkdir", ["-p", bin, repo]);
+    gitIn(repo, "init", "-q", "-b", "main");
+    // a git whose status starts a child (carrying the marker too) and waits on it for 30 seconds
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) sh -c 'sleep 30; : ${marker}'; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
+    chmodSync(join(bin, "git"), 0o755);
+    const t0 = Date.now();
+    const r = run(base, { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    const ms = Date.now() - t0;
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, "");
+    assert.ok(ms < 3000, `took ${ms} ms`);
+    assert.match(plain(r.stdout), /🌿 main/);
+    spawnSync("sleep", ["0.3"]);
+    assert.deepEqual(alive(), []);
+  } finally {
+    spawnSync("pkill", ["-f", marker]);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -49,13 +49,34 @@ BAR=$(dots_bar $((PCT / 10)) 10)
 BRANCH=""
 if git rev-parse --git-dir > /dev/null 2>&1; then
   BRANCH=" | 🌿 $(git branch --show-current 2>/dev/null)"
-  # Tracked changes only, no index lock, and at most about a second (macOS has no `timeout`): a status that has not
-  # answered by then is left running in the background, its output goes nowhere, and the line shows no dirty count.
+  # Tracked changes only, no index lock, and at most about a second (macOS has no `timeout`). git runs in the
+  # background in a process group of its own (set -m), so a status still running at the limit is killed together
+  # with everything it started, and the line shows no dirty count.
   DIRTY=""
-  # (exec 2>/dev/null: the subshell must not hold the caller's stderr open while git runs on)
-  exec 3< <(exec 2>/dev/null; git --no-optional-locks status --porcelain --untracked-files=no | wc -l | tr -d ' ')
-  IFS= read -r -t 1 DIRTY <&3 2>/dev/null || DIRTY=""
-  exec 3<&-
+  STATUS_OUT=$(mktemp "${TMPDIR:-/tmp}/statusline.XXXXXX" 2>/dev/null)
+  if [ -n "$STATUS_OUT" ]; then
+    set -m
+    git --no-optional-locks status --porcelain --untracked-files=no > "$STATUS_OUT" 2>/dev/null < /dev/null &
+    STATUS_PID=$!
+    set +m
+    i=0
+    while kill -0 "$STATUS_PID" 2>/dev/null; do
+      if [ "$i" -ge 10 ]; then
+        kill -TERM -- "-$STATUS_PID" 2>/dev/null || kill -TERM "$STATUS_PID" 2>/dev/null
+        STATUS_PID=""
+        break
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    if [ -n "$STATUS_PID" ]; then
+      wait "$STATUS_PID" 2>/dev/null
+      DIRTY=$(wc -l < "$STATUS_OUT" 2>/dev/null | tr -d ' ')
+    else
+      wait 2>/dev/null
+    fi
+    rm -f "$STATUS_OUT"
+  fi
   case "$DIRTY" in ''|*[!0-9]*) DIRTY=0 ;; esac
   [ "$DIRTY" -gt 0 ] && BRANCH="$BRANCH ${YELLOW}*${DIRTY}${RESET}"
 fi
