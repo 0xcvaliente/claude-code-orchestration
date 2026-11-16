@@ -98,8 +98,8 @@ tools=(
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git reset --merge)" # the integrator's last resort when git merge --abort fails; exactly this form, no other reset
   # git -C <dir>: only the subcommands the agents use (reviewer and researcher reads, a worktree implementer's and the
-  # integrator's writes, a skill slice's draft worktree). The `*` for the folder can also stand for other words, so the
-  # git denies below close what it could reach (reset --hard, clean, checkout, restore, rm, config, -c, --config-env).
+  # integrator's writes, a skill slice's draft worktree). The `*` for the folder can also stand for other words, so these
+  # rules also match some other git commands; the git denies below stop the plain destructive forms, not every one.
   "Bash(git -C * status*)" "Bash(git -C * diff*)" "Bash(git -C * log*)" "Bash(git -C * show*)" "Bash(git -C * rev-parse*)"
   "Bash(git -C * ls-files*)" "Bash(git -C * rev-list*)" "Bash(git -C * branch --show-current)"
   "Bash(git -C * worktree list*)" "Bash(git -C * worktree add *)"
@@ -182,15 +182,19 @@ args+=(--output-format stream-json --verbose --permission-mode dontAsk)
 args+=(--append-system-prompt "This run is unattended: nobody can answer a question during this run, so decide and proceed instead of asking.")
 # Never publish or escalate, whatever the folder's settings say (a plugin user's folder has no deny list, and this
 # repo's leaves git push to interactive sessions). A deny beats every allow rule. The first line is UNSAFE_BASH in
-# src/config.ts (src/verify.test.ts fails on drift). The git lines are for headless runs only: no work lost to
-# reset --hard, clean, checkout, restore or rm, and no -c, --config-env or config, which can set an alias that pushes or a
-# hooks folder that runs any program. `git * <word>*` also refuses a harmless command with that word after a space (a
-# file named clean.txt): the safe side. Variadic: keep it before --allowedTools.
+# src/config.ts (src/verify.test.ts fails on drift). The git lines are for headless runs only. They stop the plain
+# destructive forms an agent might run by mistake: -c and --config-env (an alias that pushes, a hooks folder that runs
+# any program), reset --hard in any spelling, clean with options; and the global options that take a separate value
+# (--namespace, --git-dir, --work-tree, --exec-path, --super-prefix, --attr-source, a second -C), so such a value cannot
+# pose as the subcommand of a `git -C * <subcommand>*` rule. They do not stop a command built to get around them: a
+# `git -C * status*` rule also matches `git -C /r branch -D main status`. A guard against mistakes, not a boundary.
+# `git * -c*` also refuses a commit whose message has " -c" in it. Variadic: keep it before --allowedTools.
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
   "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)"
-  "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)" "Bash(git config*)" "Bash(git * config*)"
-  "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean*)"
-  "Bash(git checkout*)" "Bash(git * checkout*)" "Bash(git restore*)" "Bash(git * restore*)" "Bash(git * rm *)")
+  "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)"
+  "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean -*)"
+  "Bash(git * --namespace*)" "Bash(git * --git-dir*)" "Bash(git * --work-tree*)" "Bash(git * --exec-path*)"
+  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last, or end it with `--`
 # `--` ends both the variadic --allowedTools and option parsing, so a dash-led task is the prompt.
 case "$task" in -*) args+=(-- "$task") ;; esac

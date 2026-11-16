@@ -15,9 +15,10 @@ const orchestrateSh = join(root, "scripts", "orchestrate.sh");
 const tmp = () => mkdtempSync(join(tmpdir(), "orch-vt-"));
 // The git denies orchestrate.sh adds for headless runs only, after UNSAFE_BASH (audit W-3; not in .claude/settings.json).
 const HEADLESS_GIT_DENY = [
-  "Bash(git -c*)", "Bash(git * -c*)", "Bash(git --config-env*)", "Bash(git * --config-env*)", "Bash(git config*)", "Bash(git * config*)",
-  "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean*)",
-  "Bash(git checkout*)", "Bash(git * checkout*)", "Bash(git restore*)", "Bash(git * restore*)", "Bash(git * rm *)",
+  "Bash(git -c*)", "Bash(git * -c*)", "Bash(git --config-env*)", "Bash(git * --config-env*)",
+  "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean -*)",
+  "Bash(git * --namespace*)", "Bash(git * --git-dir*)", "Bash(git * --work-tree*)", "Bash(git * --exec-path*)",
+  "Bash(git * --super-prefix*)", "Bash(git * --attr-source*)", "Bash(git * -C *)",
 ];
 function detect(files: Record<string, string>, env: Record<string, string> = {}) {
   const dir = tmp();
