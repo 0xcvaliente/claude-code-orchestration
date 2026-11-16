@@ -436,7 +436,7 @@ npm start -- --repo . --task "..." --mode plain    # skip triage
 npm start -- --repo . --resume <id>                # continue a run
 ```
 
-It retries transient errors (rate limit, overload, 5xx, dropped stream) up to twice with backoff, writes `runs/<id>/journal.json` after each slice for `--resume`, replans failed slices with `--replans N` (0 to 3) and caps tokens only when `--budget` is set; the cap stops every route, the plain and reviewed routes as well as the pipeline. When `git merge --abort` fails it refreshes the index with `git status`, aborts again, then runs `git reset --merge`, and stops with an error if a merge is still in progress. A run writes `plan.json`, `findings.md`, `journal.json`, `judge-audit.jsonl`, `telemetry.jsonl` and `report.json` under `runs/<id>/`, and branches `orch/<id>/<slice>`; it never pushes on its own.
+It retries transient errors (rate limit, overload, 5xx, dropped stream) up to twice with backoff, writes `runs/<id>/journal.json` after each slice for `--resume`, replans failed slices with `--replans N` (0 to 3) and caps tokens only when `--budget` is set. On the reviewed route the cap is checked before each round: once it is spent, no further retry round starts, but a session already running is not cut short. The plain route is a single session, so the cap never stops it. Tokens spent on triage do not count toward that check. When `git merge --abort` fails it refreshes the index with `git status`, aborts again, then runs `git reset --merge`, and stops with an error if a merge is still in progress. A run writes `plan.json`, `findings.md`, `journal.json`, `judge-audit.jsonl`, `telemetry.jsonl` and `report.json` under `runs/<id>/`, and branches `orch/<id>/<slice>`; it never pushes on its own.
 
 ### Bash judge (SDK workers)
 
@@ -453,7 +453,7 @@ SDK workers with Bash (`solo`, `writer`, `verifier`) run every command through `
 | `--no-escalate` | Do not rerun a failed plain or reviewed run through the pipeline |
 | `--test-cmd CMD` | The acceptance command, run by the harness after each worker |
 | `--setup-cmd CMD` | Runs in each new worktree before its writer, for example `npm ci` |
-| `--budget TOKENS` | Optional run cap in tokens (`500000`, `500k` or `2M`; at least 10k), for every route. Unset means no cap |
+| `--budget TOKENS` | Optional run cap in tokens (`500000`, `500k` or `2M`; at least 10k). On the reviewed route it only stops further retry rounds; a plain session is not stopped by it. Unset means no cap |
 | `--concurrency N`, `--retries N` | Parallel workers (3) and retries per slice (2) |
 | `--replans N` | Replanning rounds after failures, 0 to 3 (default 0) |
 | `--plan-only` | Stop after planning (implies the pipeline) |
