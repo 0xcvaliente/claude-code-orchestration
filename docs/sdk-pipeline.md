@@ -49,6 +49,7 @@ When a triaged plain or reviewed run fails, the task runs again on the orchestra
 - A failing commit hook (husky, lefthook, pre-commit) is shown to the writer as feedback and retried within `--retries`. When the retries are used up, the slice fails with the hook's message as its issue and the real attempt count. Hooks still run: the SDK pipeline never passes `--no-verify`.
 - When `git merge --abort` fails, it refreshes the index with `git status`, aborts again, then runs `git reset --merge`. It stops with an error if a merge is still in progress.
 - SDK workers run with an empty `agent` setting, so a repository whose settings name a default agent does not change them, and with Claude Code's auto memory off.
+- The `triager` alone also takes no MCP server and no account connector (`strictMcpConfig: true`, `mcpServers: {}`, `disableClaudeAiConnectors: true`), and writes no session transcript unless `ORCH_SESSION_PERSISTENCE=1` (`triageOptions` in `src/agent.ts`). The other roles get none of these options.
 
 ## Run it
 
@@ -67,7 +68,7 @@ npm start -- --repo . --task "..." --mode plain
 # continue a run; pass --task again, or the Bash judge refuses pushes and recursive deletes
 npm start -- --repo . --resume <id> --task "<the original request>"
 
-# triage only: prints the decision as JSON
+# triage only: prints the decision as JSON; --budget 300k caps the triage call (at least 10k)
 npm run route -- --repo /path/to/folder --task "..."
 ```
 
@@ -107,6 +108,7 @@ Exit codes:
 - Orchestrate route: the cap is checked before each slice attempt and before each replan. Once it is spent, no new attempt or replan starts. Triage tokens, and on escalation the failed session's tokens, count against the cap.
 - Reviewed route: the cap is checked before each round. Once it is spent no further round starts, but a session already running is not cut short. Triage tokens do not count toward that check.
 - Plain route: a single session, so the cap never stops it.
+- Triage: `--budget` gives the triage call no cap of its own; its tokens count only as above. `npm run route -- --budget <tokens>` caps a triage call on its own, at 1M tokens per dollar, and a triage it stops falls back to the orchestrate route.
 - The Bash judge's own tokens are not counted ([Cost and behaviour](bash-judge.md#10-cost-and-behaviour)).
 
 ## Environment
@@ -165,4 +167,5 @@ Everything else, including the full rules ([section 2.1](bash-judge.md#21-deny-r
 - None of the native gates, guards or hooks: no plan check, no review gate, no test gate.
 - The Bash judge is best-effort, not a sandbox ([The Bash judge, Limits](bash-judge.md#11-limits)).
 - The sandbox is opt-in and was smoke-tested on macOS only.
+- Only the triager is kept free of MCP servers and account connectors. The planner, explorer, writer, verifier and solo are not, and their token use was not measured.
 - Worktrees isolate git state, not the file system ([Safety, Worktrees](safety.md#worktrees)).

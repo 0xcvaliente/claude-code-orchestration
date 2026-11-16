@@ -207,6 +207,51 @@ The launcher passed `--max-budget-usd 4` (dry run).
 
 **Confirmed.** The orchestrator ran the full path for two independent slices, with a plan review, two parallel worktree implementers, the test gate at each stop, one review per slice, the integrator and a final review. Its final report kept the short form. Spend stayed under the cap at 2.32 of 4 USD. Not probed: a failing slice, a retry, the opus escalation, and the cap being reached.
 
+## Check 10: the triage call after the 1.5.1 triage fix
+
+Added later the same day, after the fix to the SDK triage call (uncommitted at the time, on branch `triage-1.5.1`): for the `triager` role only, `src/agent.ts` now passes `strictMcpConfig: true`, `mcpServers: {}`, `disableClaudeAiConnectors: true` in `settings`, `persistSession: false` (unless `ORCH_SESSION_PERSISTENCE=1`), and `maxBudgetUsd` when `triage()` gets `budgetTokens`. One paid call, capped at 300,000 tokens. Claude Code 2.1.325 (the init message's `claude_code_version`), Agent SDK 0.3.325.
+
+**The before numbers** come from Check 8's own triage transcript (the one `.jsonl` under `~/.claude/projects/` for repo-a), read with `jq`, no model call.
+
+**The repository.** `<scratch>/repo-c`, built to be repo-a as it was when its triage ran: repo-a's committed tree (`git archive HEAD`) in a new repository with one commit, no remote, and an empty `.claude/state`. Both commits have the same tree hash, so `package.json`, `src/add.js`, `test/add.test.js` and the copy of `.claude/` are the same. The two files Check 8's plain session added (`src/math.js`, `test/math.test.js`) are not there. The task text is Check 8's, unchanged.
+
+**The call.** A scratch script outside the project imports this checkout's `src/agent.ts`, `src/triage.ts` and the SDK by absolute path. It wraps the SDK's `query` only to record what passes through (the options it gets, the init message, each assistant message's usage, the result message), and refuses to run when its marker file exists. It made one call:
+
+```ts
+const run = makeRunAgent({ query: wrappedQuery, env: process.env });   // ORCH_SESSION_PERSISTENCE unset
+await triage({ run, repo: "<scratch>/repo-c", task, budgetTokens: 300_000 });
+```
+
+A dry run of the script (`--dry`, which stops before the marker and before `triage`) ran first. The call is not `npm run auto`: no `scripts/auto.sh`, no `src/route.ts`, no plain session afterwards.
+
+**Output.** Exit code 0, stderr empty, one result message.
+
+- Options that reached `query` (recorded by the wrapper): `strictMcpConfig: true`, `mcpServers: {}`, `settings: {agent: "", disableClaudeAiConnectors: true}`, `persistSession: false`, `maxBudgetUsd: 0.3`, model `claude-sonnet-5-5`, effort `low`, `maxTurns: 12`, tools `Read, Glob, Grep`.
+- Init message: `tools` is `Glob, Grep, Read, StructuredOutput` (4 tools, no `mcp__*`), `mcp_servers` is empty.
+- Two assistant messages: a `Glob`, then the `StructuredOutput` answer. This triager ran no `Read`; Check 8's ran one between the two. Cache writes 5,875 and 240, cache reads 0 and 5,875.
+- Result: `subtype: success`, `num_turns: 3`, `total_cost_usd: 0.0289293`, usage input 4, cache write 6,115, cache read 5,875, output 370. `modelUsage` also has a `claude-haiku-5-5` entry of 1,648 input and 18 output tokens (0.0001738 USD), the same entry Check 8's transcript shows; what that call is was not probed.
+- Decision: `plain`, `source: triage`, `tokens: 14,030`, facts `code: true`, `filesToTouch: 2`, `linesToChange: 20`, `independentSlices: 1`, `risky: false`. The facts' own reason sentence is worded differently from Check 8's.
+- Transcript: `ls ~/.claude/projects | grep -c triage-live-repo-c` gave 0 before the call and 0 after it.
+- Hooks: repo-c's `.claude/state` has one `gates.jsonl` record (review gate, `allow`, `no_telemetry`), like the triage's record in Check 8: the triager still loads the folder's project hooks, which the fix does not change. The stream also carried one `rate_limit_event` message; the call was not stopped.
+
+| | Check 8 (before) | Check 10 (after) |
+|---|---|---|
+| Model requests (assistant messages) | 3 (Glob, Read, StructuredOutput) | 2 (Glob, StructuredOutput); result `num_turns: 3` |
+| Total tokens, all models | 437,331 | 14,030 |
+| Cache write of the first request | 110,319 | 5,875 |
+| MCP tools in the session | 144: 99 in the tool list of every request (Notion 77, Google Drive 14, Claude Docs 8), plus 45 Canva tools added once that connector finished connecting | 0 (init `tools` and `mcp_servers`) |
+| Cost | 0.6924549 USD (transcript `cost-state`) | 0.0289293 USD (result `total_cost_usd`) |
+| Transcript under `~/.claude/projects/` | written | not written |
+| Decision | `plain`; code, 2 files, 20 lines, 1 slice, not risky | `plain`; the same facts |
+
+All 144 MCP tool names in Check 8's triage transcript carry the `mcp__claude_ai_` prefix of claude.ai account connectors (Notion 77, Google Drive 14, Claude Docs 8, Canva 45), and no tool of another MCP server was in the session: the only other `mcp__` text there is the template `mcp__<server>__*` in a sentence, not a tool name.
+
+The before and after numbers come from different records of the same kind of call: Check 8's from its transcript (the request's tool list and the `cost-state` record; no result message of that triage was kept), Check 10's from the stream (init and result messages), since no transcript exists to read.
+
+**Confirmed.** On this machine the fixed triage call loads no MCP server and no claude.ai connector, writes no transcript, and receives its cap as `maxBudgetUsd`. Its first request wrote 5,875 tokens to the cache instead of 110,319, and the call used 14,030 tokens and 0.029 USD instead of 437,331 and 0.69 (about 3% and 4%), with the same route and the same facts. Part of the cut comes from one request fewer: this triager answered after a `Glob` without a `Read`, which is the model's choice, not the fix. Not probed: a call that reaches the cap (this one used 0.03 of 0.3 USD), `ORCH_SESSION_PERSISTENCE=1`, the cap passed through `src/route.ts --budget` from `scripts/auto.sh`, and the haiku call that both runs contain.
+
+Limits of this check: one call on one machine, in a scratch repository that carries a copy of `.claude/`, made through a script that wraps `query`, not through `npm run auto`.
+
 ## Limits
 
 Checks 1 to 5, 8 and 9 are headless runs (`-p` or the SDK; checks 8 and 9 end to end through `npm run auto` and `npm run native`), each run once on 2.1.325 and macOS; checks 6 and 7 came from a live session in this repository. The npm script `plain` was not run end to end (the flag it passes was). No init event names the agent, so the conclusions rest on the tool lists and models. Not probed: the comment's claim that the empty `agent` "changes no other setting" (only the tool list and model were compared, not permissions, hooks or other keys); whether `--agent` also wins over `--settings '{"agent":""}'` when both are passed; and whether `--agent` with an agent the setting does not name changes anything besides tools and model (system prompt, effort, maxTurns).
