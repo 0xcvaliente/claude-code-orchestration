@@ -1212,6 +1212,40 @@ test("bashGuard: judged commands follow the judge", async () => {
   assert.ok(reasonOf(denied).startsWith(CONFIRM_PREFIX));
 });
 
+test("bashGuard (audit 2026-11-16, J-13): rm targets resolve against the shell's folder inside the root; a folder outside it is refused", async () => {
+  const outer = realpathSync(mkdtempSync(join(tmpdir(), "judge-cwd-")));
+  const wt = join(outer, "wt");
+  const src = join(wt, "src");
+  mkdirSync(join(src, "lib"), { recursive: true });
+  writeFileSync(join(src, "lib", "a.ts"), "x");
+  mkdirSync(join(outer, "outside"));
+  symlinkSync(join(outer, "outside"), join(src, "out"));
+  const at = (cwd: string, command: string) => ({ ...input("Bash", { command }), cwd }) as HookInput;
+  const f = fakes(ALLOW, world(), { stat: statPath });
+  const g = bashGuard({ role: "writer", task: ctx.task, brief: ctx.brief, cwd: wt, deps: f.deps, enabled: true });
+  // After `cd src`: src/out is a symlink to a folder outside, denied without asking the model.
+  const out = await run(g, at(src, "rm -rf out"));
+  assert.equal(decision(out), "deny");
+  assert.match(reasonOf(out), /out is a symlink or resolves outside the working folder/);
+  assert.equal(f.prompts.length, 0);
+  // The facts sent to the judge describe src/lib, which exists.
+  assert.equal(decision(await run(g, at(src, "rm -rf lib"))), "allow");
+  assert.match(block(f.prompts[0]!, "TARGETS") ?? "", /"exists": true/);
+  // The root still bounds an absolute target: one inside the root but outside the shell's folder is judged.
+  assert.equal(decision(await run(g, at(src, `rm -r ${join(wt, "docs")}`))), "allow");
+  assert.equal(decision(await run(g, at(src, `rm -r ${join(outer, "outside")}`))), "deny");
+  // A shell folder outside the root: judged commands are refused without asking; pass commands still pass (cd back).
+  const asked = f.prompts.length;
+  const away = await run(g, at(join(outer, "outside"), "rm -r build"));
+  assert.equal(decision(away), "deny");
+  assert.match(reasonOf(away), /outside the working folder/);
+  assert.equal(decision(await run(g, at(join(outer, "outside"), "git push"))), "deny");
+  assert.equal(f.prompts.length, asked);
+  assert.deepEqual(await run(g, at(join(outer, "outside"), "ls")), {});
+  // No folder in the input: the root, as before.
+  assert.equal(decision(await run(g, at("", "rm -rf lib"))), "allow");
+});
+
 test("blank user request: judged commands are denied without asking the model; pass commands are untouched", async () => {
   const dir = mkdtempSync(join(tmpdir(), "judge-audit-"));
   const auditFile = join(dir, "audit.jsonl");

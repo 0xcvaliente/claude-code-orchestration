@@ -1083,7 +1083,11 @@ export interface JudgeContext {
   task: string;
   /** The worker's brief: its slice text, derived from the request by a planner (it may be wrong). */
   brief: string;
+  /** The shell's current folder, where relative rm targets resolve. */
   cwd: string;
+  /** The folder the worker may change (its worktree), holding `cwd`; default `cwd`. It bounds absolute rm targets and
+   * the symlink floor: a target whose real path leaves it is denied without asking. */
+  root?: string;
 }
 
 export interface JudgeAnswer {
@@ -1106,8 +1110,8 @@ export interface JudgeDeps {
   ask: (prompt: string) => Promise<JudgeAnswer>;
   /** Runs git and returns stdout ('' on error); injected so tests need no repository. The default is `runGit`. */
   git: (args: string[], cwd: string) => Promise<string>;
-  /** Facts about an rm target; the default is `statPath`. */
-  stat?: (path: string, cwd: string) => Promise<PathStat>;
+  /** Facts about an rm target resolved against `cwd`, outside `root` counted as a symlink; the default is `statPath`. */
+  stat?: (path: string, cwd: string, root?: string) => Promise<PathStat>;
   now: () => number;
   /** One JSON line per decision is appended here when set. */
   auditFile?: string;
@@ -1174,9 +1178,10 @@ const duKb = (path: string): Promise<number> =>
 
 /**
  * The default `deps.stat`. lstat, so a symlink target is reported as one; and when the real path of the target (or of
- * a parent) lies outside the real working folder, it is reported as a symlink too, which the judge denies outright.
+ * a parent) lies outside the real working folder `root` (default `cwd`), it is reported as a symlink too, which the
+ * judge denies outright. `path` resolves against `cwd`, the shell's current folder.
  */
-export async function statPath(path: string, cwd: string): Promise<PathStat> {
+export async function statPath(path: string, cwd: string, root: string = cwd): Promise<PathStat> {
   const abs = resolve(cwd, path);
   let st;
   try {
@@ -1186,9 +1191,9 @@ export async function statPath(path: string, cwd: string): Promise<PathStat> {
   }
   let outside = true;
   try {
-    const root = realpathSync(cwd);
+    const top = realpathSync(root);
     const real = realpathSync(abs);
-    outside = !real.startsWith(root + sep); // also true for the folder itself
+    outside = !real.startsWith(top + sep); // also true for the folder itself
   } catch {
     // Unknown real path: treat as outside.
   }
@@ -1233,9 +1238,9 @@ export interface TargetFacts extends PathStat {
   ignored: boolean;
 }
 
-async function targetFacts(deps: JudgeDeps, path: string, cwd: string): Promise<TargetFacts> {
+async function targetFacts(deps: JudgeDeps, path: string, cwd: string, root: string): Promise<TargetFacts> {
   const [st, changes, tracked, ignored] = await Promise.all([
-    (deps.stat ?? statPath)(path, cwd),
+    (deps.stat ?? statPath)(path, cwd, root),
     deps.git(["status", "--short", "--", path], cwd),
     deps.git(["ls-files", "--", path], cwd),
     // Without -q: deps.git returns stdout only, and check-ignore prints the path exactly when it is ignored.
@@ -1385,17 +1390,18 @@ export async function judgeBash(command: string, ctx: JudgeContext, deps: JudgeD
   try {
     verdict = await withTimeout(
       (async (): Promise<Verdict> => {
-        const c = classifyDetail(command, ctx.cwd);
+        const root = ctx.root ?? ctx.cwd;
+        const c = classifyDetail(command, root); // the root bounds absolute rm targets
         kind = c.kind ?? "git";
         if (c.cls === "deny") return kind === "rm" ? rmDeny(c.reason ?? "recursive rm is blocked") : { decision: "deny", reason: c.reason ?? "blocked" };
         // The user's request is the authority for a push or a delete: without one, nothing judged may run.
         if (!ctx.task.trim()) return { decision: "deny", reason: NO_TASK_REASON };
         const git = await gitContext(deps.git, ctx.cwd);
-        const targets = kind === "rm" ? await Promise.all((c.targets ?? []).map((t) => targetFacts(deps, t, ctx.cwd))) : [];
+        const targets = kind === "rm" ? await Promise.all((c.targets ?? []).map((t) => targetFacts(deps, t, ctx.cwd, root))) : [];
         const link = targets.find((t) => t.isSymlink);
         if (link) return rmDeny(`${link.path} is a symlink or resolves outside the working folder; recursive rm of it is always blocked`);
         // Role, brief and request (hashed) are in the key: a verdict earned by one worker's brief is not reused by another.
-        const key = JSON.stringify([kind, command, ctx.cwd, ctx.role, hash(ctx.brief), hash(ctx.task), git.branch, git.head, git.remotes, targets]);
+        const key = JSON.stringify([kind, command, ctx.cwd, root, ctx.role, hash(ctx.brief), hash(ctx.task), git.branch, git.head, git.remotes, targets]);
         const hit = deps.cache.get(key);
         if (hit) {
           cached = true;
@@ -1485,11 +1491,24 @@ export interface BashGuardOptions {
   /** The user's original request, verbatim. */
   task: string;
   brief: string;
-  /** Falls back to the hook input's cwd, then process.cwd(). */
+  /** The working folder (the worktree root). Relative rm targets resolve against the shell's current folder, the hook
+   * input's cwd, when it lies inside this one; this one bounds absolute targets and the symlink floor. A command that
+   * needs the judge is denied while the shell's folder is outside it. Unset: the hook input's cwd, then process.cwd(). */
   cwd?: string;
   deps: JudgeDeps;
   /** false: commands that need the judge are denied without asking it (ORCH_JUDGE=off, read by the caller). */
   enabled: boolean;
+}
+
+/** `dir` is `root` or lies inside it, compared as given and, failing that, by real paths. */
+function within(dir: string, root: string): boolean {
+  const inside = (d: string, r: string) => d === r || d.startsWith(r.endsWith(sep) ? r : r + sep);
+  if (inside(resolve(dir), resolve(root))) return true;
+  try {
+    return inside(realpathSync(dir), realpathSync(root));
+  } catch {
+    return false;
+  }
 }
 
 const decide = (permissionDecision: "allow" | "deny", reason: string): HookJSONOutput => ({
@@ -1510,14 +1529,19 @@ export function bashGuard(opts: BashGuardOptions): HookCallback {
       const toolInput = input.tool_input as { command?: unknown } | null | undefined;
       const command = toolInput?.command;
       if (typeof command !== "string") return decide("deny", "Bash call without a command string: denied");
-      const cwd = opts.cwd ?? (typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd());
-      const c = classifyDetail(command, cwd);
+      const shell = typeof input.cwd === "string" && input.cwd ? input.cwd : undefined;
+      const root = opts.cwd ?? shell ?? process.cwd();
+      const cwd = shell ?? root; // after a `cd`, the shell's folder: where rm targets resolve
+      const c = classifyDetail(command, root);
       if (c.cls === "pass") return {};
       if (c.cls === "deny") return decide("deny", c.kind === "rm" ? `${c.reason}; remove specific paths with a plain rm -r <path>` : (c.reason ?? "blocked"));
+      if (!within(cwd, root)) {
+        return decide("deny", `the shell's current folder ${cwd} is outside the working folder ${root}: ${c.kind === "rm" ? "recursive rm" : "git push and remote changes"} stay blocked there; cd back into ${root} first`);
+      }
       if (!opts.enabled) {
         return decide("deny", c.kind === "rm" ? "the judge is off: recursive rm stays blocked" : "the judge is off: git push and remote changes stay blocked");
       }
-      const v = await judgeBash(command, { role: opts.role, task: opts.task, brief: opts.brief, cwd }, opts.deps);
+      const v = await judgeBash(command, { role: opts.role, task: opts.task, brief: opts.brief, cwd, root }, opts.deps);
       return decide(v.decision, v.reason);
     } catch (err) {
       return decide("deny", `Bash guard failed (${err instanceof Error ? err.message : String(err)}): denied`);
