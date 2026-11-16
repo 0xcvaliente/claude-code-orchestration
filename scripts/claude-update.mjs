@@ -24,7 +24,7 @@
 //
 // The result is written to <claude config dir>/orchestration/claude-update.json. Node built-ins only.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -301,4 +301,12 @@ export function main(argv = process.argv.slice(2), { stdout = (s) => void proces
   return r.ok ? 0 : 1;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main();
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) process.exitCode = main();

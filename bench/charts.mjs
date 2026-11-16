@@ -2,9 +2,9 @@
 // Charts for a benchmark campaign, as light and dark SVG pairs for the README's <picture> tags.
 // Usage: node bench/charts.mjs <summary.json> [--out docs/diagrams] [--prefix bench-k2-cap10]
 // Reads only summary.json (from `npm run bench:analyze`), so a committed copy rebuilds every chart.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // GitHub's own page colours (as in docs/diagrams/build.py); arm hues are the first four slots of the validated
 // categorical palette (blue, orange, aqua, yellow), stepped for each surface.
@@ -139,7 +139,15 @@ export function renderAll(summary, prefix = "bench-k2-cap10") {
   return out;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const args = process.argv.slice(2), flag = (n, d) => (args.includes(n) ? args[args.indexOf(n) + 1] : d);
   const file = args.find((a) => !a.startsWith("--") && a !== flag("--out") && a !== flag("--prefix"));
   if (!file) { console.error("usage: node bench/charts.mjs <summary.json> [--out dir] [--prefix name]"); process.exit(1); }
