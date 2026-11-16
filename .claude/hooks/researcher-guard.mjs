@@ -341,8 +341,14 @@ function readsDevice(arg, cwd) {
   const candidates = [arg];
   const long = /^--[^=]+=(.*)$/.exec(arg);
   if (long) candidates.push(long[1] ?? "");
-  const short = /^-[A-Za-z0-9]+=?(.*)$/.exec(arg);
-  if (short && !arg.startsWith("--")) candidates.push(short[1] ?? "");
+  // A value joined to a short-option cluster may start after any of its letters (`-rfdev/zero` is -r, then -f with
+  // `dev/zero`), so every suffix after the first letter is a candidate, with or without a leading `=`.
+  if (arg.startsWith("-") && !arg.startsWith("--")) {
+    for (let j = 2; j < arg.length; j++) {
+      const rest = arg.slice(j);
+      candidates.push(rest.startsWith("=") ? rest.slice(1) : rest);
+    }
+  }
   return candidates.some((p) => {
     if (!p) return false;
     const paths = [posix.resolve(cwd, p)];

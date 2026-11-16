@@ -11,7 +11,7 @@
 
 ## T-5: device rule on the normalised path, wc included
 - Changed: `.claude/hooks/researcher-guard.mjs` (`readsDevice`: each candidate path, as a word, a long option's value
-  or attached to short options, is resolved against the command's folder and, when it exists, through symlinks; the
+  or any suffix of a short-option cluster (`-rfdev/zero`), is resolved, from every folder a `cd` before it reached, against the command's folder and, when it exists, through symlinks; the
   hook passes the payload's `cwd`; wc, sed and cut are under the rule); tests in `src/guards.test.mjs` ("(T-5)").
 - Visible effect: `cat /./dev/zero`, `cat //dev/zero`, `cat /private/../dev/zero`, a relative `../../dev/zero`,
   `wc /dev/zero` and `wc -c /dev/stdin` are refused ("reads a device that may never end"); `/dev/null` still passes.

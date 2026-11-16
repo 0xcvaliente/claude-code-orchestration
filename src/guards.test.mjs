@@ -363,6 +363,40 @@ test("researcher guard (T-5): a device reached by another spelling of its path, 
   }
 });
 
+// Review of fix-guards: a value joined to a short-option cluster (`-rfdev/zero`) can start after any letter, so every
+// suffix of an option word, like a long option's value, is judged as a path from each folder a `cd` before it reached.
+test("researcher guard (T-5 with T-11): a relative device path joined to an option after a cd is refused", () => {
+  for (const c of [
+    "cd / && grep -fdev/zero x",
+    "cd / && grep -rfdev/zero x",
+    "cd / && grep -A3fdev/zero x",
+    "cd / && rg -fdev/zero x",
+    "cd / && rg -nfdev/urandom x",
+    "cd / && grep --file=dev/zero x",
+    "cd / && rg --file=dev/urandom x",
+    "cd / && grep -f dev/zero x",
+    "cd / && head -n5 dev/zero",
+    "cd / && head -c8dev/zero",
+    "cd / && tail -n5 dev/zero",
+    "cd / && wc -l dev/zero",
+    "cd / && wc -ldev/zero",
+    "cd / && sed -n 1p dev/zero",
+    "cd / && cut -f1 dev/zero",
+    "cd / && cut -sfdev/zero",
+    "cd /x && cd / && grep -rfdev/zero x",
+    "cd /dev && grep -fzero x",
+    "cd /dev && grep -rfzero x",
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device|enters \/dev/, c);
+  }
+  // Ordinary option words that are no paths still pass, also after `cd /`.
+  for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt", "cd / && grep -rn dev x", "cd / && grep -rdev x", "cd / && head -n5 a.txt", "cd / && cut -d, -f1 a.csv", "cd / && rg -f/dev/null x", "cd / && wc -c dev.txt"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
 // Audit 2026-11-16 T-11 (approved by the owner): narrow forms of cd, sed -n, cut, stat and echo, which cannot write a
 // file or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
 test("researcher guard (T-11): cd, sed -n, cut, stat and echo in their narrow forms pass", () => {
