@@ -435,9 +435,12 @@ test("researcher guard (T-5): a relative device path joined to an option is refu
   for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt"]) {
     assert.equal(researcherViolation(c, "/a/b"), null, c);
   }
-  for (const c of ["grep -rn dev x", "grep -rdev x", "head -n5 a.txt", "cut -d, -f1 a.csv", "rg -f/dev/null x", "wc -c dev.txt"]) {
+  for (const c of ["head -n5 a.txt", "cut -d, -f1 a.csv", "rg -f/dev/null x", "wc -c dev.txt"]) {
     assert.equal(researcherViolation(c, "/"), null, c);
   }
+  // fix-researcher-cd round 2 (item C, coordinator-approved change): from `/` the bare word `dev` names /dev, so these
+  // two, allowed before, are refused now; `wc -c dev.txt` beside them still passes.
+  for (const c of ["grep -rn dev x", "grep -rdev x"]) assert.ok(researcherViolation(c, "/"), c);
 });
 
 // Audit 2026-11-16 T-11 (approved by the owner): narrow forms of sed -n, cut, stat and echo, which cannot write a file
@@ -542,12 +545,59 @@ test("researcher guard (cd item 1): /dev itself is refused in every spelling, /d
   for (const c of ["cat a.txt /dev/null", "cat /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", "grep -r x ../devices", "grep -r x /a/dev", "cat ../notes/dev"]) {
     assert.equal(researcherViolation(c, "/a/b"), null, c);
   }
-  // From `/`, a path that names /dev is refused; the bare word `dev` (a pattern, or an option's letters) still passes,
-  // as pinned above: a researcher's folder is the project, and cd cannot reach `/`.
-  for (const c of ["grep -r x ./dev", "grep -r x dev/", "grep -r x /dev", "rg x ./dev/."]) {
-    assert.ok(researcherViolation(c, "/"), c);
+  // From `/`, a path that names /dev is refused, the bare word `dev` too (round 2, item C).
+  for (const c of ["grep -r x ./dev", "grep -r x dev/", "grep -r x /dev", "rg x ./dev/.", "grep -r x dev", "grep -rn dev x", "rg x dev"]) {
+    assert.match(researcherViolation(c, "/")?.reason ?? "", /device/, c);
   }
-  for (const c of ["grep -rn dev x", "grep -rdev x"]) assert.equal(researcherViolation(c, "/"), null, c);
+  // From /dev or below it, `.` and a search with no path (which searches `.`) read /dev.
+  for (const cwd of ["/dev", "/dev/", "/dev/fd", toDev]) {
+    for (const c of ["grep -r x .", "grep -rn foo .", "rg x .", "rg x", "grep -r x", "cat zero", "wc -l null/..", "ls && grep -r x ."]) {
+      assert.match(researcherViolation(c, cwd)?.reason ?? "", /device/, `${c} in ${cwd}`);
+    }
+  }
+  for (const c of ["ls", "ls -la", "cat /dev/null", "head /a/b.txt"]) assert.equal(researcherViolation(c, "/dev"), null, c);
+  // On the safe side: in /dev every search is refused, also one with a path elsewhere (a pattern looks like a path).
+  assert.ok(researcherViolation("grep -rn foo /a/b", "/dev"));
+  for (const c of ["grep -rn foo .", "rg x", "ls", "cat a.txt"]) assert.equal(researcherViolation(c, "/a/b"), null, c);
+});
+
+// fix-researcher-cd round 2 (item A): the system's real-path call (`realpathSync.native`) on a path that reaches /dev
+// itself through a symlink ends the process with SIGTRAP or SIGSEGV, or reports a false ENOENT, after a few dozen calls
+// (Node 24.22.2, Darwin 27.2). The guard no longer makes that call. These run in fresh processes, never in this one.
+// The fault shows for a long path to the link (about 150 characters and more), not for a short one.
+const devProbe = join(scratch, "dev-probe", "a".repeat(100));
+mkdirSync(join(devProbe, "proj", "sub"), { recursive: true });
+const ldev = join(devProbe, "proj", "ldev");
+const lnull = join(devProbe, "proj", "lnull");
+if (!existsSync(ldev)) symlinkSync("/dev", ldev);
+if (!existsSync(lnull)) symlinkSync("/dev/null", lnull);
+
+test("researcher guard (round 2, item A): 300 decisions on a link to /dev end normally and all refuse, in fresh processes", () => {
+  const script = join(devProbe, "decide.mjs");
+  const guardUrl = new URL("../.claude/hooks/researcher-guard.mjs", import.meta.url).href;
+  const p = join(devProbe, "proj");
+  writeFileSync(script, `const { researcherViolation } = await import(${JSON.stringify(guardUrl)});
+const forms = [${JSON.stringify(`grep -r x ${ldev}`)}, ${JSON.stringify(`grep -r x ${ldev}/`)}, ${JSON.stringify(`cat ${ldev}/.`)}, "cd ./sub && grep -r x ../ldev", "cd ./sub && cat ../ldev/"];
+let refused = 0;
+for (let i = 0; i < 300; i++) if (researcherViolation(forms[i % forms.length], ${JSON.stringify(p)}, ${JSON.stringify(p)})) refused++;
+console.log(refused);
+`);
+  for (let run = 0; run < 6; run++) {
+    const r = spawnSync(process.execPath, [script], { encoding: "utf8", cwd: devProbe });
+    assert.deepEqual([r.status, r.signal, r.stdout.trim()], [0, null, "300"], `run ${run}: ${r.stderr.slice(0, 300)}`);
+  }
+});
+
+test("researcher guard hook (round 2, item A): a command with 300 links to /dev and then <link>/zero is refused with exit 2", () => {
+  const command = `cat ${Array(300).fill(ldev).join(" ")} ${ldev}/zero`;
+  for (let i = 0; i < 3; i++) {
+    const r = run(RESEARCHER, bash(command));
+    assert.deepEqual([r.code, r.stdout], [2, ""], r.stderr.slice(0, 200));
+  }
+  // /dev/null passes in every spelling it passed before, also through a link to it or to /dev.
+  for (const c of ["cat /dev/null", "cat //dev/null", "cat a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", `cat ${lnull}`, `cat ${ldev}/null`, `grep -f${ldev}/null x .`]) {
+    assert.equal(run(RESEARCHER, bash(c)).code, 0, c);
+  }
 });
 
 // fix-researcher-cd item 2: `cd` with one literal path whose real location is the project folder or a folder inside it.
@@ -565,15 +615,17 @@ for (const [at, to] of /** @type {[string, string][]} */ ([
 ])) {
   if (!existsSync(at)) symlinkSync(to, at);
 }
-const CD_FORM = /^`cd` is allowed only as `cd <path>` .*project folder.*absolute paths/;
+const CD_FORM = /^`cd` is allowed only as `cd <path>` .*`\.\/`, `\.\.\/` or `\/`.*`cd \.\/src`.*project folder.*absolute paths/;
 
 test("researcher guard (cd item 2): cd to the project folder or a folder inside it passes", () => {
   for (const [c, cwd] of /** @type {[string, string][]} */ ([
-    [`cd ${proj}`, proj], [`cd ${sub}`, proj], [`cd ${sub}/`, proj], ["cd sub", proj], ["cd sub/deep", proj], ["cd ./sub/", proj],
-    ["cd 'sub'", proj], ['cd "sub/deep"', proj], ["cd .", proj], ["cd sub/..", proj], ["cd link-in", proj], ["cd link-in/deep", proj],
-    ["cd sub/upper", proj], ["cd sub && grep -n foo a.txt", proj], ["cd sub; ls", proj], ["cd sub && cat ../file.txt", proj],
-    ["cd sub && cd deep && ls -la", proj], ["cd ..", sub], ["cd ../sub/deep", sub], [`cd ${proj}`, sub], ["cd ../..", deep],
-    ["cd sub 2>/dev/null && wc -l ../file.txt", proj],
+    // Round 2 (item B): a relative path starts with `./` or `../` (both shells skip CDPATH then); each bare form is a
+    // refused neighbour in the next test.
+    [`cd ${proj}`, proj], [`cd ${sub}`, proj], [`cd ${sub}/`, proj], ["cd ./sub", proj], ["cd ./sub/deep", proj], ["cd ./sub/", proj],
+    ["cd './sub'", proj], ['cd "./sub/deep"', proj], ["cd .", proj], ["cd ./sub/..", proj], ["cd ./link-in", proj], ["cd ./link-in/deep", proj],
+    ["cd ./sub/upper", proj], ["cd ./sub && grep -n foo a.txt", proj], ["cd ./sub; ls", proj], ["cd ./sub && cat ../file.txt", proj],
+    ["cd ./sub && cd ./deep && ls -la", proj], ["cd ..", sub], ["cd ../sub/deep", sub], [`cd ${proj}`, sub], ["cd ../..", deep],
+    ["cd ./sub 2>/dev/null && wc -l ../file.txt", proj], ["cd ./", proj], ["cd ../", sub],
   ])) {
     assert.equal(researcherViolation(c, cwd, proj), null, `${c} (from ${cwd})`);
   }
@@ -581,13 +633,15 @@ test("researcher guard (cd item 2): cd to the project folder or a folder inside 
 
 test("researcher guard (cd item 2): every other cd is refused with a message naming the allowed form", () => {
   for (const c of [
-    "cd /", "cd /dev", `cd ${home}`, "cd ~", "cd ~/x", "cd", "cd ..", "cd link-out", "cd link-out/..", "cd link-home", "cd link-dev",
-    "cd link-out-rel", "cd missing", "cd sub deep", "cd -P sub", "cd -L sub", "cd -", "cd -- sub", "cd $HOME", 'cd "$d"', "cd su*",
-    "cd +1", "cd 'sub\n'", "cd $'sub\\n'", `cd ${outside}`, "cd sub/../..", `cd ${proj}/../outside`, "cd file.txt",
+    "cd /", "cd /dev", `cd ${home}`, "cd ~", "cd ~/x", "cd", "cd ..", "cd ./link-out", "cd ./link-out/..", "cd ./link-home", "cd ./link-dev",
+    "cd ./link-out-rel", "cd ./missing", "cd ./sub deep", "cd -P ./sub", "cd -L ./sub", "cd -", "cd -- ./sub", "cd $HOME", 'cd "$d"', "cd ./su*",
+    "cd +1", "cd './sub\n'", "cd $'./sub\\n'", `cd ${outside}`, "cd ./sub/../..", `cd ${proj}/../outside`, "cd ./file.txt",
     `cd ${outside.toUpperCase()}`, `cd ${proj}/link-out/dev`, "cd /tmp", "cd /private/tmp",
+    // Round 2 (item B): the bare relative forms, which the shell may resolve through CDPATH, are refused.
+    "cd sub", "cd sub/deep", "cd 'sub'", "cd link-in", "cd sub/..", "cd .sub", "cd ..sub",
     // Chains: a later cd is judged from every folder an earlier one may have left the shell in.
-    "cd sub && cd .. && cd ..", "cd sub | cd ../..", "(cd sub) && cd ../..", "cd sub; cd ../../outside", "cd sub && cd r",
-    "cd sub && cd dev", "cd sub && cd deep && cd ../../..", "cd sub || cd /", "cd sub & cd /dev",
+    "cd ./sub && cd .. && cd ..", "cd ./sub | cd ../..", "(cd ./sub) && cd ../..", "cd ./sub; cd ../../outside", "cd ./sub && cd ./r",
+    "cd ./sub && cd ./dev", "cd ./sub && cd ./deep && cd ../../..", "cd ./sub || cd /", "cd ./sub & cd /dev", "cd ./sub && cd deep",
   ]) {
     const v = researcherViolation(c, proj, proj);
     assert.ok(v, `expected a denial for ${JSON.stringify(c)}`);
@@ -595,7 +649,7 @@ test("researcher guard (cd item 2): every other cd is refused with a message nam
     assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
   }
   // With no project folder known, no cd passes.
-  for (const c of ["cd sub", "cd .", `cd ${proj}`]) assert.match(researcherViolation(c, proj)?.reason ?? "", CD_FORM, c);
+  for (const c of ["cd ./sub", "cd .", `cd ${proj}`]) assert.match(researcherViolation(c, proj)?.reason ?? "", CD_FORM, c);
   assert.ok(researcherViolation("cd =sub", proj, proj));
 });
 
@@ -603,20 +657,20 @@ test("researcher guard (cd item 2): after an allowed cd, later segments are judg
   const rel = posix.relative(deep, "/dev/zero");
   const relDev = posix.relative(deep, "/dev");
   for (const c of [
-    `cd sub/deep && cat ${rel}`, `cd sub/deep && grep -f${rel} x`, `cd sub/deep && grep -rf${rel} x`, `cd sub/deep && grep --file=${rel} x`,
-    `cd sub/deep && head -c8${rel}`, `cd sub/deep && wc -l ${rel}`, `cd sub/deep && grep -r x ${relDev}`,
+    `cd ./sub/deep && cat ${rel}`, `cd ./sub/deep && grep -f${rel} x`, `cd ./sub/deep && grep -rf${rel} x`, `cd ./sub/deep && grep --file=${rel} x`,
+    `cd ./sub/deep && head -c8${rel}`, `cd ./sub/deep && wc -l ${rel}`, `cd ./sub/deep && grep -r x ${relDev}`,
     // Each of these names a device only from the folder the cd reached.
-    "cd sub && cat r/../dev/zero", "cd sub && cat dev/zero", "cd sub && grep -fdev/zero x", "cd sub && grep -rfdev/zero x",
-    "cd sub && grep --file=dev/urandom x", "cd sub && grep -r x dev", "cd sub && grep -r x dev/", "cd sub; cd deep; cat ../r/../dev/zero",
-    "cd sub && cd deep && wc -c ../dev/zero", "(cd sub) ; cat dev/zero", "cd sub | cat dev/zero", "cd link-in && cat dev/zero",
-    "cd sub && sed -n 1p dev/zero", "cd sub && cut -f1 dev/zero", "cd sub && tail -n5 'dev/zero'", "cd sub/ && cat d\\ev/zero",
+    "cd ./sub && cat r/../dev/zero", "cd ./sub && cat dev/zero", "cd ./sub && grep -fdev/zero x", "cd ./sub && grep -rfdev/zero x",
+    "cd ./sub && grep --file=dev/urandom x", "cd ./sub && grep -r x dev", "cd ./sub && grep -r x dev/", "cd ./sub; cd ./deep; cat ../r/../dev/zero",
+    "cd ./sub && cd ./deep && wc -c ../dev/zero", "(cd ./sub) ; cat dev/zero", "cd ./sub | cat dev/zero", "cd ./link-in && cat dev/zero",
+    "cd ./sub && sed -n 1p dev/zero", "cd ./sub && cut -f1 dev/zero", "cd ./sub && tail -n5 'dev/zero'", "cd ./sub/ && cat d\\ev/zero",
   ]) {
     const v = researcherViolation(c, proj, proj);
     assert.ok(v, `expected a denial for ${c}`);
     assert.match(v.reason, /device that may never end/, c);
   }
   // Ordinary reads after a cd still pass.
-  for (const c of ["cd sub && cat ../file.txt", "cd sub && grep -rn foo .", "cd sub/deep && ls ../.. && wc -l ../../file.txt"]) {
+  for (const c of ["cd ./sub && cat ../file.txt", "cd ./sub && grep -rn foo .", "cd ./sub/deep && ls ../.. && wc -l ../../file.txt"]) {
     assert.equal(researcherViolation(c, proj, proj), null, c);
   }
 });
@@ -625,8 +679,9 @@ test("researcher guard hook (cd item 2): the project folder comes from the hook,
   const pay = (/** @type {string} */ command, /** @type {string} */ cwd) => ({ ...bash(command), cwd });
   const extra = { CLAUDE_PROJECT_DIR: proj, HOME: home };
   for (const [c, cwd, code] of /** @type {[string, string, number][]} */ ([
-    ["cd deep", sub, 0], ["cd ..", sub, 0], ["cd sub && cat ../file.txt", proj, 0], ["cat dev/zero", sub, 2], ["cat r/../dev/zero", sub, 2],
-    ["cd ..", proj, 2], [`cd ${home}`, proj, 2], ["cd ~", proj, 2], ["cd", proj, 2], [`cd ${outside}`, sub, 2], ["cd sub && cat dev/zero", proj, 2],
+    ["cd ./deep", sub, 0], ["cd ..", sub, 0], ["cd ./sub && cat ../file.txt", proj, 0], ["cat dev/zero", sub, 2], ["cat r/../dev/zero", sub, 2],
+    ["cd ..", proj, 2], [`cd ${home}`, proj, 2], ["cd ~", proj, 2], ["cd", proj, 2], [`cd ${outside}`, sub, 2], ["cd ./sub && cat dev/zero", proj, 2],
+    ["cd deep", sub, 2], ["cd sub", proj, 2],
   ])) {
     const r = run(RESEARCHER, pay(c, cwd), extra);
     assert.equal(r.code, code, `${c} (from ${cwd}): ${r.stderr}`);
