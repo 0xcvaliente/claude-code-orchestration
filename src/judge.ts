@@ -774,9 +774,11 @@ const NOOP_EDITOR: readonly string[] = ["true", ":"];
  * program, as `hash -p` does. Tested on the static prefix, as the exec-env rule is. */
 const ZSH_TABLES = "functions|aliases|galiases|saliases|dis_functions|dis_aliases|dis_galiases|dis_saliases|commands";
 const ZSH_TABLE = new RegExp(`^(${ZSH_TABLES})(\\[|\\+?=|$)`);
-/** The inside of `${...}` that may assign a table (`functions[f]::=body`, `aliases[p]:=x`, `commands=path`): any `=`
- * after the name counts, so a default value holding `=` (`${aliases[p]:-a=b}`) is refused too. */
-const ZSH_TABLE_EXPANSION = new RegExp(`^(${ZSH_TABLES})\\b.*=`);
+/** The inside of `${...}` that may assign a table (`functions[f]::=body`, `aliases[p]:=x`, `commands=path`): the name
+ * may follow any run of prefix characters (`#`, `+`, `^`, `=`, `~`, `!`, a space) and `(...)` flag groups, as in
+ * `${#functions[f]::=body}` or `${+aliases[p]=x}`, and any `=` after it counts, so a default value holding `=`
+ * (`${aliases[p]:-a=b}`) is refused too. */
+const ZSH_TABLE_EXPANSION = new RegExp(`^(?:[^A-Za-z0-9_(]|\\([^)]*\\))*(${ZSH_TABLES})\\b.*=`);
 /** The value of an assignment that names a table (`zparseopts -A x f:=functions`): read after an assigning builtin. */
 const ZSH_TABLE_VALUE = new RegExp(`=(${ZSH_TABLES})$`);
 /** Builtins whose arguments are assignments or the names of variables they assign. `set` counts with an `-A`/`+A`

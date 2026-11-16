@@ -3,7 +3,7 @@
 Both judge copies (`src/judge.ts`, `.claude/hooks/judge-core.mjs`) change together; the parity test passes unchanged.
 Rows: `AUDIT_1116_2_DENY` (86 deny rows, also read by `judge-differential.test.mjs`) and 41 neighbour rows in `src/judge.test.ts`.
 
-**J-9 set -A and assigning `${...}` (item 1).** `set` with an `-A`/`+A` cluster joins the assigning builtins; a `${...}` whose inside starts with a table name and holds `=` is a Doubt.
+**J-9 set -A and assigning `${...}` (item 1).** `set` with an `-A`/`+A` cluster joins the assigning builtins; a `${...}` whose inside starts with a table name and holds `=` is a Doubt (widened in the third attempt below: prefix characters and flags before the name count too).
 - Refused: `set -A functions f '..'`, `set +A`/`-sA`, behind `builtin`/`command`; `: ${functions[f]::=..}`, `:=`, `=`, in double quotes; also `dis_aliases`, `dis_galiases`, `dis_saliases`.
 - Legitimate loss: `${aliases[p]:-a=b}` (a default holding `=`; take the value in two steps).
 - Docs elsewhere: CHANGELOG.md (new entry); README.md Limits ("function and alias definitions" line) could name `set -A`.
@@ -35,6 +35,13 @@ Rows: `AUDIT_1116_2_DENY` (86 deny rows, also read by `judge-differential.test.m
 
 **Docs (item 3).** docs/bash-judge.md section 2.1 rows (filter-branch, `hook.*.command`, table rule, J-10 arithmetic), the 2.1 paragraph, the Doubt list in 2.4, section 11 (subscript assembled across statements: `x='a['; x+='$(cmd)]'`, `printf -v x 'a[%s]' '$(cmd)'`) and the over-blocked list.
 - Docs elsewhere: CHANGELOG.md entry for the second pass.
+
+**J-9 assigning `${...}` with a prefix (third attempt, after two opus reviews).** The `${...}` rule (`ZSH_TABLE_EXPANSION`, both copies) was anchored on the table name at the start of the inside, so `${#functions[f]::=echo MARK1}; f`, `${+functions[f]::=..}`, `${+aliases[p]::=..}`, `${#aliases[p]::=..}` and `${#commands[zz]::=/bin/echo}` passed and took effect in `zsh -f` 5.9. Now the name may follow any run of characters other than a letter, digit, `_` or `(` (zsh's `#`, `+`, `^`, `=`, `~`, alone, doubled or combined; also `!` and a space) and `(...)` flag groups; any `=` after the name still counts.
+- Checked in `zsh -f` with marker bodies: `#`, `+`, `^`, `^^`, `=`, `~`, `~~`, `(k)`, `(e)`, `(@)` and `${${functions[f]::=..}}`, `${#${..}}` take effect; `##`, `#+`, `#=`, `#~`, `+^`, `!`, a space and `(P)` are errors or do nothing in 5.9, refused anyway (safe side). Flags in parentheses and a nested `${` were already refused (a `(`, `$` or `{` inside `${...}` is a nested-expansion Doubt), and `${~..}`, `${=..}`, `${^..}` as a zsh expansion flag.
+- Rows: `AUDIT_1116_2_TABLE_EXPANSION_DENY` in `src/judge.test.ts` (61 deny rows: the five gap forms bare and after `:`, every table, prefixes, flags, nesting, `=`/`:=`/`::=`, with and without a subscript, in double quotes, behind `if`, `while`, `!`, `noglob`, `builtin`, `command`, `env`, `grep`, `git log --grep`, an assignment value), 14 pass rows, and a generated property in `src/judge-differential.test.mjs` (9 tables x 51 prefixes x 3 operators x 2 subscripts x 2 nestings x 4 placements, 22,032 forms, both copies deny and agree); the differential also reads the new list into its hardened inputs.
+- Still pass: `${#functions}`, `${functions[f]}`, `${+commands[git]}`, `${#aliases[p]:-none}`, `${x:=default}`, `${count::=0}`, `${#x:=default}`, `${x:=functions}`, `${myfunctions::=1}`, `${#functions_seen::=0}`.
+- Legitimate loss (new): an empty-name default whose text starts with a table name and holds `=` (`${:-functions=x}`; write the text directly). Unchanged: `${(k)aliases}` and any `(..)` flag stay refused by the older nested-expansion rule (it was so on the base); list the aliases with `alias`.
+- Docs elsewhere: docs/bash-judge.md section 2.1 (table row) and the Doubt list in 2.4 updated; CHANGELOG.md entry could name the prefix forms.
 
 **agent.ts comment (item 4).** The comment no longer says a timed-out PreToolUse callback blocks the call; it states only what sdk.d.ts says (`timeout` bounds the hooks; `onFailure: "block"` covers a throw or invalid output). No code change.
 - Docs elsewhere: none (docs/bash-judge.md section 4 already says the same).

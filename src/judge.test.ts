@@ -919,6 +919,97 @@ test("classify (audit 2026-11-16, fix-judge-2): J-3, J-4, J-8, J-9 spellings are
   ]), []);
 });
 
+// fix-judge-2, third attempt: an assigning ${...} into a zsh table with something before the name. The first five got
+// past the judge and took effect in zsh -f 5.9 (a body that echoes a marker); the rest are the family around them:
+// each prefix character alone, doubled and combined, parameter flags, a nested expansion, each assigning operator,
+// with and without a subscript, in double quotes, behind a keyword, modifier or wrapper. judge-differential.test.mjs
+// reads this list too.
+const AUDIT_1116_2_TABLE_EXPANSION_DENY: string[] = [
+  "${#functions[f]::=echo MARK1}; f",
+  "${+functions[f]::=echo MARK2}; f",
+  "${+aliases[p]::=echo MARK3}",
+  "${#aliases[p]::=echo MARK}",
+  "${#commands[zz]::=/bin/echo}; zz MARK4",
+  ": ${#functions[f]::=echo MARK1}; f",
+  ": ${+functions[f]::=echo MARK2}; f",
+  ": ${+aliases[p]::=echo MARK3}",
+  ": ${#aliases[p]::=echo MARK}",
+  ": ${#commands[zz]::=/bin/echo}; zz MARK4",
+  ": ${#functions[f]::=rm -rf ../victim}; f",
+  ": ${+functions[f]:=rm -rf x}; f",
+  ": ${#functions[f]=rm -rf x}; f",
+  ": ${+commands[ls]=/bin/rm}; ls -rf x",
+  ": ${#commands[ls]:=/usr/bin/git}; ls push origin main",
+  ": ${#galiases[G]::=echo MARK}",
+  ": ${+saliases[txt]::=echo MARK}",
+  ": ${#dis_functions[g]::=echo MARK}; enable -f g; g",
+  ": ${+dis_aliases[q]:=echo MARK}",
+  ": ${#dis_galiases[G]=echo MARK}",
+  ": ${+dis_saliases[txt]::=echo MARK}",
+  ": ${^functions[f]::=echo MARK}; f",
+  ": ${=functions[f]::=echo MARK}; f",
+  ": ${~functions[f]::=echo MARK}; f",
+  ": ${##functions[f]::=echo MARK}",
+  ": ${++aliases[p]::=echo MARK}",
+  ": ${^^functions[f]::=echo MARK}; f",
+  ": ${==functions[f]::=echo MARK}",
+  ": ${~~functions[f]=echo MARK}; f",
+  ": ${#+functions[f]::=echo MARK}",
+  ": ${+#commands[zz]::=/bin/echo}",
+  ": ${#^functions[f]::=echo MARK}",
+  ": ${#~aliases[p]:=echo MARK}",
+  ": ${#=commands[zz]=/bin/echo}",
+  ": ${!functions[f]::=echo MARK}",
+  ": ${ functions[f]::=echo MARK}",
+  ": ${#functions::=x}",
+  ": ${+aliases:=x}",
+  ": ${#commands=x}",
+  ": ${(P)functions[f]::=echo MARK}",
+  ": ${(k)functions[f]::=echo MARK}; f",
+  ": ${(e)functions[f]::=echo MARK}; f",
+  ": ${(@)commands[zz]::=/bin/echo}; zz MARK",
+  ": ${(AA)functions::=f 'echo MARK'}",
+  ": ${(#)aliases[p]:=echo MARK}",
+  ": ${${functions[f]::=echo MARK}}; f",
+  ": ${#${functions[f]::=echo MARK}}; f",
+  ": ${+${aliases[p]::=echo MARK}}",
+  "echo \"${#functions[f]::=echo MARK}\"; f",
+  "echo \"${+commands[zz]=/bin/echo}\"; zz MARK",
+  ": \"x${#aliases[p]:=echo MARK}y\"",
+  "if : ${+functions[f]::=echo MARK}; then f; fi",
+  "while : ${#functions[f]::=echo MARK}; do f; break; done",
+  "! : ${#functions[f]::=echo MARK}; f",
+  "noglob : ${#functions[f]::=echo MARK}; f",
+  "builtin : ${#functions[f]::=echo MARK}; f",
+  "command echo ${+aliases[p]::=echo MARK}",
+  "env echo ${#commands[zz]::=/bin/echo}",
+  "grep ${#functions[f]::=echo MARK} x",
+  "git log --grep ${+functions[f]::=echo MARK}",
+  "x=${#functions[f]::=echo MARK}; f",
+];
+
+test("classify (audit 2026-11-16, fix-judge-2): an assigning ${...} into a zsh table is denied whatever stands before the name", () => {
+  assert.deepEqual(misread(AUDIT_1116_2_TABLE_EXPANSION_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // reading a table: no assigning operator
+    ["echo ${#functions}", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${+commands[git]}", "pass"],
+    ["echo ${+functions[f]}", "pass"],
+    ["echo ${#aliases[p]}", "pass"],
+    ["echo ${#functions[f]:-none}", "pass"],
+    ["echo \"${+commands[git]}\"", "pass"],
+    // an assigning operator on another name, also one that ends in or starts with a table name
+    ["echo ${x:=default}", "pass"],
+    ["echo ${count::=0}", "pass"],
+    ["echo ${#x:=default}", "pass"],
+    ["echo ${+count::=0}", "pass"],
+    ["echo ${x:=functions}", "pass"],
+    ["echo ${myfunctions::=1}", "pass"],
+    ["echo ${#functions_seen::=0}", "pass"],
+  ]), []);
+});
+
 test("classify (audit 2026-11-16, J-15): a no-op editor and an empty IFS pass; any other value stays denied", () => {
   assert.deepEqual(misread([
     ["GIT_EDITOR=true git rebase --continue", "pass"],
