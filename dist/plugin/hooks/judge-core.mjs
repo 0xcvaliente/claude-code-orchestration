@@ -540,17 +540,22 @@ const pushyText = (t) => /push|remote|send-pack|receive-pack/i.test(t) || /^(ali
  * is otherwise text (`later.pushy` skips it), so each of these is read as a script of its own; a dynamic one is denied.
  * Options are matched on their static prefix, so `-x"$C"` counts too.
  */
-function gitShellArgs(ws, sub) {
+function gitShellArgs(ws, sub, rest, start, seen) {
+  // `rest` is the command's words that are not redirection targets, `rest[start]` the first after the subcommand. Every
+  // git word of a command reads from its own subcommand on: `seen` holds the option positions an earlier rebase read
+  // already, and a read that reaches one stops there (from there on it would find the same arguments again), so a
+  // command of many git words is read in linear time.
   const s = ws[sub];
   if (!s || s.dynamic) return [];
-  const rest = ws.slice(sub + 1).filter((w) => !w.redirect);
   const name = s.text.toLowerCase();
   const out = [];
   const value = (w, from) => {
     if (w) out.push({ text: w.text.slice(from), dynamic: w.dynamic });
   };
   if (name === "rebase") {
-    for (let i = 0; i < rest.length; i++) {
+    for (let i = start; i < rest.length; i++) {
+      if (seen.has(i)) break;
+      seen.add(i);
       const w = rest[i];
       const p = staticPrefix(w);
       if (p === "--" && !w.dynamic) break;
@@ -565,7 +570,7 @@ function gitShellArgs(ws, sub) {
       }
     }
   } else if (name === "submodule" || name === "bisect") {
-    let i = 0;
+    let i = start;
     while (i < rest.length && !rest[i].dynamic && rest[i].text.startsWith("-")) i++;
     const verb = rest[i];
     if (!verb || verb.dynamic || verb.text !== (name === "submodule" ? "foreach" : "run")) return [];
@@ -664,6 +669,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const script = (text, dynamic, what) =>
     push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set();
+  const rebaseSeen = new Set(); // see gitShellArgs
   let trapped = false; // a trap word already read every later word as a script
   // The first deny decides (see analyze), so the words after it are not read.
   for (let k = 0; k < ws.length && !denied; k++) {
@@ -731,7 +737,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       const g = gitRule(ws, k, later);
       push(g.c);
       gitSubs.add(g.sub);
-      if (!denied) for (const p of gitShellArgs(ws, g.sub)) if (!denied) script(p.text, p.dynamic, `git ${ws[g.sub].text}`);
+      if (!denied) for (const p of gitShellArgs(ws, g.sub, nr, from[g.sub] ?? nr.length, rebaseSeen)) if (!denied) script(p.text, p.dynamic, `git ${ws[g.sub].text}`);
     } else if (name === "rm") {
       if (gitSubs.has(k)) {
         // `git rm` is git's own command: it refuses to drop uncommitted changes unless forced.
