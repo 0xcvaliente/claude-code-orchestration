@@ -122,7 +122,36 @@ export function rowFor(task, launches, columns = 0, index) {
   const label = typeof task.label === "string" && task.label.trim() ? task.label.trim() : typeof task.description === "string" ? task.description.trim() : "";
   if (label) parts.push(label.replace(/\s+/g, " "));
   const row = parts.join(" · ");
-  return columns > 8 && row.length > columns ? `${row.slice(0, columns - 1)}…` : row;
+  return columns > 8 ? fitColumns(row, columns) : row;
+}
+
+/** East Asian Wide and Fullwidth ranges, and the emoji blocks, that a terminal draws two columns wide. */
+const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{3FFFD}]|\p{Extended_Pictographic}️/u;
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Terminal columns of one grapheme: 0 for a control or a lone mark, 2 when wide, else 1. @param {string} g */
+function graphemeWidth(g) {
+  if (WIDE.test(g)) return 2;
+  return /^[\p{M}\p{Cc}\p{Cf}]+$/u.test(g) ? 0 : 1;
+}
+
+/**
+ * The row cut to `columns` terminal columns by display width, whole graphemes only (a surrogate pair, an accent or an
+ * emoji sequence is never split), ending in "…" when cut. @param {string} row @param {number} columns
+ */
+function fitColumns(row, columns) {
+  const parts = [...graphemes.segment(row)].map((s) => s.segment);
+  let width = 0;
+  for (const g of parts) width += graphemeWidth(g);
+  if (width <= columns) return row;
+  let out = "", used = 0;
+  for (const g of parts) {
+    const w = graphemeWidth(g);
+    if (used + w > columns - 1) break;
+    out += g;
+    used += w;
+  }
+  return `${out}…`;
 }
 
 // Run as the status line command only when executed directly (the tests import rowFor).

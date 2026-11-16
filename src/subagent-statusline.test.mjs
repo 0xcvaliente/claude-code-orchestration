@@ -53,6 +53,17 @@ test("rowFor: role, slice, attempt and flags from the launch record; model, toke
   assert.deepEqual([cut.length, cut.endsWith("…")], [30, true]);
 });
 
+test("rowFor: a row is cut by display width, whole characters only (wide CJK and emoji count two columns)", () => {
+  // "implementer a risky · 41.2k · " is 30 columns; at 40 columns 9 are left for the label before the "…"
+  const cjk = rowFor(task("impl1", "implementer", { label: "修正 ".repeat(20) }), LAUNCHES, 40);
+  assert.equal(cjk, "implementer a risky · 41.2k · 修正 修正…");
+  const emoji = rowFor(task("impl1", "implementer", { label: "😀".repeat(10) }), LAUNCHES, 40);
+  assert.equal(emoji, "implementer a risky · 41.2k · 😀😀😀😀…");
+  // a row that fits by width is not cut, though it has more code units than columns (a combining accent takes none)
+  const accents = "é".repeat(9);
+  assert.equal(rowFor(task("impl1", "implementer", { label: accents }), LAUNCHES, 39), `implementer a risky · 41.2k · ${accents}`);
+});
+
 test("rowFor: other agents keep Claude Code's own row", () => {
   for (const type of ["Explore", "general-purpose", "other-plugin:reviewer-bot", "orchestration:orchestrator", "", undefined]) assert.equal(rowFor(task("x", /** @type {any} */ (type)), LAUNCHES), null, String(type));
   assert.equal(rowFor(null, LAUNCHES), null);
