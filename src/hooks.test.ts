@@ -624,3 +624,39 @@ test("test gate: log lines carry session_id and agent_id", () => {
   const entry = JSON.parse(readFileSync(gateLog(dir), "utf8").trim());
   assert.deepEqual([entry.session_id, entry.agent_id, entry.reason], ["s-9", "a7", "tests_passed"]);
 });
+
+test("compact-context: a passed slice that still needs its opus review says so, and a stalled slice says a replan is required", async () => {
+  const { runContext } = await import("../.claude/hooks/compact-context.mjs");
+  const { foldRuns } = await import("../.claude/hooks/brief.mjs");
+  const ts = (m: number) => new Date(Date.now() - 60000 * (20 - m)).toISOString();
+  const s = { session_id: "s" };
+  const plan = { ...s, ts: ts(0), agent_id: "p", agent_type: "reviewer", slice: "plan", isPlanReview: true, replan: null, plan: { slices: [{ slice: "x", files: ["x"], risky: true }, { slice: "y", files: ["y"] }, { slice: "z", files: ["z"] }] } };
+  const gap = [{ confidence: 90, key: "same-gap" }];
+  const launches = [
+    plan,
+    { ...s, ts: ts(2), agent_id: "ix", agent_type: "implementer", slice: "x" },
+    { ...s, ts: ts(4), agent_id: "rx", agent_type: "reviewer", slice: "x", model: "sonnet" },
+    { ...s, ts: ts(2), agent_id: "iy1", agent_type: "implementer", slice: "y" },
+    { ...s, ts: ts(4), agent_id: "ry1", agent_type: "reviewer", slice: "y", model: "sonnet" },
+    { ...s, ts: ts(6), agent_id: "iy2", agent_type: "implementer", slice: "y" },
+    { ...s, ts: ts(8), agent_id: "ry2", agent_type: "reviewer", slice: "y", model: "sonnet" },
+  ];
+  const stops = [
+    { ...s, ts: ts(1), agent_id: "p", role: "reviewer", slice: "plan", status: "pass" },
+    { ...s, ts: ts(3), agent_id: "ix", role: "implementer", slice: "x", status: "pass" },
+    { ...s, ts: ts(5), agent_id: "rx", role: "reviewer", slice: "x", status: "pass", answers: {}, open: [] },
+    { ...s, ts: ts(3), agent_id: "iy1", role: "implementer", slice: "y", status: "pass" },
+    { ...s, ts: ts(5), agent_id: "ry1", role: "reviewer", slice: "y", status: "fail", answers: {}, open: [], gaps: gap },
+    { ...s, ts: ts(7), agent_id: "iy2", role: "implementer", slice: "y", status: "pass" },
+    { ...s, ts: ts(9), agent_id: "ry2", role: "reviewer", slice: "y", status: "fail", answers: {}, open: [], gaps: gap },
+  ];
+  const { open } = foldRuns({ launches, stops } as any, { sessionId: "s", env: {} } as any) as any;
+  assert.ok(open, "the run is open");
+  assert.deepEqual([open.slices.x?.passed, open.slices.x?.final, open.slices.y?.stalled], [true, false, true], "fold preconditions");
+  const ctx = runContext(open);
+  assert.match(ctx, /- x: passed, opus review due, RISKY/);
+  assert.doesNotMatch(ctx, /- x: passed,? RISKY/);
+  assert.match(ctx, /- y: review failed, replan required \(2 attempts\)/);
+  assert.doesNotMatch(ctx, /retry due/);
+  assert.match(ctx, /- z: pending/);
+});

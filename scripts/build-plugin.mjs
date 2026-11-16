@@ -11,8 +11,7 @@
 // below already matches. A repo-root evals/ directory ships as evals/ when it exists. The judge hooks are registered
 // only when their files exist in .claude/hooks. Plugin settings are declared as userConfig (see OPTIONS).
 // --out <dir>: build into <dir>/plugin and <dir>/dashboard instead of dist/ (ignored with --check).
-import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -172,11 +171,55 @@ writeFileSync(
   join(dash, ".claude-plugin", "plugin.json"),
   `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts" }, null, 2)}\n`,
 );
+/**
+ * The differences between two folders, one line per path: only in one of them, a file against a folder, or different
+ * contents (a symbolic link compares by its target). `skip` (a path relative to both, `/`-separated) and everything
+ * under it are left out on both sides.
+ * @param {string} built @param {string} committed @param {string | null} skip @returns {string[]}
+ */
+function treeDiff(built, committed, skip) {
+  /** @param {string} base @returns {Map<string, string>} relative path -> "dir", "link:<target>" or "file" */
+  const walk = (base) => {
+    /** @type {Map<string, string>} */
+    const found = new Map();
+    if (!existsSync(base)) return found;
+    /** @param {string} rel */
+    const visit = (rel) => {
+      for (const e of readdirSync(rel ? join(base, rel) : base, { withFileTypes: true })) {
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (skip && (r === skip || r.startsWith(`${skip}/`))) continue;
+        if (e.isDirectory()) {
+          found.set(r, "dir");
+          visit(r);
+        } else if (e.isSymbolicLink()) found.set(r, `link:${readlinkSync(join(base, r))}`);
+        else found.set(r, "file");
+      }
+    };
+    visit("");
+    return found;
+  };
+  const a = walk(built);
+  const b = walk(committed);
+  /** @type {string[]} */
+  const out = [];
+  for (const r of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+    const x = a.get(r);
+    const y = b.get(r);
+    if (x === undefined) out.push(`Only in ${committed}: ${r}`);
+    else if (y === undefined) out.push(`Only in ${built}: ${r}`);
+    else if (x !== y) out.push(`Different kinds: ${r}`);
+    else if (x === "file" && !readFileSync(join(built, r)).equals(readFileSync(join(committed, r)))) out.push(`Files differ: ${r}`);
+  }
+  return out;
+}
+
 if (check) {
   const stale = ["plugin", "dashboard"].flatMap((name) => {
-    // `claude plugin eval` writes its reports to dist/plugin/evals/results (ignored by git): not part of the build.
-    const d = spawnSync("diff", ["-r", "-x", "results", join(outRoot, name), join(committedRoot, name)], { encoding: "utf8" });
-    return d.status === 0 ? [] : [`dist/${name} is out of date; run npm run build-plugin\n${d.stdout}${d.stderr}`];
+    // `claude plugin eval` writes its reports to dist/plugin/evals/results (ignored by git): not part of the build. Only
+    // that one folder is skipped (diff -x would skip every path named results, on both sides and at any depth).
+    const skip = name === "plugin" ? "evals/results" : null;
+    const d = treeDiff(join(outRoot, name), join(committedRoot, name), skip);
+    return d.length === 0 ? [] : [`dist/${name} is out of date; run npm run build-plugin\n${d.join("\n")}\n`];
   });
   rmSync(outRoot, { recursive: true, force: true });
   if (stale.length) {

@@ -76,20 +76,33 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), LIMITS.workerTimeoutMs);
   const started = Date.now();
-  // A worker that died mid-stream reports no tokens; runs are bounded by turns and timeouts unless a token budget is set.
-  const fail = (subtype: string, text: string): AgentResult => ({
-    ok: false, text, tokens: 0, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model,
-  });
+  // A worker that dies mid-stream (a crash, the timeout's abort, a stream with no result) gets no result message, so
+  // it is charged the usage its stream reported on assistant messages, once per message id (the SDK repeats a message
+  // per content block; the largest count of each field wins, as in telemetry's usageFromTranscript). Without it a set
+  // --budget would miss what the worker spent and let the next attempt start.
+  const streamed = new Map<string, TokenUsage>();
+  const spent = (): TokenUsage => {
+    const sum: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    for (const u of streamed.values()) for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const) sum[k] += u[k];
+    return sum;
+  };
+  const fail = (subtype: string, text: string): AgentResult => {
+    const usage = spent();
+    return { ok: false, text, tokens: totalTokens(usage), usage, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model };
+  };
 
   // Bash roles: every Bash call passes the guard first. Plain `Bash` is pre-approved, so a guard that failed without
   // blocking would let the command run. Three layers keep that from happening: bashGuard denies on any throw of its
-  // own, HOOK_TIMEOUT_S is above the judge's own timeout (and a PreToolUse callback that does time out blocks the call,
-  // Claude Code 2.1.210 and later), and the matcher's onFailure "block" below covers what is left.
+  // own, HOOK_TIMEOUT_S is above the judge's own timeout (the SDK's types say only that a matcher's `timeout` bounds its
+  // hooks, not what a callback that times out does to the call, so nothing here relies on that), and the matcher's
+  // onFailure "block" below blocks the call when the callback throws or answers with output that fails validation.
   // With the judge off the guard still denies the judged classes, on top of UNSAFE_BASH in disallowedTools.
   // The judge's own tokens are NOT part of the worker's `tokens` (they are a separate query() inside the hook).
   let hooks: Options["hooks"];
   if (cfg.tools.includes("Bash")) {
     const auditFile = req.auditFile ?? env.ORCH_JUDGE_AUDIT ?? join(process.cwd(), "runs", "judge-audit.jsonl");
+    // cwd is the worktree root: the guard resolves rm targets against the shell's folder (the hook input's cwd, which
+    // follows a `cd`) when it lies inside the root, and refuses judged commands while the shell is outside it.
     const guard = bashGuard({
       role: req.role, brief: req.prompt, task: req.task ?? "", cwd: req.cwd,
       enabled: judgeEnabled(env), deps: (deps.judgeDeps ?? defaultJudgeDeps)(auditFile),
@@ -130,6 +143,14 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
     });
 
     for await (const msg of stream) {
+      if (msg.type === "assistant") {
+        const m = msg.message as { id?: unknown; usage?: unknown } | undefined;
+        const u = usageFromResult({ usage: m?.usage as Parameters<typeof usageFromResult>[0]["usage"] });
+        const id = typeof m?.id === "string" && m.id ? m.id : `#${streamed.size}`;
+        const prev = streamed.get(id);
+        streamed.set(id, prev ? { input: Math.max(prev.input, u.input), output: Math.max(prev.output, u.output), cacheRead: Math.max(prev.cacheRead, u.cacheRead), cacheWrite: Math.max(prev.cacheWrite, u.cacheWrite) } : u);
+        continue;
+      }
       if (msg.type !== "result") continue;
       const usage = usageFromResult(msg);
       const common = {

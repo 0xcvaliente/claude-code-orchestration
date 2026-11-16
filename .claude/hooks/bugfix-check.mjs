@@ -10,13 +10,16 @@
 //             completely, so a failure that never shows as a named test can slip through; the guards are: never
 //             when a failure is unqualified or a runner-level crash marker is present (suite failed to run,
 //             collection or import error, build failure, go FAIL <pkg> without a named test, panics, vitest
-//             unhandled errors, cargo binary crash or signal, jest coverage threshold), never when the base run
+//             unhandled errors, cargo binary crash or signal, jest coverage threshold), never when cargo stopped at a
+//             failing target (its rerun hint ends the run without the --no-fail-fast summary) or the command is a
+//             unittest run with failfast (-f, --failfast), never when the base run
 //             timed out, could not use the main worktree's dependencies, or failed without parsable names.
 //   bugfix    (stdin: the SubagentStop event; ORCH_BUGFIX_CHECK=off skips it) -- for an implementer whose brief says
 //             KIND: bugfix, after the tests passed: at least one test file must be changed or added against the base,
 //             and the base run with those files copied in must show at least one new qualified failing test that
-//             lives in a copied file, compared with the base run without them. Blocks say what is missing; after two
-//             such blocks for the agent it allows with bugfix_unverified_gave_up.
+//             lives in a copied file, compared with the base run without them (a failure of the whole file, such as
+//             an import error, does not count: the test body has to run and fail). Blocks say what is missing; after two
+//             such blocks for the agent since its latest SubagentStart it allows with bugfix_unverified_gave_up.
 // Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
 // SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
@@ -55,8 +58,11 @@ const real = (p) => {
 //   node --test TAP: "not ok" with the YAML "location:" file; spec reporter: the "✖ failing tests:" summary, where
 //     each "✖ name" follows a "test at <file>" line;
 //   jest: "FAIL <file>" header, then "●"/"✕" names; vitest: "FAIL  <file> > name", or "❯ <file>" then "×" names;
-//   pytest: "FAILED/ERROR path::name"; go: "--- FAIL: TestX" qualified by the "FAIL <pkg>" line that follows;
-//   cargo: "test name ... FAILED" qualified by the preceding "Running <target>".
+//   pytest: "FAILED/ERROR path::name"; unittest: "FAIL:/ERROR: name (module.Class.name)", the module as its .py path;
+//   go: "--- FAIL: TestX" qualified by the "FAIL <pkg>" line that follows;
+//   cargo: "test name ... FAILED" qualified by the preceding "Running <target>"; under --quiet (the detected command)
+//     "name --- FAILED" qualified by the "error: test failed, to rerun pass `--lib`" (src/lib.rs) or
+//     "`--test x`" (tests/x.rs) hint that follows.
 // A failure with no file or package goes to `unqualified`; a suite-level crash sets `crash`.
 // Absolute paths under `root` (the run's tree) are made relative so two trees compare.
 // ---------------------------------------------------------------------------------------------------------------
@@ -112,11 +118,30 @@ export function parseFailures(text, root = "") {
   let goPending = [];
   /** @type {string | null} */
   let cargoTarget = null;
+  /** @type {string[]} */
+  let cargoPending = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    if (CRASH_RE.some((re) => re.test(line))) res.crash = true;
+    // cargo --quiet: the rerun hint qualifies the names listed before it, so with names pending it is no crash.
+    const hint = /^error: test failed, to rerun pass `([^`]*)`/.exec(line);
+    if (CRASH_RE.some((re) => re.test(line)) && !(hint && cargoPending.length)) res.crash = true;
     let m;
-    if ((m = /^\s*not ok\s+\d+\s*(?:-\s*)?(.*)$/.exec(line))) {
+    if (hint) {
+      // "--lib" is src/lib.rs, "--test x" tests/x.rs (cargo's default layout); any other target keeps the hint's words.
+      // A workspace's "-p <package>" becomes a leading folder ("<package>/tests/x.rs"), which inFiles matches as the
+      // tail of the member's path (crates/<package>/tests/x.rs), so another member's file of the same name never matches.
+      const all = (hint[1] ?? "").split(/\s+/).filter(Boolean);
+      const pk = all.findIndex((w) => /^(-p|--package)$/.test(w));
+      const pkg = pk >= 0 ? all[pk + 1] : undefined;
+      const t = pk >= 0 ? all.filter((w, k) => k !== pk && k !== pk + 1) : all;
+      const test = t.indexOf("--test") >= 0 ? t[t.indexOf("--test") + 1] : undefined;
+      const file = t.includes("--lib") ? "src/lib.rs" : test ? `tests/${test}.rs` : "";
+      const target = file ? (pkg ? `${pkg}/${file}` : file) : t.join(" ").replace(/^--/, "");
+      for (const n of cargoPending) add(target || null, n);
+      cargoPending = [];
+    } else if ((m = /^(\S+) --- FAILED$/.exec(line))) {
+      cargoPending.push(m[1] ?? "");
+    } else if ((m = /^\s*not ok\s+\d+\s*(?:-\s*)?(.*)$/.exec(line))) {
       if (/#\s*(?:SKIP|TODO)\b/i.test(m[1] ?? "")) continue;
       /** @type {string | null} */
       let loc = null;
@@ -165,6 +190,19 @@ export function parseFailures(text, root = "") {
       else add(jsFile, n);
     } else if ((m = /^\s*[✕×]\s+(.+?)(?:\s+\d[\d.]*\s*m?s|\s+\(\d[\d.]*\s*m?s\))?$/.exec(line))) {
       add(jsFile, m[1]);
+    } else if ((m = /^(?:FAIL|ERROR): (\S+) \(([\w.]+)\)/.exec(line))) {
+      // unittest: "FAIL: test_x (pkg.mod.Class.test_x)" (Python 3.11+) or "(pkg.mod.Class)" before; a module that
+      // fails to import shows as unittest.loader._FailedTest, a crash with no test of its own.
+      const test = m[1] ?? "";
+      const parts = (m[2] ?? "").split(".");
+      if (/^unittest\.loader\._Failed/.test(m[2] ?? "")) {
+        res.crash = true;
+        continue;
+      }
+      if (parts.length > 2 && parts[parts.length - 1] === test) parts.pop();
+      const cls = parts.length > 1 ? parts.pop() : undefined;
+      if (cls) add(`${parts.join("/")}.py`, `${cls}.${test}`);
+      else add(null, test);
     } else if ((m = /^(FAILED|ERROR)\s+(\S+?\[.*?\]|\S+)(?:\s+-\s.*)?$/.exec(line))) { // a parametrized id may hold spaces
       const id = m[2] ?? "";
       if (id.startsWith("(")) continue; // unittest's "FAILED (failures=1)"
@@ -181,6 +219,7 @@ export function parseFailures(text, root = "") {
     }
   }
   for (const n of goPending) add(null, n);
+  for (const n of cargoPending) add(null, n);
   res.names = [...names].sort();
   res.unqualified = [...unq].sort();
   return res;
@@ -188,6 +227,32 @@ export function parseFailures(text, root = "") {
 
 /** Names to compare: at least one, all qualified, no crash. @param {Failures} f */
 export const complete = (f) => f.names.length > 0 && f.unqualified.length === 0 && !f.crash;
+
+/**
+ * A cargo run that stopped at a failing test target: cargo (without --no-fail-fast) stops after the first target that
+ * fails, so its last line is that target's rerun hint and the targets after it never ran. Under --no-fail-fast every
+ * target runs and cargo ends with an "error: N target(s) failed:" summary, which closes the hints before it. The names
+ * such a run printed stay usable (bugfix check, the inform note); only the allow decision treats it as incomplete.
+ * @param {unknown} text
+ */
+export function stoppedEarly(text) {
+  if (typeof text !== "string") return false;
+  let stopped = false;
+  // eslint-disable-next-line no-control-regex
+  for (const l of text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/)) {
+    if (/^error: test failed, to rerun pass `/.test(l)) stopped = true;
+    else if (/^error: \d+ targets? failed:\s*$/.test(l)) stopped = false;
+  }
+  return stopped;
+}
+
+/**
+ * A unittest command that stops at its first failure (-f, --failfast, or -f among combined short flags): unittest
+ * prints its FAIL:/ERROR: blocks only after the run, but that output carries no mark of a failfast stop, so the
+ * command is the only sign. Without failfast a run cut short (a crash, os._exit, a kill) prints no names at all.
+ * @param {string} cmd
+ */
+export const failFastCmd = (cmd) => /\bunittest\b/.test(cmd) && /(?:^|\s)(?:--failfast|-[A-Za-z]*f[A-Za-z]*)(?=\s|;|&|\||$)/.test(cmd);
 
 // Test files by path: under a test folder, or named like a test in the common runners.
 /** @param {string} path */
@@ -214,9 +279,24 @@ export function inFiles(name, files) {
   const q = name.slice(0, k).replace(/\\/g, "/");
   return files.some((t) => {
     if (q === t || q.endsWith(`/${t}`)) return true;
+    // unittest: a module path relative to discover's start folder; cargo: a workspace member's "<package>/tests/x.rs".
+    if (/\.(py|rs)$/.test(q) && t.endsWith(`/${q}`)) return true;
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });
+}
+
+/**
+ * A failure of a whole test file, not of a test in it: node's runner names a file that fails to load (an import or
+ * syntax error) after the file itself. Such a failure never shows that a test body ran.
+ * @param {string} name
+ */
+export function fileLevel(name) {
+  const k = name.indexOf("::");
+  if (k <= 0) return false;
+  const file = name.slice(0, k).replace(/\\/g, "/");
+  const n = name.slice(k + 2).trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  return n === file || file.endsWith(`/${n}`) || n.endsWith(`/${file}`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -472,7 +552,8 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   const quick = parseFailures(output);
   if (quick.names.length === 0) return null; // nothing qualified to compare
   const allow = mode === "allow";
-  if (allow && !complete(quick)) return null; // unqualified names or a crash: keep the block
+  // unqualified names, a crash, a cargo stop at a failing target or a unittest failfast command: keep the block
+  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd))) return null;
   const info = baseInfo(cwd, isolated);
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
@@ -537,6 +618,24 @@ function jsonl(state, file) {
   }
 }
 
+/**
+ * The test gate's blocks of agent `id` whose reason is `reason` (or starts with it, when it ends in "_"), counted since
+ * the agent's latest SubagentStart in telemetry.jsonl: a SendMessage resume starts the agent again under its id, so
+ * each attempt gets its own cap. With no start record, every block of the agent counts.
+ * @param {string} state @param {string} id @param {string} reason
+ */
+export function countBlocks(state, id, reason) {
+  if (!id) return 0;
+  let start = -Infinity;
+  for (const e of jsonl(state, "telemetry.jsonl")) {
+    if (e.hook_event_name !== "SubagentStart" || e.agent_id !== id) continue;
+    const t = Date.parse(e.ts);
+    if (t > start) start = t;
+  }
+  const match = (/** @type {unknown} */ r) => (reason.endsWith("_") ? String(r).startsWith(reason) : r === reason);
+  return jsonl(state, "gates.jsonl").filter((r) => r.gate === "test" && r.decision === "block" && r.agent_id === id && match(r.reason) && !(Date.parse(r.ts) < start)).length;
+}
+
 /** KIND from the transcript brief, else from the launch record. @param {string} state @param {any} event @returns {string | null} */
 export function agentKind(state, event) {
   const brief = briefFromTranscript(event?.agent_transcript_path);
@@ -562,9 +661,7 @@ export function changedTestFiles(top, base) {
 export async function bugfix({ cwd, cmd, isolated, state, event }) {
   if (agentKind(state, event) !== "bugfix") return null;
   const id = typeof event?.agent_id === "string" ? event.agent_id : "";
-  const blocks = id
-    ? jsonl(state, "gates.jsonl").filter((r) => r.gate === "test" && r.decision === "block" && r.agent_id === id && String(r.reason).startsWith("bugfix_")).length
-    : 0;
+  const blocks = countBlocks(state, id, "bugfix_");
   const block = (/** @type {string} */ reason, /** @type {string} */ message, extra = "") =>
     blocks >= MAX_BUGFIX_BLOCKS
       ? { decision: "allow", reason: "bugfix_unverified_gave_up", extra, message: "" }
@@ -612,12 +709,12 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
   }
   if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
-  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests));
+  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests) && !fileLevel(n));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
   if (fresh.length > 0) return { decision: "allow", reason: "bugfix_verified", extra, message: "" };
   return block(
     "bugfix_test_passes_on_base",
-    `KIND: bugfix: the changed test files (${tests.slice(0, 5).join(", ")}${tests.length > 5 ? ", ..." : ""}) add no failing test on ${short} without the fix: they pass there, fail the same way as the base does without them, or fail without a parsable test name. Add or change a test that fails before the fix.`,
+    `KIND: bugfix: the changed test files (${tests.slice(0, 5).join(", ")}${tests.length > 5 ? ", ..." : ""}) add no failing test on ${short} without the fix: they pass there, fail the same way as the base does without them, or fail without a parsable test name or only as a whole file that does not load. Add or change a test that fails before the fix.`,
     extra,
   );
 }

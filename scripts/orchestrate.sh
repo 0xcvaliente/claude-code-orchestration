@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Headless native orchestration: run the orchestrator agent non-interactively, print its JSON (the session's last
-# result, plus orch_totals: the results, turns and wall time of the whole run; scripts/run-result.mjs),
+# result, plus orch_totals: the results, turns and wall time of the whole run; scripts/run-result.mjs; on a terminal, the
+# result text and one line of turns, seconds and exit code instead),
 # and log tokens, turns and duration to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
@@ -39,10 +40,18 @@ export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a ru
 
 task="${1:?usage: orchestrate.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # CDPATH cleared: a relative dirname must not find another folder
 # The old dollar cap must fail, not be ignored: a run that relied on it would go uncapped.
 if [ -n "${ORCH_BUDGET_USD:-}" ]; then
   echo "ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS (a token count such as 2M)" >&2
+  exit 1
+fi
+# The plain session's output style (ORCH_AGENT=none only): unset is Claude Code's built-in Concise; "default" or empty
+# passes none (Claude Code's default style); any other value must be a plain word, the name of a style.
+style="${ORCH_OUTPUT_STYLE-Concise}"
+[ "$style" = default ] && style=""
+if [ -n "$style" ] && ! [[ "$style" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  echo "ORCH_OUTPUT_STYLE must be a style name of letters, digits, _ and -, or default" >&2
   exit 1
 fi
 budget_usd=""
@@ -88,7 +97,14 @@ tools=(
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git reset --merge)" # the integrator's last resort when git merge --abort fails; exactly this form, no other reset
-  "Bash(git -C *)" "Bash(cd *)"
+  # git -C <dir>: only the subcommands the agents use (reviewer and researcher reads, a worktree implementer's and the
+  # integrator's writes, a skill slice's draft worktree). The `*` for the folder can also stand for other words, so these
+  # rules also match some other git commands; the git denies below stop the plain destructive forms, not every one.
+  "Bash(git -C * status*)" "Bash(git -C * diff*)" "Bash(git -C * log*)" "Bash(git -C * show*)" "Bash(git -C * rev-parse*)"
+  "Bash(git -C * ls-files*)" "Bash(git -C * rev-list*)" "Bash(git -C * branch --show-current)"
+  "Bash(git -C * worktree list*)" "Bash(git -C * worktree add *)"
+  "Bash(git -C * add *)" "Bash(git -C * commit *)" "Bash(git -C * merge *)" "Bash(git -C * reset --merge)"
+  "Bash(cd *)"
   "Bash(npm *)" "Bash(node *)" "Bash(ls*)" "Bash(mkdir -p *)"
 )
 if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
@@ -131,15 +147,24 @@ export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
 # Fork subagents (on by default since v2.1.302) inherit the whole conversation and every tool; Agent(fork) is denied too.
 export CLAUDE_CODE_FORK_SUBAGENT=0
 
-args=(-p "$task")
+# The task is claude's positional prompt. A task that starts with a dash would be read as an option after -p, so it goes
+# after `--` at the very end instead (see the end of this list; probed on Claude Code 2.1.325:
+# docs/data/live-checks-2026-11-16.md, Check 5). Any other task keeps its place after -p.
+args=(-p)
+case "$task" in -*) ;; *) args+=("$task") ;; esac
 if [ "$agent" != none ]; then
   args+=(--agent "$agent") # the flag wins over an `agent` setting in the folder
 else
   # A plain session must stay plain. A folder's settings can name a main agent (this repo's .claude/settings.json sets
   # "agent": "orchestrator", and a copy of .claude/ carries it along), and `claude -p` would then run as that agent,
   # with its tools. An empty `agent` in the flag settings, which rank above the folder's, gives the default agent back
-  # (probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md). It changes no other setting.
-  args+=(--settings '{"agent":""}')
+  # (probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md). The same JSON names the output style, Concise
+  # unless ORCH_OUTPUT_STYLE says otherwise (Check 5 there; the key and the case-sensitive name are Claude Code's).
+  if [ -z "$style" ]; then
+    args+=(--settings '{"agent":""}')
+  else
+    args+=(--settings "{\"agent\":\"\",\"outputStyle\":\"$style\"}")
+  fi
 fi
 # The event stream, not --output-format json: a session that waits for agents produces one result per wake-up, and
 # json prints the last one only. scripts/run-result.mjs reduces the stream to that last result plus the run's totals.
@@ -156,11 +181,23 @@ args+=(--output-format stream-json --verbose --permission-mode dontAsk)
 # Headless: nobody reads a question before the run ends (the orchestrator then decides instead of asking).
 args+=(--append-system-prompt "This run is unattended: nobody can answer a question during this run, so decide and proceed instead of asking.")
 # Never publish or escalate, whatever the folder's settings say (a plugin user's folder has no deny list, and this
-# repo's leaves git push to interactive sessions). A deny beats every allow rule, so `Bash(git -C *)` cannot reach a
-# push. UNSAFE_BASH in src/config.ts; src/verify.test.ts fails on drift. Variadic: keep it before --allowedTools.
+# repo's leaves git push to interactive sessions). A deny beats every allow rule. The first line is UNSAFE_BASH in
+# src/config.ts (src/verify.test.ts fails on drift). The git lines are for headless runs only. They stop the plain
+# destructive forms an agent might run by mistake: -c and --config-env (an alias that pushes, a hooks folder that runs
+# any program), reset --hard in any spelling, clean with options; and the global options that take a separate value
+# (--namespace, --git-dir, --work-tree, --exec-path, --super-prefix, --attr-source, a second -C), so such a value cannot
+# pose as the subcommand of a `git -C * <subcommand>*` rule. They do not stop a command built to get around them: a
+# `git -C * status*` rule also matches `git -C /r branch -D main status`. A guard against mistakes, not a boundary.
+# `git * -c*` also refuses a commit whose message has " -c" in it. Variadic: keep it before --allowedTools.
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
-  "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)")
-args+=(--allowedTools "${tools[@]}") # variadic: keep it last
+  "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)"
+  "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)"
+  "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean -*)"
+  "Bash(git * --namespace*)" "Bash(git * --git-dir*)" "Bash(git * --work-tree*)" "Bash(git * --exec-path*)"
+  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)")
+args+=(--allowedTools "${tools[@]}") # variadic: keep it last, or end it with `--`
+# `--` ends both the variadic --allowedTools and option parsing, so a dash-led task is the prompt.
+case "$task" in -*) args+=(-- "$task") ;; esac
 
 if [ -n "${ORCH_DRY_RUN:-}" ]; then
   printf '%s\n' "${args[@]}"
@@ -176,6 +213,12 @@ claude "${args[@]}" > "$stream" || code=$?
 # from claude's exit code, so a run cut short after an interim result is marked) for the whole run.
 out="$(node "$here/run-result.mjs" "$stream" "$start_ms" "$code")" || out="$(cat "$stream")"
 
-printf '%s\n' "$out"
+# A person in a terminal reads the result text and one totals line; a pipe or a capture (auto.sh, the bench, jq) gets the
+# JSON document as before.
+if [ -t 1 ]; then
+  printf '%s' "$out" | node "$here/run-result.mjs" --terminal || printf '%s\n' "$out"
+else
+  printf '%s\n' "$out"
+fi
 printf '%s' "$out" | node "$here/log-run.mjs" "$task" "$code" || true
 exit "$code"

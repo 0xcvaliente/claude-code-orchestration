@@ -83,6 +83,34 @@ test("haiku rule: an agent file that still says haiku is raised; sonnet, opus an
   }
 });
 
+// G-15 (audit 2026-11-16): older, dated and provider-prefixed haiku ids are in the haiku family too.
+test("haiku rule: any id of the haiku family is raised, from the call or the agent file; other families are not", () => {
+  const ids = ["claude-3-5-haiku-20241022", "claude-3-haiku-20240307", "us.anthropic.claude-haiku-4-5-20251001-v1:0", "anthropic.claude-3-haiku-20240307-v1:0", "claude-haiku-4-5@20251001", "CLAUDE-3-5-HAIKU-LATEST"];
+  const dir = project({ reviewer: "sonnet" });
+  try {
+    for (const model of ids) {
+      const r = launch(dir, { subagent_type: "reviewer", prompt: "Review it.", model });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(out(r).updatedInput.model, "sonnet", model);
+    }
+    assert.equal(floorLog(dir).length, ids.length);
+    for (const model of ["claude-sonnet-4-5-20250929", "us.anthropic.claude-opus-4-1-20250805-v1:0", "claude-3-7-sonnet-latest", "inherit"]) {
+      const r = launch(dir, { subagent_type: "reviewer", prompt: "Review it.", model });
+      assert.equal(r.stdout, "", model);
+    }
+    assert.equal(floorLog(dir).length, ids.length);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const file = project({ researcher: "claude-3-5-haiku-20241022" });
+  try {
+    assert.equal(out(launch(file, { subagent_type: "researcher", prompt: "Read it." })).updatedInput.model, "sonnet");
+    assert.equal(floorLog(file).at(-1).model_source, "agent_file");
+  } finally {
+    rmSync(file, { recursive: true, force: true });
+  }
+});
+
 test("haiku rule: ORCH_ALLOW_HAIKU=1 or the plugin option leaves haiku alone; any other value does not", () => {
   const dir = project({ researcher: "haiku" });
   try {

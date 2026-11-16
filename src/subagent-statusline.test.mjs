@@ -2,13 +2,13 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { launchRecord } from "../.claude/hooks/brief.mjs";
-import { indexLaunches, rowFor, sessionLaunches, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
+import { displayWidth, indexLaunches, rowFor, sessionLaunches, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, ".claude", "hooks", "subagent-statusline.mjs");
@@ -51,6 +51,72 @@ test("rowFor: role, slice, attempt and flags from the launch record; model, toke
   // Cut to the row width.
   const cut = rowFor(task("impl1", "implementer", { model: "claude-sonnet-5-5" }), LAUNCHES, 30) ?? "";
   assert.deepEqual([cut.length, cut.endsWith("…")], [30, true]);
+});
+
+test("rowFor: a row is cut by display width, whole characters only (wide CJK and emoji count two columns)", () => {
+  // "implementer a risky · 41.2k · " is 30 columns; at 40 columns 9 are left for the label before the "…"
+  const cjk = rowFor(task("impl1", "implementer", { label: "修正 ".repeat(20) }), LAUNCHES, 40);
+  assert.equal(cjk, "implementer a risky · 41.2k · 修正 修正…");
+  const emoji = rowFor(task("impl1", "implementer", { label: "😀".repeat(10) }), LAUNCHES, 40);
+  assert.equal(emoji, "implementer a risky · 41.2k · 😀😀😀😀…");
+  // a row that fits by width is not cut, though it has more code units than columns (a combining accent takes none)
+  const accents = "é".repeat(9);
+  assert.equal(rowFor(task("impl1", "implementer", { label: accents }), LAUNCHES, 39), `implementer a risky · 41.2k · ${accents}`);
+});
+
+test("rowFor: every emoji with emoji presentation counts two columns; a variation selector or a joined sequence is never split", () => {
+  // "implementer a risky · 41.2k · " is 30 columns; at 40, 9 are left before the "…": four two-column characters
+  for (const e of ["🚀", "✅", "⌛", "⏩", "☕", "🛠️", "❤️", "👩‍💻", "🇳🇴", "1️⃣"]) {
+    assert.equal(rowFor(task("impl1", "implementer", { label: e.repeat(10) }), LAUNCHES, 40), `implementer a risky · 41.2k · ${e.repeat(4)}…`, JSON.stringify(e));
+  }
+  // text presentation (U+FE0E) and a plain symbol stay one column: 9 fit
+  assert.equal(rowFor(task("impl1", "implementer", { label: "☕︎".repeat(12) }), LAUNCHES, 40), `implementer a risky · 41.2k · ${"☕︎".repeat(9)}…`);
+  // mixed text: whole characters only, the cut lands between them
+  const mixed = rowFor(task("impl1", "implementer", { label: "ok 👩‍💻 ❤️ 漢字 done" }), LAUNCHES, 40);
+  assert.equal(mixed, "implementer a risky · 41.2k · ok 👩‍💻 ❤️ …"); // 1+1+1+2+1+2+1 = 9 columns
+});
+
+test("rowFor: a row of Hangul Compatibility Jamo is cut to the width, never wider", () => {
+  // each of U+3131-318E is East Asian Wide: two columns; the rest of the row ("integrator · 41.2k · ", 21 columns)
+  // is one column a character
+  const jamo = Array.from({ length: 0x318e - 0x3131 + 1 }, (_, i) => String.fromCodePoint(0x3131 + i)).join("");
+  const row = rowFor(task("new", "orchestration:integrator", { label: jamo }), LAUNCHES, 30) ?? "";
+  assert.ok(row.startsWith("integrator · 41.2k · ㄱ"), row);
+  const width = [...row].reduce((w, c) => w + (c >= "ㄱ" && c <= "ㆎ" ? 2 : 1), 0);
+  assert.ok(width <= 30, `${width} columns: ${row}`);
+  assert.ok(row.endsWith("…"));
+});
+
+test("displayWidth: one code point's width matches Python's unicodedata for the Basic and Supplementary Multilingual Planes", (t) => {
+  // Python's reference: 0 for marks and Cc/Cf, 2 for East Asian Wide or Fullwidth, else 1; "x" for unassigned.
+  // The widths change between Unicode versions, so Python is a fair reference only when its Unicode version is the
+  // one the hook's WIDE table was generated from (the hook says which). With another version the test is skipped.
+  const table = /generated from Unicode (\d+\.\d+\.\d+)/.exec(readFileSync(script, "utf8"))?.[1];
+  assert.ok(table, `no "generated from Unicode X.Y.Z" in ${script}: the WIDE table's Unicode version is unknown`);
+  const py = [
+    "import sys, unicodedata as u",
+    "def w(c):",
+    "    ch = chr(c); cat = u.category(ch)",
+    "    if cat == 'Cn': return 'x'",
+    "    if cat[0] == 'M' or cat in ('Cc', 'Cf'): return '0'",
+    "    return '2' if u.east_asian_width(ch) in ('W', 'F') else '1'",
+    "sys.stdout.write(u.unidata_version + '\\n' + ''.join(w(c) for c in range(0x20000)))",
+  ].join("\n");
+  const r = spawnSync("python3", ["-I", "-c", py], { encoding: "utf8", maxBuffer: 1 << 22 });
+  if (r.error || r.status !== 0) return t.skip("python3 not available");
+  const [version, want = ""] = r.stdout.split("\n");
+  if (version !== table) return t.skip(`python3 has Unicode ${version}, the WIDE table was generated from Unicode ${table}`);
+  assert.equal(want.length, 0x20000);
+  const wrong = [];
+  for (let cp = 0; cp < 0x20000; cp++) {
+    const ch = String.fromCodePoint(cp);
+    // left out: unassigned in either version, and the emoji presentation rule (two columns whatever the width)
+    if (want[cp] === "x" || /\p{Cn}/u.test(ch)) continue;
+    if (want[cp] === "1" && /\p{Emoji_Presentation}/u.test(ch)) continue;
+    const got = String(displayWidth(ch));
+    if (got !== want[cp]) wrong.push(`U+${cp.toString(16).toUpperCase()} ${got}/${want[cp]}`);
+  }
+  assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} code points differ from Unicode ${version}`);
 });
 
 test("rowFor: other agents keep Claude Code's own row", () => {
@@ -119,4 +185,22 @@ test("indexLaunches: attempt numbers counted once for all rows, the same as coun
   const watched = new Proxy(LAUNCHES, { get: (t, k, r) => (k === "filter" || k === "findLast" ? (scans++, Reflect.get(t, k, r)) : Reflect.get(t, k, r)) });
   for (const t of many) assert.equal(rowFor(t, watched, 0, idx), "implementer a #2 risky · opus · 41.2k · Running the tests");
   assert.equal(scans, 0);
+});
+
+test("indexLaunches: attempts count per run; a new PLAN REVIEW starts again at 1, a REPLAN keeps counting", () => {
+  const plain = "SLICE: s1\nFILES: s1.py\nDEPENDS: none";
+  const two = [
+    launch(0, "reviewer", "PLAN REVIEW\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: one", "p1"),
+    launch(1, "implementer", plain, "a1"),
+    // a second task in the same session reuses the slice id s1
+    launch(10, "reviewer", "PLAN REVIEW\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: two", "p2"),
+    launch(11, "implementer", plain, "a2"),
+    launch(12, "implementer", plain, "a3"),
+    // a REPLAN extends the same run: the next launch of s1 is its third attempt there
+    launch(13, "reviewer", "PLAN REVIEW\nREPLAN: 1\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: two", "p3"),
+    launch(14, "implementer", plain, "a4"),
+  ];
+  const idx = indexLaunches(two);
+  assert.deepEqual(["a1", "a2", "a3", "a4"].map((id) => idx.nth.get(idx.byAgent.get(id))), [1, 1, 2, 3]);
+  assert.equal(rowFor(task("a2", "implementer", { model: "claude-opus-5-5", label: "" , description: "" }), two), "implementer s1 · opus · 41.2k");
 });

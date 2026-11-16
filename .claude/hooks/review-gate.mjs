@@ -20,14 +20,16 @@
 //    (an Agent tool launch, so workflow agents are left to their script), blocks until it is resumed and stops, or a
 //    later implementer stop of the same slice (any later implementer stop when its brief named no slice) takes over.
 //    Its loop guard is per agent for the whole session: two blocks that name it, one give-up, then it is left alone.
+//    An implementer whose latest test-gate record (gates.jsonl) is a block with no later SubagentStop counts the same
+//    way (G-2, audit 2026-11-16): the block can land after a passing review, and the agent may never stop again.
 // 2. Per slice of the current run (run.mjs folds journal-launches.jsonl, journal.jsonl, gates.jsonl and telemetry.jsonl
 //    with brief.mjs foldRuns): every slice of the latest run with an implementer attempt, and the slice of the session's
 //    last implementer, needs its latest review after its latest attempt to pass (no_reviewer_after_last_implementer,
 //    last_reviewer_failed, last_reviewer_no_status). If that reviewer's brief had CHECKS, every id must be answered
 //    with pass (constraints_unchecked; a brief without CHECKS skips this, logged). If a doubt signal fired (risky,
-//    retry, read_answer, open_items, tests_failed_isolated; ORCH_ESCALATION=off|always), a passing review by an opus
-//    reviewer must exist after the latest attempt (opus_review_required). A slice that failed for good (latest review
-//    failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
+//    retry, read_answer, open_items, tests_failed_isolated, test_gate_gave_up; ORCH_ESCALATION=off|always), a passing
+//    review by an opus reviewer must exist after the latest attempt (opus_review_required). A slice that failed for
+//    good (latest review failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
 //    Reviews count by brief.mjs's fold (docs/brief-grammar.md, "Review counting"): a fail whose gaps are all below
 //    ORCH_GAP_MIN (default 80; 0 = every fail counts) counts as a pass and adds the doubt signal low_confidence_fail;
 //    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
@@ -125,16 +127,28 @@ const stops = telemetry.filter((e) => e.hook_event_name === "SubagentStop");
 const implStops = stops.filter((e) => role(e) === "implementer");
 const lastImpl = implStops.at(-1);
 // 1b. Implementer agents whose latest SubagentStart has no later SubagentStop (step 1 found nothing running).
-/** @type {Map<string, { id: string, start: number, stop: number }>} */
+// Also (G-2) an implementer whose latest test-gate record is a block with no later SubagentStop: the test gate runs beside
+// the journal at a stop and decides minutes later, so its block can land after a reviewer passed the slice; an agent
+// sent back that never stops again left failing tests nobody saw.
+/** @type {Map<string, { id: string, start: number, stop: number, testAt: number, testBlock: boolean }>} */
 const implAgents = new Map();
 for (const e of telemetry) {
   if (role(e) !== "implementer" || typeof e.agent_id !== "string" || !e.agent_id) continue;
-  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity };
+  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity, testAt: -Infinity, testBlock: false };
   if (e.hook_event_name === "SubagentStart") a.start = Math.max(a.start, time(e.ts));
   if (e.hook_event_name === "SubagentStop") a.stop = Math.max(a.stop, time(e.ts));
   implAgents.set(e.agent_id, a);
 }
-const neverStopped = [...implAgents.values()].filter((a) => a.start > a.stop);
+for (const g of gatesRaw) {
+  if (g.gate !== "test" || typeof g.agent_id !== "string" || (g.session_id !== undefined && g.session_id !== sessionId)) continue;
+  const a = implAgents.get(g.agent_id);
+  if (!a || time(g.ts) < a.testAt) continue;
+  a.testAt = time(g.ts);
+  a.testBlock = g.decision === "block";
+}
+/** @param {{ stop: number, testAt: number, testBlock: boolean }} a */
+const testBlocked = (a) => a.testBlock && a.testAt > a.stop;
+const neverStopped = [...implAgents.values()].filter((a) => a.start > a.stop || testBlocked(a));
 if (!lastImpl && !neverStopped.length) decide("allow", "no_implementer_in_session", 0);
 
 /** @type {ReturnType<typeof sessionRuns>["runs"]} */
@@ -190,7 +204,7 @@ for (const u of unfinished) {
     ...(u.slice ? { slice: u.slice } : {}),
     agent: u.id,
     reason: "implementer_unfinished",
-    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
+    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) ${testBlocked(u) && u.start <= u.stop ? "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed" : "started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed"}. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
   });
 }
 

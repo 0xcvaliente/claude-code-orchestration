@@ -48,8 +48,57 @@ test("reduce: output that is not an event stream is printed unchanged", async ()
   const pretty = JSON.stringify({ is_error: false, result: "x" }, null, 2).split("\n");
   assert.equal(await reduce(pretty), pretty.join("\n"));
   assert.equal(await reduce([]), "");
-  // A stream that was cut before any result (a killed run) leaves only its plain-text lines.
-  assert.equal(await reduce([INIT, "Killed", j({ type: "assistant", message: {} })]), "Killed");
+  // A stream that was cut before any result (a killed run): a document of its own that keeps its plain-text lines.
+  const killed = JSON.parse(await reduce([INIT, "Killed", j({ type: "assistant", message: {} })]));
+  assert.equal(killed.result, "Killed");
+  assert.equal(killed.subtype, "no_result");
+});
+
+// Audit W-6: claude crashed or was killed after start-up, so the stream has records but no result record.
+const NO_RESULT = [
+  INIT,
+  j({ type: "assistant", message: { id: "m1", content: [{ type: "text", text: "a" }] } }),
+  j({ type: "assistant", message: { id: "m1", content: [{ type: "tool_use", name: "Read" }] } }),
+  j({ type: "user", message: { content: [] } }),
+  j({ type: "assistant", message: { id: "m2", content: [{ type: "text", text: "b" }] } }),
+];
+
+test("reduce: a stream with records but no result gives an error document with the run's totals", async () => {
+  const doc = JSON.parse(await reduce(NO_RESULT, 4200.6, 1));
+  assert.equal(doc.type, "result");
+  assert.equal(doc.subtype, "no_result");
+  assert.equal(doc.is_error, true);
+  assert.equal(doc.result, "");
+  // two assistant messages (m1 came in two records): the turns seen
+  assert.deepEqual(doc.orch_totals, { results: 0, turns: 2, wall_ms: 4201, exit_code: 1, complete: false });
+  // exit code 0 without a result is still not complete; without an exit code or a start time, those stay unknown
+  assert.deepEqual(JSON.parse(await reduce(NO_RESULT, 10, 0)).orch_totals, { results: 0, turns: 2, wall_ms: 10, exit_code: 0, complete: false });
+  assert.deepEqual(JSON.parse(await reduce(NO_RESULT)).orch_totals, { results: 0, turns: 2, wall_ms: null, complete: false });
+});
+
+test("orchestrate.sh: a run with no result record prints the no_result document and logs its wall time and turns", () => {
+  const { r, log } = runOrchestrate(`${NO_RESULT.join("\n")}\n`, 1);
+  assert.equal(r.status, 1);
+  const doc = JSON.parse(r.stdout);
+  assert.equal(doc.subtype, "no_result");
+  assert.equal(doc.orch_totals.exit_code, 1);
+  assert.equal(log[0].ok, false);
+  assert.ok(typeof log[0].duration_ms === "number" && log[0].duration_ms >= 200, `wall time logged, got ${log[0].duration_ms}`);
+  assert.equal(log[0].turns, 2);
+  assert.equal(log[0].terminal_reason, "no_result");
+  assert.deepEqual([log[0].exit_code, log[0].complete], [1, false]);
+});
+
+test("log-run.mjs: an older record without orch_totals or terminal_reason is still logged", () => {
+  const repo = mkdtempSync(join(tmpdir(), "log-run-"));
+  try {
+    const r = spawnSync("node", [join(scripts, "log-run.mjs"), "t", "0"], { cwd: repo, input: j({ type: "result", is_error: false, result: "x" }), encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const row = JSON.parse(readFileSync(join(repo, ".claude", "state", "runs.jsonl"), "utf8"));
+    assert.deepEqual([row.ok, row.turns, row.duration_ms, row.terminal_reason, row.exit_code, row.complete], [true, null, null, "unparsed output", 0, true]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 /** A folder, a fake `claude` that prints `stdout`, and orchestrate.sh run on it. */

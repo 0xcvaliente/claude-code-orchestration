@@ -4,9 +4,9 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchRecord, stopRecord } from "../.claude/hooks/brief.mjs";
 import { researcherViolation } from "../.claude/hooks/researcher-guard.mjs";
@@ -144,7 +144,7 @@ const DENIED = [
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],
-  ["sed -n 1,5p a.txt", /`sed`/],
+  ["sed -i 1,5p a.txt", /`sed`/], // T-11: `sed -n 1,5p a.txt` passes now; -i does not
 ];
 
 test("researcher guard: allowlisted commands pass", () => {
@@ -253,14 +253,16 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["grep foo . > out.txt", "deny"],
   ["cat a.txt | sh", "deny"],
   ["/usr/bin/grep foo .", "deny"],
-  ["sed -n 1,5p a.txt", "deny"],
+  ["sed -n 1,5p a.txt", "allow"], // T-11 (owner-approved change): was deny
+  ["sed -i 1,5p a.txt", "deny"],
   ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
   ["python3 x.py", "deny"],
   ["cd src && ls", "deny"],
   ["git log --oneline | wc -l", "allow"],
   ["cd /x && grep -n foo a.txt", "deny"],
   ["grep foo a.txt | sort", "deny"],
-  ["echo hi", "deny"],
+  ["echo hi", "allow"], // T-11: was deny
+  ["echo hi > a.txt", "deny"],
   ["x=0; grep foo a.txt", "deny"],
   // b4: exactly `2>/dev/null` and `2>&1`, each a word of its own, are the only redirections allowed.
   ["grep foo a.txt 2>/dev/null", "allow"],
@@ -308,13 +310,18 @@ test("researcher guard: every recorded command keeps its allow or deny decision"
 
 // A denial says what to use instead, and keeps its first words so the gate records still group.
 const HINTS = [
-  ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
-  ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
-  ["sed -n 1,5p a.txt", /^`sed` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  // fix-researcher-cd (owner-approved change): a refused `cd` names the one form that is allowed (no project folder
+  // given here, so every cd is refused), and still says to put absolute paths in the command.
+  ["cd /x && grep -n foo a.txt", /^`cd` is allowed only as `cd <path>` .*project folder.*absolute paths/],
+  ["cd src && ls", /^`cd` is allowed only as `cd <path>` .*project folder.*absolute paths/],
+  // T-11: `sed` passes in its narrow form; the refusal of any other form names the allowed one.
+  ["sed -i 1,5p a.txt", /^`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>`/],
+  ["cut -z a.txt", /^cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+  ["stat --bogus a.txt", /^stat --bogus is not an allowed option/],
   ["awk 'NR<5' a.txt", /^`awk` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
   ["grep foo a.txt | sort", /^`sort` is not an allowed command; .*grep, rg, find, head, tail, cat, ls, wc, du.*in the report/],
   ["uniq a.txt", /^`uniq` is not an allowed command; .*grep, rg, find.*in the report/],
-  ["echo hi", /^`echo` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["tr a b", /^`tr` is not an allowed command; .*grep, rg, find.*in the report/], // T-11: `echo hi` passes now
   ["printf hi", /^`printf` is not an allowed command; .*grep, rg, find.*in the report/],
   ["python3 x.py", /^`python3` is not an allowed command; .*grep, rg, find.*in the report/],
   ["x=0; grep foo a.txt", /^a variable assignment; .*grep, rg, find.*in the report/],
@@ -329,10 +336,484 @@ test("researcher guard: a refused command's reason says what to use instead, in 
   }
 });
 
+// Audit 2026-11-16 T-5: the device rule judges the normalised path (also a relative one, against the command's
+// folder), and wc is under it too. /dev/null stays allowed where it was.
+test("researcher guard (T-5): a device reached by another spelling of its path, or through wc, is refused", () => {
+  for (const c of [
+    "cat /./dev/zero",
+    "cat //dev/zero",
+    "cat /private/../dev/zero",
+    "tail -c +1 /./dev/urandom",
+    "head -c 8 /dev/./zero",
+    "grep --file=//dev/zero x",
+    "rg -f/./dev/urandom x",
+    "grep -rf//dev/urandom x .",
+    "wc /dev/zero",
+    "wc -c /dev/stdin",
+    "wc -l //dev/zero",
+    "cat ../../../../../../../../../../dev/zero",
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat a.txt /dev/null", "cat a.txt //dev/null", "wc -l a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", "wc -l /x/a.txt /x/b.txt", "cat ../notes/devices.md", "grep -rn dev ../dev-notes"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
+// Third review of fix-guards: a symlink to `/` followed by `..` reaches /dev by a path whose text-normalised form does
+// not exist, so the device rule also asks the system for the real path of the unnormalised string.
+test("researcher guard (T-5): a device reached through a symlink and `..` is refused", () => {
+  const links = join(scratch, "device-links");
+  mkdirSync(links, { recursive: true });
+  const link = join(links, "root-link");
+  if (!existsSync(link)) symlinkSync("/", link);
+  for (const c of [
+    `cat ${link}/../dev/zero`,
+    `wc ${link}/../dev/zero`,
+    `grep -f${link}/../dev/zero x`,
+    `grep --file=${link}/../dev/zero x`,
+    `head -c 8 '${link}/../dev/urandom'`,
+    `cut -f1 ${link}/../dev/zero`,
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Relative to the folder the command runs in.
+  for (const c of ["cat root-link/../dev/zero", "wc -c root-link/../dev/zero", "grep -froot-link/../dev/zero x"]) {
+    const v = researcherViolation(c, links);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // A cd into a symlink to `/` is refused (fix-researcher-cd: with or without a project folder, it leads out of it), so
+  // a relative path after it never reaches a device the check cannot follow.
+  const v = researcherViolation(`cd ${link} && cat ../dev/zero`, "/a/b");
+  assert.ok(v);
+  assert.match(v.reason, /^`cd` is allowed only as `cd <path>` .*absolute paths/);
+  const vp = researcherViolation(`cd ${link} && cat ../dev/zero`, links, links);
+  assert.ok(vp);
+  assert.match(vp.reason, /^`cd` is allowed only as `cd <path>` .*absolute paths/);
+  // /dev/null through the link, and ordinary files, still pass.
+  for (const c of [`cat ${link}/../dev/null`, `cat ${link}/../etc/hosts`, "cat root-link/../a.txt"]) {
+    assert.equal(researcherViolation(c, links), null, c);
+  }
+});
+
+// Review of fix-guards: a value joined to a short-option cluster (`-rfdev/zero`) can start after any letter, so every
+// suffix of an option word, like a long option's value, is judged as a path from the folder the command runs in.
+test("researcher guard (T-5): a relative device path joined to an option is refused", () => {
+  for (const c of [
+    "grep -fdev/zero x",
+    "grep -rfdev/zero x",
+    "grep -A3fdev/zero x",
+    "rg -fdev/zero x",
+    "rg -nfdev/urandom x",
+    "grep --file=dev/zero x",
+    "rg --file=dev/urandom x",
+    "grep -f dev/zero x",
+    "head -n5 dev/zero",
+    "head -c8dev/zero",
+    "tail -n5 dev/zero",
+    "wc -l dev/zero",
+    "wc -ldev/zero",
+    "sed -n 1p dev/zero",
+    "cut -f1 dev/zero",
+    "cut -sfdev/zero",
+  ]) {
+    const v = researcherViolation(c, "/");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["grep -fzero x", "grep -rfzero x"]) {
+    const v = researcherViolation(c, "/dev");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Ordinary option words that are no paths still pass, also from `/`.
+  for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+  for (const c of ["head -n5 a.txt", "cut -d, -f1 a.csv", "rg -f/dev/null x", "wc -c dev.txt"]) {
+    assert.equal(researcherViolation(c, "/"), null, c);
+  }
+  // fix-researcher-cd round 2 (item C, coordinator-approved change): from `/` the bare word `dev` names /dev, so these
+  // two, allowed before, are refused now; `wc -c dev.txt` beside them still passes.
+  for (const c of ["grep -rn dev x", "grep -rdev x"]) assert.ok(researcherViolation(c, "/"), c);
+});
+
+// Audit 2026-11-16 T-11 (approved by the owner): narrow forms of sed -n, cut, stat and echo, which cannot write a file
+// or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
+// `cd` is refused in the pinned decisions above (no project folder given); its one allowed form is under "cd item 2".
+test("researcher guard (T-11): sed -n, cut, stat and echo in their narrow forms pass", () => {
+  for (const c of [
+    "sed -n '10p' a.md",
+    "sed -n '10,40p' a.md b.md",
+    "sed -n 1,5p a.txt",
+    "git show HEAD:a.md | sed -n '3,9p'",
+    "cut -d, -f1 a.csv",
+    "cut -d ',' -f 1,3 a.csv",
+    "cut -c1-10 a.txt",
+    "cut -b 1-4 a.txt",
+    "cut -sf2 -d: a.txt",
+    "cut --complement -f2 a.csv",
+    "cut --output-delimiter=';' -f1,2 -d, a.csv",
+    "cut --output-delimiter ' ' -f1 -d, a.csv",
+    "stat a.txt",
+    "stat -f %z a.txt",
+    "stat -c %s a.txt",
+    "stat --printf='%s\\n' a.txt",
+    "stat -L --format=%y a.txt",
+    "echo ---",
+    "echo hi && cat a.txt",
+    "echo -n done",
+  ]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
+test("researcher guard (T-11): the neighbours of the new forms that could write, run or read for ever stay refused", () => {
+  for (const [c, re] of /** @type {[string, RegExp][]} */ ([
+    // sed: only -n with one line or one range and p.
+    ["sed -i 's/a/b/' a.txt", /`sed` is allowed only as `sed -n '10p' <file>`/],
+    ["sed -i 1,5p a.txt", /`sed` is allowed only as/],
+    ["sed -n '1w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1e cmd' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/e' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1p;2p' a.txt", /`sed` is allowed only as/],
+    ["sed -n '$p' a.txt", /`sed` is allowed only as|expansion/],
+    ["sed -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -i a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p --in-place a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -- -i", /`sed` is allowed only as/],
+    ["sed -n 1p *", /`sed` is allowed only as/], // a file named -i would turn into an option
+    ["sed -n -s 1p a.txt", /`sed` is allowed only as/],
+    ["sed 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1,5p /dev/zero", /device/],
+    ["sed -n 1p //dev/urandom", /device/],
+    // cut: only -b, -c, -f, -d, -s, --complement and --output-delimiter.
+    ["cut -z -f1 a.txt", /cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+    ["cut -n -b1 a.txt", /cut -n is not an allowed option/],
+    ["cut --delimiter=, -f1 a.txt", /cut --delimiter is not an allowed option/],
+    ["cut --fields=1 a.txt", /cut --fields is not an allowed option/],
+    ["cut --zero-terminated -f1 a.txt", /not an allowed option/],
+    ["cut -d, -- --foo", /not an allowed option/],
+    ["cut -f1 /dev/zero", /device/],
+    ["cut -f1 /./dev/urandom", /device/],
+    // stat: long options from an allowlist only.
+    ["stat --bogus a.txt", /stat --bogus is not an allowed option/],
+    // echo: output only, never into a file.
+    ["echo hi > out.txt", /redirection/],
+    ["echo hi >> out.txt", /redirection/],
+    ["echo $(id)", /substitution/],
+    ["echo $HOME", /expansion/],
+    ["printf hi", /`printf`/],
+  ])) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${JSON.stringify(c)}`);
+    assert.match(v.reason, re, c);
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+});
 
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
 });
+
+// fix-researcher-cd item 1: a path that is /dev itself, in any spelling the text normalisation or the system's
+// resolution turns into /dev, is refused like a path under it (a recursive search of /dev reads devices).
+test("researcher guard (cd item 1): /dev itself is refused in every spelling, /dev/null still passes", () => {
+  const links = join(scratch, "dev-itself");
+  mkdirSync(links, { recursive: true });
+  const toDev = join(links, "to-dev");
+  const toRoot = join(links, "to-root");
+  if (!existsSync(toDev)) symlinkSync("/dev", toDev);
+  if (!existsSync(toRoot)) symlinkSync("/", toRoot);
+  for (const c of [
+    "grep -r x /dev/", "grep -r x /dev/.", "grep -r x /dev/zero/..", "cat /dev/", "grep -r x /dev",
+    "rg x /dev", "grep -r x //dev", "grep -r x /./dev/", "wc /dev", "head /dev/", "tail /dev/null/..", "grep -r x /dev/fd/..",
+    "grep -r x ../../dev", "grep -rf/dev/ x", "grep --file=/dev x", "sed -n 1p /dev/", "cut -f1 /dev",
+    `grep -r x ${toDev}`, `grep -r x ${toDev}/`, `grep -r x ${toRoot}/dev`, `grep -r x ${toRoot}/../dev`, `rg -f${toDev} x`,
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat a.txt /dev/null", "cat /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", "grep -r x ../devices", "grep -r x /a/dev", "cat ../notes/dev"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+  // From `/`, a path that names /dev is refused, the bare word `dev` too (round 2, item C).
+  for (const c of ["grep -r x ./dev", "grep -r x dev/", "grep -r x /dev", "rg x ./dev/.", "grep -r x dev", "grep -rn dev x", "rg x dev"]) {
+    assert.match(researcherViolation(c, "/")?.reason ?? "", /device/, c);
+  }
+  // From /dev or below it, `.` and a search with no path (which searches `.`) read /dev.
+  for (const cwd of ["/dev", "/dev/", "/dev/fd", toDev]) {
+    for (const c of ["grep -r x .", "grep -rn foo .", "rg x .", "rg x", "grep -r x", "cat zero", "wc -l null/..", "ls && grep -r x ."]) {
+      assert.match(researcherViolation(c, cwd)?.reason ?? "", /device/, `${c} in ${cwd}`);
+    }
+  }
+  for (const c of ["ls", "ls -la", "cat /dev/null", "head /a/b.txt"]) assert.equal(researcherViolation(c, "/dev"), null, c);
+  // On the safe side: in /dev every search is refused, also one with a path elsewhere (a pattern looks like a path).
+  assert.ok(researcherViolation("grep -rn foo /a/b", "/dev"));
+  for (const c of ["grep -rn foo .", "rg x", "ls", "cat a.txt"]) assert.equal(researcherViolation(c, "/a/b"), null, c);
+});
+
+// fix-researcher-cd round 2 (item A): the system's real-path call (`realpathSync.native`) on a path that reaches /dev
+// itself through a symlink ends the process with SIGTRAP or SIGSEGV, or reports a false ENOENT, after a few dozen calls
+// (Node 24.22.2, Darwin 27.2). The guard no longer makes that call. These run in fresh processes, never in this one.
+// The fault shows for a long path to the link (about 150 characters and more), not for a short one.
+const devProbe = join(scratch, "dev-probe", "a".repeat(100));
+mkdirSync(join(devProbe, "proj", "sub"), { recursive: true });
+const ldev = join(devProbe, "proj", "ldev");
+const lnull = join(devProbe, "proj", "lnull");
+if (!existsSync(ldev)) symlinkSync("/dev", ldev);
+if (!existsSync(lnull)) symlinkSync("/dev/null", lnull);
+
+test("researcher guard (round 2, item A): 300 decisions on a link to /dev end normally and all refuse, in fresh processes", () => {
+  const script = join(devProbe, "decide.mjs");
+  const guardUrl = new URL("../.claude/hooks/researcher-guard.mjs", import.meta.url).href;
+  const p = join(devProbe, "proj");
+  writeFileSync(script, `const { researcherViolation } = await import(${JSON.stringify(guardUrl)});
+const forms = [${JSON.stringify(`grep -r x ${ldev}`)}, ${JSON.stringify(`grep -r x ${ldev}/`)}, ${JSON.stringify(`cat ${ldev}/.`)}, "cd ./sub && grep -r x ../ldev", "cd ./sub && cat ../ldev/"];
+let refused = 0;
+for (let i = 0; i < 300; i++) if (researcherViolation(forms[i % forms.length], ${JSON.stringify(p)}, ${JSON.stringify(p)})) refused++;
+console.log(refused);
+`);
+  for (let run = 0; run < 6; run++) {
+    const r = spawnSync(process.execPath, [script], { encoding: "utf8", cwd: devProbe });
+    assert.deepEqual([r.status, r.signal, r.stdout.trim()], [0, null, "300"], `run ${run}: ${r.stderr.slice(0, 300)}`);
+  }
+});
+
+test("researcher guard hook (round 2, item A): a command with 300 links to /dev and then <link>/zero is refused with exit 2", () => {
+  const command = `cat ${Array(300).fill(ldev).join(" ")} ${ldev}/zero`;
+  for (let i = 0; i < 3; i++) {
+    const r = run(RESEARCHER, bash(command));
+    assert.deepEqual([r.code, r.stdout], [2, ""], r.stderr.slice(0, 200));
+  }
+  // /dev/null passes in every spelling it passed before, also through a link to it or to /dev.
+  for (const c of ["cat /dev/null", "cat //dev/null", "cat a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", `cat ${lnull}`, `cat ${ldev}/null`, `grep --file=${ldev}/null x .`]) {
+    // (a short-option form such as `grep -f<path>` would also be refused when the random temp name holds a Q: -Q)
+    assert.equal(run(RESEARCHER, bash(c)).code, 0, c);
+  }
+});
+
+// fix-researcher-cd item 2: `cd` with one literal path whose real location is the project folder or a folder inside it.
+const cdRoot = join(scratch, "cd");
+const proj = join(cdRoot, "proj");
+const sub = join(proj, "sub");
+const deep = join(sub, "deep");
+const home = join(cdRoot, "home");
+const outside = join(cdRoot, "outside");
+for (const d of [deep, home, outside]) mkdirSync(d, { recursive: true });
+writeFileSync(join(proj, "file.txt"), "x\n");
+for (const [at, to] of /** @type {[string, string][]} */ ([
+  [join(proj, "link-out"), "/"], [join(proj, "link-home"), home], [join(proj, "link-in"), sub], [join(proj, "link-dev"), "/dev"],
+  [join(proj, "link-out-rel"), "../outside"], [join(sub, "r"), "/"], [join(sub, "dev"), "/dev"], [join(sub, "upper"), ".."],
+])) {
+  if (!existsSync(at)) symlinkSync(to, at);
+}
+const CD_FORM = /^`cd` is allowed only as `cd <path>` .*`\.\/`, `\.\.\/` or `\/`.*`cd \.\/src`.*project folder.*absolute paths/;
+
+test("researcher guard (cd item 2): cd to the project folder or a folder inside it passes", () => {
+  for (const [c, cwd] of /** @type {[string, string][]} */ ([
+    // Round 2 (item B): a relative path starts with `./` or `../` (both shells skip CDPATH then); each bare form is a
+    // refused neighbour in the next test.
+    [`cd ${proj}`, proj], [`cd ${sub}`, proj], [`cd ${sub}/`, proj], ["cd ./sub", proj], ["cd ./sub/deep", proj], ["cd ./sub/", proj],
+    ["cd './sub'", proj], ['cd "./sub/deep"', proj], ["cd .", proj], ["cd ./sub/..", proj], ["cd ./link-in", proj], ["cd ./link-in/deep", proj],
+    ["cd ./sub/upper", proj], ["cd ./sub && grep -n foo a.txt", proj], ["cd ./sub; ls", proj], ["cd ./sub && cat ../file.txt", proj],
+    ["cd ./sub && cd ./deep && ls -la", proj], ["cd ..", sub], ["cd ../sub/deep", sub], [`cd ${proj}`, sub], ["cd ../..", deep],
+    ["cd ./sub 2>/dev/null && wc -l ../file.txt", proj], ["cd ./", proj], ["cd ../", sub],
+  ])) {
+    assert.equal(researcherViolation(c, cwd, proj), null, `${c} (from ${cwd})`);
+  }
+});
+
+test("researcher guard (cd item 2): every other cd is refused with a message naming the allowed form", () => {
+  for (const c of [
+    "cd /", "cd /dev", `cd ${home}`, "cd ~", "cd ~/x", "cd", "cd ..", "cd ./link-out", "cd ./link-out/..", "cd ./link-home", "cd ./link-dev",
+    "cd ./link-out-rel", "cd ./missing", "cd ./sub deep", "cd -P ./sub", "cd -L ./sub", "cd -", "cd -- ./sub", "cd $HOME", 'cd "$d"', "cd ./su*",
+    "cd +1", "cd './sub\n'", "cd $'./sub\\n'", `cd ${outside}`, "cd ./sub/../..", `cd ${proj}/../outside`, "cd ./file.txt",
+    `cd ${outside.toUpperCase()}`, `cd ${proj}/link-out/dev`, "cd /tmp", "cd /private/tmp",
+    // Round 2 (item B): the bare relative forms, which the shell may resolve through CDPATH, are refused.
+    "cd sub", "cd sub/deep", "cd 'sub'", "cd link-in", "cd sub/..", "cd .sub", "cd ..sub",
+    // Chains: a later cd is judged from every folder an earlier one may have left the shell in.
+    "cd ./sub && cd .. && cd ..", "cd ./sub | cd ../..", "(cd ./sub) && cd ../..", "cd ./sub; cd ../../outside", "cd ./sub && cd ./r",
+    "cd ./sub && cd ./dev", "cd ./sub && cd ./deep && cd ../../..", "cd ./sub || cd /", "cd ./sub & cd /dev", "cd ./sub && cd deep",
+  ]) {
+    const v = researcherViolation(c, proj, proj);
+    assert.ok(v, `expected a denial for ${JSON.stringify(c)}`);
+    assert.match(v.reason, CD_FORM, c);
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+  // With no project folder known, no cd passes.
+  for (const c of ["cd ./sub", "cd .", `cd ${proj}`]) assert.match(researcherViolation(c, proj)?.reason ?? "", CD_FORM, c);
+  assert.ok(researcherViolation("cd =sub", proj, proj));
+});
+
+test("researcher guard (cd item 2): after an allowed cd, later segments are judged from the folder it reached", () => {
+  const rel = posix.relative(deep, "/dev/zero");
+  const relDev = posix.relative(deep, "/dev");
+  for (const c of [
+    `cd ./sub/deep && cat ${rel}`, `cd ./sub/deep && grep -f${rel} x`, `cd ./sub/deep && grep -rf${rel} x`, `cd ./sub/deep && grep --file=${rel} x`,
+    `cd ./sub/deep && head -c8${rel}`, `cd ./sub/deep && wc -l ${rel}`, `cd ./sub/deep && grep -r x ${relDev}`,
+    // Each of these names a device only from the folder the cd reached.
+    "cd ./sub && cat r/../dev/zero", "cd ./sub && cat dev/zero", "cd ./sub && grep -fdev/zero x", "cd ./sub && grep -rfdev/zero x",
+    "cd ./sub && grep --file=dev/urandom x", "cd ./sub && grep -r x dev", "cd ./sub && grep -r x dev/", "cd ./sub; cd ./deep; cat ../r/../dev/zero",
+    "cd ./sub && cd ./deep && wc -c ../dev/zero", "(cd ./sub) ; cat dev/zero", "cd ./sub | cat dev/zero", "cd ./link-in && cat dev/zero",
+    "cd ./sub && sed -n 1p dev/zero", "cd ./sub && cut -f1 dev/zero", "cd ./sub && tail -n5 'dev/zero'", "cd ./sub/ && cat d\\ev/zero",
+  ]) {
+    const v = researcherViolation(c, proj, proj);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Ordinary reads after a cd still pass.
+  for (const c of ["cd ./sub && cat ../file.txt", "cd ./sub && grep -rn foo .", "cd ./sub/deep && ls ../.. && wc -l ../../file.txt"]) {
+    assert.equal(researcherViolation(c, proj, proj), null, c);
+  }
+});
+
+// fix-guards-2 item 2: the walk returned "missing" at the first name that did not exist, before it looked at whether it
+// had passed through /dev, so a file descriptor the hook lacks but the command's shell may have (`/dev/fd/63`, a
+// process substitution's) passed through a link to /dev.
+test("researcher guard (guards-2 item 2): a path through /dev is refused when its last part is missing; /dev/null still passes", () => {
+  const fdProj = join(scratch, "fd-missing", "proj");
+  mkdirSync(join(fdProj, "sub"), { recursive: true });
+  writeFileSync(join(fdProj, "file.txt"), "x\n");
+  const ld = join(fdProj, "ld");
+  if (!existsSync(ld)) symlinkSync("/dev", ld);
+  // A descriptor number this process does not hold, so the last part is missing here.
+  const fd = [63, 99, 987, 4093].find((n) => !existsSync(`/dev/fd/${n}`));
+  assert.ok(fd, "a free descriptor number");
+  for (const c of [
+    `cd ./sub && grep -rn x ../ld/fd/${fd}`, `cd ./sub && cat ../ld/fd/${fd}`, `grep -rn x ${ld}/fd/${fd}`, `cat ./ld/fd/${fd}`,
+    `grep -f./ld/fd/${fd} x .`, `cat ./ld/no-such-device`, `cat /dev/fd/${fd}`, `cat ./ld/null/x`,
+  ]) {
+    const v = researcherViolation(c, fdProj, fdProj);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // /dev/null through the link, and a missing path that never touches /dev, pass as before.
+  for (const c of ["cd ./sub && cat ../ld/null", `cat ${ld}/null`, "cat ./ld/null", "grep --file=./ld/null x .", "cd ./sub && cat ../no-such-file", "cat ./missing/deeper.txt", "cat ./file.txt/x"]) {
+    assert.equal(researcherViolation(c, fdProj, fdProj), null, c);
+  }
+});
+
+test("researcher guard hook (cd item 2): the project folder comes from the hook, the folder from the payload", () => {
+  const pay = (/** @type {string} */ command, /** @type {string} */ cwd) => ({ ...bash(command), cwd });
+  const extra = { CLAUDE_PROJECT_DIR: proj, HOME: home };
+  for (const [c, cwd, code] of /** @type {[string, string, number][]} */ ([
+    ["cd ./deep", sub, 0], ["cd ..", sub, 0], ["cd ./sub && cat ../file.txt", proj, 0], ["cat dev/zero", sub, 2], ["cat r/../dev/zero", sub, 2],
+    ["cd ..", proj, 2], [`cd ${home}`, proj, 2], ["cd ~", proj, 2], ["cd", proj, 2], [`cd ${outside}`, sub, 2], ["cd ./sub && cat dev/zero", proj, 2],
+    ["cd deep", sub, 2], ["cd sub", proj, 2],
+  ])) {
+    const r = run(RESEARCHER, pay(c, cwd), extra);
+    assert.equal(r.code, code, `${c} (from ${cwd}): ${r.stderr}`);
+    assert.equal(r.stdout, "");
+    if (code === 2 && c.startsWith("cd") && !c.includes("cat")) assert.match(r.stderr, /`cd` is allowed only as `cd <path>`/, c);
+    if (code === 0) assert.equal(r.stderr, "");
+  }
+});
+
+// fix-researcher-cd item 3: the guard decides for any input and the hook exits 0 or 2, never anything else.
+test("researcher guard (cd item 3): odd paths, long words, symlink chains and loops get a decision, quickly", () => {
+  const links = join(scratch, "odd-links");
+  mkdirSync(links, { recursive: true });
+  if (!existsSync(join(links, "l0"))) {
+    symlinkSync("/", join(links, "l0"));
+    for (let i = 1; i < 60; i++) symlinkSync(join(links, `l${i - 1}`), join(links, `l${i}`));
+    symlinkSync(join(links, "loopB"), join(links, "loopA"));
+    symlinkSync(join(links, "loopA"), join(links, "loopB"));
+  }
+  // A long word first: judged suffix by suffix it took seconds (and a word of a few hundred thousand characters, minutes).
+  const t1 = Date.now();
+  assert.ok(researcherViolation(`grep -${"r".repeat(100000)} x`, proj, proj), "a word too long to judge is refused");
+  assert.ok(Date.now() - t1 < 3000, "a long word is judged quickly");
+  const odd = [
+    `cat ${"a/".repeat(5000)}`, `cat /${"x".repeat(300000)}`, `grep -${"r".repeat(100000)} x`, `cat ${"../".repeat(3000)}dev/zero`,
+    "cat a\u0000b", "cat 'a\u0000b'", "cat $'\\x00'", "cat \u0001\u0002\u007f", "cat '\n'", "cat \udc00", "cat \ud800x",
+    "cat /dev/fd/0", "cat /dev/fd/", "cat /dev/stdin", "cat /dev/tty", "grep -r x /dev/fd", `cat ${links}/l30/dev/zero`,
+    `cat ${links}/l59/dev/zero`, `cat ${links}/loopA`, `cat ${links}/loopA/../dev/zero`, `cd ${links}/loopA`, `cd ${links}/l59`,
+    `cd ${"a/".repeat(5000)}`, `cd /${"x".repeat(300000)}`, "cd /dev/fd/0", "cd /dev/stdin", "cd $'\\x01'", "cd \udc00",
+    `${"cd sub; ".repeat(200)}cat dev/zero`, `${"cd sub && cd .. && ".repeat(100)}ls`,
+  ];
+  const cwds = [proj, "/", "/dev", "/dev/fd/0", "relative", "", `/${"y".repeat(5000)}`, "/a\u0000b", "/dev/zero"];
+  const projects = [proj, undefined, "", "relative", "/dev/zero", "/a\u0000b", `/${"z".repeat(5000)}`, `${links}/loopA`];
+  for (const c of odd) {
+    for (const cwd of cwds) {
+      for (const p of projects) {
+        const t0 = Date.now();
+        /** @type {unknown} */
+        let v;
+        assert.doesNotThrow(() => {
+          v = researcherViolation(c, cwd, p);
+        }, `${JSON.stringify(c.slice(0, 40))} ${JSON.stringify(cwd.slice(0, 20))} ${String(p).slice(0, 20)}`);
+        assert.ok(v === null || (typeof v === "object" && typeof (/** @type {any} */ (v).reason) === "string"));
+        assert.ok(Date.now() - t0 < 3000, `slow: ${c.slice(0, 40)}`);
+      }
+    }
+  }
+  // Each of these is refused wherever it runs: a word too long to judge, a device, a cd that cannot be judged.
+  for (const c of [`grep -${"r".repeat(100000)} x`, `cat /${"x".repeat(300000)}`, "cat /dev/fd/0", "cat /dev/stdin", `cd ${links}/loopA`, `cd ${"a/".repeat(5000)}`, `${"cd sub; ".repeat(200)}cat dev/zero`]) {
+    assert.ok(researcherViolation(c, proj, proj), c.slice(0, 40));
+  }
+  // Wherever the system can open a device through a chain of links (one byte read, nothing more), the guard refuses it;
+  // a chain too long for the system (ELOOP) reaches nothing.
+  let opened = 0;
+  for (let i = 0; i < 60; i += 3) {
+    const p = `${links}/l${i}/dev/zero`;
+    try {
+      const fd = openSync(p, "r");
+      readSync(fd, Buffer.alloc(1), 0, 1, null);
+      closeSync(fd);
+      opened++;
+    } catch {
+      continue;
+    }
+    assert.ok(researcherViolation(`cat ${p}`, proj, proj), p);
+  }
+  assert.ok(opened > 0);
+});
+
+test("researcher guard (cd item 3): importing the guard never runs the hook, and a second copy decides the same", async () => {
+  // A script whose own name ends in researcher-guard.mjs used to run the hook block when it imported the guard, and the
+  // block ended that process mid-import.
+  const probeDir = join(scratch, "probe");
+  mkdirSync(probeDir, { recursive: true });
+  const probe = join(probeDir, "probe-researcher-guard.mjs");
+  const url = (/** @type {string} */ q) => JSON.stringify(`${new URL("../.claude/hooks/researcher-guard.mjs", import.meta.url).href}${q}`);
+  writeFileSync(probe, `const a = await import(${url("")});\nconst b = await import(${url("?copy=2")});\nconsole.log("imported", a.researcherViolation("cat /dev/zero") !== null, b.researcherViolation("cat /dev/zero") !== null);\n`);
+  for (const input of ["", JSON.stringify(bash("cat /dev/zero")), JSON.stringify(bash("ls"))]) {
+    const r = spawnSync(process.execPath, [probe], { input, env: env(), cwd: probeDir, encoding: "utf8" });
+    assert.deepEqual([r.status, r.signal, r.stdout.trim()], [0, null, "imported true true"], `${input}: ${r.stderr}`);
+  }
+  const copy = await import(`${new URL("../.claude/hooks/researcher-guard.mjs", import.meta.url).href}?copy=${Date.now()}`);
+  for (const c of ["cat /dev/zero", "cd sub", "grep -r x /dev", "cat dev/zero"]) {
+    assert.deepEqual(copy.researcherViolation(c, sub, proj), researcherViolation(c, sub, proj), c);
+  }
+  // Run through a symlinked path, the hook still decides.
+  const linked = join(probeDir, "linked-researcher-guard.mjs");
+  if (!existsSync(linked)) symlinkSync(RESEARCHER, linked);
+  assert.equal(run(linked, bash("cat /dev/zero")).code, 2);
+});
+
+test("researcher guard hook (cd item 3): odd payloads exit 0 or 2, never anything else", () => {
+  const cmds = ["cat /dev/zero", "cd /", "cd sub", `cat ${"a/".repeat(3000)}`, `grep -${"r".repeat(20000)} x`, "cat /dev/fd/0"];
+  const cwds = [undefined, "/", "/dev/fd/0", "relative", `/${"x".repeat(5000)}`, "/a\u0000b", 5, proj];
+  for (const command of cmds) {
+    for (const cwd of cwds) {
+      for (const p of [proj, "", "/dev/zero"]) {
+        const r = run(RESEARCHER, { ...bash(command), cwd }, { CLAUDE_PROJECT_DIR: p, HOME: home });
+        assert.ok(r.code === 0 || r.code === 2, `${r.code} ${command.slice(0, 30)} ${String(cwd).slice(0, 20)} ${p}: ${r.stderr}`);
+        assert.equal(r.stdout, "");
+      }
+    }
+  }
+});
+
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
   for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src && ls"]) {
@@ -511,6 +992,42 @@ test("egress guard hook: exit codes, gates.jsonl holds the host only, no decisio
   ]);
   const text = JSON.stringify(gates);
   assert.doesNotMatch(text, /token|leak|Review the change|https?:/); // C7: hosts only
+});
+
+// Audit 2026-11-16 T-6: without a subagent transcript (headless runs keep none) the guard decides from the reviewer's
+// launch record (its urls and sources hosts, and its slice's planned FILES); only with no launch record either is the
+// fetch allowed as egress_unverified.
+test("egress guard (T-6): no transcript, so the launch record's hosts and the slice's planned files decide", () => {
+  const launches = join(stateDir, "journal-launches.jsonl");
+  const add = (/** @type {string} */ agentId, /** @type {string} */ prompt, /** @type {string} */ sid = SID) =>
+    writeFileSync(launches, `${JSON.stringify(launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { sessionId: sid, agentId }))}\n`, { flag: "a" });
+  add("ahl1", "SLICE: s1\nSOURCES: https://src.example:8443/a, docs/links.md\nCHECKS: C1\nC1: matches https://launch.example/spec\nReview the change.");
+  add("ahl2", "SLICE: s7\nReview the change.");
+  add("ahl3", "SLICE: s1\nReview the change against https://other-session.example/x.", "another-session");
+  const o = { dir: stateDir, env: env() };
+  for (const id of ["ahl1", "ahl2", "ahl3"]) assert.equal(agentTranscript(mainTranscript, id), null, "no subagent transcript");
+  for (const [url, id, want] of /** @type {[string, string, string][]} */ ([
+    ["https://launch.example/other", "ahl1", "allow"],
+    ["https://src.example:8443/b", "ahl1", "allow"],
+    ["https://files.example/x", "ahl1", "allow"], // s1's planned files
+    ["https://second.example/x", "ahl1", "allow"],
+    ["https://evil.example/?q=secret", "ahl1", "deny"],
+    ["https://src.example/b", "ahl1", "deny"], // another port
+    ["https://evil.example/?q=secret", "ahl2", "deny"], // a launch record that names no host: nothing is allowed
+    ["https://other-session.example/x", "ahl3", "unverified"], // its launch record is another session's
+  ])) {
+    assert.equal(egressDecision(fetchInput(url, id), o).decision, want, `${id} ${url}`);
+  }
+  const d = egressDecision(fetchInput("https://evil.example/?q=secret", "ahl1"), o);
+  assert.match(String(d.reason), /launch\.example/);
+  assert.doesNotMatch(String(d.reason), /secret/);
+  // The hook: exit 2 for the denial, logged as host_not_in_brief with the host only.
+  const r = run(EGRESS, fetchInput("https://evil.example/leak?token=abc", "ahl1"));
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /evil\.example/);
+  noDecision(r);
+  const g = readFileSync(join(stateDir, "gates.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).at(-1);
+  assert.deepEqual([g.gate, g.decision, g.reason, g.host, g.agent_id], ["egress", "deny", "host_not_in_brief", "evil.example", "ahl1"]);
 });
 
 // ---- compact context ----

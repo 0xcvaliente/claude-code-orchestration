@@ -355,6 +355,8 @@ function csvCell(v) {
 
 /** The last row number of a sheet (Excel's limit): a larger `r` is not used for padding. */
 const MAX_SHEET_ROWS = 1_048_576;
+/** The number of columns of a sheet (Excel's limit, last column XFD): a cell beyond it is skipped, never padded to. */
+const MAX_SHEET_COLUMNS = 16_384;
 
 /**
  * Sheet XML to CSV using shared strings and cached `<v>` values. Line n of the CSV is row n of the sheet: an empty row,
@@ -381,6 +383,7 @@ export function sheetToCsv(xml, shared) {
       else if (type === "b" && v !== undefined) value = v === "1" ? "TRUE" : "FALSE";
       else if (v !== undefined) value = decodeXml(v);
       const idx = ref ? colIndex(ref) : cells.length;
+      if (idx >= MAX_SHEET_COLUMNS) continue;
       while (cells.length < idx) cells.push("");
       cells[idx] = csvCell(value);
     }

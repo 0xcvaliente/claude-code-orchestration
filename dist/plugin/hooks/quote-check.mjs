@@ -15,7 +15,7 @@
 //   - text is compared after Unicode NFKC, lower-casing, straight quotes and dashes, dropping *, _ and backticks, and
 //     collapsing whitespace; an ellipsis (... or …) splits a quote into parts that must appear in order.
 // Unverifiable, never unverified: URLs, images and other binaries, missing or unreadable files, a PDF with no usable
-// text layer (a scan), a quote whose page has no text, and any path whose real path (symlinks resolved) is outside the
+// text layer (a scan), a quote whose page has no text (a page number outside the document is unverified, not this), and any path whose real path (symlinks resolved) is outside the
 // project dir and the read cache: such a file is never read, so the hook says nothing about it. Each stop logs { agent_id, slice, total, verified,
 // unverified, unverifiable, blocked } and the unverified quotes' paths to quotes.jsonl in the state dir (counts and
 // paths only, never quote, reply or file text). When a quote is unverified and quote-check has not blocked this agent
@@ -26,7 +26,7 @@ import { resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
 import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const LOG = "quotes.jsonl";
 const MAX_TEXT_BYTES = 64 * 1024 * 1024; // larger sources are not read: their quotes count as unverifiable
@@ -147,7 +147,11 @@ function sourceText(abs) {
         const scanned = prof.kind === "pdf" && typeof prof.charsPerPage === "number" && prof.charsPerPage < EMPTY_PAGE_CHARS;
         if (!scanned) {
           const text = readFileSync(prof.textPath, "utf8");
-          src = { text, pages: prof.kind === "pdf" ? text.split("\f") : null };
+          // Only the document's own pages: pdftotext ends each page with a form feed, so the split's last element
+          // (page N+1) is not a page, and neither is any number past pdfinfo's page count.
+          const all = text.split("\f");
+          const count = typeof prof.pages === "number" && prof.pages > 0 ? prof.pages : Math.max(all.length - 1, 1);
+          src = { text, pages: prof.kind === "pdf" ? all.slice(0, count) : null };
         }
       }
     }
@@ -181,8 +185,9 @@ function check(q) {
     at = i + part.length;
   }
   if (found) return { result: "verified", path };
-  // A quote from a page with no text layer (an image page in a text PDF) cannot be checked.
-  if (src.pages && page !== null && page >= 1 && nonSpace(src.pages[page - 1] ?? "") < EMPTY_PAGE_CHARS) return { result: "unverifiable", path };
+  // A quote from a page with no text layer (an image page in a text PDF) cannot be checked. A page the document does
+  // not have is not such a page: that quote is unverified (T-7).
+  if (src.pages && page !== null && page >= 1 && page <= src.pages.length && nonSpace(src.pages[page - 1] ?? "") < EMPTY_PAGE_CHARS) return { result: "unverifiable", path };
   return { result: "unverified", path };
 }
 
@@ -228,6 +233,8 @@ try {
   // at SubagentStop logging never changes the decision; at a hand-back an unrecorded refusal is not made (below)
 }
 if (block && (recorded || !atHandback)) {
+  // A refused hand-back is not delivered: mark it, so the stop never takes handback-check.mjs's capture of it (G-14).
+  if (atHandback && agentId) recordHandbackRefusal({ session_id: sessionId, agent_id: agentId, tool_use_id: typeof input.tool_use_id === "string" ? input.tool_use_id : null, gate: "quote" });
   const list = unverifiedLocators.map((l) => `- ${l}`).join("\n");
   try {
     process.stderr.write(

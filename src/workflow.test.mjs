@@ -326,11 +326,12 @@ test("no replan when nothing failed for good; an empty replan leaves the slice f
   assert.deepEqual(empty.result.slices.map((/** @type {any} */ s) => s.status), ["failed"]);
 });
 
-test("the plan JSON is logged once and resumes a new run through args.plan and args.skip", async () => {
+test("the plan is logged once as a short line, returned whole, and resumes a new run through args.plan and args.skip", async () => {
   const first = await run({ constraints: C, slices: [slice("a", { checks: ["C1"] }), slice("b", { dependsOn: ["a"] })], verdict: () => answered(["C1"]) });
   const planLogs = first.logs.filter((m) => m.startsWith("plan: "));
   assert.equal(planLogs.length, 1);
-  const plan = JSON.parse(String(planLogs[0]).slice("plan: ".length));
+  assert.equal(planLogs[0], "plan: 2 slice(s), constraints C1, C2");
+  const plan = first.result.plan;
   assert.deepEqual(plan.constraints, [{ id: "C1", text: "parsing never throws" }, { id: "C2", text: "no new dependencies" }]);
   const resumed = await run({ args: { plan, skip: ["a"] }, verdict: () => answered(["C1"]) });
   const l = labels(resumed.calls);
@@ -405,8 +406,13 @@ test("args.skip: unknown ids are ignored and logged; a slice whose dependency is
 const logged = (logs, re) => logs.some((m) => re.test(m));
 /** @param {string[]} l @param {string} a @param {string} b */
 const before = (l, a, b) => l.indexOf(a) >= 0 && l.indexOf(b) >= 0 && l.indexOf(a) < l.indexOf(b);
+// The plan as the run fixed it: the log names it in one line (O-8) and the result carries it whole.
 /** @param {any} r */
-const planLogged = (r) => JSON.parse(String(r.logs.find((/** @type {string} */ m) => m.startsWith("plan: "))).slice("plan: ".length));
+const planLogged = (r) => {
+  assert.ok(r.logs.some((/** @type {string} */ m) => /^plan: \d+ slice\(s\), constraints /.test(m)), "the plan line is logged");
+  assert.ok(r.result.plan, "the result carries the plan");
+  return r.result.plan;
+};
 
 test("plan check: paths are normalised; overlapping files (equal or a folder prefix) make the later slice depend on the earlier", async () => {
   const r = await run({ slices: [slice("a", { files: ["./src/x/"] }), slice("b", { files: ["src/x/y.ts"] }), slice("c", { files: ["src/xy.ts"] })] });
@@ -748,4 +754,118 @@ test("planCheck: false: a plan slice without files or dependsOn runs", async () 
   assert.match(implementers(r.calls)[0].prompt, /Files you own: unspecified/);
   assert.ok(labels(r.calls).includes("build:x#1"), "the replanned slice without files runs");
   assert.equal(r.result.slices.find((/** @type {any} */ s) => s.id === "a").status, "replanned");
+});
+
+// W-2: an isolated wave of two slices whose first merged review of `a` fails with one gap at confidence 90.
+const edge = { pass: false, gaps: [{ text: "a: edge case wrong", confidence: 90 }], evidence: "", answers: [], open: "" };
+/** @param {string[]} l @param {string} x */
+const at = (l, x) => l.indexOf(x);
+
+test("isolated wave: a failed merged review gets the refute pass; when it drops every gap the slice passes", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    verdict: (l) => (l === "review:a" ? edge : answered([])),
+    refute: () => ({ gaps: [{ n: 1, stands: false, reason: "the merged change handles it" }] }),
+  });
+  const l = labels(r.calls);
+  assert.ok(l.includes("refute:a#1") && at(l, "review:a") < at(l, "refute:a#1"), "the refute pass follows the merged review");
+  const rf = r.calls.find((c) => c.opts.label === "refute:a#1");
+  assert.match(rf.prompt, /1\. a: edge case wrong \(confidence 90\)/);
+  assert.match(rf.prompt, /merged into the current branch/);
+  assert.ok(!l.includes("build:a#2") && !l.includes("plan:replan"));
+  assert.deepEqual(r.result.slices, [{ id: "a", status: "passed", attempts: 1, gaps: [] }, { id: "b", status: "passed", attempts: 1, gaps: [] }]);
+  assert.ok(logged(r.logs, /a: no reviewer gap stands after the refute pass; passing/));
+});
+
+test("isolated wave: a standing gap rebuilds the slice in a new worktree, merges and reviews it again; a passing retry passes", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    verdict: (l) => (l === "review:a" ? edge : answered([])),
+  });
+  const l = labels(r.calls);
+  assert.ok(l.includes("refute:a#1") && at(l, "refute:a#1") < at(l, "build:a#2"));
+  assert.ok(at(l, "build:a#2") < at(l, "integrate:a#2") && at(l, "integrate:a#2") < at(l, "review:a#2"));
+  const retry = implementers(r.calls).find((c) => c.opts.label === "build:a#2");
+  assert.equal(retry.opts.isolation, "worktree");
+  assert.equal(retry.opts.model, undefined, "attempt 2 of 3 is not the last");
+  assert.match(retry.prompt, /^ORCHESTRATION: workflow\nSlice a\n/);
+  assert.match(retry.prompt, /isolated worktree/);
+  assert.match(retry.prompt, /Fix:\na: edge case wrong\n/);
+  const merge = r.calls.find((c) => c.opts.label === "integrate:a#2");
+  assert.equal(merge.opts.agentType, "integrator");
+  assert.match(merge.prompt, /^Merge these branches in order and run the checks:\nwt-build:a#2\nChecks:\na: check a\n/);
+  assert.ok(!l.includes("build:b#2"), "b passed and is not rebuilt");
+  assert.ok(l.includes("review:a#2:opus"), "a passing review after a failed one is escalated, as in the shared tree");
+  assert.ok(!l.includes("plan:replan"));
+  assert.deepEqual(r.result.slices.map((/** @type {any} */ s) => [s.id, s.status, s.attempts]), [["a", "passed", 2], ["b", "passed", 1]]);
+  assert.equal(r.result.failed, 0);
+});
+
+test("isolated wave: when the attempts run out the slice fails for good, the last attempt on opus, and the replan starts", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    verdict: (l) => (l.startsWith("review:a") ? edge : answered([])),
+  });
+  const l = labels(r.calls);
+  const builds = implementers(r.calls).filter((c) => c.opts.label.startsWith("build:a"));
+  assert.deepEqual(builds.map((c) => [c.opts.label, c.opts.model, c.opts.isolation]), [["build:a#1", undefined, "worktree"], ["build:a#2", undefined, "worktree"], ["build:a#3", "opus", "worktree"]]);
+  assert.match(builds[2].prompt, /last attempt, given to you as a fresh agent/);
+  assert.ok(logged(r.logs, /a: last attempt 3 runs on opus/));
+  assert.deepEqual(l.filter((x) => /^refute:a/.test(x)), ["refute:a#1", "refute:a#2", "refute:a#3"]);
+  assert.ok(!l.includes("build:a#4"));
+  assert.ok(l.includes("review:a#3") && at(l, "review:a#3") < at(l, "plan:replan"), "the replan starts only after the attempts are used up");
+  const a = r.result.slices.find((/** @type {any} */ s) => s.id === "a");
+  assert.deepEqual(a, { id: "a", status: "failed", attempts: 3, gaps: ["a: edge case wrong"] });
+  const rp = r.calls.find((c) => c.opts.label === "plan:replan");
+  assert.match(rp.prompt, /- a: goal a \[a\.txt\]\n {2}gaps: a: edge case wrong/);
+});
+
+test("isolated wave: a retry whose merge the integrator leaves out fails the slice unreviewed, as a first merge does", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    verdict: (l) => (l === "review:a" ? edge : answered([])),
+    integrate: (branches) => ({ status: branches.some((b) => /#2$/.test(b)) ? "fail" : "pass", merged: branches.filter((b) => !/#2$/.test(b)), open: "conflict in a.txt" }),
+  });
+  const l = labels(r.calls);
+  assert.ok(l.includes("integrate:a#2"));
+  assert.ok(!l.includes("review:a#2"), "an unmerged retry is not reviewed");
+  assert.ok(!l.includes("build:a#3"), "a conflict is not retried");
+  const a = r.result.slices.find((/** @type {any} */ s) => s.id === "a");
+  assert.equal(a.status, "failed");
+  assert.equal(a.attempts, 2);
+  assert.match(a.gaps[0], /^branch wt-build:a#2 not merged by the integrator \(integrator status fail: conflict in a\.txt\)/);
+});
+
+// O-8: a short plan log line; the result keeps the whole plan and gains a one-line-per-slice summary.
+test("the plan log is one short line; the result has the plan and a summary line per slice", async () => {
+  const r = await run({ slices: [slice("a"), slice("b")], verdict: (l) => (l === "review:b#1" ? edge : answered([])), refute: () => ({ gaps: [{ n: 1, stands: false, reason: "" }] }) });
+  assert.ok(r.logs.includes("plan: 2 slice(s), constraints none"));
+  assert.ok(!r.logs.some((m) => /^plan: \{/.test(m) || m.includes('"goal"')), "no plan JSON in the log");
+  assert.ok(r.result.plan, "the result has the plan");
+  assert.deepEqual(r.result.plan.constraints, []);
+  assert.deepEqual(r.result.plan.slices.map((/** @type {any} */ s) => [s.id, s.goal, s.acceptance]), [["a", "goal a", "check a"], ["b", "goal b", "check b"]]);
+  assert.equal(r.result.summary, "a: passed (1 attempt)\nb: passed (1 attempt)");
+  const failing = await run({ args: { maxRetries: 1 }, slices: [slice("a")], verdict: () => edge, replan: { slices: [] } });
+  assert.equal(failing.result.summary, "a: failed (2 attempts)");
+  assert.deepEqual(failing.result.slices[0].gaps, ["a: edge case wrong"], "gap texts stay in the result");
+});
+
+test("after a replan the plan line keeps its prefix and stays short; the result's plan is the replanned one", async () => {
+  const r = await run({
+    args: { maxRetries: 0 },
+    constraints: C,
+    slices: [slice("a"), slice("b")],
+    replan: { constraints: [{ id: "C9", text: "new rule" }], slices: [slice("a2", { dependsOn: ["b"] })] },
+    verdict: (l) => (l.startsWith("review:a#") ? edge : answered([])),
+  });
+  const line = r.logs.find((m) => m.startsWith("plan after replan: "));
+  assert.equal(line, "plan after replan: 2 slice(s), constraints C1, C2, C9");
+  assert.ok(r.result.plan, "the result has the plan");
+  assert.deepEqual(r.result.plan.slices.map((/** @type {any} */ s) => s.id), ["b", "a2"]);
+  assert.deepEqual(r.result.plan.constraints.map((/** @type {any} */ c) => c.id), ["C1", "C2", "C9"]);
+  assert.equal(r.result.summary, "a: replanned (1 attempt)\nb: passed (1 attempt)\na2: passed (1 attempt)");
 });

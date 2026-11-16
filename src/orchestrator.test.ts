@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -224,6 +224,38 @@ test("a crash in one slice fails that slice only and the report is still written
   assert.match(report.slices[1]!.issues[0]!, /disk on fire/);
   assert.equal(report.merged.length, 1);
   assert.ok(existsSync(join(out, report.runId, "report.json")));
+});
+
+test("a crash in one slice keeps the attempts it had", async () => {
+  const repo = await tempRepo();
+  const { run } = fake([slice("alpha"), slice("beta")], {
+    write: (cwd, id) => {
+      if (id === "beta") throw new Error("disk on fire");
+      writeFileSync(join(cwd, `${id}.txt`), `${id}\n`);
+    },
+  });
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, concurrency: 1 });
+
+  assert.equal(report.slices[1]!.status, "failed");
+  assert.equal(report.slices[1]!.attempts, 1, "the writer of attempt 1 ran before the crash");
+  assert.match(report.slices[1]!.issues[0]!, /^error: .*disk on fire/);
+});
+
+test("a failing commit hook is retried with its message; used-up retries report the real attempt count", async () => {
+  const repo = await tempRepo();
+  const hooks = mkdtempSync(join(tmpdir(), "orch-hooks-"));
+  writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\necho "lint: 1 problem"\nexit 1\n`);
+  chmodSync(join(hooks, "pre-commit"), 0o755);
+  await git(repo, "config", "core.hooksPath", hooks);
+  const { run, calls } = fake([slice("s0")]);
+  const report = await orchestrate({ repo, task: "t", outRoot: outRoot(), run, maxRetries: 2 });
+
+  assert.equal(report.slices[0]!.status, "failed");
+  assert.equal(report.slices[0]!.attempts, 3);
+  assert.match(report.slices[0]!.issues[0]!, /lint: 1 problem/);
+  const writers = calls.filter((c) => c.role === "writer");
+  assert.equal(writers.length, 3);
+  assert.ok(writers[2]!.prompt.includes("lint: 1 problem"));
 });
 
 test("a NaN worker token count cannot disable the run budget", async () => {

@@ -16,7 +16,7 @@ import { launchRecord } from "../.claude/hooks/brief.mjs";
 import { seal } from "../.claude/hooks/skill-seal.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "skill-seal.mjs", "skill-gate.mjs"];
+const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "skill-seal.mjs", "skill-scan.mjs", "skill-gate.mjs"];
 const NAME = "demo-skill";
 const GIT_ENV = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid", GIT_CONFIG_NOSYSTEM: "1" };
 // Built at run time so this file holds no token-shaped literal.
@@ -188,7 +188,10 @@ test("b: a failing validator is listed with its output; a missing python3 has it
     worktree(s);
     writeSkill(s, { edit: (_sd, wt) => appendFileSync(join(wt, "scripts", "validate.py"), "# relaxed\n") });
     launch(s);
-    assert.match(blocked(s, ["validator"]), /The branch adds or changes files under scripts\//);
+    // W-1: a committed change under scripts/ is also a path outside the skill folder and README.md.
+    const msg = blocked(s, ["validator", "paths"]);
+    assert.match(msg, /The branch adds or changes files under scripts\//);
+    assert.match(msg, /outside skills\/demo-skill\/ and README\.md: scripts\/validate\.py\./);
   });
 });
 
@@ -260,7 +263,10 @@ test("e: an unclean worktree, or a branch with no commit of its own, fails as gi
     writeSkill(s, { after: (_sd, wt) => writeFileSync(join(wt, "notes.txt"), "scratch\n"), commit: true });
     writeFileSync(join(s.draft, "notes2.txt"), "uncommitted\n");
     launch(s);
-    assert.match(blocked(s, ["git_state"]), /1 uncommitted paths/);
+    // W-1: the committed notes.txt is outside the skill folder and README.md.
+    const msg = blocked(s, ["paths", "git_state"]);
+    assert.match(msg, /1 uncommitted paths/);
+    assert.match(msg, /README\.md: notes\.txt\./);
   });
   withSetup((s) => {
     // The skill is already on the base branch: the draft branch adds nothing.
@@ -283,7 +289,9 @@ test("e: a sealed file that is ignored (so never committed) fails as git_state a
     });
     assert.equal(git(s.draft, ["status", "--porcelain"], s.base), "", "git status is clean");
     launch(s);
-    const msg = blocked(s, ["git_state"]);
+    // W-1: the committed .gitignore is outside the skill folder and README.md.
+    const msg = blocked(s, ["paths", "git_state"]);
+    assert.match(msg, /README\.md: \.gitignore\./);
     assert.match(msg, /not committed on skill\/demo-skill/);
     assert.match(msg, /skills\/demo-skill\/references\/extra\.md/);
   });
@@ -429,8 +437,9 @@ test("gap 1: a branch cannot steer the validator through scripts/, the current f
     worktree(s);
     writeSkill(s, { edit: (_sd, wt) => { writeFileSync(join(wt, "README.md"), "# none\n"); writeFileSync(join(wt, "scripts", "re.py"), "import sys\nsys.exit(0)\n"); } });
     launch(s);
-    const msg = blocked(s, ["validator"]);
+    const msg = blocked(s, ["validator", "paths"]);
     assert.match(msg, /adds or changes files under scripts\//);
+    assert.match(msg, /README\.md: scripts\/re\.py\./);
     assert.equal(records(s).at(-1).decision, "block");
   });
   // The same file untracked and ignored (git status stays clean): still refused.
@@ -439,7 +448,10 @@ test("gap 1: a branch cannot steer the validator through scripts/, the current f
     writeSkill(s, { edit: (_sd, wt) => writeFileSync(join(wt, ".gitignore"), "scripts/re.py\n") });
     writeFileSync(join(s.draft, "scripts", "re.py"), "import sys\nsys.exit(0)\n");
     launch(s);
-    assert.match(blocked(s, ["validator"]), /adds or changes files under scripts\//);
+    // W-1: the committed .gitignore is outside the skill folder and README.md.
+    const msg = blocked(s, ["validator", "paths"]);
+    assert.match(msg, /adds or changes files under scripts\//);
+    assert.match(msg, /README\.md: \.gitignore\./);
   });
   // A shadowing module at the worktree root, and one on PYTHONPATH: isolated python ignores both, so the real
   // validator runs and reports the missing catalog row.
@@ -488,7 +500,10 @@ test("gap 3: a skill folder that is a link to a sealed folder elsewhere fails as
     git(s.draft, ["add", "-A"], s.base);
     git(s.draft, ["commit", "-q", "-m", "add"], s.base);
     launch(s);
-    assert.match(blocked(s, ["skill_dir"]), /skills\/demo-skill is a link/);
+    // W-1: the committed link is the path skills/demo-skill itself, not a file inside the folder.
+    const msg = blocked(s, ["skill_dir", "paths"]);
+    assert.match(msg, /skills\/demo-skill is a link/);
+    assert.match(msg, /README\.md: skills\/demo-skill\./);
   });
   withSetup((s) => {
     // skills/ itself a link: the folder resolves outside the draft.
@@ -500,7 +515,9 @@ test("gap 3: a skill folder that is a link to a sealed folder elsewhere fails as
     git(s.draft, ["add", "-A"], s.base);
     git(s.draft, ["commit", "-q", "-m", "add"], s.base);
     launch(s);
-    assert.match(blocked(s, ["skill_dir"]), /resolves to a place outside the draft worktree/);
+    const msg = blocked(s, ["skill_dir", "paths"]);
+    assert.match(msg, /resolves to a place outside the draft worktree/);
+    assert.match(msg, /README\.md: skills\./);
   });
 });
 
@@ -545,5 +562,209 @@ test("gap 6: a home-directory path after a URL scheme is found", () => {
     assert.match(msg, /a\.md line 2: home-directory path/);
     assert.doesNotMatch(msg, /a\.md line 3:/);
     assert.ok(!msg.includes("alice"));
+  });
+});
+
+// ---- W-1 (audit 2026-11-16): the whole branch is what the publish step pushes, so every commit of it is scanned and
+// it may change only skills/<name>/ and README.md.
+
+/** Seal the skill again and commit everything in the draft. @param {ReturnType<typeof setup>} s @param {string} msg */
+function commitAll(s, msg) {
+  seal(join(s.draft, "skills", NAME));
+  git(s.draft, ["add", "-A"], s.base);
+  git(s.draft, ["commit", "-q", "-m", msg], s.base);
+}
+
+test("W-1: a token added and then removed in a later commit blocks, and the message says to recreate the commits", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "notes.md"), `token ${TOKEN}\n`) });
+    rmSync(join(s.draft, "skills", NAME, "notes.md"));
+    commitAll(s, "remove the token");
+    launch(s);
+    const msg = blocked(s, ["secrets"]);
+    assert.match(msg, /skills\/demo-skill\/notes\.md, only in earlier commit [0-9a-f]{12}: GitHub token/);
+    assert.match(msg, /removing the line in a new commit leaves it in the history/);
+    assert.match(msg, /Recreate the branch's commits without it/);
+    assert.ok(!msg.includes(TOKEN), "no matched text in the message");
+    assert.ok(!readFileSync(join(s.state, "skill-gate.jsonl"), "utf8").includes(TOKEN), "no matched text in the log");
+  });
+  // In the first of several commits.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "references", "a.md"), `Reference.\nkey ${TOKEN}\n`) });
+    writeFileSync(join(s.draft, "skills", NAME, "references", "a.md"), "Reference.\n");
+    commitAll(s, "drop the key");
+    writeFileSync(join(s.draft, "skills", NAME, "references", "b.md"), "More.\n");
+    commitAll(s, "more");
+    launch(s);
+    assert.match(blocked(s, ["secrets"]), /references\/a\.md, only in earlier commit [0-9a-f]{12}: GitHub token/);
+  });
+});
+
+test("W-1: a token in a file outside the skill folder and README.md blocks as secrets and paths", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (_sd, wt) => { mkdirSync(join(wt, "notes")); writeFileSync(join(wt, "notes", "leak.md"), `token ${TOKEN}\n`); } });
+    launch(s);
+    const msg = blocked(s, ["secrets", "paths"]);
+    assert.match(msg, /notes\/leak\.md line 1: GitHub token/);
+    assert.match(msg, /\[paths\] The branch changes paths outside skills\/demo-skill\/ and README\.md: notes\/leak\.md\./);
+    assert.ok(!msg.includes(TOKEN));
+  });
+});
+
+test("W-1: a branch whose only extra file is outside the allowed paths, with no secret, is blocked for the path alone", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (_sd, wt) => writeFileSync(join(wt, "plan.txt"), "A plan with nothing secret.\n") });
+    launch(s);
+    const msg = blocked(s, ["paths"]);
+    assert.match(msg, /outside skills\/demo-skill\/ and README\.md: plan\.txt\./);
+    assert.match(msg, /Recreate the branch's commits without/);
+  });
+});
+
+test("W-1 variants: a file added then deleted, a rename out of the skill folder, a merge, a binary file, no merge base", () => {
+  // Added outside with a token, then deleted: still in the history.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (_sd, wt) => writeFileSync(join(wt, "tmp.md"), `key ${TOKEN}\n`) });
+    rmSync(join(s.draft, "tmp.md"));
+    commitAll(s, "delete tmp.md");
+    launch(s);
+    const msg = blocked(s, ["secrets", "paths"]);
+    assert.match(msg, /tmp\.md, only in earlier commit [0-9a-f]{12}: GitHub token/);
+    assert.match(msg, /README\.md: tmp\.md\./);
+  });
+  // A file renamed out of the skill folder: the new path is named.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "references", "moved.md"), "Moved text, long enough to be seen as a rename by git.\n".repeat(5)) });
+    mkdirSync(join(s.draft, "docs"));
+    git(s.draft, ["mv", `skills/${NAME}/references/moved.md`, "docs/moved.md"], s.base);
+    commitAll(s, "move it out");
+    launch(s);
+    assert.match(blocked(s, ["paths"]), /README\.md: docs\/moved\.md\./);
+  });
+  // A side branch with a token (added, then removed) merged into the skill branch.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s);
+    git(s.repo, ["checkout", "-q", "-b", "side", "main"], s.base);
+    writeFileSync(join(s.repo, "side.md"), `key ${TOKEN}\n`);
+    git(s.repo, ["add", "-A"], s.base);
+    git(s.repo, ["commit", "-q", "-m", "side"], s.base);
+    git(s.repo, ["rm", "-q", "side.md"], s.base);
+    git(s.repo, ["commit", "-q", "-m", "side cleanup"], s.base);
+    git(s.repo, ["checkout", "-q", "main"], s.base);
+    git(s.draft, ["merge", "-q", "--no-ff", "-m", "merge side", "side"], s.base);
+    launch(s);
+    const msg = blocked(s, ["secrets", "paths"]);
+    assert.match(msg, /side\.md, only in earlier commit [0-9a-f]{12}: GitHub token/);
+    assert.ok(!msg.includes(TOKEN));
+  });
+  // A binary-looking file with a token, committed and then deleted.
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "blob.bin"), Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(`\nkey=${TOKEN}\n`), Buffer.from([0, 255])])) });
+    rmSync(join(s.draft, "skills", NAME, "blob.bin"));
+    commitAll(s, "drop the blob");
+    launch(s);
+    assert.match(blocked(s, ["secrets"]), /blob\.bin, only in earlier commit [0-9a-f]{12}: GitHub token/);
+  });
+  // A skill branch that shares no commit with its base.
+  withSetup((s) => {
+    mkdirSync(dirname(s.draft), { recursive: true });
+    git(s.repo, ["worktree", "add", "-q", "--orphan", "-b", `skill/${NAME}`, s.draft], s.base);
+    mkdirSync(join(s.draft, "scripts"));
+    writeFileSync(join(s.draft, "scripts", "validate.py"), VALIDATOR);
+    writeFileSync(join(s.draft, "README.md"), "# Skills\n");
+    writeSkill(s);
+    launch(s);
+    const r = stop(s);
+    assert.equal(r.status, 2);
+    assert.ok(records(s).at(-1).failed.includes("paths"), r.stderr);
+    assert.match(r.stderr, /\[paths\] What the branch would push cannot be checked: it shares no commit with main/);
+  });
+});
+
+test("W-1 retry: a committed name that starts with a newline is judged as it is, outside the allowed paths, and shown escaped", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, {
+      edit: (sd, wt) => {
+        writeFileSync(join(wt, "\nREADME.md"), "plain\n");
+        mkdirSync(join(wt, "\nskills", NAME), { recursive: true });
+        writeFileSync(join(wt, "\nskills", NAME, "y.md"), "plain\n");
+        mkdirSync(join(wt, "\nscripts"));
+        writeFileSync(join(wt, "\nscripts", "run.sh"), "echo plain\n");
+        writeFileSync(join(sd, "references", "ok.md"), "An ordinary name inside the folder.\n");
+      },
+    });
+    launch(s);
+    const msg = blocked(s, ["paths"]);
+    const line = msg.split("\n").find((l) => l.includes("[paths]")) ?? "";
+    assert.ok(line.includes('"\\nREADME.md"'), line);
+    assert.ok(line.includes(`"\\nskills/${NAME}/y.md"`), line);
+    assert.ok(line.includes('"\\nscripts/run.sh"'), line);
+    assert.doesNotMatch(line, /references\/ok\.md|: README\.md|, README\.md/, "ordinary allowed names are not listed");
+  });
+});
+
+test("W-1 retry: commits of the base that origin lacks are covered when origin's base is known", () => {
+  withSetup((s) => {
+    const origin = join(s.base, "origin.git");
+    git(s.base, ["init", "-q", "--bare", "-b", "main", origin], s.base);
+    git(s.repo, ["remote", "add", "origin", origin], s.base);
+    git(s.repo, ["push", "-q", "origin", "main"], s.base);
+    // A commit on the local main only, then the draft made from it.
+    writeFileSync(join(s.repo, "notes.txt"), `token ${TOKEN}\n`);
+    git(s.repo, ["add", "-A"], s.base);
+    git(s.repo, ["commit", "-q", "-m", "local only"], s.base);
+    const leak = git(s.repo, ["rev-parse", "HEAD"], s.base);
+    worktree(s);
+    writeSkill(s);
+    launch(s);
+    const msg = blocked(s, ["secrets", "paths"]);
+    assert.match(msg, new RegExp(`notes\\.txt, in commit ${leak.slice(0, 12)}, which is not part of the draft: GitHub token`));
+    assert.match(msg, new RegExp(`1 commit of the base that origin lacks \\(${leak.slice(0, 12)}\\)`));
+    assert.ok(!msg.includes(TOKEN));
+  });
+  // The same draft on a base origin already has passes.
+  withSetup((s) => {
+    const origin = join(s.base, "origin.git");
+    git(s.base, ["init", "-q", "--bare", "-b", "main", origin], s.base);
+    git(s.repo, ["remote", "add", "origin", origin], s.base);
+    git(s.repo, ["push", "-q", "origin", "main"], s.base);
+    worktree(s);
+    writeSkill(s);
+    launch(s);
+    assert.equal(stop(s).status, 0);
+  });
+});
+
+// ---- W-9: a home path that ends the word, and the Windows form.
+
+test("W-9: home paths without a trailing slash and Windows profile paths are found; shared folders are not", () => {
+  withSetup((s) => {
+    worktree(s);
+    const lines = [
+      "cd /Users/alice",
+      "HOME=/home/bob",
+      "see /home/bob.",
+      "C:\\Users\\alice\\notes",
+      'in "C:\\\\Users\\\\carol\\\\x"',
+      "ok: /Users/Shared and /Users/Shared/x and C:\\Users\\Public\\x and ~/notes and /home/ and https://example.com/homepage",
+      "ok: C:\\Users\\Default\\x and /usr/share and /Users/",
+      "cd /root",
+    ];
+    writeSkill(s, { edit: (sd) => writeFileSync(join(sd, "references", "a.md"), `${lines.join("\n")}\n`) });
+    launch(s);
+    const msg = blocked(s, ["secrets"]);
+    for (const n of [1, 2, 3, 4, 5, 8]) assert.match(msg, new RegExp(`a\\.md line ${n}: home-directory path`), `line ${n}`);
+    assert.doesNotMatch(msg, /a\.md line 6:/);
+    assert.doesNotMatch(msg, /a\.md line 7:/);
+    assert.ok(!msg.includes("alice") && !msg.includes("bob") && !msg.includes("carol"));
   });
 });
