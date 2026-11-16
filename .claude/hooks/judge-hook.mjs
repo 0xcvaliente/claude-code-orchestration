@@ -9,6 +9,10 @@
 //   `claude -p` (opus, one turn, no tools, no user settings or plugins, from an empty temp dir) with the user's typed
 //   requests of this session (prompts.jsonl, written by prompt-capture.mjs) as the only authority. Approve: exit 0.
 //   Anything else (a refusal, a timeout, a missing CLI, an unreadable answer, no recorded request): deny.
+// - The record of those requests (state.mjs `promptStore`) is a per-user folder outside the project; a prompts.jsonl
+//   in the project's state dir is never read. A Bash command that names the record's folder is denied with no model
+//   call (audit 2026-11-16 J-12). A text check: a glob or a name built at run time gets past it, and the Write and Edit
+//   tools never reach this hook. Best-effort, not a sandbox.
 // - Malformed hook input: exit 0, no decision. Every floor or judged decision goes to gates.jsonl in the state dir.
 // Settings: ORCH_JUDGE_CLAUDE_BIN (the claude binary, default `claude`), ORCH_JUDGE_MODEL (default opus),
 // ORCH_JUDGE_TIMEOUT_MS (default 40000, clamped to 45000 so the hook always decides before Claude Code kills it).
@@ -17,7 +21,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "./judge-core.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { PROMPT_STORE_NAME, duplicate, ensureStateDir, promptStore, stateDir } from "./state.mjs";
 
 if ((process.env.ORCH_JUDGE ?? "").trim().toLowerCase() !== "native") process.exit(0);
 if (process.env.ORCH_JUDGE_INNER === "1") process.exit(0); // the judge's own claude -p run
@@ -60,9 +64,15 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
   process.exit(0);
 }
 
+// The judge's authority must stay out of the judged worker's reach: a command that names the record's folder (its
+// absolute path, `~/...`, `$HOME/...`, or the bare folder name, all of which hold the name) is refused, even one that
+// only reads. Quotes and backslashes are dropped and case is ignored first, so `judge'-'prompts`, `judge\-prompts` and
+// another case (a case-insensitive file system) count too.
+if (command.replace(/[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) deny("always blocked: the command names the judge's record of the user's requests");
+
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {
-  const file = join(stateDir, "prompts.jsonl");
+  const file = promptStore;
   if (!sessionId || !existsSync(file)) return [];
   // The file holds every session's prompts, so a line that cannot hold this session's id is skipped before parsing.
   // prompt-capture.mjs writes each record with JSON.stringify, so a record of this session holds the id as
