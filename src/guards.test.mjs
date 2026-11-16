@@ -595,7 +595,8 @@ test("researcher guard hook (round 2, item A): a command with 300 links to /dev 
     assert.deepEqual([r.code, r.stdout], [2, ""], r.stderr.slice(0, 200));
   }
   // /dev/null passes in every spelling it passed before, also through a link to it or to /dev.
-  for (const c of ["cat /dev/null", "cat //dev/null", "cat a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", `cat ${lnull}`, `cat ${ldev}/null`, `grep -f${ldev}/null x .`]) {
+  for (const c of ["cat /dev/null", "cat //dev/null", "cat a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", `cat ${lnull}`, `cat ${ldev}/null`, `grep --file=${ldev}/null x .`]) {
+    // (a short-option form such as `grep -f<path>` would also be refused when the random temp name holds a Q: -Q)
     assert.equal(run(RESEARCHER, bash(c)).code, 0, c);
   }
 });
