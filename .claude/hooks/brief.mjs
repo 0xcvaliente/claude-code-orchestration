@@ -984,7 +984,7 @@ export function foldRuns(records, opts = {}) {
       const agent = typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null;
       // G-8: the stop after a forced hand-back is the same review as the stop before it: the later record replaces it.
       const prev = s.reviews.at(-1);
-      if (r.continues === true && agent && prev?.agent === agent && (s.lastImplAt === null || prev.ts > s.lastImplAt)) s.reviews.pop();
+      if (r.continues === true && agent && prev && prev.agent === agent && (s.lastImplAt === null || prev.ts > s.lastImplAt)) s.reviews.pop();
       // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes, but only
       // with a verdict of its own: a validation reply with no STATUS supersedes nothing.
       if (validate && status !== null) {
