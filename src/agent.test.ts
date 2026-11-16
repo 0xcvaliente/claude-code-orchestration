@@ -75,6 +75,17 @@ test("judge on: Bash roles carry the PreToolUse hook with a timeout above the ju
   }
 });
 
+test("every worker opts out of a project's main agent: project settings are loaded, the flag settings unset `agent`", async () => {
+  // With settingSources ["project"], an `agent` setting in the repo (this repo's own names the orchestrator) would run
+  // the worker as that agent, with that agent's tools. Probed on Claude Code 2.1.322: docs/data/live-checks-2026-11-11.md.
+  for (const role of Object.keys(ROLES) as Role[]) {
+    const o = await optionsFor(req(role), {});
+    assert.deepEqual(o.settingSources, ["project"], role);
+    assert.deepEqual(o.settings, { agent: "" }, role);
+    assert.equal((o as { agent?: string }).agent, undefined, `${role}: no --agent equivalent either`);
+  }
+});
+
 test("judge off: Bash roles keep UNSAFE_BASH and the hook denies the judged classes without asking", async () => {
   const judge = fakeJudge(["allow"]);
   for (const role of BASH_ROLES) {

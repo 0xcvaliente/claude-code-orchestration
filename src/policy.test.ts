@@ -46,3 +46,17 @@ test("SDK_DENIED_BASH keeps sudo denied by rule and is a subset of UNSAFE_BASH (
   assert.deepEqual(SDK_DENIED_BASH, ["Bash(sudo*)"]);
   for (const rule of SDK_DENIED_BASH) assert.ok(UNSAFE_BASH.includes(rule));
 });
+
+test("this repo runs as the orchestrator: the project settings name it, the plugin does not, and plain launchers opt out", () => {
+  const settings = JSON.parse(readFileSync(new URL("../.claude/settings.json", import.meta.url), "utf8"));
+  assert.equal(settings.agent, "orchestrator");
+  assert.match(readFileSync(new URL("../.claude/agents/orchestrator.md", import.meta.url), "utf8"), /^name: orchestrator$/m, "the named agent exists");
+  // The plugin must not ship the default: it would turn every session of every project with the plugin on into an
+  // orchestrator. Its settings.json holds the subagent status line only.
+  const plugin = JSON.parse(readFileSync(new URL("../dist/plugin/settings.json", import.meta.url), "utf8"));
+  assert.deepEqual(Object.keys(plugin), ["subagentStatusLine"]);
+  // Everything that must stay a plain session says so itself.
+  assert.match(readFileSync(new URL("../scripts/orchestrate.sh", import.meta.url), "utf8"), /args\+=\(--settings '\{"agent":""\}'\)/);
+  assert.match(readFileSync(new URL("./agent.ts", import.meta.url), "utf8"), /settings: \{ agent: "" \}/);
+  assert.match(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.plain, /^claude --settings '\{"agent":""\}'$/);
+});

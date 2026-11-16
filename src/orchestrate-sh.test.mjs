@@ -37,3 +37,18 @@ test("orchestrate.sh dry run: ORCH_SESSION_PERSISTENCE=1 omits --no-session-pers
   assert.ok(!kept.includes("--no-session-persistence"));
   assert.deepEqual(kept, def.filter((a) => a !== "--no-session-persistence"));
 });
+
+test("orchestrate.sh dry run: a plain session (ORCH_AGENT=none) unsets a folder's main agent; a named agent uses --agent", () => {
+  // A folder's settings can name a main agent (this repo's .claude/settings.json does). The flag wins over it for a
+  // named agent; a plain session passes an empty `agent` in the flag settings, which rank above the folder's.
+  const plain = dryRunArgs({ ORCH_AGENT: "none" });
+  assert.ok(!plain.includes("--agent"));
+  assert.equal(plain[plain.indexOf("--settings") + 1], '{"agent":""}');
+  assert.deepEqual(JSON.parse(plain[plain.indexOf("--settings") + 1] ?? "null"), { agent: "" });
+  // --disallowedTools and --allowedTools take every word after them: the settings flag must come before both.
+  assert.ok(plain.indexOf("--settings") < plain.indexOf("--disallowedTools") && plain.indexOf("--disallowedTools") < plain.indexOf("--allowedTools"));
+
+  const named = dryRunArgs({ ORCH_AGENT: "reviewer", ORCH_AGENT_PREFIX: "orchestration:" });
+  assert.equal(named[named.indexOf("--agent") + 1], "orchestration:reviewer");
+  assert.ok(!named.includes("--settings"));
+});
