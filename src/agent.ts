@@ -93,8 +93,9 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
 
   // Bash roles: every Bash call passes the guard first. Plain `Bash` is pre-approved, so a guard that failed without
   // blocking would let the command run. Three layers keep that from happening: bashGuard denies on any throw of its
-  // own, HOOK_TIMEOUT_S is above the judge's own timeout (and a PreToolUse callback that does time out blocks the call,
-  // Claude Code 2.1.210 and later), and the matcher's onFailure "block" below covers what is left.
+  // own, HOOK_TIMEOUT_S is above the judge's own timeout (the SDK's types say only that a matcher's `timeout` bounds its
+  // hooks, not what a callback that times out does to the call, so nothing here relies on that), and the matcher's
+  // onFailure "block" below blocks the call when the callback throws or answers with output that fails validation.
   // With the judge off the guard still denies the judged classes, on top of UNSAFE_BASH in disallowedTools.
   // The judge's own tokens are NOT part of the worker's `tokens` (they are a separate query() inside the hook).
   let hooks: Options["hooks"];
