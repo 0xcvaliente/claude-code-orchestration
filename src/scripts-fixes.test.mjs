@@ -82,6 +82,50 @@ test("auto.sh exits 1 with 'repo folder not found' before any triage call when t
   }
 });
 
+test("auto.sh passes ORCH_BUDGET_TOKENS to route.ts as --budget, and route.ts accepts it; no cap, no flag", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-budget-")));
+  try {
+    mkdirSync(join(scratch, "proj"));
+    mkdirSync(join(scratch, "bin"));
+    writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
+    chmodSync(join(scratch, "bin", "npx"), 0o755);
+    /** @param {string} budget */
+    const routeArgsFor = (budget) => {
+      const env = { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_AGENT_PREFIX: "orchestration:", ORCH_MODE: "plain", ORCH_BUDGET_TOKENS: budget, ORCH_BUDGET_USD: "" };
+      const a = spawnSync("bash", [join(scripts, "auto.sh"), "task", "proj"], { cwd: scratch, env, encoding: "utf8" });
+      assert.equal(a.status, 0, a.stderr);
+      const args = readFileSync(join(scratch, "npx-args"), "utf8").split("\n").filter((l) => l !== "");
+      return args.slice(args.indexOf("src/route.ts") + 1);
+    };
+    const capped = routeArgsFor("300k");
+    assert.ok(capped.includes("--budget=300k"), JSON.stringify(capped));
+    assert.ok(!routeArgsFor("").some((a) => a.startsWith("--budget")), "no cap: no --budget");
+    // route.ts takes the flag (a forced mode: no model call).
+    const r = spawnSync(process.execPath, ["--import", "tsx", join(root, "src", "route.ts"), ...capped], { cwd: root, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).mode, "plain");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("route.ts: a bad --budget prints usage and exits 2 before any model call", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "route-budget-")));
+  try {
+    // --mode plain: even a broken parser could not reach a model call from here.
+    for (const bad of ["5", "abc", "1e6", "", "-3"]) {
+      const r = spawnSync(process.execPath, ["--import", "tsx", join(root, "src", "route.ts"), "--repo", scratch, "--task=t", "--mode", "plain", `--budget=${bad}`], { cwd: root, encoding: "utf8" });
+      assert.equal(r.status, 2, `${bad}: ${r.stderr}`);
+      assert.match(r.stderr, /--budget must be a token count of at least 10k/, bad);
+      assert.match(r.stderr, /usage: route\.ts .*\[--budget TOKENS\]/, bad);
+      assert.equal(r.stdout, "");
+    }
+    assert.ok(!existsSync(join(scratch, ".claude")), "no route was logged");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("report.mjs writes a report for a legacy runs.jsonl row without subagents", () => {
   const repo = mkdtempSync(join(tmpdir(), "report-legacy-"));
   try {

@@ -1,6 +1,6 @@
 # Development
 
-For contributors to this repository: the npm scripts, the repository layout, the rules to follow when you change something, how to build the plugin, the paid benchmark and eval runs, and the diagrams. Users of the plugin need the [README](../README.md) instead. Terms: [glossary](glossary.md).
+For contributors to this repository: the npm scripts, the repository layout, the rules to follow when you change something, how to build the plugin, the release steps, the paid benchmark and eval runs, and the diagrams. Users of the plugin need the [README](../README.md) instead. Terms: [glossary](glossary.md).
 
 ## Set up and check
 
@@ -105,6 +105,20 @@ What the build does:
 - **The pane.** It builds `dashboard/` into the plugin (with its state owner renamed to `orchestration`) and alone as `dist/dashboard`.
 
 `npm run check-plugin` skips only `dist/plugin/evals/results`. A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
+
+## Release steps
+
+How releases 1.2.2 to 1.5.0 were made, and 1.5.1 on. `X.Y.Z` is the new version.
+
+1. Set `version` to `X.Y.Z` in `package.json` and in `package-lock.json`, which names it twice (at the top and under `packages[""]`).
+2. Add one entry `## [X.Y.Z] - <date>` to `CHANGELOG.md`, above the latest one: an opening paragraph that says what the release is and what a person upgrading has to know, then the sections the release needs, out of `### Added`, `### Changed`, `### Fixed` and `### Known and not fixed`. When a changed behaviour asks something of a person, its item says what to do. Add `[X.Y.Z]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/vX.Y.Z` as the first line of the link definitions at the end. Never edit a released entry.
+3. Run `npm run build-plugin`. The plugin manifests in `dist/` take the version from `package.json`.
+4. Run `npm run check`. It must pass.
+5. Commit on a branch, push it and open a pull request into `main`. Wait until CI passes.
+6. Squash-merge it with the title `Release X.Y.Z: <summary> (#N)`, where `N` is the pull request's number (only 1.4.3's title had no summary): `gh pr merge <N> --squash --subject "Release X.Y.Z: <summary> (#N)"`. Pass `--subject`: the repository's squash title setting takes the commit's subject when the pull request has one commit. To keep a private address out of the merge commit, switch on "Keep my email addresses private" in the GitHub account (Settings, Emails) before you merge. With it on, GitHub authors its web-based Git operations, such as a merge, with the account's noreply address, and that address cannot be changed. With it off, `--author-email` with the noreply address is refused with `Invalid email address` (seen on 2026-11-16).
+7. Tag the merge commit on `main` with a lightweight tag `vX.Y.Z` (`git tag vX.Y.Z <merge commit>`, no `-a`), and push that tag on its own (`git push origin vX.Y.Z`).
+8. Create a GitHub Release from the tag, titled `X.Y.Z: <summary>`, with the changelog entry, without its heading line, as its notes. In the notes, rewrite each relative link of the entry to `https://github.com/0xcvaliente/claude-code-orchestration/blob/vX.Y.Z/<path>`, since a relative link leads nowhere on a release page; the link in `CHANGELOG.md` stays relative (`gh release create vX.Y.Z --title "X.Y.Z: <summary>" --notes-file <file>`).
+9. On each machine that uses the plugin, run `npm run claude-update`; `-- --fix` updates a stale plugin install ([docs/claude-code-updates.md](claude-code-updates.md)).
 
 ## Benchmark and eval suite
 

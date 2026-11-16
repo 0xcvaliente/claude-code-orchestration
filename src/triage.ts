@@ -1,5 +1,6 @@
 import type { RunAgent } from "./agent.js";
 import { LIMITS, TRIAGE } from "./config.js";
+import { TOKENS_PER_USD } from "./tokens.js";
 
 /** reviewed: a plain session, then one independent reviewer (with retries on its feedback). */
 export type Mode = "plain" | "reviewed" | "orchestrate";
@@ -142,16 +143,22 @@ export function triagePrompt(task: string): string {
 /**
  * One cheap read-only call, then the policy. A failed triage falls back to the full pipeline, the pre-triage behaviour.
  * `repo` is the folder the task is about: any folder works, a git repository is not required, and triage never calls git.
+ * `budgetTokens` caps the call (src/route.ts --budget, from ORCH_BUDGET_TOKENS): it reaches query() as maxBudgetUsd at
+ * TOKENS_PER_USD, the launcher's conversion. A call stopped by the cap is a failed triage like any other.
  */
-export async function triage(opts: { run: RunAgent; repo: string; task: string }): Promise<Decision> {
-  const r = await opts.run({ role: "triager", cwd: opts.repo, schema: TRIAGE_SCHEMA, prompt: triagePrompt(opts.task) });
+export async function triage(opts: { run: RunAgent; repo: string; task: string; budgetTokens?: number }): Promise<Decision> {
+  const r = await opts.run({
+    role: "triager", cwd: opts.repo, schema: TRIAGE_SCHEMA, prompt: triagePrompt(opts.task),
+    ...(opts.budgetTokens !== undefined && { maxBudgetUsd: opts.budgetTokens / TOKENS_PER_USD }),
+  });
   const tokens = Number.isFinite(r.tokens) ? r.tokens : 0;
   const facts = r.ok ? parseFacts(r.structured) : undefined;
   if (!facts) {
+    const why = r.ok ? "invalid output" : r.subtype === "error_max_budget_usd" ? "the token cap stopped it, error_max_budget_usd" : r.subtype;
     return {
       mode: "orchestrate",
       source: "fallback",
-      reason: `triage failed (${r.ok ? "invalid output" : r.subtype}); using the full pipeline`,
+      reason: `triage failed (${why}); using the full pipeline`,
       tokens,
     };
   }

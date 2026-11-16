@@ -98,7 +98,7 @@ It is never taken from the reply. Unknown, or on any error, both fields are left
 
 A missing transcript leaves these fields out.
 
-**Headless runs.** They pass `--no-session-persistence` by default and keep no subagent transcripts, so the usage fields are empty there. `ORCH_SESSION_PERSISTENCE=1` makes `scripts/orchestrate.sh` drop that flag, for `npm run native`, every session `npm run auto` starts, and bench runs that use the script (the `reader-*` bench arms set it). Transcripts are then written under `~/.claude/projects/` (one per session) and the fields fill in ([live-checks-telemetry.md](data/live-checks-telemetry.md)).
+**Headless runs.** They pass `--no-session-persistence` by default and keep no subagent transcripts, so the usage fields are empty there. `ORCH_SESSION_PERSISTENCE=1` makes `scripts/orchestrate.sh` drop that flag, for `npm run native`, every session `npm run auto` starts, and bench runs that use the script (the `reader-*` bench arms set it). Transcripts are then written under `~/.claude/projects/` (one per session) and the fields fill in ([live-checks-telemetry.md](data/live-checks-telemetry.md)). The triage call of `npm run auto` and `npm run route` follows the same switch: without it, it writes no transcript ([live-checks-2026-11-16.md](data/live-checks-2026-11-16.md), Check 10).
 
 ## Hand-back capture
 
@@ -181,7 +181,7 @@ A crashed run is logged with its wall time and the turns seen.
 
 ## Limits
 
-- Headless runs keep no subagent transcripts by default, so telemetry's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set. The cost of setting it is one transcript per session under `~/.claude/projects/`.
+- Headless runs keep no subagent transcripts by default, so telemetry's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set. The cost of setting it is one transcript per session under `~/.claude/projects/`, the triage call's included.
 - A worker that stops at its turn limit fires no SubagentStop, so `max_turns_hit` cannot see it. The report lists agents that started and never stopped instead.
 - A quote-check refusal without a `tool_use_id` in its payload, that finishes before `handback-check.mjs` writes its capture, is not tied to that capture.
 - `telemetry.jsonl` keeps clipped payload strings, the worker's last message included, so it can hold up to 300 characters of a reply.

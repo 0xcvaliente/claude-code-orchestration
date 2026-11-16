@@ -232,3 +232,43 @@ test("triage: a sheet without code still routes, and code stays true for the cal
   assert.deepEqual([d.mode, d.source], ["plain", "triage"]);
   assert.equal(d.facts!.code, true);
 });
+
+// The token cap (ORCH_BUDGET_TOKENS through scripts/auto.sh, --budget on src/route.ts) reaches the triage call as dollars,
+// at the launcher's rate of 1,000,000 tokens per dollar (scripts/tokens.mjs).
+const recordingRun = (out: Partial<AgentResult> = {}) => {
+  const seen: AgentRequest[] = [];
+  const run: RunAgent = async (req) => {
+    seen.push(req);
+    return { ok: true, text: "", structured: { code: true, filesToTouch: 1, linesToChange: 5, independentSlices: 1, risky: false, reason: "r" }, tokens: 10, turns: 1, subtype: "success", durationMs: 1, model: "m", ...out };
+  };
+  return { run, seen };
+};
+
+test("triage: a token cap reaches the call as maxBudgetUsd at 1M tokens per dollar; no cap, no key", async () => {
+  const capped = recordingRun();
+  await triage({ run: capped.run, repo: "/r", task: "t", budgetTokens: 300_000 });
+  assert.equal(capped.seen[0]!.maxBudgetUsd, 0.3);
+  const free = recordingRun();
+  await triage({ run: free.run, repo: "/r", task: "t" });
+  assert.equal("maxBudgetUsd" in free.seen[0]!, false);
+});
+
+test("decideRoute: the triage cap passes through; a forced mode makes no call", async () => {
+  const a = recordingRun();
+  await decideRoute({ run: a.run, repo: "/r", task: "t", mode: "auto", triageBudgetTokens: 1_500_000 });
+  assert.equal(a.seen[0]!.maxBudgetUsd, 1.5);
+  const b = recordingRun();
+  await decideRoute({ run: b.run, repo: "/r", task: "t", mode: "auto" });
+  assert.equal("maxBudgetUsd" in b.seen[0]!, false, "src/cli.ts passes no triage cap");
+});
+
+test("triage: a call stopped by the token cap takes the failed-triage fallback, and the reason names the cap", async () => {
+  const { run } = recordingRun({ ok: false, subtype: "error_max_budget_usd", structured: undefined, text: "" });
+  const d = await triage({ run, repo: "/r", task: "t", budgetTokens: 300_000 });
+  assert.equal(d.mode, "orchestrate");
+  assert.equal(d.source, "fallback");
+  assert.equal(d.facts, undefined);
+  assert.equal(d.tokens, 10);
+  assert.match(d.reason, /token cap/);
+  assert.match(d.reason, /error_max_budget_usd/);
+});

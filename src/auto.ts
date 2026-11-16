@@ -22,9 +22,12 @@ export interface AutoResult {
   escalated: boolean;
 }
 
-/** Choose the route for one task. A forced mode, --plan-only and --resume skip triage and use no tokens. */
+/**
+ * Choose the route for one task. A forced mode, --plan-only and --resume skip triage and use no tokens.
+ * `triageBudgetTokens` caps the triage call (src/route.ts --budget); `auto` passes none, so the SDK CLI's triage is uncapped.
+ */
 export async function decideRoute(
-  opts: Pick<AutoOptions, "run" | "repo" | "task" | "mode" | "planOnly" | "resume">,
+  opts: Pick<AutoOptions, "run" | "repo" | "task" | "mode" | "planOnly" | "resume"> & { triageBudgetTokens?: number },
 ): Promise<Decision> {
   if (opts.planOnly || opts.resume) {
     // Both only mean something for the pipeline, so they imply that route.
@@ -32,7 +35,7 @@ export async function decideRoute(
   }
   const requested = opts.mode ?? "auto";
   if (requested !== "auto") return { mode: requested, source: "forced", reason: `--mode ${requested}`, tokens: 0 };
-  return triage({ run: opts.run, repo: opts.repo, task: opts.task });
+  return triage({ run: opts.run, repo: opts.repo, task: opts.task, ...(opts.triageBudgetTokens !== undefined && { budgetTokens: opts.triageBudgetTokens }) });
 }
 
 /** One line per decision, so thresholds in config.ts can be tuned against what actually happened. */

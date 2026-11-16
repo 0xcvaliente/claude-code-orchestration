@@ -70,3 +70,12 @@ test("withTransientRetry: gives up after the retry limit and does not retry task
   await withTransientRetry(broken.run, noWait)({ role: "writer", prompt: "p", cwd: "." });
   assert.equal(broken.calls(), 1);
 });
+
+test("a call stopped by its budget cap is never retried, whatever its error text says", async () => {
+  const capped = res({ ok: false, subtype: "error_max_budget_usd", text: "API Error: overloaded" });
+  assert.equal(isTransient(capped), false);
+  const s = scripted([capped]);
+  const r = await withTransientRetry(s.run, noWait)({ role: "triager", prompt: "p", cwd: "." });
+  assert.equal(s.calls(), 1);
+  assert.equal(r.subtype, "error_max_budget_usd");
+});
