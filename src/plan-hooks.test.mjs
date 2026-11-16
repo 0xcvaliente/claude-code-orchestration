@@ -438,3 +438,30 @@ test("plan check: records without a run id (older plan check) own files only whe
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// G-12 (audit 2026-11-16): PATH: light is for a task with a single slice; a planned run whose plan names several slices
+// waits for its plan review even before any of its slices launched. A one-slice plan keeps the light path.
+test("plan check: PATH: light does not skip the plan review of a planned run with several slices", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: b.py\nDEPENDS: none\nGOAL: b\nSLICE: c\nFILES: c.py\nDEPENDS: none\nGOAL: c", null);
+    for (let i = 0; i < 2; i++) {
+      const r = launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "light_path_multi"], r.stderr);
+      assert.match(r.stderr, /a, b, c/);
+    }
+    const third = launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+    assert.deepEqual([third.status, lastCheck(dir).reason], [0, "no_plan_review_gave_up"], "the two-block loop guard still releases");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const one = project({ reviewed: false });
+  try {
+    agents(one).plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a", null);
+    const r = launch(one, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+    assert.deepEqual([r.status, lastCheck(one).reason], [0, "light_path"], r.stderr);
+  } finally {
+    rmSync(one, { recursive: true, force: true });
+  }
+});

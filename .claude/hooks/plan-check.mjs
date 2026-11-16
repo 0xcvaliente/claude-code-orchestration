@@ -894,7 +894,9 @@ if (skillInfo) {
 
 const launched = scoped.filter((e) => e.decision === "allow" && e.slice);
 const others = [...new Set(launched.map((e) => e.slice).filter((id) => id !== slice))];
-const light = lightBrief && others.length === 0;
+// The light path is for a task with a single slice: none other launched, and no open plan naming several slices.
+const plannedMany = open?.kind === "planned" && Array.isArray(open.planned) && open.planned.length > 1;
+const light = lightBrief && others.length === 0 && !plannedMany;
 const legacyReviewed = k === 0 && records.stops.some((e) => e.slice === "plan" && String(e.role ?? e.agent_type ?? "").split(":").pop() === "reviewer");
 const reviewed =
   (open?.kind === "planned" && open.planReviewed) ||
@@ -903,7 +905,7 @@ const reviewed =
 if (!reviewed && !light) {
   if (blocks("no_plan_review", (e) => e.slice === slice) + blocks("light_path_multi", (e) => e.slice === slice) < MAX_BLOCKS) {
     if (lightBrief) {
-      decide("block", "light_path_multi", `Plan check: PATH: light is only for a task with a single slice, and this run already has ${others.join(", ")}. A plan with several slices needs a plan review first: send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, then launch the implementers.`);
+      decide("block", "light_path_multi", `Plan check: PATH: light is only for a task with a single slice, and this run ${others.length ? `already has ${others.join(", ")}` : `plans ${open?.planned.join(", ")}`}. A plan with several slices needs a plan review first: send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, then launch the implementers.`);
     }
     decide("block", "no_plan_review", "Plan check: no plan review has finished in this run. Send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, fix the plan, then launch the implementers. Only the light path (a single slice) skips this, with the line PATH: light in the brief.");
   }
