@@ -15,21 +15,32 @@ import { ensureStateDir, stateDirFor } from "../.claude/hooks/state.mjs";
 
 const runAgent = withTransientRetry(baseAgent);
 
-const { values } = parseArgs({
-  options: {
-    repo: { type: "string" },
-    task: { type: "string" },
-    mode: { type: "string", default: "auto" },
-    "project-state": { type: "boolean", default: false },
-  },
-});
-if (!values.repo || !values.task || !MODES.includes(values.mode as RequestedMode)) {
+function usage(problem?: string): never {
   console.error(
-    `usage: route.ts --repo <folder> --task "<task>" [--mode ${MODES.join("|")}] [--project-state]\n` +
-      "  --repo is the folder the task is about: any folder works, a git repository is not required",
+    (problem ? `${problem}\n` : "") +
+      `usage: route.ts --repo <folder> --task "<task>" [--mode ${MODES.join("|")}] [--project-state]\n` +
+      "  --repo is the folder the task is about: any folder works, a git repository is not required\n" +
+      "  a task that starts with a dash goes as --task=<task>",
   );
   process.exit(2);
 }
+
+// parseArgs throws on an unknown flag, a missing value or a value that starts with a dash: that is a usage error.
+let parsed;
+try {
+  parsed = parseArgs({
+    options: {
+      repo: { type: "string" },
+      task: { type: "string" },
+      mode: { type: "string", default: "auto" },
+      "project-state": { type: "boolean", default: false },
+    },
+  });
+} catch (err) {
+  usage(err instanceof Error ? err.message : String(err));
+}
+const { values } = parsed;
+if (!values.repo || !values.task || !MODES.includes(values.mode as RequestedMode)) usage();
 
 const repo = resolve(values.repo);
 const decision = await decideRoute({ run: runAgent, repo, task: values.task, mode: values.mode as RequestedMode });
