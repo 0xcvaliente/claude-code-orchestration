@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { launchRecord } from "../.claude/hooks/brief.mjs";
-import { indexLaunches, rowFor, sessionLaunches, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
+import { displayWidth, indexLaunches, rowFor, sessionLaunches, shortTokens } from "../.claude/hooks/subagent-statusline.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, ".claude", "hooks", "subagent-statusline.mjs");
@@ -74,6 +74,44 @@ test("rowFor: every emoji with emoji presentation counts two columns; a variatio
   // mixed text: whole characters only, the cut lands between them
   const mixed = rowFor(task("impl1", "implementer", { label: "ok 👩‍💻 ❤️ 漢字 done" }), LAUNCHES, 40);
   assert.equal(mixed, "implementer a risky · 41.2k · ok 👩‍💻 ❤️ …"); // 1+1+1+2+1+2+1 = 9 columns
+});
+
+test("rowFor: a row of Hangul Compatibility Jamo is cut to the width, never wider", () => {
+  // each of U+3131-318E is East Asian Wide: two columns; the rest of the row ("integrator · 41.2k · ", 21 columns)
+  // is one column a character
+  const jamo = Array.from({ length: 0x318e - 0x3131 + 1 }, (_, i) => String.fromCodePoint(0x3131 + i)).join("");
+  const row = rowFor(task("new", "orchestration:integrator", { label: jamo }), LAUNCHES, 30) ?? "";
+  assert.ok(row.startsWith("integrator · 41.2k · ㄱ"), row);
+  const width = [...row].reduce((w, c) => w + (c >= "ㄱ" && c <= "ㆎ" ? 2 : 1), 0);
+  assert.ok(width <= 30, `${width} columns: ${row}`);
+  assert.ok(row.endsWith("…"));
+});
+
+test("displayWidth: one code point's width matches Python's unicodedata for the Basic and Supplementary Multilingual Planes", (t) => {
+  // Python's reference: 0 for marks and Cc/Cf, 2 for East Asian Wide or Fullwidth, else 1; "x" for unassigned.
+  const py = [
+    "import sys, unicodedata as u",
+    "def w(c):",
+    "    ch = chr(c); cat = u.category(ch)",
+    "    if cat == 'Cn': return 'x'",
+    "    if cat[0] == 'M' or cat in ('Cc', 'Cf'): return '0'",
+    "    return '2' if u.east_asian_width(ch) in ('W', 'F') else '1'",
+    "sys.stdout.write(u.unidata_version + '\\n' + ''.join(w(c) for c in range(0x20000)))",
+  ].join("\n");
+  const r = spawnSync("python3", ["-I", "-c", py], { encoding: "utf8", maxBuffer: 1 << 22 });
+  if (r.error || r.status !== 0) return t.skip("python3 not available");
+  const [version, want = ""] = r.stdout.split("\n");
+  assert.equal(want.length, 0x20000);
+  const wrong = [];
+  for (let cp = 0; cp < 0x20000; cp++) {
+    const ch = String.fromCodePoint(cp);
+    // left out: unassigned in either version, and the emoji presentation rule (two columns whatever the width)
+    if (want[cp] === "x" || /\p{Cn}/u.test(ch)) continue;
+    if (want[cp] === "1" && /\p{Emoji_Presentation}/u.test(ch)) continue;
+    const got = String(displayWidth(ch));
+    if (got !== want[cp]) wrong.push(`U+${cp.toString(16).toUpperCase()} ${got}/${want[cp]}`);
+  }
+  assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} code points differ from Unicode ${version}`);
 });
 
 test("rowFor: other agents keep Claude Code's own row", () => {

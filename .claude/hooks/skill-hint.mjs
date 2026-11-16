@@ -254,23 +254,14 @@ export function skillHints(args) {
     let goal = [];
     if (!exts.length) {
       const words = new Set(tokens(text).filter((t) => !STOP.has(t)));
-      // How many installed skills use each word in their name or description.
-      /** @type {Map<string, number>} */
-      const df = new Map();
-      for (const s of catalog) for (const t of new Set([...tokens(bareName(s.name)), ...tokens(s.description)])) df.set(t, (df.get(t) ?? 0) + 1);
       const scored = pool
         .map((s) => {
           const nameToks = [...new Set(tokens(bareName(s.name)))].filter((t) => !STOP.has(t) && !GENERIC.has(t));
-          const hitToks = nameToks.filter((t) => words.has(t));
-          const nameHits = hitToks.length;
-          const distinctive = hitToks.some((t) => (df.get(t) ?? 0) <= 2);
+          const nameHits = nameToks.filter((t) => words.has(t)).length;
           const descHits = [...new Set(tokens(s.description))].filter((t) => t.length >= 4 && !STOP.has(t) && !nameToks.includes(t) && words.has(t)).length;
-          return { s, nameHits, distinctive, descHits, score: 3 * nameHits + descHits };
+          return { s, nameHits, descHits, score: 3 * nameHits + descHits };
         })
-        // Two name words, or one distinctive name word (one that at most two installed skills use in their name or
-        // description): one shared word ("rules", "built", "context", "documents", "payload") matched unrelated
-        // skills in this project's own runs (W-10), while "supabase" or "vercel" name the skill.
-        .filter((x) => (x.nameHits >= 2 || x.distinctive) && x.descHits >= 2 && x.score >= 5)
+        .filter((x) => x.nameHits >= 1 && x.descHits >= 2 && x.score >= 5)
         .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
       goal = scored.map((x) => x.s);
     }
