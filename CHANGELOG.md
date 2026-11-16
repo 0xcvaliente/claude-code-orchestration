@@ -2,14 +2,14 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.5] - 2026-11-16
 
-This batch closes holes in the Bash judge, fixes the SDK pipeline's empty-slice check, budget cap, retry test and flag parsing, fixes five small hook bugs and the dashboard's VALIDATE mirror, and rewrites the README and its diagrams for 1.4.4. Upgrading: no plugin setting changed. The judge now denies some forms that legitimate work may use (below). A skill draft sealed earlier that contains a file named `__proto__` must be sealed again. The changed hooks take effect in a new session.
+1.4.5 closes holes in the Bash judge, fixes the SDK pipeline's empty-slice check, budget cap, retry test and flag parsing, fixes five small hook bugs and the dashboard's VALIDATE mirror, and rewrites the README and corrects its diagrams. Upgrading: no plugin setting changed. The judge now denies some forms that legitimate work may use (below). A skill draft sealed earlier that contains a file named `__proto__` must be sealed again. The changed hooks take effect in a new session.
 
 ### Changed
 
 - **The judge refuses legitimate uses that 1.4.4 passed** (`src/judge.ts`, `.claude/hooks/judge-core.mjs`). Any NUL escape inside `$'...'` is refused, such as `read -d $'\0'`: use `read -d ''`, which also reads up to a NUL. A git command line that names a `trailer.*.cmd`, `trailer.*.command`, `difftool.*.path`, `mergetool.*.path` or `submodule.*.update` key is refused, whatever its value and whether it sets or reads the key (`git -c`, `--config-env`, `git config`): edit the config file itself, or leave the key at its default. Under `git bisect run` and `git submodule foreach`, a command whose first word is a shell (`sh`, `bash`, `rbash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `fish`, `csh`, `tcsh` or `busybox` (`SHELLS`)) is refused whatever follows, a script file (`git bisect run sh test.sh`) as much as `-c`: the judge reads only that first word as a script, and a bare shell name reads its commands from stdin. Run the program directly (`git bisect run ./check.sh`, `git bisect run make test`), or for `submodule foreach` give the whole command as one quoted argument (`git submodule foreach 'sh test.sh'`). `git rebase -x '<command>'` is read in full and not affected.
-- **README and diagrams** (`README.md`, `docs/diagrams/`). The README describes current behaviour for 1.4.4 instead of sections layered by version. The six flow diagrams were corrected through their sources and rebuilt; the committed `pipeline` SVGs had drifted from their scene.
+- **README and diagrams** (`README.md`, `docs/diagrams/`). The README describes current behaviour instead of sections layered by version. The six flow diagrams were corrected through their sources and rebuilt; the committed `pipeline` SVGs had drifted from their scene.
 
 ### Fixed
 
@@ -302,6 +302,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.4.5]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.5
 [1.4.4]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.4
 [1.4.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.3
 [1.4.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.2
