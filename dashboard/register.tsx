@@ -762,7 +762,7 @@ export const countedOf = (reply: Reply): { status: 'pass' | 'fail' | null; doubt
   const status = doubt ? 'pass' : reply.status
   return { status, doubt, keys: status === 'fail' ? [...new Set(high.map(g => gapText(g.text)))] : [] }
 }
-type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean; stalled: boolean }
+type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean; stalled: boolean; latest: 'pass' | 'fail' | null; built: boolean }
 const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number]): SliceRun => {
   const mine = list.filter(a => a.slice === id)
   const impls = mine.filter(a => a.role === 'implementer')
@@ -821,8 +821,22 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
     opusPass,
     checks: [...new Set([...(planned?.checks ?? []), ...mine.flatMap(a => a.checks ?? [])])],
     answers: latest?.answers ?? {},
+    latest: latest?.status === 'pass' || latest?.status === 'fail' ? latest.status : null,
+    built: impls.length > 0,
   }
 }
+// G-1 (brief.mjs foldRuns): a PLAN REVIEW without REPLAN that closes an open run hands the new run each slice it names again that is not final and
+// whose latest review after its latest implementer did not fail (its agents move: `carry`), and each slice that was final and passed (`done`: final in
+// the new run until an implementer of it is launched there). The atom keeps the Run shape with these two optional lists.
+type RunMarks = Run & { carry?: string[]; done?: string[] }
+// The agents of a run: launched in it, plus those of the slices it carried over from the run its plan closed.
+const inRunOf = (list: Agent[], run: Run) => {
+  const carry = (run as RunMarks).carry ?? []
+  return list.filter(a => a.startedAt >= run.at || (!!a.slice && carry.includes(a.slice)))
+}
+// A slice the run took over as final: final until an implementer of it is launched in this run.
+const doneIn = (inRun: Agent[], run: Run, id: string) =>
+  ((run as RunMarks).done ?? []).includes(id) && !inRun.some(a => a.role === 'implementer' && a.slice === id && a.startedAt >= run.at)
 // Stale: agents ran, none runs, the last one ended over ten minutes ago (the same escape as the main turn's below).
 const staleOf = (list: Agent[], t: number) =>
   list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS
@@ -831,9 +845,9 @@ const staleOf = (list: Agent[], t: number) =>
 const runOpen = (list: Agent[], plan: Plan | null, run: Run | null, t: number) => {
   if (!run || staleOf(list, t)) return false
   if (list.some(a => a.status === 'running')) return true
-  const inRun = list.filter(a => a.startedAt >= run.at)
+  const inRun = inRunOf(list, run)
   const ids = run.kind === 'light' ? [run.slice as string] : [...new Set([...(plan?.slices ?? []).map(s => s.id), ...inRun.flatMap(a => (a.slice ? [a.slice] : []))])]
-  return !ids.length || ids.some(id => !sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
+  return !ids.length || ids.some(id => !doneIn(inRun, run, id) && !sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
 }
 
 // A new run drops the old diagram: agents, log, main, plan and run. With `keepVerdict` (the spawn path) the work line stays while the main turn works on
@@ -1016,9 +1030,27 @@ export const register: Register = on => {
       const newPlan = !!parsed && parsed.replan === null && parsed.slices.length > 0 && before.some(a => a.slice)
       const idle = !workOpen(await read($, workAtom), before, t) && !before.some(a => a.status === 'running')
       const reset = before.length > 0 && (newPlan || (idle && (staleOf(before, t) || (!!run0 && !open0))))
+      // G-1: what a new plan that closes the open run hands on (RunMarks above), worked out before the reset drops the agents.
+      const carry: string[] = []
+      const done: string[] = []
+      if (newPlan && open0 && run0) {
+        const old = inRunOf(before, run0)
+        const plan0 = await read($, planAtom)
+        for (const id of new Set(planOf(e.prompt).map(p => p.id))) {
+          if (!old.some(a => a.slice === id) || doneIn(old, run0, id)) {
+            if (doneIn(old, run0, id)) done.push(id)
+            continue
+          }
+          const sr = sliceRunOf(old, id, plan0?.slices.find(s => s.id === id))
+          if (sr.final && sr.latest === 'pass') done.push(id)
+          else if (!sr.final && sr.built && sr.latest !== 'fail') carry.push(id)
+        }
+      }
       if (reset) await newRun($, t, true)
+      if (carry.length) await update($, agents, () => before.filter(a => !!a.slice && carry.includes(a.slice)))
       // The run the gates would see; the scripted workflow's briefs are not part of it.
-      if (parsed && (parsed.replan === null || reset || !open0)) await update($, runAtom, () => ({ kind: 'planned', at: t }) as Run)
+      if (parsed && (parsed.replan === null || reset || !open0))
+        await update($, runAtom, () => ({ kind: 'planned', at: t, ...(carry.length ? { carry } : {}), ...(done.length ? { done } : {}) }) as RunMarks)
       else if (!plan && role === 'implementer' && header.path === 'light' && !header.workflow && slice && (reset || !open0)) await update($, runAtom, () => ({ kind: 'light', at: t, slice }) as Run)
       // a spawn whose id already has a record (a resume that fires agent.spawn again) is a new record, so the earlier run stays as history
       const grown = await update($, agents, list => [...list, agent].slice(-80))

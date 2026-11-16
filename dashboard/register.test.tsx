@@ -1779,6 +1779,31 @@ test('run: REPLAN extends the open run and marks the progress bar; the agents st
   expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1 /.test(x))).toBe(true) // b1's card is still there
 })
 
+test('run: a second plain plan carries an unreviewed slice with its agents and keeps a final slice final (brief.mjs G-1)', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  const two = 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two'
+  await spawnWith($, 'p1', two, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS) // s1 is final in the first run
+  await spawnWith($, 'b2', brief('s2'), IMPL) // s2 is in flight when the second plan comes
+  await spawnWith($, 'p2', two, REVQ)
+  let t = await texts($, 100, 200)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s2 /.test(x))).toBe(true) // b2's card moved into the new run
+  await finish($, 'p2', PASS)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s2', REVQ)
+  await finish($, 'r2', PASS)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'the next job' }) // s2 passed and s1 still counts as final: the run is closed
+  t = await texts($)
+  expect(t.some(x => /s1|s2/.test(x))).toBe(false)
+  expect(t.includes('▸ the next job')).toBe(true)
+})
+
 test('waiting: the main turn ended with agents still running reads waiting for N agents, then signs off', async ($, on) => {
   await boot($, on)
   const s = $ as any

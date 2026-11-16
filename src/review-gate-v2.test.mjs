@@ -515,3 +515,61 @@ test("Stop gate: an unfinished implementer next to another open problem is named
   assert.match(JSON.parse(gaveUp.stdout).systemMessage, /gave up after 2 blocks \(implementer_unfinished, last_reviewer_failed\)/);
   assert.deepEqual(s.last().unfinished, [orphan]);
 });
+
+// ---- G-1 (audit 2026-11-16): a second plain PLAN REVIEW while slices are in flight. The run it closes hands an
+// unreviewed attempt of a slice the new plan names again to the new run, and a slice that was final and passed there
+// counts as final in the new run until it is launched again. Spec: docs/brief-grammar.md, "Run model". ----
+test("G-1 fold: an unreviewed attempt of a re-planned slice moves into the new run with its launches", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const { runs } = foldRuns(R(planLaunch(0), ...implAttempt(1, "a"), planLaunch(2), ...review(3, "a", "STATUS: pass")), { now: T0 + 10 * 60000, env });
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0]?.closed, true);
+  assert.equal(runs[0]?.slices.a, undefined, "the attempt left the closed run");
+  const a = runs[1]?.slices.a;
+  assert.deepEqual([a?.launches, a?.attempts, a?.reviews.length, a?.passed, a?.final], [1, 1, 1, true, true]);
+});
+
+test("G-1 fold: a re-planned slice whose attempt was reviewed and failed starts clean in the new run", () => {
+  const { runs } = foldRuns(R(planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), planLaunch(3)), { now: T0 + 10 * 60000, env: { ORCH_ESCALATION: "off" } });
+  assert.deepEqual([runs[0]?.slices.a?.attempts, runs[0]?.slices.a?.countedFails], [1, 1], "the failed attempt stays in the closed run");
+  assert.deepEqual([runs[1]?.slices.a?.attempts, runs[1]?.slices.a?.reviews.length, runs[1]?.slices.a?.final], [0, 0, false]);
+});
+
+test("G-1 fold: a slice final and passed in the closed run counts as final in the new run until it is launched again", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const now = T0 + 20 * 60000;
+  const base = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3), ...implAttempt(4, "b"), ...review(5, "b", "STATUS: pass")];
+  let { runs, open } = foldRuns(R(...base), { now, env });
+  assert.equal(runs[0]?.closed, true);
+  assert.deepEqual([runs[1]?.slices.a?.final, runs[1]?.slices.a?.attempts], [true, 0]);
+  assert.deepEqual([runs[1]?.closed, open], [true, null], "the new run closes once its other slices are final");
+  // Launched again in the new run, the slice is open work of that run.
+  const head = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3)];
+  ({ runs, open } = foldRuns(R(...head, ...implAttempt(4, "a"), ...implAttempt(5, "b"), ...review(6, "b", "STATUS: pass")), { now, env }));
+  assert.equal(open?.id, 2);
+  assert.deepEqual([runs[1]?.closed, runs[1]?.slices.a?.final, runs[1]?.slices.a?.attempts], [false, false, 1]);
+});
+
+test("G-1 Stop gate: a slice built before a second PLAN REVIEW and passed after it is allowed", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.impl("a");
+  s.plan();
+  s.review("a", "STATUS: pass");
+  const r = s.gate();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("G-1 Stop gate: a slice built before a second PLAN REVIEW and failed after it blocks, though a later slice passed", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.impl("a");
+  s.plan();
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  s.impl("b");
+  s.review("b", "STATUS: pass");
+  const r = s.gate();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["last_reviewer_failed", "a"]);
+});

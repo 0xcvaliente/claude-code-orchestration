@@ -689,8 +689,11 @@ export function stopRecord(ctx) {
  *   launches: number, attempts: number, lastImplAt: number | null, reviews: Review[],
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
  *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
- *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[]
+ *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[],
+ *   carriedFinal: boolean
  * }} SliceState
+ * carriedFinal: the slice was final and passed in the run a plain PLAN REVIEW closed, and this plan names it again: it
+ * counts as final (and passed) here until an implementer of it is launched in this run.
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
@@ -721,7 +724,7 @@ const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string"
 const newSlice = (slice, planned) => ({
   slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
-  countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [],
+  countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [], carriedFinal: false,
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
@@ -761,16 +764,17 @@ function settle(s, env) {
   const latest = currentReviews(s).at(-1);
   const counted = latest ? countedStatus(latest) : null;
   s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
-  s.passed = counted === "pass";
-  s.gaveUp = counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
-  s.final = s.gaveUp || (s.passed && (hasOpusPass(s) || doubtSignals(s, env).length === 0));
+  s.passed = s.carriedFinal || counted === "pass";
+  s.gaveUp = !s.carriedFinal && counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
+  s.final = s.carriedFinal || s.gaveUp || (s.passed && (hasOpusPass(s) || doubtSignals(s, env).length === 0));
 }
 
 /**
  * Folds one session's log records into runs (docs/brief-grammar.md, "Run model"). Records of other sessions are
  * dropped when `sessionId` is given. A gate record counts when its agent_id joins a launch and its session_id (when it
  * has one) is that launch's. A run opens at a PLAN REVIEW launch without REPLAN (closing any open run) or at a PATH: light implementer
- * launch with no run open; a PLAN REVIEW with REPLAN extends the open run (or opens one). Launches outside any run are
+ * launch with no run open; a PLAN REVIEW with REPLAN extends the open run (or opens one). A plain PLAN REVIEW that
+ * closes an open run carries the slices its plan names again (spec, "Carried slices"). Launches outside any run are
  * not tracked. `now` decides staleness at the end; a launch or an agent start decides it on the way. With `starts`
  * (telemetry SubagentStart/SubagentStop records), an agent counts as running from its SubagentStart to its next
  * SubagentStop or journal stop with the same agent_id; a run with a running agent is never stale, and each start or
@@ -879,8 +883,11 @@ export function foldRuns(records, opts = {}) {
       let open = cur && !cur.closed && !cur.stale ? cur : null;
       if (role === "reviewer" && (r.isPlanReview === true || r.slice === "plan")) {
         const replan = typeof r.replan === "number" ? r.replan : null;
+        /** @type {Run | null} the open run this plain PLAN REVIEW closes */
+        let closing = null;
         if (replan === null || !open) {
           if (open) open.closed = true;
+          closing = open;
           open = cur = openRun("planned", ts);
         }
         open.kind = "planned";
@@ -891,6 +898,22 @@ export function foldRuns(records, opts = {}) {
         for (const p of arr(plan.slices)) {
           if (typeof p.slice !== "string" || !p.slice) continue;
           if (!open.planned.includes(p.slice)) open.planned.push(p.slice);
+          // A slice of the closed run that this plan names again (docs/brief-grammar.md, "Run model"): an attempt with
+          // no failed review after it moves here with its launches and reviews, so its later stops and reviews meet it;
+          // one that was final and passed counts as final here until it is launched again; one whose latest review
+          // failed (or that failed for good) starts clean.
+          const old = closing && !Object.hasOwn(open.slices, p.slice) ? closing.slices[p.slice] : undefined;
+          if (old && old.final && old.passed) {
+            const kept = (open.slices[p.slice] = newSlice(p.slice, true));
+            kept.carriedFinal = true;
+            settle(kept, env);
+          } else if (old && !old.final && old.lastImplAt !== null) {
+            const latest = currentReviews(old).at(-1);
+            if (!latest || countedStatus(latest) !== "fail") {
+              open.slices[p.slice] = old;
+              delete closing?.slices[p.slice];
+            }
+          }
           const s = (open.slices[p.slice] ??= newSlice(p.slice, true));
           s.planned = true;
           s.risky = s.risky || p.risky === true;
@@ -905,6 +928,7 @@ export function foldRuns(records, opts = {}) {
         if (!open && r.path === "light") open = cur = openRun("light", ts);
         if (!open) continue;
         const s = (open.slices[slice] ??= newSlice(slice, false));
+        s.carriedFinal = false;
         s.launches += 1;
         s.lastImplAt = ts;
         s.risky = s.risky || r.risky === true;
