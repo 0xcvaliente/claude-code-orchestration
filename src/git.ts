@@ -24,11 +24,28 @@ export async function removeWorktree(repo: string, dir: string): Promise<void> {
 export const deleteBranch = (repo: string, branch: string) =>
   git(repo, "branch", "-D", branch).then(() => undefined, () => undefined);
 
-/** Commit everything in the worktree. Returns false when the worker changed nothing. */
+/** `git commit` itself failed, a commit hook most often; `output` is what git and the hook printed. */
+export class CommitError extends Error {
+  constructor(readonly output: string, options?: { cause?: unknown }) {
+    super(`git commit failed: ${output}`, options);
+    this.name = "CommitError";
+  }
+}
+
+/**
+ * Commit everything in the worktree, with the repository's hooks (never skipped). Returns false when the worker
+ * changed nothing. Throws CommitError when the commit itself fails; other git errors are thrown as they are.
+ */
 export async function commitAll(dir: string, message: string): Promise<boolean> {
   await git(dir, "add", "-A");
   if ((await git(dir, "status", "--porcelain")) === "") return false;
-  await git(dir, ...IDENTITY, "commit", "-m", message);
+  try {
+    await git(dir, ...IDENTITY, "commit", "-m", message);
+  } catch (err) {
+    const e = err as { stdout?: unknown; stderr?: unknown; message?: unknown };
+    const output = `${String(e.stdout ?? "")}${String(e.stderr ?? "")}`.trim() || String(e.message ?? err);
+    throw new CommitError(output, { cause: err });
+  }
   return true;
 }
 

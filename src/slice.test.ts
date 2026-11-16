@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -166,6 +166,87 @@ test("a later attempt that adds no new commit still counts the earlier attempt's
 
   assert.equal(r.status, "passed");
   assert.equal(r.attempts, 2);
+});
+
+/**
+ * A pre-commit hook that prints a lint finding and exits 1. With `passAfter`, it fails that many times, then passes.
+ * Set with an absolute core.hooksPath, so the slice's worktrees run it too.
+ */
+async function failingHook(repo: string, passAfter?: number) {
+  const hooks = mkdtempSync(join(tmpdir(), "slice-hooks-"));
+  const count = join(hooks, "count");
+  const pass = passAfter === undefined ? "" : `n=$(cat "${count}" 2>/dev/null || echo 0); echo $((n+1)) > "${count}"; [ "$n" -ge ${passAfter} ] && exit 0\n`;
+  writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\n${pass}echo "lint: 1 problem in alpha.txt"\nexit 1\n`);
+  chmodSync(join(hooks, "pre-commit"), 0o755);
+  await git(repo, "config", "core.hooksPath", hooks);
+}
+
+test("a failing commit hook is the next attempt's feedback; used-up retries fail the slice with its message", async () => {
+  const { run, calls } = fake();
+  const { ctx, logs } = await ctxFor(run, { maxRetries: 2 });
+  await failingHook(ctx.repo);
+  const r = await runSlice(ctx, slice);
+
+  assert.equal(r.status, "failed");
+  assert.equal(r.attempts, 3, "every attempt is used and counted");
+  assert.equal(r.issues.length, 1);
+  assert.match(r.issues[0]!, /lint: 1 problem in alpha\.txt/);
+  const writers = calls.filter((c) => c.role === "writer");
+  assert.equal(writers.length, 3);
+  assert.ok(!writers[0]!.prompt.includes("lint: 1 problem"));
+  assert.ok(writers[1]!.prompt.includes("A previous attempt is already in this worktree but was rejected"));
+  assert.ok(writers[1]!.prompt.includes("lint: 1 problem in alpha.txt"), "the writer sees the hook's message");
+  assert.equal(calls.filter((c) => c.role === "verifier").length, 0, "no verifier runs on an uncommitted attempt");
+  assert.equal(logs.at(-1), "alpha: failed");
+});
+
+test("a commit hook that fails once, then passes: the retry commits and the slice passes", async () => {
+  const { run, calls } = fake();
+  const { ctx } = await ctxFor(run, { maxRetries: 2 });
+  await failingHook(ctx.repo, 1);
+  const r = await runSlice(ctx, slice);
+
+  assert.equal(r.status, "passed");
+  assert.equal(r.attempts, 2);
+  assert.deepEqual(r.issues, []);
+  assert.deepEqual(calls.map((c) => c.role), ["writer", "writer", "verifier"]);
+  assert.ok((await git(ctx.repo, "ls-tree", "--name-only", r.branch)).split("\n").includes("alpha.txt"));
+});
+
+test("a long commit hook output is cut to its end in the feedback", async () => {
+  const { run } = fake();
+  const { ctx } = await ctxFor(run, { maxRetries: 0 });
+  const hooks = mkdtempSync(join(tmpdir(), "slice-hooks-"));
+  writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\nawk 'BEGIN { for (i = 0; i < 2000; i++) print "noise line " i }'\necho "LAST LINE"\nexit 1\n`);
+  chmodSync(join(hooks, "pre-commit"), 0o755);
+  await git(ctx.repo, "config", "core.hooksPath", hooks);
+  const r = await runSlice(ctx, slice);
+
+  assert.equal(r.status, "failed");
+  assert.equal(r.attempts, 1);
+  assert.ok(r.issues[0]!.length < 4000, `feedback is cut (${r.issues[0]!.length} chars)`);
+  assert.match(r.issues[0]!, /LAST LINE/);
+  assert.ok(!r.issues[0]!.includes("noise line 0\n"), "the start of a long output is dropped");
+});
+
+test("an error outside the commit step still throws, carrying the attempts made", async () => {
+  let writers = 0;
+  const run: RunAgent = async (req) => {
+    if (req.role === "writer") {
+      writers++;
+      writeFileSync(join(req.cwd, "alpha.txt"), `alpha ${writers}\n`);
+      return result();
+    }
+    if (writers === 2) throw new Error("verifier crashed");
+    return result({ structured: { pass: false, issues: ["again"], summary: "" } });
+  };
+  const { ctx } = await ctxFor(run, { maxRetries: 3 });
+  await assert.rejects(runSlice(ctx, slice), (err: unknown) => {
+    assert.ok(err instanceof Error);
+    assert.match(err.message, /verifier crashed/);
+    assert.equal((err as { attempts?: number }).attempts, 2);
+    return true;
+  });
 });
 
 test("a spent token budget stops the slice before the next attempt", async () => {
