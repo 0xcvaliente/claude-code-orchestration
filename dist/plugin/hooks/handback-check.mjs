@@ -19,11 +19,12 @@
 // It also captures every hand-back's parsed fields (handbackFields) in handbacks.jsonl (state.mjs recordHandback), for
 // any agent type with an agent id and even with ORCH_HANDBACK_CHECK=off: at SubagentStop journal.mjs and telemetry.mjs
 // read the report from that capture, since the stop payload of a hand-back carries no last_assistant_message and the
-// subagent transcript does not hold the report just handed back yet.
+// subagent transcript does not hold the report just handed back yet. A hand-back this hook refuses is also marked in
+// handback-refusals.jsonl (state.mjs recordHandbackRefusal), so the stop never takes the undelivered capture.
 import { readFileSync } from "node:fs";
 import { parseReply, stopRecord } from "./brief.mjs";
 import { appendJsonl, readJsonl } from "./run.mjs";
-import { duplicate, ensureStateDir, recordHandback, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, recordHandback, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"]);
 
@@ -86,9 +87,10 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   // The capture for the stop records (state.mjs, HANDBACK_LOG): every agent with an id that hands a report back, and
   // whether or not the check below is switched off. Each attempt is captured, so after a report is sent back the
   // corrected one is the latest. Parsed fields only.
+  const toolUseId = typeof input.tool_use_id === "string" && input.tool_use_id ? input.tool_use_id : null;
   if (input.tool_name === "SubagentHandback" && typeof message === "string" && agentId) {
     try {
-      recordHandback({ session_id: sessionId, agent_id: agentId, agent_type: role, ...handbackFields(message) });
+      recordHandback({ session_id: sessionId, agent_id: agentId, agent_type: role, ...(toolUseId ? { tool_use_id: toolUseId } : {}), ...handbackFields(message) });
     } catch {
       // the capture must never hold a report back
     }
@@ -125,6 +127,8 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
     // no record, so no denial
   }
   if (!deny || !recorded) process.exit(0);
+  // The capture above is now a report that is not delivered: mark it, so the stop never takes it (G-14).
+  recordHandbackRefusal({ session_id: sessionId, agent_id: agentId, tool_use_id: toolUseId, gate: "handback" });
   process.stderr.write(`${problem.message}\n`);
   process.exit(2);
 }
