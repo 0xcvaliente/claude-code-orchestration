@@ -33,12 +33,16 @@ Run implementer and reviewer Bash in Claude Code's sandbox with a network allowl
 **From a checkout** (`npm install` first):
 
 ```bash
-claude --agent orchestrator                      # interactive native orchestrator
+claude                                           # in this repo: starts as the orchestrator (its .claude/settings.json sets "agent")
+npm run plain                                    # in this repo: a plain session, no agent
+claude --agent orchestrator                      # interactive native orchestrator, in any folder
 npm run orchestrate                              # the same, with the dashboard pane loaded
 npm run auto -- "task" /path/to/folder           # headless: triage, then a plain session, a reviewed one or the orchestrator
 npm run native -- "task" /path/to/folder         # headless: always the orchestrator
 npm run route -- --repo /path/to/folder --task "..."   # triage only, prints the decision as JSON
 ```
+
+The default agent applies to this repo only: the plugin does not ship the `agent` setting. What must stay plain clears it itself: `ORCH_AGENT=none` in `scripts/orchestrate.sh`, the SDK workers and `npm run plain` ([live checks](docs/data/live-checks-2026-11-16.md)).
 
 The gated workflow is started by you, never by the model: `/orchestration:orchestrate {"task":"...","code":true,"baseRefHead":true}` (project copy: `/orchestrate`). See [The gated workflow](#the-gated-workflow).
 
@@ -506,6 +510,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
 | `npm run auto`, `npm run native`, `npm run route` | Headless native run with or without triage; triage only |
 | `npm run orchestrate`, `npm run test-dashboard` | Interactive orchestrator with the dashboard loaded; the dashboard's own test (needs the `claude` CLI) |
+| `npm run plain` | A plain interactive session in this repo (`claude --settings '{"agent":""}'`), since a session opened here otherwise starts as the orchestrator |
 | `npm run report` | HTML timeline and per-role tables from the state dir |
 | `npm run install-statusline` | Copy the status line script and print the setting |
 | `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](docs/claude-code-updates.md)) |

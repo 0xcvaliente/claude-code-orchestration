@@ -6,7 +6,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatus } from "./brief.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, handbackFor, stateDir } from "./state.mjs";
 
 // Imported by turn-budget.mjs for usageFromTranscript (its turn count) and maxTurnsOf: the hook code below runs only
 // when this file is the entry script (argv[1], which keeps a symlinked plugin path working).
@@ -14,6 +14,8 @@ import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 // Status comes only from the worker's final report, never from the whole payload (it may echo the brief).
 // brief.mjs parseStatus: any STATUS: fail line fails, else the first STATUS line decides; blockquoted lines and the
 // format template "STATUS: pass or fail" do not count. No status line is undefined (the field is left out).
+// In auto mode the report is handed back through SubagentHandback, which the stop payload does not carry and the
+// transcript does not hold yet: the status then comes from handback-check.mjs's capture (state.mjs handbackFor).
 /** @param {unknown} text */
 const statusOf = (text) => parseStatus(text) ?? undefined;
 
@@ -174,10 +176,24 @@ if (process.argv[1]?.endsWith("telemetry.mjs")) {
 
   let status;
   if (payload.hook_event_name === "SubagentStop") {
-    // A reviewer may write a preamble and then call SubagentHandback, so fall back to the transcript whenever the last message has no status.
-    const last = payload.last_assistant_message;
-    status = typeof last === "string" ? statusOf(last) : undefined;
-    if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
+    // A report handed back through SubagentHandback is in neither the stop payload nor (yet) the transcript: the
+    // capture handback-check.mjs wrote at the hand-back wins, when it is newer than this agent's previous stop here.
+    /** @type {Record<string, any> | null} */
+    let handback = null;
+    try {
+      const sid = typeof payload.session_id === "string" ? payload.session_id : "";
+      const aid = typeof payload.agent_id === "string" ? payload.agent_id : null;
+      handback = handbackFor(sid, aid, ["telemetry.jsonl"], (r) => r.hook_event_name === "SubagentStop");
+    } catch {
+      // no capture: today's sources
+    }
+    if (handback) status = handback.status === "pass" || handback.status === "fail" ? handback.status : undefined;
+    else {
+      // A reviewer may write a preamble and then call SubagentHandback, so fall back to the transcript whenever the last message has no status.
+      const last = payload.last_assistant_message;
+      status = typeof last === "string" ? statusOf(last) : undefined;
+      if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
+    }
   }
 
   /** @param {unknown} v */

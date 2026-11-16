@@ -6,6 +6,8 @@ The same roles as the SDK pipeline, run inside a Claude Code session with no SDK
 claude --agent orchestrator
 ```
 
+**Default agent of this repo.** This repo's `.claude/settings.json` sets `"agent": "orchestrator"`, so a plain `claude` started here runs as the orchestrator. For a plain session run `npm run plain` (`claude --settings '{"agent":""}'`: an empty `agent` in flag settings, which rank above the project's, gives the default agent back). Headless runs are unaffected: `orchestrate.sh` passes `--agent` for a named agent and `--settings '{"agent":""}'` for `ORCH_AGENT=none`, and SDK workers set `settings: { agent: "" }`. A copy of this `.claude/` carries the setting into another folder; the plugin never ships it. Probes on Claude Code 2.1.325: [live checks, 2026-11-16](data/live-checks-2026-11-16.md).
+
 ## Agents
 
 | Agent | Model / effort | Tools |
