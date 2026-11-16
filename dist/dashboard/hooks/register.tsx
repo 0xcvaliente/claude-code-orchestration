@@ -750,9 +750,10 @@ const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
 const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed review is final
 // Review counting (brief.mjs countReview): a fail whose gaps are all below the cutoff, with no failed answer, counts as a pass carrying a doubt
 // (`doubt`); a counted fail keeps the keys of its gaps at or above the cutoff (`gapKeys`, brief.mjs gapKey's normalised text before the hash) for
-// the stall check. The pane cannot read ORCH_GAP_MIN, so it uses the default cutoff. `replan` marks a PLAN REVIEW with REPLAN.
+// the stall check. The pane cannot read ORCH_GAP_MIN, so it uses the default cutoff. `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
+// launched with VALIDATE: gaps.
 const GAP_MIN = 80
-type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; replan?: boolean }
+type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; replan?: boolean; validate?: boolean }
 const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
 export const countedOf = (reply: Reply): { status: 'pass' | 'fail' | null; doubt: boolean; keys: string[] } => {
   const high = reply.gaps.filter(g => (g.confidence ?? 100) >= GAP_MIN)
@@ -776,7 +777,17 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
   }
   // Reviews that count: reviewer stops after the slice's latest implementer launch or stop.
   const lastImpl = Math.max(-Infinity, ...impls.map(a => a.endedAt ?? a.startedAt))
-  const reviews = mine.filter(a => a.role === 'reviewer' && a.endedAt !== undefined)
+  // The implementer time a review follows: the latest implementer launch or stop before it ended.
+  const implAt = (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
+  const ended = mine.filter(a => a.role === 'reviewer' && a.endedAt !== undefined)
+  // VALIDATE supersede (brief.mjs fold): a VALIDATE: gaps review with a verdict replaces the earlier reviews of the same attempt, which then count as
+  // nothing (no retry, no stall, no doubt); a validation with no verdict supersedes nothing. `reviews` are the reviews that still count.
+  const superseded = new Set<Agent>()
+  for (const v of ended) {
+    if (!(v as Rec).validate || (v.status !== 'pass' && v.status !== 'fail')) continue
+    for (const p of ended) if (p !== v && (p.endedAt as number) < (v.endedAt as number) && (p.endedAt as number) > implAt(v)) superseded.add(p)
+  }
+  const reviews = ended.filter(r => !superseded.has(r))
   const current = reviews.filter(r => (r.endedAt as number) > lastImpl).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
   const latest = current[current.length - 1]
   const pass = current.filter(r => r.status === 'pass').pop()
@@ -794,7 +805,6 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
   const final = (latest?.status === 'pass' && (opusPass || signals.length === 0)) || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
   // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
   // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one.
-  const implAt = (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
   const counted = reviews.filter(r => r.status === 'pass' || r.status === 'fail').sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
   const b = counted[counted.length - 1] as Rec | undefined
   const ai = b ? counted.findLastIndex(r => implAt(r) !== implAt(b)) : -1
@@ -993,6 +1003,7 @@ export const register: Register = on => {
         tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
         ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
         ...(parsed && parsed.replan !== null ? { replan: true } : {}),
+        ...(!plan && role === 'reviewer' && header.validate ? { validate: true } : {}),
       }
       const t = agent.startedAt
       const before = await read($, agents)
@@ -1440,11 +1451,14 @@ export const register: Register = on => {
       x0 += colW + (gutters[i + 1]?.width ?? 0)
     })
     const needed = new Set(layers.flatMap(l => l.flatMap(parentsOf)))
-    const leafCols = vertical
-      ? [3 + Math.floor(colW / 2)]
-      : layers.flatMap((l, i) => (!needed.has((l[l.length - 1] as Node).id) ? [(xs[i] as number) + Math.floor(colW / 2)] : []))
-    const leafNodes = vertical ? [...map.values()].filter(n => !needed.has(n.id)) : layers.flatMap(l => (!needed.has((l[l.length - 1] as Node).id) ? [l[l.length - 1] as Node] : []))
-    const leafTones = vertical ? [topTone(leafNodes.map(n => toneOf(n, fix.has(n.id))))] : leafNodes.map(n => toneOf(n, fix.has(n.id)))
+    // The final slices are every card nothing depends on, in either layout. Side by side, a layer with any of them drops one stub under its column in
+    // the best colour of its final cards.
+    const leavesOf = (l: Node[]) => l.filter(n => !needed.has(n.id))
+    const leafTone = (l: Node[]) => topTone(leavesOf(l).map(n => toneOf(n, fix.has(n.id))))
+    const leafLayers = layers.flatMap((l, i) => (leavesOf(l).length ? [i] : []))
+    const leafCols = vertical ? [3 + Math.floor(colW / 2)] : leafLayers.map(i => (xs[i] as number) + Math.floor(colW / 2))
+    const leafNodes = [...map.values()].filter(n => !needed.has(n.id))
+    const leafTones = vertical ? [topTone(leafNodes.map(n => toneOf(n, fix.has(n.id))))] : leafLayers.map(i => leafTone(layers[i] as Node[]))
     const bus = leafCols.length ? busOf(leafCols, leafTones) : undefined
 
     // Tasks: one row per slice (or per agent without one) with its tokens, time, and what it reported.
@@ -1771,9 +1785,9 @@ export const register: Register = on => {
                   )}
                   <Box flexDirection="column">
                     {layer.map(card)}
-                    {!needed.has((layer[layer.length - 1] as Node).id) &&
+                    {leavesOf(layer).length > 0 &&
                       Array.from({ length: Math.max(0, diagramRows - layerRows(layer)) }, () => (
-                        <Text color={toneOf(layer[layer.length - 1] as Node, fix.has((layer[layer.length - 1] as Node).id))}>{' '.repeat(Math.floor(colW / 2))}│</Text>
+                        <Text color={leafTone(layer)}>{' '.repeat(Math.floor(colW / 2))}│</Text>
                       ))}
                   </Box>
                 </Box>

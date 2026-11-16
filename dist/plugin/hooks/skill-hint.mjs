@@ -215,7 +215,8 @@ export function skillHints(args) {
 
     // 2. Document extensions in FILES or SOURCES: skills naming the format in their name first, then in the description.
     const paths = [...(Array.isArray(header.files) ? header.files : []), ...(Array.isArray(header.sources) ? header.sources : [])].filter((p) => typeof p === "string");
-    const exts = [...new Set(paths.map(extOf).filter((e) => e in FORMATS))];
+    // own keys only: `in` would take "constructor" or "toString" from the prototype and throw below
+    const exts = [...new Set(paths.map(extOf).filter((e) => Object.hasOwn(FORMATS, e)))];
     // Name matches of every format come before any description match, so two formats each get their own skill.
     /** @type {{ s: CatalogSkill, reason: string }[]} */
     const byName = [];

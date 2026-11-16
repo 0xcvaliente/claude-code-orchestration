@@ -56,6 +56,13 @@ The example column is taken from the `CASES` table in `src/judge.test.ts` (class
 | Function and alias definitions, `at`/`batch` | `f() { ls; }; f` · `function f { ls; }` · `alias x='git push origin main'` · `shopt -s expand_aliases` · `echo 'rm -rf .git' \| at now` |
 | `git -c`/`--config-env`/`git config` of a key that runs a program, and an exec-relevant environment assignment on a line that runs git, rm or a shell (any word whose static prefix starts with an exec-env name and `=` or `+=`, quoted or not, wherever it stands; see 2.5) | `git -c core.fsmonitor='rm -rf .git' status` · `git -c core.pager=less log` · `git -c alias.x=push x` · `git config core.fsmonitor '...'` · `GIT_SSH_COMMAND='x' git fetch` · `PAGER=x git log` · `PATH=/tmp/evil:$PATH git status` · `LD_PRELOAD=/x.so rm file` · `export "GIT_SSH_COMMAND=sh -c id"; git fetch` · `export 'PATH=/tmp/x'; git status` · `env -iu HOME 'PATH=/x' git status` · `env PA"TH=/x" git status` · `nice ${E}nv "PATH=/x" git status` · `PAGER+=evil git log` · `git log --grep 'PATH='` (cost, 2.5) |
 | Zsh-only expansions, brace expansion, control characters, unreadable syntax, nesting deeper than 3 | `=rm -rf .git` · `X=rm; $~X -rf .git` · `echo ${=X}` · `ls *(e:'rm -rf .git':)` · `{rm,-rf,.git,' '}` · `echo {a,b}` · `echo 'unterminated` · `ls\rrm -rf .git` · `cat <<EOF\nno end` · `echo $(echo $(echo $(echo $(ls))))` |
+| `<<` inside arithmetic (`((...))`, `$((...))`), where it is a left shift that a here-document reading would let hide the lines after it; any shift is denied, `$((1<<3))` included | `((1<<EOF))\nrm -rf .git\nEOF` · `echo $((1<<3))` |
+| A brace expansion that holds `$(...)`, backticks or `${...}`: it is read whole across them | `env {rm,$(:)-rf,.git}` · ``env {rm,`echo x y`-rf,.git}`` |
+| A NUL decoded inside `$'...'` (the shell cuts the word there) | `$'sudo\x00' id` · `$'rm\0' -rf .git` |
+| An argument git runs as a shell command, read as a script of its own (denied by the rules above, judged for a push, denied when dynamic): the value of `rebase -x`/`--exec`, the first word after `submodule foreach` and `bisect run`. A shell there is fed a script the guard does not read, so `git bisect run sh -c '...'` is denied | `git rebase -x 'rm -rf .git' main` · `git submodule foreach 'sudo id'` · `git bisect run 'rm -rf .git'` · `git rebase -x "$CMD" main` |
+| `git -c` keys added in this batch: `trailer.*.cmd`/`.command`, `submodule.*.update` (whatever its value), `difftool.*.path`, `mergetool.*.path` | `git -c submodule.x.update=checkout submodule update` |
+
+The last five rows are new since 1.4.4 (Unreleased). The arithmetic shift and `git bisect run sh -c '...'` are denied although legitimate work may use them. Forms of the same families that still pass are listed in section 11.
 
 The same list is in the header comment of `classifyDetail`.
 
@@ -103,7 +110,7 @@ The same list is in the header comment of `classifyDetail`.
 - **Here-documents.** The body of a quoted here-document is data. In an unquoted one, `$(...)` and backticks in the body are read as scripts. A here-document that is never closed is doubt.
 - **`bash -c` payloads.** For `sh`, `bash`, `zsh`, `dash`, `ksh`, `ash`, `fish`, `csh`, `tcsh`, `rbash`, `busybox` with `-c`, the payload string is read as a script of its own. The same goes for `eval`, `trap` actions, `env -S` strings and `watch` commands. A payload that is not a literal string is denied.
 - **Depth limit.** Scripts nested in scripts are read to depth 3 (`MAX_DEPTH`); a fourth level is denied.
-- **Doubt is deny.** Anything the tokenizer cannot read with confidence throws `Doubt` and the command is denied: an unterminated quote, backtick, `$(` or `${`, a trailing backslash, brace expansion (`{rm,-rf,.git}`, quote-aware), zsh-only expansions (`=rm`, `=(..)`, `$~X`, `${=X}`, glob qualifiers), a control character other than tab and newline, an unterminated here-document.
+- **Doubt is deny.** Anything the tokenizer cannot read with confidence throws `Doubt` and the command is denied: an unterminated quote, backtick, `$(` or `${`, a trailing backslash, brace expansion (`{rm,-rf,.git}`, quote-aware), zsh-only expansions (`=rm`, `=(..)`, `$~X`, `${=X}`, glob qualifiers), a control character other than tab and newline, an unterminated here-document, `<<` inside `((...))` or `$((...))`, a NUL decoded in `$'...'`.
 
 ### 2.5 The exec-env rule
 
@@ -343,11 +350,12 @@ This is best-effort defence in depth against mistakes, not a security boundary a
 - environment or flags that point git at config, hooks or binaries planted in an earlier step (`GIT_DIR=...`, `HOME=... git`, `git -C <dir> ...`, `git --exec-path=...`);
 - an exec-env assignment not spelled `NAME=` or whose name part is dynamic (section 2.5);
 - `su`, `pkexec` or `runuser` after a shell keyword or in an unlisted wrapper form (`until su; do :; done`, `if true; then su root; fi`, `then pkexec ls`, `do runuser -u r ls`, `exec -a foo su`, `env -u X su root`); they are interactive and need a password or a polkit agent that a headless worker does not have;
+- forms of the families hardened after 1.4.4 that the guard still does not read: arithmetic in other spellings (`$[...]`, an array subscript), brace groups that hold a process substitution or other quoting, further git options that take a shell command, and further `git -c` keys that run programs;
 - anything else the tokenizer cannot see.
 
 Also outside it: the Edit and Write tools (a file can be emptied or overwritten without Bash), non-recursive `rm` of a single literal path (`rm file`, `rm -f file` pass), and git commands that do not push (`git reset --hard`, `git checkout -- .`).
 
-**Over-blocked on purpose** (denied although harmless): an unquoted `rm` word anywhere (`echo rm -rf x`, `grep rm -r src`, `nice rm file`); a glob that could name `rm` or a privilege command (`ls r*`, `ls s*`, `ls p*`); `rm` with a glob or variable argument (`rm *.o`); flags split across commands (`rm -r x; rm -f y`); a word starting with an exec-env name and `=` on a line with git, rm or a shell (`git log --grep 'PATH='`, section 2.5); and, on the git side, any unquoted word near `git` that mentions push or remote (`git commit -m push-fix` is judged, not passed).
+**Over-blocked on purpose** (denied although harmless): an unquoted `rm` word anywhere (`echo rm -rf x`, `grep rm -r src`, `nice rm file`); a glob that could name `rm` or a privilege command (`ls r*`, `ls s*`, `ls p*`); `rm` with a glob or variable argument (`rm *.o`); flags split across commands (`rm -r x; rm -f y`); a word starting with an exec-env name and `=` on a line with git, rm or a shell (`git log --grep 'PATH='`, section 2.5); any `<<` inside arithmetic (`$((1<<3))`); `git bisect run` with a shell and `-c` (`git bisect run sh -c '...'`); and, on the git side, any unquoted word near `git` that mentions push or remote (`git commit -m push-fix` is judged, not passed).
 
 **Other limits.**
 

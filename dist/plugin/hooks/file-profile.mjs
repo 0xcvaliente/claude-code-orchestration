@@ -353,14 +353,24 @@ function csvCell(v) {
   return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 }
 
-/** Sheet XML to CSV using shared strings and cached `<v>` values. @param {string} xml @param {string[]} shared */
+/** The last row number of a sheet (Excel's limit): a larger `r` is not used for padding. */
+const MAX_SHEET_ROWS = 1_048_576;
+
+/**
+ * Sheet XML to CSV using shared strings and cached `<v>` values. Line n of the CSV is row n of the sheet: an empty row,
+ * self-closing (`<row r="2" ht="30"/>`) or left out of the XML, is a blank line.
+ * @param {string} xml @param {string[]} shared
+ */
 export function sheetToCsv(xml, shared) {
   /** @type {string[]} */
   const out = [];
-  for (const row of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+  // The lazy attribute part stops before "/>", so a self-closing row is a row of its own and never swallows the next.
+  for (const row of xml.matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+    const r = Number(/\br="(\d+)"/.exec(row[1] ?? "")?.[1]);
+    if (Number.isInteger(r) && r <= MAX_SHEET_ROWS) while (out.length < r - 1) out.push("");
     /** @type {string[]} */
     const cells = [];
-    for (const c of (row[1] ?? "").matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+    for (const c of (row[2] ?? "").matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
       const attrs = c[1] ?? "", body = c[2] ?? "";
       const ref = /\br="([A-Z]+\d+)"/.exec(attrs)?.[1];
       const type = /\bt="(\w+)"/.exec(attrs)?.[1];

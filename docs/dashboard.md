@@ -204,7 +204,9 @@ Flow lines are amber while work moves through them, green once what feeds them i
 - The progress total is the plan's only when the PLAN REVIEW brief lists the slices as `SLICE:` lines; free-form plans fall back to the slices seen so far.
 - The run boundary goes stale after 10 minutes with no agent running (`STALE_MS`), not after the gates' `ORCH_RUN_STALE_MIN` (default 30), so the pane can start a clean run while the gates still hold the old one.
 - `⇧opus?` cannot see an isolated test failure (a test-gate record the pane does not read), so the gate may require an opus review the pane does not mark.
-- The `doubt` and `↻replan` marks use the default gap cutoff 80; with `ORCH_GAP_MIN` set to another value the pane and the gates can disagree. A `VALIDATE: gaps` review that supersedes earlier reviews is not mirrored.
+- The `doubt` and `↻replan` marks use the default gap cutoff 80; with `ORCH_GAP_MIN` set to another value the pane and the gates can disagree.
+- A failed review that a gap validation has set aside still counts in the header's failed count and in the review stage's colour.
+- While a resumed implementer is still running, the pane can briefly disagree with the gate about which review counts.
 - The mod does not route workflow researchers: its `agent.spawn` handler only records the spawn. So workflow researchers are still not routed. A probe showed that under `claude -p` the hook runs, fires for workflow agents and can rewrite a workflow agent's model and prompt; mod code can use `$.fs.read`, `$.process.run` and imports inside the plugin, but not `node:` imports or files outside it. Routing workflow researchers this way is feasible and not implemented ([live checks: workflow agents](data/live-checks-workflow.md#answers)).
 - "Used in this session" keeps the last 300 skills, connectors and files of each list, and shows file base names, so two files with the same name show twice.
 - The stacked bar is at most 40 cells wide and at least 10, and each model with tokens needs one cell. It would overflow only with more such models than cells, which in practice means a very large number of distinct models.
