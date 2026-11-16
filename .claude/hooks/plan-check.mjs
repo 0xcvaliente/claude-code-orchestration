@@ -1193,9 +1193,36 @@ function plannedDraft(id) {
   }
 }
 
+// The run's dependency graph: each launched slice's DEPENDS, over all its allowed launches in this scope.
+/** @type {Map<string, Set<string>>} */
+const graph = new Map();
+for (const e of launched) {
+  const edges = graph.get(e.slice) ?? new Set();
+  for (const d of Array.isArray(e.depends) ? e.depends : []) if (typeof d === "string") edges.add(d);
+  graph.set(e.slice, edges);
+}
+/** Slices reached from `start` by following DEPENDS through the graph, stopping at this slice. @param {Iterable<string>} start */
+const reach = (start) => {
+  const out = new Set();
+  const todo = [...start];
+  while (todo.length) {
+    const s = /** @type {string} */ (todo.pop());
+    if (out.has(s)) continue;
+    out.add(s);
+    if (s !== slice) todo.push(...(graph.get(s) ?? []));
+  }
+  return out;
+};
+// A retry: this slice already launched in this run, so its place in the order is set by its earlier launches.
+const retry = graph.has(slice);
+// Ordered before this launch: its DEPENDS line and, for a retry, its earlier launches' DEPENDS, followed through the graph.
+const before = reach([...depends, ...(graph.get(slice) ?? [])]);
+// Ordered after it: every earlier launch whose DEPENDS lead to this slice, directly or through other slices.
+const after = new Set([...graph.keys()].filter((s) => s !== slice && reach(graph.get(s) ?? []).has(slice)));
+
 const clashes = [];
 for (const e of launched) {
-  if (e.slice === slice || depends.includes(e.slice)) continue;
+  if (e.slice === slice || before.has(e.slice) || after.has(e.slice)) continue;
   // FILES are logged as written and compared normalized; an entry that does not normalize is compared as written.
   /** @type {string[]} */
   const owned = (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
@@ -1212,11 +1239,13 @@ if (clashes.length) {
   decide("block", "file_overlap", `Plan check: slice ${slice} would change files another slice owns: ${[...new Set(clashes)].join(", ")}. Give each file one owner, or list the owning slice in DEPENDS if this slice runs after it.`);
 }
 
-// Cycle: following DEPENDS from this slice's dependencies leads back to this slice.
+// Cycle: following DEPENDS from this slice's dependencies leads back to this slice. A retry's DEPENDS on a slice that an
+// earlier launch already ordered after it does not reverse that order (the run's graph decides), so it closes no cycle.
+const mine = retry ? depends.filter((d) => !after.has(d)) : depends;
 const deps = new Map(launched.map((e) => [e.slice, e.depends ?? []]));
-deps.set(slice, depends);
+deps.set(slice, mine);
 const seen = new Set();
-const stack = [...depends];
+const stack = [...mine];
 while (stack.length) {
   const s = stack.pop();
   if (s === slice) decide("block", "dependency_cycle", `Plan check: DEPENDS of slice ${slice} forms a cycle. Fix the order in the plan.`);

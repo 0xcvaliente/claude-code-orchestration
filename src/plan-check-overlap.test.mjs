@@ -247,3 +247,41 @@ syncBuiltinESMExports();
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// G-7 (audit 2026-11-16): b DEPENDS on a and shares a's file. A fresh retry of a must go through, with its own DEPENDS
+// line or with the DEPENDS: b the overlap message used to advise; a real overlap and a real cycle still block every time.
+const SEQ = "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: f.txt\nDEPENDS: a\nGOAL: b\nSLICE: c\nFILES: f.txt\nDEPENDS: none\nGOAL: c";
+test("file_overlap and dependency_cycle: a retry of a slice that a later slice DEPENDS on goes through", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, SEQ);
+    for (const [s, d] of [["a", "none"], ["b", "a"], ["a", "none"], ["a", "none"], ["a", "b"], ["a", "b"], ["b", "a"], ["b", "none"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: f.txt\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    // c shares f.txt with a and b and is ordered against neither: a real overlap, blocked every time.
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: c\nFILES: f.txt\nDEPENDS: none");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], r.stderr);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file_overlap and dependency_cycle: a transitive dependant is ordered after the retried slice; a real cycle still blocks", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: m\nFILES: m.txt\nDEPENDS: a\nGOAL: m\nSLICE: b\nFILES: f.txt\nDEPENDS: m\nGOAL: b\nSLICE: x\nFILES: x.txt\nDEPENDS: y\nGOAL: x\nSLICE: y\nFILES: y.txt\nDEPENDS: x\nGOAL: y");
+    for (const [s, f, d] of [["a", "f.txt", "none"], ["m", "m.txt", "a"], ["b", "f.txt", "m"], ["a", "f.txt", "none"], ["a", "f.txt", "b"], ["x", "x.txt", "y"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: ${f}\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: y\nFILES: y.txt\nDEPENDS: x");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "dependency_cycle"], r.stderr);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
