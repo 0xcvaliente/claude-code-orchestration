@@ -39,7 +39,8 @@ if [ -n "${ORCH_BUDGET_TOKENS:-}" ]; then
   node "$here/tokens.mjs" budget-usd "$ORCH_BUDGET_TOKENS" > /dev/null || exit 1
 fi
 
-decision="$(cd "$root" && npx --no-install tsx src/route.ts --repo "$repo" --task "$task" --mode "$requested" --project-state)" || exit $?
+# --task=<task>, not --task <task>: route.ts would read a task that starts with a dash as a flag.
+decision="$(cd "$root" && npx --no-install tsx src/route.ts --repo "$repo" --task="$task" --mode "$requested" --project-state)" || exit $?
 field() { printf '%s' "$decision" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).$1"; }
 mode="$(field mode)" || exit 1
 
