@@ -272,6 +272,17 @@ test("sheetToCsv: an empty row, self-closing or left out, keeps the later rows o
   assert.equal(sheetToCsv(`<row><c><v>1</v></c></row><row/><row><c><v>3</v></c></row>`, []), "1\n\n3");
 });
 
+test("sheetToCsv: a cell beyond the last spreadsheet column (XFD, 16,384) is skipped, never padded to", () => {
+  const row = (/** @type {string} */ col) => `<row r="1"><c r="A1"><v>a</v></c><c r="${col}1"><v>z</v></c></row>`;
+  // XFD is the last column: kept, padded to 16,384 cells
+  const last = sheetToCsv(row("XFD"), []);
+  assert.equal(last.split(",").length, 16_384);
+  assert.ok(last.startsWith("a,") && last.endsWith(",z"));
+  // one past it, and a hostile reference that would ask for 321 million cells: skipped, the row keeps its other cells
+  assert.equal(sheetToCsv(row("XFE"), []), "a");
+  assert.equal(sheetToCsv(row("ZZZZZZ"), []), "a");
+});
+
 test("sheetToCsv: shared, inline, boolean and gap cells", () => {
   const xml = '<row r="1"><c r="A1" t="s"><v>1</v></c><c r="C1" t="b"><v>1</v></c></row><row r="2"><c r="B2" t="inlineStr"><is><t>a &amp; "b"</t></is></c></row>';
   assert.equal(sheetToCsv(xml, ["zero", "one"]), 'one,,TRUE\n,"a & ""b"""');

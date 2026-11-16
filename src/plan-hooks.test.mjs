@@ -346,7 +346,8 @@ test("plan check: while a run is open, built-in and fork agents are blocked (bui
     for (const t of ["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup", "web-fetch", "fork", undefined]) {
       const r = builtin(t);
       assert.equal(r.status, 2, String(t));
-      assert.match(r.stderr, /run 1 is open.*built-in or a fork.*ORCH_ALLOW_BUILTINS=1/);
+      assert.match(r.stderr, /run 1 is open.*built-in or a fork/);
+      assert.doesNotMatch(r.stderr, /ORCH_/, "a block message never names an environment switch (G-6)");
       assert.equal(lastCheck(dir).reason, "builtin_agent_in_run");
     }
     for (const t of ["orchestration:researcher", "my-project-agent", "acme:Explore", "reviewer"]) assert.equal(builtin(t).status, 0, t);
@@ -436,5 +437,41 @@ test("plan check: records without a run id (older plan check) own files only whe
     assert.equal(lastCheck(dir).run, "none-1");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// G-6 (audit 2026-11-16): block messages go to the orchestrator, which cannot set an environment switch, so none names
+// one. Every block message of the plan check is one source line holding a literal that starts with "Plan check:".
+test("plan check: no block message names an ORCH_ environment variable", () => {
+  const src = readFileSync(join(root, ".claude", "hooks", "plan-check.mjs"), "utf8");
+  const messages = src.split("\n").filter((l) => /["`]Plan check:/.test(l));
+  assert.ok(messages.length >= 14, `found ${messages.length} block messages`);
+  for (const m of messages) assert.doesNotMatch(m, /ORCH_[A-Z_]*/, m);
+});
+
+// G-12 (audit 2026-11-16): PATH: light is for a task with a single slice; a planned run whose plan names several slices
+// waits for its plan review even before any of its slices launched. A one-slice plan keeps the light path.
+test("plan check: PATH: light does not skip the plan review of a planned run with several slices", () => {
+  const dir = project({ reviewed: false });
+  try {
+    const s = agents(dir);
+    s.plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: b.py\nDEPENDS: none\nGOAL: b\nSLICE: c\nFILES: c.py\nDEPENDS: none\nGOAL: c", null);
+    for (let i = 0; i < 2; i++) {
+      const r = launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "light_path_multi"], r.stderr);
+      assert.match(r.stderr, /a, b, c/);
+    }
+    const third = launch(dir, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+    assert.deepEqual([third.status, lastCheck(dir).reason], [0, "no_plan_review_gave_up"], "the two-block loop guard still releases");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const one = project({ reviewed: false });
+  try {
+    agents(one).plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a", null);
+    const r = launch(one, "SLICE: a\nFILES: a.py\nDEPENDS: none\nPATH: light");
+    assert.deepEqual([r.status, lastCheck(one).reason], [0, "light_path"], r.stderr);
+  } finally {
+    rmSync(one, { recursive: true, force: true });
   }
 });

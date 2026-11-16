@@ -15,24 +15,39 @@
 //                 skills/<name> is committed on the branch (an ignored or untracked file is sealed but never pushed).
 //                 The base is --base, else the branch the repository's main checkout is on (the one the draft was made
 //                 from). The branch's head commit is recorded here.
-//   4. push       refused when origin's skill/<name> exists and is neither that head nor an ancestor of it (commits the
-//                 seal never covered); else git push -u origin skill/<name> (never a force push).
-//   5. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
+//   4. scan       the skill gate's branch scan (.claude/hooks/skill-scan.mjs): every line any commit between the
+//                 branch's merge base with the base and its tip adds, on every path, has no secret or personal detail
+//                 (a finding only in an earlier commit is named with that commit: the push carries the history), and
+//                 those commits change only skills/<name>/ and README.md. A branch with no merge base is refused. It
+//                 compares with the push target, not origin's fetch address: every address git remote get-url --push
+//                 --all origin names (pushurl, pushInsteadOf, several URLs) is read with git ls-remote, and a commit
+//                 counts as there only when every one of them has it. The commits a push would send below the merge
+//                 base (base commits an address lacks, on whatever local branch) are scanned too, and refused, since
+//                 the pull request would carry them. Refused as unclear: an address that cannot be read, one git
+//                 would rewrite again when reading it, no address, and origin set up as a mirror.
+//   5. push       refused when skill/<name> exists at any push address and is neither that head nor an ancestor of it
+//                 (commits the seal never covered); else git push --recurse-submodules=no --no-follow-tags -u origin
+//                 skill/<name>:skill/<name> (never a force push; remote and refspec named, so remote.pushDefault,
+//                 branch.<name>.pushRemote and remote.origin.push cannot redirect it; no tag is sent, whatever
+//                 push.followTags says, since tag messages are never scanned).
+//   6. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
 //                 created it and a person must review it; an open PR for the branch is reused. Prints the URL.
 // With --merge, after those:
-//   6. merge      gh pr merge <url> --merge --match-head-commit <the head recorded in step 3>, so gh merges only
+//   7. merge      gh pr merge <url> --merge --match-head-commit <the head recorded in step 3>, so gh merges only
 //                 when the pull request's head is still the commit that was checked.
-//   7. update     the main checkout fetches origin and fast-forwards its base branch (git merge --ff-only).
-//   8. install    --install "<command>" run with sh in the main checkout, else scripts/install.sh --target claude when
+//   8. update     the main checkout fetches origin and fast-forwards its base branch (git merge --ff-only).
+//   9. install    --install "<command>" run with sh in the main checkout, else scripts/install.sh --target claude when
 //                 that file exists, else skipped with a note.
-//   9. clean up   git worktree remove <draft>, then git branch -d skill/<name> (a failure there is only a note).
-// --dry-run prints each step and its command without running any of them (it still finds the draft and its repository).
+//  10. clean up   git worktree remove <draft>, then git branch -d skill/<name> (a failure there is only a note).
+// --dry-run prints each step and its command without running any of them (it still finds the draft and its
+// repository), except step 4, which only reads and runs in the dry run too, refusing with the same findings.
 // Node built-ins only.
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isSkillName } from "../.claude/hooks/brief.mjs";
+import { findingLine, historyAdvice, outsideText, scanBranch, unpushedText } from "../.claude/hooks/skill-scan.mjs";
 import { verify } from "../.claude/hooks/skill-seal.mjs";
 
 const TARGETS = /** @type {const} */ (["private", "public"]);
@@ -172,13 +187,14 @@ if (!opt.dryRun && process.env.CLAUDECODE === "1") fail("this runs inside a Clau
 
 let stepNo = 0;
 /**
- * One step: print it; in a dry run print its command and stop there, else run it.
- * @param {string} label @param {string} shown the command or action, as printed @param {() => void} act
+ * One step: print it; in a dry run print its command and stop there, else run it. A step marked `always` only reads,
+ * so it runs in a dry run too.
+ * @param {string} label @param {string} shown the command or action, as printed @param {() => void} act @param {boolean} [always]
  */
-function step(label, shown, act) {
+function step(label, shown, act, always = false) {
   stepNo++;
-  console.log(`${stepNo}. ${label}${opt.dryRun ? `\n   would run: ${shown}` : ""}`);
-  if (!opt.dryRun) act();
+  console.log(`${stepNo}. ${label}${opt.dryRun && !always ? `\n   would run: ${shown}` : ""}`);
+  if (!opt.dryRun || always) act();
 }
 
 // 1. seal
@@ -252,21 +268,93 @@ step("Check the draft is clean and committed", `git status, git branch --show-cu
   console.log(`   ok, ${ahead.out} commit${ahead.out === "1" ? "" : "s"} ahead of ${baseBranch}`);
 });
 
-// 4. push
-step("Push the branch", `git ls-remote origin refs/heads/${branch}; git -C ${sh(draft)} push -u origin ${branch}`, () => {
-  // Origin's branch may only be the checked head or behind it: anything else holds commits the seal never covered.
-  const remote = git(draft, ["ls-remote", "origin", `refs/heads/${branch}`]);
-  if (!remote.ok) fail(`cannot read ${branch} on origin (git ls-remote failed):\n${tail(remote)}`);
-  const remoteHead = remote.out.split(/\s+/)[0] ?? "";
-  if (remoteHead && remoteHead !== localHead && !git(draft, ["merge-base", "--is-ancestor", remoteHead, localHead]).ok) {
-    fail(`origin's ${branch} is at ${remoteHead.slice(0, 12)}, which is not the draft's head ${localHead.slice(0, 12)} or an ancestor of it: origin holds commits the seal never covered. Nothing was pushed. Look at origin's ${branch}; if those commits belong in the skill, bring them into the draft, have it reviewed and sealed again, then rerun; otherwise delete the remote branch by hand.`);
+/** An address as printed: any user name or password in it masked. @param {string} u */
+const shownUrl = (u) => u.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/i, "$1***@");
+
+/**
+ * Where `git push origin <branch>:<branch>` sends the branch, and what each of those addresses has. The push names the
+ * remote and the refspec, so remote.pushDefault, branch.<name>.pushRemote and remote.origin.push never redirect it;
+ * the addresses are origin's push URLs as git resolves them (pushurl, else url, after pushInsteadOf and insteadOf
+ * rewrites; several when several are set), each read with git ls-remote. Anything unclear stops the publish: origin
+ * set up as a mirror, no push URL, a URL git would rewrite again when it is read, or one that cannot be read.
+ * @returns {{ url: string, refs: Map<string, string> }[]} each address, with its refs (name to commit id)
+ */
+function pushTargets() {
+  const stop = (/** @type {string} */ why) => fail(`${why} Nothing was pushed.`);
+  const mirror = git(draft, ["config", "--type=bool", "--get", "remote.origin.mirror"]);
+  if (mirror.out !== "" && mirror.out !== "false") stop(`origin is set up as a mirror (remote.origin.mirror is ${mirror.out}): a push to it would not be the branch push that is checked here. Unset it (git config --unset remote.origin.mirror) or publish by hand.`);
+  const urls = git(draft, ["remote", "get-url", "--push", "--all", "origin"]);
+  if (!urls.ok) stop(`cannot tell where a push to origin goes (git remote get-url --push failed), so what it would send cannot be checked.\n${shownUrl(tail(urls))}`);
+  const list = [...new Set(urls.out.split("\n").filter((u) => u !== ""))];
+  if (!list.length) stop("origin has no push address, so what a push would send cannot be checked.");
+  return list.map((url, i) => {
+    const which = `origin's push address ${list.length > 1 ? `${i + 1} of ${list.length} ` : ""}(${shownUrl(url)})`;
+    if (url.startsWith("-")) stop(`cannot read ${which}: it starts with "-".`);
+    // ls-remote applies insteadOf rewrites to a URL it is given: read only a URL it leaves as it is.
+    const as = git(draft, ["ls-remote", "--get-url", "--", url]);
+    if (!as.ok || as.out !== url) stop(`cannot read ${which} as the push would reach it: git rewrites it again when reading it (to ${shownUrl(as.out) || "nothing"}). Simplify origin's url.<base>.insteadOf and pushInsteadOf settings, then rerun.`);
+    const ls = git(draft, ["ls-remote", "--", url]);
+    if (!ls.ok) stop(`cannot read ${which} (git ls-remote failed), so what a push would send there cannot be checked.\n${shownUrl(tail(ls))}`);
+    /** @type {Map<string, string>} */
+    const refs = new Map();
+    for (const l of ls.out.split("\n")) {
+      const [id = "", ref = ""] = l.split(/\s+/);
+      if (/^[0-9a-f]{40,64}$/.test(id)) refs.set(ref, id);
+    }
+    return { url, refs };
+  });
+}
+
+// 4. the branch scan, the skill gate's own (skill-scan.mjs): the push carries every commit, so every line any commit
+// adds is scanned, on every path, and the branch may change only skills/<name>/ and README.md. Read-only, so it runs in
+// a dry run too.
+step(
+  "Scan the branch for secrets and paths outside the skill",
+  `every line the commits of ${branch} add since its merge base with ${baseBranch}, and the paths they change`,
+  () => {
+    // What each address the push goes to has now: the push sends every commit of the branch that an address's refs
+    // do not reach, whichever local branch it sits on. A commit counts as there only when every address has it.
+    const targets = pushTargets();
+    const remotes = targets.map((t) => [...new Set(t.refs.values())]);
+    const scan = scanBranch(draft, { base: baseBranch, branch, name, remotes });
+    const fetchUrl = git(draft, ["remote", "get-url", "origin"]);
+    const remoteName = targets.length > 1 ? "one of origin's push addresses" : fetchUrl.ok && fetchUrl.out === targets[0]?.url ? "origin" : "origin's push address";
+    /** @type {string[]} */
+    const lines = [];
+    if (scan.problems.length) lines.push(`What the branch would push cannot be checked: ${scan.problems.join("; ")}. Pass the right base with --base <branch>, or recreate the draft from its base branch.`);
+    if (scan.unpushed.length) lines.push(unpushedText(scan.unpushed, remoteName, `Push the base branch to every push address of origin first (after checking those commits) or recreate the draft on the copy of the base they have, then rerun.`));
+    if (scan.findings.length) {
+      lines.push(`Possible secrets or personal details (${scan.findings.length}); remove each, or replace it with a placeholder such as <token>, user@example.com or ~/:`);
+      for (const f of scan.findings.slice(0, 50)) lines.push(`  ${findingLine(f)}`);
+      if (scan.findings.length > 50) lines.push(`  and ${scan.findings.length - 50} more`);
+      if (scan.findings.some((f) => f.commit && !f.base)) lines.push(historyAdvice(scan.mergeBase));
+    }
+    if (scan.outside.length) lines.push(outsideText(scan.outside, name, scan.mergeBase));
+    if (lines.length) fail(`the branch ${branch} cannot be published as it is. Nothing was pushed.\n  - ${lines.join("\n  - ")}\nFix the draft in ${draft}, have it reviewed and sealed again, then rerun.`);
+    console.log("   ok");
+  },
+  true,
+);
+
+// 5. push
+step("Push the branch", `git ls-remote <each push address of origin> refs/heads/${branch}; git -C ${sh(draft)} push --recurse-submodules=no --no-follow-tags -u origin ${branch}:${branch}`, () => {
+  // Origin's branch may only be the checked head or behind it, at every address the push goes to: anything else holds
+  // commits the seal never covered.
+  for (const t of pushTargets()) {
+    const remoteHead = t.refs.get(`refs/heads/${branch}`) ?? "";
+    if (remoteHead && remoteHead !== localHead && !git(draft, ["merge-base", "--is-ancestor", remoteHead, localHead]).ok) {
+      fail(`origin's ${branch} is at ${remoteHead.slice(0, 12)}, which is not the draft's head ${localHead.slice(0, 12)} or an ancestor of it: origin holds commits the seal never covered. Nothing was pushed. Look at origin's ${branch}; if those commits belong in the skill, bring them into the draft, have it reviewed and sealed again, then rerun; otherwise delete the remote branch by hand.`);
+    }
   }
-  const r = git(draft, ["push", "-u", "origin", `${branch}:${branch}`]);
+  // The remote and the refspec are named, so no push default, push remote or push refspec of origin changes where it
+  // goes; submodules are never pushed with it, and no tag either (push.followTags would send the annotated tags that
+  // point into the pushed commits, and tag messages are never scanned).
+  const r = git(draft, ["push", "--recurse-submodules=no", "--no-follow-tags", "-u", "origin", `${branch}:${branch}`]);
   if (!r.ok) fail(`git push failed:\n${tail(r)}\nThe push never forces: if ${branch} exists on origin with other commits, look at it and resolve that by hand, then rerun.`);
   console.log("   ok");
 });
 
-// 5. pull request
+// 6. pull request
 let prUrl = "";
 const body = () =>
   [
@@ -295,14 +383,14 @@ if (!opt.merge) {
   process.exit(0);
 }
 
-// 6. merge
+// 7. merge
 step("Merge the pull request", `gh pr merge <url> --merge --match-head-commit ${localHead || "<the checked head>"}`, () => {
   const r = run("gh", ["pr", "merge", prUrl, "--merge", "--match-head-commit", localHead], { cwd: mainCheckout });
   if (!r.ok) fail(`gh pr merge failed:\n${tail(r)}\nIf the pull request's head is no longer ${localHead.slice(0, 12)} (the commit that was checked), someone pushed to ${branch}: look at it before anything is merged. Otherwise merge ${prUrl} by hand (or fix what blocks it), then rerun with --merge.`);
   console.log("   ok");
 });
 
-// 7. fast-forward the main checkout
+// 8. fast-forward the main checkout
 step("Fast-forward the main checkout", `git -C ${sh(mainCheckout)} pull --ff-only origin ${baseBranch}`, () => {
   const cur = git(mainCheckout, ["branch", "--show-current"]);
   if (cur.out !== baseBranch) fail(`the main checkout ${mainCheckout} is on ${cur.out || "no branch"}, not ${baseBranch}. Check out ${baseBranch} there, pull, and run the installer by hand.`);
@@ -311,7 +399,7 @@ step("Fast-forward the main checkout", `git -C ${sh(mainCheckout)} pull --ff-onl
   console.log("   ok");
 });
 
-// 8. install
+// 9. install
 const installer = join(mainCheckout, "scripts", "install.sh");
 const installShown = opt.install ? `sh -c ${sh(opt.install)}  (in ${mainCheckout})` : existsSync(installer) ? `bash scripts/install.sh --target claude  (in ${mainCheckout})` : "nothing: no --install and no scripts/install.sh";
 step("Install the skill", installShown, () => {
@@ -328,7 +416,7 @@ step("Install the skill", installShown, () => {
   console.log("   ok");
 });
 
-// 9. clean up
+// 10. clean up
 step("Remove the draft worktree", `git -C ${sh(mainCheckout)} worktree remove ${sh(draft)}; git branch -d ${branch}`, () => {
   const r = git(mainCheckout, ["worktree", "remove", draft]);
   if (!r.ok) fail(`git worktree remove failed:\n${tail(r)}\nThe skill is published; remove ${draft} by hand with git worktree remove.`);

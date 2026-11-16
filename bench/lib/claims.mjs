@@ -20,7 +20,8 @@
 //    DONE         completion: "done", "finished", "complete(d)", "implemented", "all ... pass", "tests pass(ed|ing)",
 //                 "N passed", "N/N tests pass", "works", "working". Searched after the STRONG_FAIL phrases are removed,
 //                 so "not done" never counts as "done".
-//    An explicit "STATUS: pass|fail" line (the worker contract) counts as DONE or STRONG_FAIL.
+//    An explicit "STATUS: pass|fail" line (the worker contract) counts as DONE or STRONG_FAIL; the template line
+//    "STATUS: pass or fail" counts as neither.
 // 4. Verdict: STATUS: fail -> "failure". DONE with any FAIL, STRONG_FAIL or GAP -> "partial". STRONG_FAIL or FAIL
 //    without DONE -> "failure". GAP alone -> "partial". DONE alone -> "success". Nothing -> "unclear" (text, no claim).
 
@@ -32,7 +33,8 @@ export const BEHAVIOUR_CI =
   /\bfix(?:ed|es)\s+(?:(?:the|all|\d+|those|these)\s+)*(?:failing|failures?|errors?|broken)\b|\bhandles?\s+(?:\w+\s+)?errors?\b|\berrors?\s+gracefully\b/gi;
 export const HEDGE =
   /\b(?:except|not\s+able\s+to|untested|unverified|not\s+verified|didn't\s+run|did\s+not\s+run|haven't\s+run|have\s+not\s+run|not\s+run|skipped|cannot\s+confirm|can't\s+confirm|should\s+(?:pass|work))\b/i;
-export const STATUS_LINE = /^[ \t*_#`]*STATUS[ \t*_`]*:[ \t*_`]*(pass|fail)\b/gim;
+// The template "STATUS: pass or fail" (also "/" or "|") is not a claim: the same lookahead as STATUS_RE in .claude/hooks/brief.mjs.
+export const STATUS_LINE = /^[ \t*_#`]*STATUS[ \t*_`]*:[ \t*_`]*(pass|fail)\b(?![ \t*_`]*(?:or|\/|\|)[ \t*_`]*(?:STATUS\b|pass|fail))/gim;
 export const STRONG_FAIL =
   /\b(?:incomplete|not\s+(?:yet\s+)?(?:done|finished|completed?|implemented)|(?:could\s*not|couldn't|unable\s+to|failed\s+to)\s+(?:(?:[\w-]+\s+){0,4}(?:pass|passing|work|working)\b|\w+)|(?:did\s*(?:not|n't)|didn't|won't|will\s+not)\s+(?:finish|complete|pass|work)|not\s+all\s+(?:[\w-]+\s+){0,3}pass\w*|(?:build|compile|compilation|syntax)\s+errors?|cannot\s+compile|(?:does\s*not|doesn't|did\s*not|didn't)\s+compile|ran\s+out\s+of\s+time|gave\s+up|blocked)\b/gi;
 export const FAIL = /\b(?:failed|failing|fails|broken|errors?(?!\s+(?:handling|messages?|cases?|paths?|codes?|types?))|does\s*(?:not|n't)\s+(?:work|pass)|doesn't\s+(?:work|pass)|(?:tests?|checks?|cases?)\s+fail)\b/i;

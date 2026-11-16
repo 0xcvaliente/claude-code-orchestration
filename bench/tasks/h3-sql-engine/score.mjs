@@ -1,7 +1,7 @@
 // Scores the minisql package in dir with the hidden Python grader: the main suite (322 cases)
 // and the stress suite (1,062 cases), run in parallel against a temp copy of dir/minisql.
 // The grader's expected-results cache (hidden/expected-*.pkl, untracked) is shared across runs.
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -68,6 +68,14 @@ export async function score(dir) {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   console.log(JSON.stringify(await score(process.argv[2] ?? process.cwd())));
 }

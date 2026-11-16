@@ -1,6 +1,6 @@
 {
   "name": "claude-code-orchestration",
-  "version": "1.4.5",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,7 +17,7 @@
     "build-plugin": "node scripts/build-plugin.mjs",
     "check-plugin": "node scripts/build-plugin.mjs --check",
     "orchestrate": "claude --agent orchestrator --plugin-dir dist/dashboard",
-    "plain": "claude --settings '{\"agent\":\"\"}'",
+    "plain": "claude --settings '{\"agent\":\"\",\"outputStyle\":\"Concise\"}'",
     "test-dashboard": "node scripts/test-dashboard.mjs",
     "install-statusline": "bash scripts/install-statusline.sh",
     "claude-update": "node scripts/claude-update.mjs",

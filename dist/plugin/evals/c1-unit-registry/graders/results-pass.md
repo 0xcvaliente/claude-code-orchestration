@@ -1,7 +1,7 @@
 ---
 type: regex
 target: { source: file, path: test-results.txt }
-pattern: '^(?:#|ℹ) fail 0\b'
+pattern: '^(?:\x1b\[[0-9;]*m)?(?:#|ℹ) fail 0\b'
 flags: m
 ---
 

@@ -333,6 +333,56 @@ test("preference table: ui_work, motion, bugfix, tdd and security pick the first
   assert.deepEqual(preferenceRules({ role: "implementer", files: ["a.html"], kind: null, risky: false, text: "style the screen" }).map((r) => r.reason), ["ui_work"]);
 });
 
+// Names and descriptions shaped like installed skills, several of which share words (payload, figma, supabase,
+// konnected): the goal-word matching is the base commit's, so a goal that clearly names a skill gets it however many
+// other skills share the word (W-10: losing a needed skill is worse than naming an extra one the worker ignores).
+const GOAL_CATALOG = [
+  { name: "payload", description: "Build, review, or troubleshoot Payload CMS collections, fields, access control, hooks, Local API calls, custom endpoints, migrations, adapters, and Next.js integration." },
+  { name: "konnected-payload-backend", description: "Konnected backend patterns on Payload CMS 3 with PostgreSQL. Collections for users, students, companies and projects, fail-closed access control, status-transition hooks, migrations." },
+  { name: "konnected-access-testing", description: "Automated tests that prove Konnected's access rules through REST, GraphQL and the Local API of Payload, with test users." },
+  { name: "konnected-email", description: "Konnected emails sent from Payload hooks: templates and the rules for consent." },
+  { name: "konnected-product-rules", description: "Konnected product rules: who can see what, the approval workflow, project and application statuses in Payload." },
+  { name: "figma", description: "Read Figma files, frames, components and variables through the Figma MCP server, and fetch design context and screenshots." },
+  { name: "figma-implement-design", description: "Turn a Figma design into production code with pixel-perfect fidelity to the Figma frames and components." },
+  { name: "figma-create-design-system-rules", description: "Generate design system rules for a codebase from Figma variables and components." },
+  { name: "supabase", description: "Any task involving Supabase: database, auth, edge functions, storage, logs, migrations and RLS." },
+  { name: "supabase-postgres-best-practices", description: "Postgres best practices maintained by Supabase: creating or altering a table, a migration, RLS policies, indexes, slow queries." },
+  { name: "security-threat-model", description: "Repository-grounded threat modeling that enumerates trust boundaries, assets, attacker capabilities, abuse paths and mitigations for a codebase." },
+  { name: "security-best-practices", description: "Language and framework specific security best-practice reviews and secure-by-default coding help." },
+];
+
+test("goal picks: a goal that clearly names a skill gets it, however many installed skills share the word", () => {
+  const goal = (/** @type {string} */ text) => `SLICE: a\nDEPENDS: none\nGOAL: ${text}`;
+  const cases = /** @type {[string, string][]} */ ([
+    ["add a Payload CMS collection with custom fields, endpoints and access control", "payload"],
+    // the Konnected backend skill of the same family wins when the goal says more of its words
+    ["add a Payload CMS collection for projects with access control, hooks and migrations", "konnected-payload-backend"],
+    ["read the Figma frames and components of the settings screen and fetch screenshots", "figma"],
+    ["write a Supabase migration that adds RLS policies and indexes to the profiles table", "supabase-postgres-best-practices"],
+    ["threat model the codebase: enumerate trust boundaries, assets and abuse paths", "security-threat-model"],
+  ]);
+  for (const role of ["implementer", "researcher"]) {
+    for (const [text, name] of cases) {
+      const brief = goal(text);
+      assert.deepEqual(skillHints({ role, header: parseHeader(brief), brief, catalog: GOAL_CATALOG }), [{ name, reason: "goal_match" }], `${role}: ${text}`);
+    }
+  }
+});
+
+test("preference table: the bugfix rule needs KIND: bugfix, or no KIND and a FILES entry that is not prose", () => {
+  const catalog = [{ name: "diagnosing-bugs", description: "Diagnosis loop for hard bugs." }, { name: "tdd", description: "Test-driven development." }];
+  const p = (/** @type {string} */ brief) => skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog });
+  const words = "GOAL: find the bugs, crashes and regressions in the hooks and write each finding with a reproduction of the failing case";
+  // an audit that writes findings fixes nothing, though its brief is full of bug words
+  assert.deepEqual(p(`SLICE: audit\nFILES: docs/data/audit/gates.md\nDEPENDS: none\n${words}`), []);
+  assert.deepEqual(p(`SLICE: notes\nFILES: notes/a.md, notes/b.txt\nDEPENDS: none\n${words}`), []);
+  // a brief whose kind is not bugfix
+  assert.deepEqual(p(`SLICE: skill\nFILES: src/x.py\nDEPENDS: none\nKIND: skill\n${words}`), []);
+  // still fires: KIND: bugfix (even on prose files), or no KIND with code in FILES
+  assert.deepEqual(p(`SLICE: fix\nFILES: docs/a.md\nDEPENDS: none\nKIND: bugfix\nGOAL: the wrong example`), [{ name: "diagnosing-bugs", reason: "bugfix" }]);
+  assert.deepEqual(p(`SLICE: fix\nFILES: docs/a.md, src/a.py\nDEPENDS: none\n${words}`), [{ name: "diagnosing-bugs", reason: "bugfix" }]);
+});
+
 test("format picks: a skill whose description sends the format to another skill is skipped", () => {
   const p = (/** @type {string} */ brief) => skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog: PREF });
   assert.equal(PREF.find((s) => s.name === "anthropic-skills:docs")?.description.includes("that format's skill"), true);

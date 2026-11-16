@@ -12,6 +12,9 @@ root="${1:?root}"
 prompt="${2:?prompt}"
 repo="${3:?repo}"
 placeholder="__BENCH_PROMPT_PLACEHOLDER__" # the dry run prints one argument per line, so pass a one-line stand-in
+# A dash-led stand-in for a dash-led prompt: orchestrate.sh then puts it after `--` at the end, where claude reads it as
+# the prompt and not as an option, and the loop below swaps it for the prompt in that place.
+case "$prompt" in -*) placeholder="-$placeholder" ;; esac
 args=()
 prev=""
 while IFS= read -r a; do

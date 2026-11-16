@@ -22,10 +22,21 @@
 //                  limit). Its output, trimmed and with secrets masked, goes into the message.
 //   secrets        no private key block, well-known token prefix (GitHub, AWS, Slack, OpenAI, Anthropic, Google), e-mail
 //                  address (git@<host>, example.com/.org/.net and their subdomains, and the final labels .test,
-//                  .example, .invalid and .localhost excepted) or home-directory path (/root/, /home/<user>/,
-//                  /Users/<user>/, also after a URL scheme such as file://) in any file under skills/<name>/ (bytes
-//                  scanned whatever the content; a file over 5 MB or unreadable is a finding of its own) or in the
-//                  README.md lines the branch adds. The message gives file, line and kind, never the matched text.
+//                  .example, .invalid and .localhost excepted) or home-directory path (/root, /home/<user>,
+//                  /Users/<user>, followed by a slash or the end of the word, also after a URL scheme such as file://;
+//                  C:\Users\<user>; /Users/Shared and C:\Users\Public, Default and All Users excepted) in any file under
+//                  skills/<name>/ (bytes scanned whatever the content; a file over 5 MB or unreadable is a finding of
+//                  its own), in the README.md lines the branch adds, or in any line that any commit of the branch adds
+//                  on any path (skill-scan.mjs scanBranch: the commits from the merge base with the base to the tip of
+//                  skill/<name>, merges against each parent, binary files as text). A hit that only an earlier commit
+//                  holds is named with that commit, with the advice to recreate the branch's commits without it. The
+//                  message gives file, line or commit, and kind, never the matched text.
+//   paths          the branch's commits change only skills/<name>/... and README.md (renames count as both paths; names
+//                  are judged exactly as git gives them, and one with a control character is never allowed), the
+//                  branch has a merge base with its base (otherwise what it would push cannot be checked), and, when
+//                  origin's copy of the base is known (refs/remotes/origin/<base>), the branch does not sit on base
+//                  commits that origin lacks: a push would send them, so those commits are scanned too and named.
+//                  Without that remote-tracking ref the scan keeps the merge-base range.
 //   seal           provenance.json exists and skill-seal.mjs verify() passes.
 //   git_state      the draft worktree is clean, is on branch skill/<name> (a failing branch lookup fails too), that
 //                  branch has at least one commit its base does not, and every file under skills/<name> is in the
@@ -43,6 +54,7 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { isSkillName, parseHeader, sliceOfBrief } from "./brief.mjs";
 import { readJsonl } from "./run.mjs";
+import { findingLine, historyAdvice, MAX_SCAN_BYTES, mask, outsideText, scanBranch, scanText, unpushedText } from "./skill-scan.mjs";
 import { verify } from "./skill-seal.mjs";
 import { ensureStateDir, stateDir } from "./state.mjs";
 
@@ -50,74 +62,7 @@ const LOG = "skill-gate.jsonl";
 const MAX_BLOCKS = 3;
 const OWN_IMPLEMENTER = new Set(["implementer", "orchestration:implementer"]);
 const VALIDATOR_MS = 60_000;
-const MAX_SCAN_BYTES = 5 * 1024 * 1024;
 const MAX_FINDINGS_SHOWN = 20;
-
-/**
- * Secret and personal-detail patterns: [kind, global regex, excuse]. The kind is what the message says; the match is
- * never shown. `excuse` (when given) lets a match through: only for e-mail addresses on the reserved example domains.
- * @type {[string, RegExp, ((m: RegExpMatchArray) => boolean)?][]}
- */
-const SECRET_PATTERNS = [
-  ["private key block", /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/g],
-  ["Anthropic API key", /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
-  ["OpenAI API key", /\bsk-(?!ant-)(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}/g],
-  ["GitHub token", /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})/g],
-  ["AWS access key", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g],
-  ["Slack token", /\bxox[abposr]-[A-Za-z0-9-]{10,}/g],
-  ["Google API key", /\bAIza[0-9A-Za-z_-]{35}/g],
-  ["e-mail address", /(?<![\w.%+-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b/g, (m) => reservedAddress(String(m[1]), String(m[2]))],
-  // After start, a character that cannot be part of a path, or a URL scheme's "://" (file:///home/alice/...).
-  ["home-directory path", /(?:^|[^\w.~/-]|:\/\/)(?:\/root\/|\/home\/[A-Za-z0-9._-]+\/|\/Users\/[A-Za-z0-9._-]+\/)/g],
-  // The same path behind a host, for the schemes that name a file on a machine (file://localhost/home/alice/...).
-  ["home-directory path", /\b(?:file|sftp|ssh|scp|rsync|ftp):\/\/[^\s/]+(?:\/root\/|\/home\/[A-Za-z0-9._-]+\/|\/Users\/[A-Za-z0-9._-]+\/)/g],
-];
-
-/**
- * An address that names nobody: git@<host> (an SSH remote), or a domain that is example.com, example.org, example.net
- * or a subdomain of one, or whose final label is test, example, invalid or localhost.
- * @param {string} local @param {string} domain
- */
-function reservedAddress(local, domain) {
-  const d = domain.toLowerCase();
-  if (local === "git") return true;
-  if (/(?:^|\.)example\.(?:com|org|net)$/.test(d)) return true;
-  return /\.(?:test|example|invalid|localhost)$/.test(d);
-}
-
-/** The kinds found in one line. @param {string} line @returns {string[]} */
-function kindsIn(line) {
-  /** @type {string[]} */
-  const kinds = [];
-  for (const [kind, re, excuse] of SECRET_PATTERNS) {
-    for (const m of line.matchAll(re)) {
-      if (excuse && excuse(m)) continue;
-      kinds.push(kind);
-      break;
-    }
-  }
-  return kinds;
-}
-
-/**
- * The secret findings in one text: line number and kind, never the match.
- * @param {string} text @returns {{ line: number, kind: string }[]}
- */
-function scanText(text) {
-  /** @type {{ line: number, kind: string }[]} */
-  const out = [];
-  text.split("\n").forEach((l, i) => {
-    for (const kind of kindsIn(l)) out.push({ line: i + 1, kind });
-  });
-  return out;
-}
-
-/** Text with every secret match (excused addresses aside) replaced by [masked]. @param {string} text */
-const mask = (text) =>
-  SECRET_PATTERNS.reduce((t, [, re, excuse]) => t.replace(re, (...a) => {
-    const m = /** @type {RegExpMatchArray} */ (/** @type {unknown} */ (a.slice(0, -2).filter((x) => typeof x === "string" || x === undefined)));
-    return excuse && excuse(m) ? String(a[0]) : "[masked]";
-  }), text);
 
 /**
  * Frontmatter fields of a SKILL.md: name and description as strings (folded block and quoted scalars read), null when
@@ -271,10 +216,11 @@ function filesNotOnBranch(draft, skillDir, skillRel, branch) {
 
 /**
  * Run the gate's checks on a draft.
- * @param {{ draft: string, name: string, base: string | null }} o
+ * @param {{ draft: string, name: string, base: string | null, baseName?: string | null }} o `baseName`: the base
+ *   branch's name when `base` is a pinned commit
  * @returns {{ code: string, text: string }[]} the failures, empty when the draft passes
  */
-function checkDraft({ draft, name, base }) {
+function checkDraft({ draft, name, base, baseName = null }) {
   /** @type {{ code: string, text: string }[]} */
   const fail = [];
   const skillRel = `skills/${name}`;
@@ -378,13 +324,40 @@ function checkDraft({ draft, name, base }) {
     }
   }
   for (const { line, text } of addedReadmeLines(draft, mergeBase)) for (const f of scanText(text)) findings.push({ file: "README.md", line, kind: f.kind });
+  // The branch as the publish step pushes it: every line any of its commits adds, on every path, and the paths they
+  // touch (skill-scan.mjs). A finding the checks above already named is not repeated.
+  const hasBranch = git(draft, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0;
+  // When origin's copy of the base is known (a remote-tracking ref), the commits below the merge base that origin
+  // lacks are covered too: a push of the branch sends them. Without one the scan keeps the merge-base range.
+  const bn = baseRef && !/^[0-9a-f]{40,64}$/.test(baseRef) ? baseRef : baseName;
+  const tracked = !!bn && git(draft, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${bn}^{commit}`]).status === 0;
+  const scan = hasBranch ? scanBranch(draft, { base: baseRef, branch, name, remote: tracked ? ["--remotes=origin"] : null }) : null;
+  if (scan) {
+    const named = new Set(findings.map((f) => `${f.file}\n${f.line}\n${f.kind}`));
+    for (const f of scan.findings) {
+      const key = `${f.file}\n${f.line}\n${f.kind}`;
+      if (f.commit || !named.has(key)) findings.push(f);
+      named.add(key);
+    }
+  }
   if (findings.length) {
-    const shown = findings.slice(0, MAX_FINDINGS_SHOWN).map((f) => `   - ${f.file}${f.line === null ? "" : ` line ${f.line}`}: ${f.kind}`);
+    const shown = findings.slice(0, MAX_FINDINGS_SHOWN).map((f) => `   - ${findingLine(f)}`);
     const more = findings.length > MAX_FINDINGS_SHOWN ? [`   - and ${findings.length - MAX_FINDINGS_SHOWN} more`] : [];
+    const history = findings.some((f) => "commit" in f && f.commit && !("base" in f && f.base)) ? [`   ${historyAdvice(scan?.mergeBase ?? null)}`] : [];
     fail.push({
       code: "secrets",
-      text: [`Possible secrets or personal details, or files the scan could not read (${findings.length}). Remove each secret, or replace it with a placeholder such as <token>, user@example.com or ~/; never put a real key, address or home path in a skill:`, ...shown, ...more].join("\n"),
+      text: [`Possible secrets or personal details, or files the scan could not read (${findings.length}). Remove each secret, or replace it with a placeholder such as <token>, user@example.com or ~/; never put a real key, address or home path in a skill:`, ...shown, ...more, ...history].join("\n"),
     });
+  }
+  // Only skills/<name>/ and README.md: whatever else the branch carries is pushed unsealed.
+  if (scan && scan.problems.length) {
+    fail.push({ code: "paths", text: `What the branch would push cannot be checked: ${scan.problems.join("; ")}. The draft worktree must come from the command in your brief, on a branch made from the base branch.` });
+  } else if (scan && (scan.outside.length || scan.unpushed.length)) {
+    /** @type {string[]} */
+    const texts = [];
+    if (scan.outside.length) texts.push(outsideText(scan.outside, name, scan.mergeBase));
+    if (scan.unpushed.length) texts.push(unpushedText(scan.unpushed, "origin", `Recreate the draft on origin's copy of the base (in the draft worktree: git rebase --onto origin/${bn} ${scan.mergeBase ? scan.mergeBase.slice(0, 12) : "<merge base>"}, then seal again and commit), or name these commits under OPEN in your report so a person deals with them before publishing.`));
+    fail.push({ code: "paths", text: texts.join(" ") });
   }
 
   // d. The seal.
@@ -522,7 +495,7 @@ async function run() {
     const allows = readJsonl(stateDir, "skill-create.jsonl").filter((e) => e.session_id === sessionId && e.decision === "allow" && e.skill === name);
     const pinned = allows.find((e) => typeof e.base_sha === "string" && /^[0-9a-f]{40,64}$/.test(e.base_sha));
     const made = allows.findLast((e) => typeof e.base === "string" && e.base);
-    failures = checkDraft({ draft, name, base: pinned ? String(pinned.base_sha) : made ? String(made.base) : null });
+    failures = checkDraft({ draft, name, base: pinned ? String(pinned.base_sha) : made ? String(made.base) : null, baseName: made ? String(made.base) : null });
   }
   const failed = failures.map((f) => f.code);
   if (!failures.length) {

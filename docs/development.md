@@ -1,0 +1,136 @@
+# Development
+
+For contributors to this repository: the npm scripts, the repository layout, the rules to follow when you change something, how to build the plugin, the paid benchmark and eval runs, and the diagrams. Users of the plugin need the [README](../README.md) instead. Terms: [glossary](glossary.md).
+
+## Set up and check
+
+```bash
+npm install
+npm run check        # typecheck, tests, check-agents and check-plugin at the same time; must pass before you finish
+npm test             # the tests only (fake model, no API calls)
+npm run typecheck    # the type check only
+```
+
+`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main.
+
+## npm scripts
+
+| Script | What it does |
+|---|---|
+| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time |
+| `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls; one temp root, removed at the end) and the type check |
+| `npm run check-agents`, `npm run sync-agents` | Find, or fix, drift between `src/config.ts` and `.claude/agents/*.md` |
+| `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
+| `npm run auto`, `npm run native`, `npm run route` | Headless run with triage first; headless run of the orchestrator; triage only ([Headless runs](native-mode.md#headless-runs)) |
+| `npm run orchestrate`, `npm run test-dashboard` | The orchestrator with the pane loaded; the pane's own test (needs the `claude` CLI) |
+| `npm run plain` | A plain interactive session in this repo: `claude --settings '{"agent":"","outputStyle":"Concise"}'`. A session opened here otherwise starts as the orchestrator |
+| `npm run report` | An HTML timeline and per-role tables from the state dir, with an estimated cost at list prices ([Run report](logs.md#run-report)) |
+| `npm run install-statusline` | Copy the status line script and print the setting ([Status lines](dashboard.md#status-lines)) |
+| `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](claude-code-updates.md)) |
+| `npm run skill-publish` | List draft skills; `-- <name>` pushes a draft and opens its pull request, `--merge` merges, installs and removes the draft, `--dry-run` prints the steps ([Publishing](skills.md#publishing)) |
+| `npm run eval` | `claude plugin eval` on `dist/plugin` with the cases in `evals/` (paid, `--max-cost-usd 10`) ([Plugin eval suite](../bench/README.md#plugin-eval-suite)) |
+| `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](../bench/README.md)) |
+| `npm start` | The SDK pipeline, with triage ([docs/sdk-pipeline.md](sdk-pipeline.md)) |
+
+## Repository layout
+
+```
+.claude/
+  agents/            orchestrator, researcher, implementer, integrator, reviewer
+  hooks/             plan-check.mjs (plan check, read router, skill suggestions), verify.sh and bugfix-check.mjs (test gate,
+                     test baseline, bugfix check), review-gate.mjs, quote-check.mjs, researcher-guard.mjs, egress-guard.mjs,
+                     handback-check.mjs (report check and hand-back capture), compact-context.mjs, journal.mjs,
+                     telemetry.mjs, read-log.mjs, turn-budget.mjs (turn warning), nudge.mjs, brief.mjs (the parser),
+                     run.mjs, state.mjs, file-profile.mjs, skill-catalog.mjs, skill-hint.mjs, judge-hook.mjs,
+                     judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
+                     built-in subagent types), skill-gate.mjs (the skill gate), skill-seal.mjs (a draft skill's seal),
+                     skill-scan.mjs (a library shared by the skill gate and npm run skill-publish),
+                     subagent-statusline.mjs (the plugin's subagent status line)
+  skills/            route, orchestration-conventions, skill-authoring
+  workflows/         orchestrate.js (the gated workflow)
+  settings.json, rules/
+.claude-plugin/      marketplace.json
+dist/plugin/, dist/dashboard/   the built plugin, and the pane's mod alone (both committed)
+dashboard/           the pane (source for both builds)
+statusline/          statusline.sh
+src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
+scripts/             check.mjs (npm run check), run-tests.mjs (npm test), auto.sh, orchestrate.sh, build-plugin.mjs,
+                     report.mjs and prices.mjs (npm run report), tokens.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
+                     install-statusline.sh, claude-update.mjs (the check after a Claude Code update),
+                     skill-publish.mjs (a person publishes a draft skill),
+                     run-result.mjs and log-run.mjs (a headless run's result document and its row in runs.jsonl)
+evals/               the plugin eval suite
+bench/               the benchmark: run, grade, analyze, report, tasks/, matrix/
+docs/                the documentation (index: docs/README.md), data/ (run data, live checks), diagrams/
+```
+
+## Contributor rules
+
+The full rules are in `CLAUDE.md` and `.claude/rules/agents.md`. `CLAUDE.md` holds the commands and rules every session needs. `.claude/rules/agents.md` loads only when you touch agent, hook, settings or workflow files. In short:
+
+**Models and agents.**
+- Change models, effort, turn limits and the triage thresholds in `src/config.ts`, the one source of truth. Then run `npm run sync-agents`; `npm run check-agents` fails on drift.
+- Model rule: Fable plans (the orchestrator, the SDK planner), Opus does the tasks (the implementer, the SDK writer and solo, the plain session of `npm run auto`), Sonnet does the rest. Haiku is not used.
+- Do not add `memory:` to the orchestrator or the reviewer: it turns on Write and Edit for them.
+- Never give the researcher or the reviewer a web tool that posts data, or Edit or Write.
+- Do not set `CLAUDE_CODE_EFFORT_LEVEL` or `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`: both override the per-agent settings.
+- Name built-in agents only in `.claude/hooks/builtin-agents.mjs` (`BUILTIN_AGENTS`). After a Claude Code update, run `npm run claude-update`.
+
+**Texts that must agree.** The nudge, the `route` skill and the orchestrator describe the same three routes and the same output rule. Change them together. Name switches (`ORCH_*`) only in maintainer text, never in agent bodies, skills or the nudge's context; `src/contracts.test.ts` checks this.
+
+**Tests.**
+- `npm test` runs `scripts/run-tests.mjs`. It runs two suites (`tsx --test src/*.test.ts src/*.test.mjs` and `node --test bench/*.test.mjs`) with one temp root as `TMPDIR`, and removes the root at the end. `ORCH_KEEP_TEST_TMP=1` keeps it.
+- Every test file imports `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) as its first import, so a file run on its own makes and removes its own `orch-test-*` root. `src/test-tmp.test.mjs` fails when one does not.
+- The test gate's hardening tests are split in three files: `src/gate-hardening-time.test.mjs` (time limit and hook budget), `src/gate-hardening-trap.test.mjs` (temp folder, `run_limited`) and `src/gate-hardening-logs.test.mjs` (the rest).
+- To test a hook script by hand in zsh, pass the JSON with `printf '%s'`, not `echo`: zsh expands `\n`.
+
+**After a change under `.claude/` or `dashboard/`,** rebuild the plugin (next section) and bump `version` in `package.json`, so installed copies pick up the change.
+
+## Build the plugin
+
+```bash
+npm run build-plugin    # assemble dist/plugin and dist/dashboard
+npm run check-plugin    # fail when the committed build is stale
+claude plugin validate dist/plugin    # check the built plugin
+claude --plugin-dir dist/plugin       # try it in a session
+```
+
+What the build does:
+- **Agent names.** Plugin agents carry a namespace (`orchestration:<name>`). The build rewrites the orchestrator's allowlist and the test gate's hook matcher to that form, and the hooks compare the bare role name. The first live plugin run showed that the namespaced name silently turned off both gates; `hooks.test.ts` now covers plain and namespaced names.
+- **What it leaves out.** Plugin builds do not carry `hooks`, `permissionMode` or `mcpServers` from agent frontmatter. Project permission denies are not part of a plugin.
+- **Workflows.** It ships `.claude/workflows/*.js` as plugin workflows, with every `agentType` rewritten to `orchestration:<role>`.
+- **Evals.** It copies the repo-root `evals/` into the plugin, for `claude plugin eval`.
+- **Hooks.** It registers `judge-hook.mjs` (PreToolUse on `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`, and wraps the judge hook for `onFailure: "block"`. It also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`).
+- **Settings.** It writes the 20 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`, and ships `.claude/hooks/subagent-statusline.mjs` through the plugin's `settings.json`.
+- **The pane.** It builds `dashboard/` into the plugin (with its state owner renamed to `orchestration`) and alone as `dist/dashboard`.
+
+`npm run check-plugin` skips only `dist/plugin/evals/results`. A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
+
+## Benchmark and eval suite
+
+Both cost money: they run real model sessions.
+
+```bash
+npm run bench:validate                                # check every task's graders, no model calls
+npm run bench -- --matrix bench/matrix/<name>.json    # one benchmark campaign (paid)
+npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # one bounded eval run (paid)
+```
+
+The eval suite was smoke-run on 2026-11-10 with the bounded command above, twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed. How the benchmark works and every result: [bench/README.md](../bench/README.md).
+
+## Diagrams
+
+The diagrams are SVG files in `docs/diagrams/`, each in a light and a dark version. To change one:
+
+1. Edit its `*.scene.json`, or the sequence in `build.py`.
+2. Run `python3 docs/diagrams/build.py`. It uses the diagram-craft skill's renderer.
+
+## Optional: TypeScript code intelligence
+
+This gives Claude type errors after edits and symbol lookup. This repo does not install it, because it downloads software; run it yourself:
+
+```bash
+npm install -g typescript-language-server typescript    # the language server
+```
+
+Then, inside `claude`: `/plugin install typescript-lsp@claude-plugins-official`.

@@ -247,3 +247,207 @@ syncBuiltinESMExports();
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// G-7 (audit 2026-11-16): b DEPENDS on a and shares a's file. A fresh retry of a must go through, with its own DEPENDS
+// line or with the DEPENDS: b the overlap message used to advise; a real overlap and a real cycle still block every time.
+const SEQ = "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: f.txt\nDEPENDS: a\nGOAL: b\nSLICE: c\nFILES: f.txt\nDEPENDS: none\nGOAL: c";
+test("file_overlap and dependency_cycle: a retry of a slice that a later slice DEPENDS on goes through", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, SEQ);
+    for (const [s, d] of [["a", "none"], ["b", "a"], ["a", "none"], ["a", "none"], ["a", "b"], ["a", "b"], ["b", "a"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: f.txt\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    // A retry's line replaces its earlier one: b with DEPENDS: none would no longer run after a (the base blocked it too).
+    const loose = launch(dir, "SLICE: b\nFILES: f.txt\nDEPENDS: none");
+    assert.deepEqual([loose.status, lastCheck(dir).reason], [2, "file_overlap"], loose.stderr);
+    assert.match(loose.stderr, /f\.txt \(owned by a\)/);
+    // c shares f.txt with a and b and is ordered against neither: a real overlap, blocked every time.
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: c\nFILES: f.txt\nDEPENDS: none");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], r.stderr);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file_overlap: a retry's DEPENDS on a slice ordered after it adds no order for a later slice", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: f.txt\nDEPENDS: a\nGOAL: b\nSLICE: c\nFILES: f.txt\nDEPENDS: a\nGOAL: c");
+    for (const [s, d] of [["a", "none"], ["b", "a"], ["a", "none"], ["a", "b"], ["b", "a"], ["a", "b"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: f.txt\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    // c and b both come after a and are not ordered against each other: a real overlap, every time.
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: c\nFILES: f.txt\nDEPENDS: a");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], r.stderr);
+      assert.match(r.stderr, /f\.txt \(owned by b\)/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file_overlap and dependency_cycle: a transitive dependant is ordered after the retried slice; a real cycle still blocks", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: m\nFILES: m.txt\nDEPENDS: a\nGOAL: m\nSLICE: b\nFILES: f.txt\nDEPENDS: m\nGOAL: b\nSLICE: x\nFILES: x.txt\nDEPENDS: y\nGOAL: x\nSLICE: y\nFILES: y.txt\nDEPENDS: x\nGOAL: y");
+    for (const [s, f, d] of [["a", "f.txt", "none"], ["m", "m.txt", "a"], ["b", "f.txt", "m"], ["a", "f.txt", "none"], ["a", "f.txt", "b"], ["x", "x.txt", "y"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: ${f}\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: y\nFILES: y.txt\nDEPENDS: x");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "dependency_cycle"], r.stderr);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// G-7, third attempt: one order graph for both checks. Each slice's edges are the DEPENDS of its latest allowed launch (a
+// retry replaces its earlier line); a retry's entry naming a slice that already leads back to it is dropped.
+const ABC = "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: f.txt\nDEPENDS: a\nGOAL: b\nSLICE: c\nFILES: f.txt\nDEPENDS: a\nGOAL: c";
+/**
+ * Launch each [slice, DEPENDS, FILES] in a fresh planned run; every launch but the last must be allowed; returns the last.
+ * @param {string} planText @param {[string, string, string?][]} seq
+ */
+function walk(planText, seq) {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, planText);
+    /** @type {{ status: number | null, stderr: string, reason: string }} */
+    let out = { status: null, stderr: "", reason: "" };
+    seq.forEach(([s, d, f = "f.txt"], i) => {
+      const r = launch(dir, `SLICE: ${s}\nFILES: ${f}\nDEPENDS: ${d}`);
+      out = { status: r.status, stderr: r.stderr, reason: lastCheck(dir).reason };
+      if (i < seq.length - 1) assert.deepEqual([out.status, out.reason], [0, "ok"], `launch ${i + 1}, ${s} DEPENDS ${d}: ${out.stderr}`);
+    });
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("file_overlap (G-7): a retry's DEPENDS on its dependant orders nothing for a later slice", () => {
+  const r = walk(ABC, [["a", "none"], ["b", "a"], ["a", "b"], ["c", "a"]]);
+  assert.deepEqual([r.status, r.reason], [2, "file_overlap"], r.stderr);
+  assert.match(r.stderr, /f\.txt \(owned by b\)/);
+});
+
+test("file_overlap (G-7): an edge of a superseded launch orders nothing", () => {
+  const r = walk(ABC, [["a", "b"], ["a", "none"], ["b", "a"], ["c", "a"]]);
+  assert.deepEqual([r.status, r.reason], [2, "file_overlap"], r.stderr);
+  assert.match(r.stderr, /f\.txt \(owned by b\)/);
+});
+
+test("file_overlap (G-7): the retry of a slice that b DEPENDS on goes through, with DEPENDS: none or DEPENDS: b", () => {
+  for (const d of ["none", "b"]) {
+    const r = walk(ABC, [["a", "none"], ["b", "a"], ["a", d]]);
+    assert.deepEqual([r.status, r.reason], [0, "ok"], `retry a DEPENDS ${d}: ${r.stderr}`);
+  }
+  const again = walk(ABC, [["a", "none"], ["b", "a"], ["a", "b"], ["a", "none"], ["a", "b"]]);
+  assert.deepEqual([again.status, again.reason], [0, "ok"], again.stderr);
+});
+
+test("dependency_cycle and file_overlap (G-7): a cycle of first launches and an overlap with no order still block", () => {
+  const cyc = "PLAN REVIEW\nSLICE: x\nFILES: f.txt\nDEPENDS: y\nGOAL: x\nSLICE: y\nFILES: f.txt\nDEPENDS: x\nGOAL: y";
+  const r1 = walk(cyc, [["x", "y"], ["y", "x"]]);
+  assert.deepEqual([r1.status, r1.reason], [2, "dependency_cycle"], r1.stderr);
+  const plain = "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: c\nFILES: f.txt\nDEPENDS: none\nGOAL: c";
+  const r2 = walk(plain, [["a", "none"], ["c", "none"]]);
+  assert.deepEqual([r2.status, r2.reason], [2, "file_overlap"], r2.stderr);
+  assert.match(r2.stderr, /f\.txt \(owned by a\)/);
+});
+
+test("file_overlap (G-7): a retry that drops the only order between two slices sharing a file is blocked", () => {
+  // x and y share f.txt and are ordered only through s (x DEPENDS s, s DEPENDS y); s owns another file.
+  const p = "PLAN REVIEW\nSLICE: y\nFILES: f.txt\nDEPENDS: none\nGOAL: y\nSLICE: s\nFILES: g.txt\nDEPENDS: y\nGOAL: s\nSLICE: x\nFILES: f.txt\nDEPENDS: s\nGOAL: x";
+  const head = /** @type {[string, string, string?][]} */ ([["y", "none"], ["s", "y", "g.txt"], ["x", "s"]]);
+  const dropped = walk(p, [...head, ["s", "none", "g.txt"]]);
+  assert.deepEqual([dropped.status, dropped.reason], [2, "file_overlap"], dropped.stderr);
+  assert.match(dropped.stderr, /x and y/);
+  const kept = walk(p, [...head, ["s", "y", "g.txt"]]);
+  assert.deepEqual([kept.status, kept.reason], [0, "ok"], kept.stderr);
+});
+
+/** planOrder, lifted out of the hook's source: the hook runs on import, so the test cannot import it. */
+function liftPlanOrder() {
+  const src = readFileSync(join(root, ".claude", "hooks", "plan-check.mjs"), "utf8");
+  const m = src.match(/^function planOrder\([\s\S]*?^}$/m);
+  assert.ok(m, "plan-check.mjs defines function planOrder");
+  return new Function(`${m[0]}\nreturn planOrder;`)();
+}
+
+test("file_overlap and dependency_cycle (G-7): every sequence of up to four launches of three slices sharing one file", () => {
+  const planOrder = liftPlanOrder();
+  const S = ["a", "b", "c"];
+  /** Reachability of its own, not the hook's. @param {Map<string, string[]>} g @param {string} from @param {string} to */
+  const leads = (g, from, to) => {
+    const seen = new Set();
+    const todo = [...(g.get(from) ?? [])];
+    while (todo.length) {
+      const n = /** @type {string} */ (todo.pop());
+      if (n === to) return true;
+      if (!seen.has(n)) {
+        seen.add(n);
+        todo.push(...(g.get(n) ?? []));
+      }
+    }
+    return false;
+  };
+  // Every launch: one of the three slices with each possible DEPENDS line over the other two (none, one, both).
+  const choices = S.flatMap((s) => {
+    const o = S.filter((x) => x !== s);
+    return [[], o.slice(0, 1), o.slice(1), o].map((depends) => ({ slice: s, depends }));
+  });
+  const started = Date.now();
+  let decisions = 0;
+  /** @param {{ slice: string, depends: string[] }[]} history allowed launches so far @param {number} left */
+  const step = (history, left) => {
+    if (left === 0) return;
+    for (const c of choices) {
+      decisions++;
+      const at = `${JSON.stringify(history)} + ${JSON.stringify(c)}`;
+      const r = planOrder(history, c.slice, c.depends);
+      const before = new Set(history.map((e) => e.slice));
+      const all = [...new Set([...before, c.slice])];
+      const blocked = r.cycle || r.unordered.length > 0 || r.lost.length > 0;
+      // Blocked exactly when the launch closes a cycle or leaves two launched slices (all share f.txt) in no order.
+      const cycle = leads(r.graph, c.slice, c.slice);
+      const loose = all.some((x) => all.some((y) => x < y && !leads(r.graph, x, y) && !leads(r.graph, y, x)));
+      assert.equal(blocked, cycle || loose, at);
+      if (before.has(c.slice)) {
+        // A retry is never blocked by a slice that depends on it, and its DEPENDS on such a slice is no cycle.
+        const dependants = S.filter((x) => x !== c.slice && before.has(x) && leads(r.prior, x, c.slice));
+        assert.equal(r.cycle, false, at);
+        for (const x of dependants) assert.ok(!r.unordered.includes(x), `blocked by its dependant ${x}: ${at}`);
+        // The G-7 retry itself: its latest line, plus any or all of its dependants, goes through.
+        const latest = history.filter((e) => e.slice === c.slice).at(-1)?.depends ?? [];
+        const own = latest.filter((d) => !leads(r.prior, d, c.slice));
+        for (const extra of [[], dependants]) {
+          const again = planOrder(history, c.slice, [...own, ...extra]);
+          assert.ok(!again.cycle && !again.unordered.length && !again.lost.length, `G-7 retry of ${c.slice} with ${extra}: ${JSON.stringify(history)}`);
+        }
+      }
+      if (blocked) {
+        step(history, left - 1);
+        continue;
+      }
+      const next = [...history, c];
+      // The graph the next decision starts from is the one this decision allowed, and it orders every two slices.
+      assert.deepEqual(planOrder(next, "z", []).prior, r.graph, at);
+      for (const x of all) for (const y of all) if (x < y) assert.ok(leads(r.graph, x, y) || leads(r.graph, y, x), `${x} ${y}: ${at}`);
+      step(next, left - 1);
+    }
+  };
+  step([], 4);
+  const ms = Date.now() - started;
+  assert.equal(decisions, 12 + 12 ** 2 + 12 ** 3 + 12 ** 4, "every sequence of up to four launches");
+  assert.ok(ms < 10_000, `the walk took ${ms} ms`);
+  console.log(`# G-7 walk: ${decisions} launch decisions in ${ms} ms`);
+});

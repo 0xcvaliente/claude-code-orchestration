@@ -1,6 +1,6 @@
 import "../src/test-tmp.mjs";
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -187,6 +187,23 @@ export async function score(dir, o = {}) { return { pass: !!o.variant, passed: o
     const before = readFileSync(join(campaign, "grades-lenient.jsonl"), "utf8");
     grade(campaign, "--tasks-dir", tasks, "--variant", "lenient");
     assert.equal(readFileSync(join(campaign, "grades-lenient.jsonl"), "utf8"), before);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("task graders run when started through a symlinked folder (entry guard compares real paths)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "grade-link-"));
+  try {
+    const link = join(tmp, "tasks-link");
+    symlinkSync(join(here, "tasks"), link);
+    const empty = join(tmp, "empty");
+    mkdirSync(empty);
+    for (const t of ["k1-stdlib-toolkit", "k2-stdlib-toolkit-xl", "h3-sql-engine"]) {
+      const r = spawnSync(process.execPath, [join(link, t, "score.mjs"), empty], { encoding: "utf8" });
+      assert.notEqual(`${r.stdout}${r.stderr}`.trim(), "", `${t}: the grader printed nothing through the symlink`);
+      if (t !== "h3-sql-engine") assert.equal(JSON.parse(r.stdout).pass, false, t);
+    }
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }

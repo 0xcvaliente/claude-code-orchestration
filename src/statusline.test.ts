@@ -76,6 +76,16 @@ test("statusline: a non-numeric line count or reset time prints no shell error",
   assert.match(plain(f.stdout), /\[5h\] \(2h left\) .* 4%/);
 });
 
+test("statusline: a backslash in the folder or model name is printed as it is", skipNoJq, () => {
+  // echo -e read `\c` as "stop here": the folder's rest, the line counts and the newline were lost.
+  const r = run({ ...base, model: { display_name: "Op\\tus" }, workspace: { current_dir: "/x/my\\cproj" }, cost: { total_lines_added: 3, total_lines_removed: 1 } });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = plain(r.stdout).split("\n");
+  assert.equal(lines[0], "[Op\\tus] 📁 my\\cproj | +3 -1");
+  assert.match(lines[1] ?? "", /^\[ctx\] .* 12%$/);
+  assert.equal(lines.length, 3, "two lines, each ending in a newline");
+});
+
 test("statusline: the 7-day window is labelled with its reset date", skipNoJq, () => {
   const reset = Date.UTC(2027, 2, 5, 12) / 1000; // 5 March 2027, noon UTC
   const r = run({ ...base, rate_limits: { seven_day: { used_percentage: 20, resets_at: reset } } }, { env: { ...process.env, TZ: "UTC" } });

@@ -27,7 +27,7 @@ function strings(file) {
 }
 
 // The exec-env names (EXEC_ENV), GIT_CONFIG_* by one example.
-const NAMES = ["GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_ASKPASS", "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_COUNT", "GIT_PROXY_COMMAND", "EDITOR", "VISUAL", "PAGER", "LD_PRELOAD", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "PATH", "SHELLOPTS"];
+const NAMES = ["GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_ASKPASS", "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_COUNT", "GIT_PROXY_COMMAND", "EDITOR", "VISUAL", "PAGER", "LD_PRELOAD", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "PATH", "SHELLOPTS", "PS4", "ZDOTDIR", "BASH_FUNC_f%%"];
 
 /** The quotings of one word `N<op>V` that the J2 property covers. @type {Array<(n: string, op: string, v: string) => string>} */
 const QUOTINGS = [
@@ -62,6 +62,18 @@ const HARDENING_REASONS = [
   /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
   /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
   /\(a NUL in \$'\.\.\.'\)/, // J3
+  // Audit 2026-11-16 (J-1 to J-10)
+  /\(<< inside \$\[\.\.\.\] or a subscript is a left shift, not a here document\)/,
+  /\(a here-document delimiter with \$ or a backtick\)/,
+  /^assigning zsh's functions, aliases/,
+  /^a \$\(\.\.\.\) or backtick inside an array subscript/,
+  /^hash -p and hash name=path/,
+  /^enable -f loads a builtin/,
+  // Audit 2026-11-16, second pass (fix-judge-2)
+  /^assigning zsh's commands table/,
+  /\(an assigning \$\{\.\.\.\} of a zsh function, alias or commands table\)/,
+  // fix-judge-3: the same rule on the widest reading of the whole command text
+  /^an assigning \$\{\.\.\.\} of zsh's functions, aliases or commands table/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -109,8 +121,35 @@ const HARDENED = [
   ["git config submodule.x.update '!rm -rf .git'", ["deny"]],
   ["git config difftool.x.path /tmp/evil", ["deny"]],
 ];
+/** The string literals between `const <name>` and the next `];` of a test file. @param {string} file @param {string} name */
+function listIn(file, name) {
+  const src = readFileSync(join(here, file), "utf8");
+  const at = src.indexOf(`const ${name}`);
+  assert.ok(at >= 0, `${name} not found in ${file}`);
+  const body = src.slice(at, src.indexOf("\n];", at));
+  return [...body.matchAll(/^\s*"((?:[^"\\\n]|\\.)*)",/gm)].map((m) => JSON.parse(`"${m[1]}"`));
+}
+// Audit 2026-11-16, J-1 to J-10: every bypass row of judge.test.ts (AUDIT_1116_DENY) must be denied here too.
+const AUDIT_1116 = listIn("judge.test.ts", "AUDIT_1116_DENY");
+for (const c of AUDIT_1116) HARDENED.push([c, ["deny"]]);
+// The second pass (fix-judge-2): J-3, J-4, J-8 and J-9 spellings (AUDIT_1116_2_DENY).
+const AUDIT_1116_2 = listIn("judge.test.ts", "AUDIT_1116_2_DENY");
+for (const c of AUDIT_1116_2) HARDENED.push([c, ["deny"]]);
+// fix-judge-2, third attempt: an assigning ${...} into a zsh table with a prefix, flag or nesting before the name.
+const AUDIT_1116_2_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_2_TABLE_EXPANSION_DENY");
+for (const c of AUDIT_1116_2_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
+// fix-judge-3: the same rule on the widest reading (an escaped }, a backslash-newline, a quoted }, a nested expansion).
+const AUDIT_1116_3_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_3_TABLE_EXPANSION_DENY");
+for (const c of AUDIT_1116_3_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
+
+/**
+ * Audit 2026-11-16, J-15 (approved by the owner): the only forms 1.4.0 denied that may now pass, exactly these strings
+ * and their wrapped forms. Everything else in GIT_EDITOR, core.editor and IFS stays denied (judge.test.ts, J-15 rows).
+ */
+const RELAXED = ["GIT_EDITOR=true git rebase --continue", "GIT_EDITOR=: git commit --amend", "GIT_EDITOR='true' git merge --continue", "git -c core.editor=true rebase --continue", "git -c core.editor=: commit --amend", "git -c 'core.editor=true' rebase --continue", 'while IFS= read -r f; do git add "$f"; done < files.txt', "IFS='' read -r line < f; git status"];
+const RELAXED_FORMS = new Set(RELAXED.flatMap((s) => [s, `env ${s}`, `${s}; git status`]));
 
 /** @param {{ cls: string, reason?: string }} r */
 const fires = (r) => r.cls === "deny" && /^setting /.test(r.reason ?? "");
@@ -127,9 +166,12 @@ test("differential (J1): never weaker than 1.4.0 on every judge test string and 
   for (const s of all) {
     const o = old(s, CWD);
     const n = next(s, CWD);
+    if (RELAXED_FORMS.has(s) && n.cls === "pass") continue;
     if ((o.cls === "deny" && n.cls !== "deny") || (o.cls === "judge" && n.cls === "pass")) weaker.push(`${JSON.stringify(s)}: 1.4.0 ${o.cls}, now ${n.cls}`);
   }
   assert.deepEqual(weaker, []);
+  assert.ok(AUDIT_1116.length >= 60, `only ${AUDIT_1116.length} audit rows read`);
+  assert.ok(AUDIT_1116_2.length >= 50, `only ${AUDIT_1116_2.length} second-pass audit rows read`);
 });
 
 test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the intended new rules", () => {
@@ -172,4 +214,88 @@ test("hardening (J1-J5): both copies deny or judge every input that got past 1.4
     }
   }
   assert.deepEqual(wrong, []);
+});
+
+test("zsh table expansion (fix-judge-2): every prefix, flag, operator and subscript of an assigning ${...} into a table is denied by both copies", () => {
+  const tables = ["functions", "aliases", "galiases", "saliases", "dis_functions", "dis_aliases", "dis_galiases", "dis_saliases", "commands"];
+  const chars = ["#", "+", "^", "=", "~", "!"];
+  const prefixes = ["", ...chars, ...chars.flatMap((a) => chars.map((b) => a + b)), " ", "(P)", "(k)", "(e)", "(@)", "(AA)", "(#)", "#(k)"];
+  const wrong = [];
+  let n = 0;
+  for (const t of tables)
+    for (const p of prefixes)
+      for (const op of ["=", ":=", "::="])
+        for (const sub of ["", "[f]"])
+          for (const inner of [`${p}${t}${sub}${op}echo MARK`, `${p}\${${t}${sub}${op}echo MARK}`])
+            for (const line of [`: \${${inner}}`, `: "\${${inner}}"`, `if : \${${inner}}; then :; fi`, `env echo \${${inner}}`]) {
+              n++;
+              const a = next(line, CWD);
+              const b = sdk(line, CWD);
+              if (a.cls !== "deny" || JSON.stringify(a) !== JSON.stringify(b)) wrong.push(`${JSON.stringify(line)}: judge-core ${a.cls}, judge.ts ${b.cls}`);
+            }
+  assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} of ${n} forms`);
+  for (const line of ["echo ${#functions}", "echo ${functions[f]}", "echo ${+commands[git]}", "echo ${x:=default}", "echo ${count::=0}", "echo ${#x:=functions}"]) {
+    assert.equal(next(line, CWD).cls, "pass", line);
+    assert.equal(sdk(line, CWD).cls, "pass", line);
+  }
+});
+
+test("zsh table expansion (fix-judge-3): an escaped }, a backslash-newline anywhere, a quoted }, a nested expansion, a newline or spaces, wherever the expansion stands, is denied by both copies", () => {
+  const tables = ["functions", "aliases", "galiases", "saliases", "dis_functions", "dis_aliases", "dis_galiases", "dis_saliases", "commands"];
+  const expansions = (/** @type {string} */ t) => {
+    const out = [
+      `\${${t}[x\\}]::=echo MARK two words}`,
+      `\${${t}[f]::=echo a\\}b MARK}`,
+      `\${#${t}[x\\}]:=echo MARK}`,
+      `\${+${t}[x\\}]=echo MARK}`,
+      `\${${t}['}']::=echo MARK}`,
+      `\${${t}["}"]::=echo MARK}`,
+      `\${${t}[\${x:-g}]::=echo MARK}`,
+      `\${${t}[\${x:-\\}}]::=echo MARK}`,
+      `\${${t}[a\nb]::=echo MARK}`,
+      `\${${t}[f]::=echo MARK\necho MARK}`,
+      `\${${t}[a b]::=echo MARK}`,
+      `\${${t}[a b]=echo MARK}`,
+    ];
+    // A backslash-newline at every place from just after the `$` to just before the `=`, with and without a prefix.
+    for (const pre of ["", "#", "+"])
+      for (const op of ["=", ":=", "::="]) {
+        const s = `\${${pre}${t}[f]${op}echo MARK}`;
+        for (let k = 1; k <= s.indexOf("="); k++) out.push(`${s.slice(0, k)}\\\n${s.slice(k)}`);
+      }
+    return out;
+  };
+  const sq = (/** @type {string} */ s) => `'${s.replaceAll("'", "'\\''")}'`;
+  const dq = (/** @type {string} */ s) => `"${s.replace(/[\\"$`]/g, "\\$&")}"`;
+  /** @type {Array<(e: string) => string>} */
+  const placements = [
+    (e) => `: ${e}; f`,
+    (e) => `: "${e}"; f`,
+    (e) => `if : ${e}; then f; fi`,
+    (e) => `builtin : ${e}; f`,
+    (e) => `! noglob : ${e}`,
+    (e) => `env echo ${e}`,
+    (e) => `echo ok; : ${e}`,
+    (e) => `zsh -c ${sq(`: ${e}; f`)}`,
+    (e) => `bash -c ${dq(`: ${e}; f`)}`,
+    (e) => `eval ${sq(`: ${e}`)}`,
+    (e) => `zsh -fc ${sq(`if : "${e}"; then f; fi`)}`,
+  ];
+  const wrong = [];
+  let n = 0;
+  for (const t of tables)
+    for (const e of expansions(t))
+      for (const place of placements) {
+        const line = place(e);
+        n++;
+        const a = next(line, CWD);
+        const b = sdk(line, CWD);
+        if (a.cls !== "deny" || JSON.stringify(a) !== JSON.stringify(b)) wrong.push(`${JSON.stringify(line)}: judge-core ${a.cls}, judge.ts ${b.cls}`);
+      }
+  assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} of ${n} forms`);
+  assert.ok(n > 5000, `only ${n} forms`);
+  for (const line of ["echo ${#functions}", "echo ${functions[f]}", "echo ${+commands[git]}", "n=${#functions}; echo $n", "echo ${functions_dir:=x}", "echo ${my_commands:=y}", "echo '${functions[x\\}]::=echo MARK}'"]) {
+    assert.equal(next(line, CWD).cls, "pass", line);
+    assert.equal(sdk(line, CWD).cls, "pass", line);
+  }
 });

@@ -6,7 +6,7 @@
 // The grader bounds its own run time (per-module budgets, see hidden/grade.py) and
 // rewrites its output after every finished module, so even if this wrapper's much
 // larger safety timeout fires, the modules that finished keep their scores.
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -84,6 +84,14 @@ export async function score(dir, opts = {}) {
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   console.log(JSON.stringify(await score(process.argv[2] ?? process.cwd())));
 }

@@ -265,3 +265,53 @@ test("d3-reader arms: plain sonnet main session, .claude/ copied, session persis
   assert.equal(envAdditions("reader-routed", m, run).ORCH_READ_ROUTER, "on");
   assert.equal(envAdditions("reader-routed", m, run).CLAUDE_CODE_SUBAGENT_MODEL_FORCE, undefined);
 });
+
+// ---------- audit 2026-11-16 (B-1, O-5): haiku arms run haiku; plain sessions keep the default output style ----------
+
+test("haiku arms: researcher.md rewritten to haiku, the haiku switch kept by runEnv, labels say haiku and not shipped", () => {
+  const m = { test_cmd: "python3 tools/check.py" };
+  const tmp = mkdtempSync(join(tmpdir(), "bench-haiku-"));
+  try {
+    const modelIn = (dir, n) => /^model:\s*(\S+)/m.exec(readFileSync(join(dir, n), "utf8"))?.[1];
+    for (const a of ["all-haiku", "reader-haiku"]) {
+      const env = runEnv(a, m, run, { ORCH_ALLOW_HAIKU: "0", PATH: "/bin" });
+      assert.equal(env.ORCH_ALLOW_HAIKU, "1", a);
+      assert.match(ARMS[a].label, /haiku/, a);
+      assert.doesNotMatch(ARMS[a].label, /shipped/, a);
+      const repo = join(tmp, a);
+      mkdirSync(repo);
+      prepareClaudeDir(a, repo, root, []);
+      const agents = join(repo, ".claude", "agents");
+      assert.equal(modelIn(agents, "researcher.md"), "haiku", a);
+      for (const n of ["implementer.md", "reviewer.md", "integrator.md", "orchestrator.md"]) {
+        assert.equal(modelIn(agents, n), modelIn(join(root, ".claude", "agents"), n), `${a} ${n}`);
+      }
+    }
+    // Arms that do not run haiku neither set the switch nor claim haiku.
+    for (const a of ["O-mix", "all-sonnet", "routed", "reader-sonnet", "reader-routed"]) {
+      assert.equal(envAdditions(a, m, run).ORCH_ALLOW_HAIKU, undefined, a);
+      assert.doesNotMatch(ARMS[a].label, /haiku/, a);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("plain-session arms set ORCH_OUTPUT_STYLE=default, so orchestrate.sh passes no outputStyle", () => {
+  for (const a of ["P-S", "P-O", "W-mix", "N-UC", "AUTO", "reader-haiku", "reader-sonnet", "reader-routed"]) {
+    assert.equal(envAdditions(a, meta, run).ORCH_OUTPUT_STYLE, "default", a);
+  }
+  const repo = mkdtempSync(join(tmpdir(), "bench-style-"));
+  try {
+    for (const a of ["P-S", "W-mix", "reader-haiku", "N-UC"]) {
+      const env = { ...runEnv(a, meta, run), ORCH_DRY_RUN: "1" };
+      const r = spawnSync("bash", [join(root, "scripts", "orchestrate.sh"), "task", repo], { cwd: root, env, encoding: "utf8" });
+      assert.equal(r.status, 0, `${a}: ${r.stderr}`);
+      const args = r.stdout.split("\n");
+      assert.equal(args[args.indexOf("--settings") + 1], '{"agent":""}', a);
+      assert.doesNotMatch(r.stdout, /outputStyle/, a);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
