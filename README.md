@@ -42,7 +42,7 @@ npm run native -- "task" /path/to/folder         # headless: always the orchestr
 npm run route -- --repo /path/to/folder --task "..."   # triage only, prints the decision as JSON
 ```
 
-`npm run auto` takes the task as its first argument, even a task that begins with `-`.
+`npm run auto` takes the task as its first argument. A task that begins with `-` gets through triage, but the session that follows still fails, because the `claude` CLI reads a prompt starting with `-` as an option; start the task with another character.
 
 The default agent applies to this repo only: the plugin does not ship the `agent` setting. What must stay plain clears it itself: `ORCH_AGENT=none` in `scripts/orchestrate.sh`, the SDK workers and `npm run plain` ([live checks](docs/data/live-checks-2026-11-16.md)).
 
@@ -413,6 +413,7 @@ The full list, with the evidence for each, is in [docs/native-mode.md](docs/nati
 - The eval suite (`npm run eval`) was smoke-run on 2026-11-10, bounded to `t2-single`, one run, twice, about $0.37 each: it runs end to end and 4 of 7 graders pass; why the other three fail is not understood yet ([docs/research-2026-11-10.md](docs/research-2026-11-10.md)).
 - A report that the hand-back check sends back is still captured, so a worker that then stops without handing back again is recorded with the undelivered report.
 - The gated workflow's file-overlap check is coarser than the plan check's: it can run one after the other two slices that could have run together. It never rejects a plan.
+- A task that begins with `-` fails once `npm run auto` or `npm run native` starts the session: `scripts/orchestrate.sh` passes it as `-p "$task"` with no `--` before it, and the `claude` CLI then reads it as an unknown option. Triage no longer fails on it. Start the task with another character.
 - The dashboard counts a run as stale after 10 minutes with no agent running, not after `ORCH_RUN_STALE_MIN`.
 
 ## Safety
