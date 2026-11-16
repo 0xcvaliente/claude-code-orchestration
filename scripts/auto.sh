@@ -79,7 +79,12 @@ orchestrate() { ORCH_AGENT=orchestrator exec "$here/orchestrate.sh" "$task" "$re
 # The plain session runs on opus unless ORCH_MODEL names another model (the same model the implementer agent runs on).
 session_out="$(ORCH_AGENT=none ORCH_MODEL="${ORCH_MODEL:-opus}" "$here/orchestrate.sh" "$task" "$repo")"
 code=$?
-printf '%s\n' "$session_out"
+# Captured above, so orchestrate.sh printed JSON: on a terminal, show its result text and totals line instead.
+if [ -t 1 ]; then
+  printf '%s' "$session_out" | node "$here/run-result.mjs" --terminal || printf '%s\n' "$session_out"
+else
+  printf '%s\n' "$session_out"
+fi
 
 if [ "$code" -eq 0 ] && [ "$mode" = reviewed ]; then
   # The session's report, cut to about 4000 characters; empty when the output is not the JSON claude prints.

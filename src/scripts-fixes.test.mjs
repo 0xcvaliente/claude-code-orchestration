@@ -200,6 +200,74 @@ for (const script of ["auto.sh", "orchestrate.sh"]) {
   });
 }
 
+const RESULT_DOC = JSON.stringify({ type: "result", is_error: false, result: "Done.\nTwo files changed.", num_turns: 3, orch_totals: { results: 2, turns: 41, wall_ms: 723400, exit_code: 0, complete: true } });
+// What the fake claude prints: one result record of 41 turns (orchestrate.sh adds orch_totals itself).
+const STREAM_DOC = JSON.stringify({ type: "result", is_error: false, result: "Done.\nTwo files changed.", num_turns: 41 });
+
+test("O-9: the terminal form is the result text and one totals line; anything that is not a result document is unchanged", async () => {
+  const { terminalForm } = await import("../scripts/run-result.mjs");
+  assert.equal(terminalForm(RESULT_DOC), "Done.\nTwo files changed.\nturns 41, 723 s, exit 0");
+  // older documents without orch_totals: their own num_turns and duration_ms; unknown values print as ?
+  assert.equal(terminalForm(JSON.stringify({ type: "result", result: "ok", num_turns: 2, duration_ms: 1500 })), "ok\nturns 2, 2 s, exit ?");
+  assert.equal(terminalForm(JSON.stringify({ type: "result", subtype: "no_result", is_error: true, result: "", orch_totals: { results: 0, turns: 0, wall_ms: null, exit_code: 1, complete: false } })), "turns 0, ? s, exit 1");
+  for (const raw of ["error: not logged in", "", "[1,2]", '{"a":1}', "null"]) assert.equal(terminalForm(raw), raw);
+});
+
+/** Runs `argv` with its standard output on a pseudo-terminal (script(1)); null when this system has no usable script. @param {string[]} argv @param {Record<string, string>} env */
+function onTerminal(argv, env) {
+  const quoted = argv.map((a) => `'${a.replace(/'/g, `'\\''`)}'`).join(" ");
+  // stdin closed: script(1) cannot set up a terminal on a pipe, and with no input it only echoes the end of input.
+  /** @type {import("node:child_process").SpawnSyncOptionsWithStringEncoding} */
+  const opts = { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
+  const r = process.platform === "darwin" ? spawnSync("script", ["-q", "/dev/null", ...argv], opts) : spawnSync("script", ["-qec", quoted, "/dev/null"], opts);
+  if (r.error || (r.status !== 0 && /usage|illegal option|invalid option|tcgetattr|ioctl/i.test(r.stderr))) return null;
+  return { status: r.status, stderr: r.stderr, stdout: r.stdout.replace(/\^D\x08\x08/g, "").replace(/\r/g, "") };
+}
+
+test("O-9: orchestrate.sh prints the terminal form on a terminal and the JSON document when piped", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "orch-fix-tty-"));
+  try {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo);
+    const bin = fakeBin(tmp, STREAM_DOC);
+    const env = cleanEnv({ PATH: `${bin}:${process.env.PATH}` });
+    const piped = spawnSync("bash", [orchestrateSh, "task", repo], { env, encoding: "utf8" });
+    assert.equal(piped.status, 0, piped.stderr);
+    assert.equal(JSON.parse(piped.stdout).orch_totals.turns, 41, "piped: one JSON document, as auto.sh and the bench read it");
+    const log = readFileSync(join(repo, ".claude", "state", "runs.jsonl"), "utf8").trim().split("\n");
+    assert.equal(JSON.parse(String(log.at(-1))).turns, 41);
+    const tty = onTerminal(["bash", orchestrateSh, "task", repo], env);
+    if (!tty) return t.skip("no script(1) to give the launcher a terminal");
+    assert.equal(tty.status, 0, tty.stderr);
+    const out = tty.stdout;
+    assert.match(out, /^Done\.\nTwo files changed\.\nturns 41, \d+ s, exit 0\n$/, out);
+    const log2 = readFileSync(join(repo, ".claude", "state", "runs.jsonl"), "utf8").trim().split("\n");
+    assert.equal(log2.length, 2, "the run is logged on a terminal too");
+    assert.equal(JSON.parse(String(log2.at(-1))).turns, 41, "the log still reads the document");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("O-9: auto.sh prints the plain session's terminal form on a terminal and its JSON when piped", (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "orch-fix-tty-auto-"));
+  try {
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+    const bin = fakeBin(tmp, STREAM_DOC);
+    const env = cleanEnv({ PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "plain", GIT_CEILING_DIRECTORIES: tmp });
+    const piped = spawnSync("bash", [join(root, "scripts", "auto.sh"), "task", repo], { env, encoding: "utf8" });
+    assert.equal(piped.status, 0, piped.stderr);
+    assert.equal(JSON.parse(piped.stdout).result, "Done.\nTwo files changed.");
+    const tty = onTerminal(["bash", join(root, "scripts", "auto.sh"), "task", repo], env);
+    if (!tty) return t.skip("no script(1) to give the launcher a terminal");
+    assert.equal(tty.status, 0, tty.stderr);
+    assert.match(tty.stdout, /(^|\n)Done\.\nTwo files changed\.\nturns 41, \d+ s, exit 0\n$/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
   test(`W-4: bench/lib/${launcher} carries a dash-led prompt through as the positional prompt after --`, () => {
     const tmp = mkdtempSync(join(tmpdir(), "orch-fix-launch-"));

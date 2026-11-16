@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Headless native orchestration: run the orchestrator agent non-interactively, print its JSON (the session's last
-# result, plus orch_totals: the results, turns and wall time of the whole run; scripts/run-result.mjs),
+# result, plus orch_totals: the results, turns and wall time of the whole run; scripts/run-result.mjs; on a terminal, the
+# result text and one line of turns, seconds and exit code instead),
 # and log tokens, turns and duration to <repo>/.claude/state/runs.jsonl.
 # Usage: scripts/orchestrate.sh "task description" [repo]   (repo: the folder the task is about, default the current directory)
 # The folder can be any folder: code, research, writing, analysis or operations. A git repository is needed only for
@@ -195,6 +196,12 @@ claude "${args[@]}" > "$stream" || code=$?
 # from claude's exit code, so a run cut short after an interim result is marked) for the whole run.
 out="$(node "$here/run-result.mjs" "$stream" "$start_ms" "$code")" || out="$(cat "$stream")"
 
-printf '%s\n' "$out"
+# A person in a terminal reads the result text and one totals line; a pipe or a capture (auto.sh, the bench, jq) gets the
+# JSON document as before.
+if [ -t 1 ]; then
+  printf '%s' "$out" | node "$here/run-result.mjs" --terminal || printf '%s\n' "$out"
+else
+  printf '%s\n' "$out"
+fi
 printf '%s' "$out" | node "$here/log-run.mjs" "$task" "$code" || true
 exit "$code"
