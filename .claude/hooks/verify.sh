@@ -30,7 +30,8 @@
 # KIND: bugfix (ORCH_BUGFIX_CHECK=off disables): after the tests pass, an implementer whose brief says KIND: bugfix
 # must have changed or added a test file that adds a qualified failing test on the base (bugfix-check.mjs); blocks
 # say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
-# the bugfix cap are counted separately.
+# the bugfix cap are counted separately, each over the blocks since the agent's latest SubagentStart in telemetry.jsonl
+# (a SendMessage resume starts the agent again under its id), or over all its blocks when no start is recorded.
 # Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block, so the whole hook ends
 # within ORCH_HOOK_BUDGET_S (default 870, 30 s under the 900 s timeout for logging and exit):
 #   test run    min(ORCH_TEST_TIMEOUT_S (default 600), time left). When it is reached the test command and its
@@ -92,7 +93,7 @@ if [ "${1:-}" = --plugin ] && ! { [ -f "$project/.claude/hooks/telemetry.mjs" ] 
   state="${CLAUDE_PLUGIN_DATA:-${HOME:-}/.claude/orchestration}/state/$key"
 fi
 
-MAX_BLOCKS=2 # per agent; the cap is the loop guard, so a still-failing agent is rechecked, not waved through
+MAX_BLOCKS=2 # per agent, since its latest SubagentStart (a resume starts a new count); the cap is the loop guard, so a still-failing agent is rechecked, not waved through
 
 # A whole number of seconds above 0, else the default.
 pos_int() { # value default
@@ -237,6 +238,20 @@ is_bugfix_agent() {
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 1
   kind="$(cat "$work/kind.out" 2>/dev/null)"
   [ "$kind" = bugfix ]
+}
+
+# The agent's blocks with reason $1 (a prefix when it ends in _), counted since its latest SubagentStart in
+# telemetry.jsonl (bugfix-check.mjs countBlocks): a SendMessage resume starts the agent again under its id, so each
+# attempt gets its own cap. With no start record every block counts. When node fails, the grep pattern $2 counts them
+# over the whole log, as before.
+count_blocks() { # reason grep-pattern
+  local n=""
+  [ -n "$agent_id" ] || { printf 0; return 0; }
+  n="$(node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { countBlocks } = await import(pathToFileURL(process.argv[2]).href); process.stdout.write(String(countBlocks(process.argv[3], process.argv[4], process.argv[5])));' count "$hooks_dir/bugfix-check.mjs" "$state" "$agent_id" "$1" </dev/null 2>/dev/null)"
+  case "$n" in
+    '' | *[!0-9]*) n="$(grep -c "$2" "$state/gates.jsonl" 2>/dev/null || true)" ;;
+  esac
+  printf '%s' "${n:-0}"
 }
 
 chk_parse() { # helper output
@@ -391,7 +406,7 @@ if [ "$rc" = 0 ]; then
       # KIND: bugfix agent: any other agent passes as before.
       bblocks=0
       if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
-        bblocks="$(grep -c "\"decision\":\"block\",\"reason\":\"bugfix_.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
+        bblocks="$(count_blocks bugfix_ "\"decision\":\"block\",\"reason\":\"bugfix_.*\"agent_id\":\"$agent_id\"")"
       fi
       if [ "${bblocks:-0}" -ge "$MAX_BLOCKS" ]; then
         log_gate allow bugfix_unverified_gave_up
@@ -452,8 +467,8 @@ fi
 
 blocks=0
 if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
-  # Only tests_failed blocks count here; bugfix-check.mjs counts its own bugfix_ blocks.
-  blocks="$(grep -c "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
+  # Only tests_failed blocks count here, since the agent's latest start; bugfix-check.mjs counts its own bugfix_ blocks.
+  blocks="$(count_blocks tests_failed "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"")"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   log_gate allow max_blocks_reached "$base_extra"

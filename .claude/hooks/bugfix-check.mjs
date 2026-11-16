@@ -17,7 +17,7 @@
 //             and the base run with those files copied in must show at least one new qualified failing test that
 //             lives in a copied file, compared with the base run without them (a failure of the whole file, such as
 //             an import error, does not count: the test body has to run and fail). Blocks say what is missing; after two
-//             such blocks for the agent it allows with bugfix_unverified_gave_up.
+//             such blocks for the agent since its latest SubagentStart it allows with bugfix_unverified_gave_up.
 // Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
 // SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
@@ -583,6 +583,24 @@ function jsonl(state, file) {
   }
 }
 
+/**
+ * The test gate's blocks of agent `id` whose reason is `reason` (or starts with it, when it ends in "_"), counted since
+ * the agent's latest SubagentStart in telemetry.jsonl: a SendMessage resume starts the agent again under its id, so
+ * each attempt gets its own cap. With no start record, every block of the agent counts.
+ * @param {string} state @param {string} id @param {string} reason
+ */
+export function countBlocks(state, id, reason) {
+  if (!id) return 0;
+  let start = -Infinity;
+  for (const e of jsonl(state, "telemetry.jsonl")) {
+    if (e.hook_event_name !== "SubagentStart" || e.agent_id !== id) continue;
+    const t = Date.parse(e.ts);
+    if (t > start) start = t;
+  }
+  const match = (/** @type {unknown} */ r) => (reason.endsWith("_") ? String(r).startsWith(reason) : r === reason);
+  return jsonl(state, "gates.jsonl").filter((r) => r.gate === "test" && r.decision === "block" && r.agent_id === id && match(r.reason) && !(Date.parse(r.ts) < start)).length;
+}
+
 /** KIND from the transcript brief, else from the launch record. @param {string} state @param {any} event @returns {string | null} */
 export function agentKind(state, event) {
   const brief = briefFromTranscript(event?.agent_transcript_path);
@@ -608,9 +626,7 @@ export function changedTestFiles(top, base) {
 export async function bugfix({ cwd, cmd, isolated, state, event }) {
   if (agentKind(state, event) !== "bugfix") return null;
   const id = typeof event?.agent_id === "string" ? event.agent_id : "";
-  const blocks = id
-    ? jsonl(state, "gates.jsonl").filter((r) => r.gate === "test" && r.decision === "block" && r.agent_id === id && String(r.reason).startsWith("bugfix_")).length
-    : 0;
+  const blocks = countBlocks(state, id, "bugfix_");
   const block = (/** @type {string} */ reason, /** @type {string} */ message, extra = "") =>
     blocks >= MAX_BUGFIX_BLOCKS
       ? { decision: "allow", reason: "bugfix_unverified_gave_up", extra, message: "" }
