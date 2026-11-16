@@ -9,8 +9,8 @@
 // "Glob tool behavior"). Without them the researcher could only Read whole files (docs/research-2026-11-10.md). Each is
 // held to forms that cannot write a file or start a program: `find` without its exec, ok, delete and fprint actions,
 // `grep` and `rg` with long options from SEARCH_LONG only (so no --filter, --pager, --pre or config file) and
-// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them on a /dev/ device (also as an
-// option's value); no command may hold a glob in an option's name (`tail -?`, `find . -delet[e]`). A lone `--`
+// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them (nor wc) on a /dev/ device other
+// than /dev/null (also as an option's value; judged on the normalised and resolved path, not its text); no command may hold a glob in an option's name (`tail -?`, `find . -delet[e]`). A lone `--`
 // never ends the check (review of 2026-11-10: `rg -e -- --pre=sh x` used it to hide an option).
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output (the session's own permission rules then
 // decide). It never prints an allow or ask decision. Acts only when the bare agent_type is `researcher`; any other
@@ -21,8 +21,8 @@
 // exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
 // allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
-import { appendFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, realpathSync } from "node:fs";
+import { join, posix } from "node:path";
 import { tokenize } from "./judge-core.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -40,9 +40,11 @@ const FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|rm|fprint|fprint0|fprintf|
 // tail's --follow and --retry and every shortened spelling GNU tail accepts for them (--fol, --f).
 const PAGE_LONG = new Set(["lines", "bytes", "quiet", "silent", "verbose", "zero-terminated", "help", "version"]);
 const PAGERS = new Set(["head", "tail", "cat"]);
-// A /dev/ path as a whole argument, as a long option's value (`--file=/dev/zero`) or attached to short options
-// (`-f/dev/zero`, `-rf/dev/zero`): group 1 is the path.
-const DEVICE = /^(?:--[^=]+=|-[A-Za-z0-9]+=?)?(\/dev\/.*)$/;
+// Audit 2026-11-16 T-5: a device path is judged after normalising it, never by its text: `/./dev/zero`, `//dev/zero`,
+// `/private/../dev/zero` and a relative `../../dev/zero` (resolved against the command's folder) all name /dev/zero,
+// and so does a symlink to it (its real path, when it exists). The commands that read their operands are under the
+// rule: the search and paging commands, wc, and the narrow sed and cut forms.
+const READERS = new Set(["wc", "sed", "cut"]);
 // Long options of grep, ugrep and ripgrep that only change what is searched or how matches print. Anything else is
 // denied by name, which covers the ones that run a program or write a file (ugrep --filter, --pager, --view,
 // --save-config, --config and ---FILE; ripgrep --pre, --hostname-bin) without listing them.
@@ -73,10 +75,11 @@ function insteadOf(word) {
 
 /**
  * Why `command` is outside the researcher's allowlist, or null when it is inside.
- * @param {string} command @returns {{ reason: string, word?: string } | null}
+ * @param {string} command @param {string} [cwd] the folder the command runs in (relative paths resolve against it)
+ * @returns {{ reason: string, word?: string } | null}
  */
-export function researcherViolation(command) {
-  return violation(withoutStderrNull(command));
+export function researcherViolation(command, cwd = process.cwd()) {
+  return violation(withoutStderrNull(command), cwd);
 }
 
 // The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
@@ -132,8 +135,8 @@ function withoutStderrNull(command) {
   return out;
 }
 
-/** @param {string} command @returns {{ reason: string, word?: string } | null} */
-function violation(command) {
+/** @param {string} command @param {string} cwd @returns {{ reason: string, word?: string } | null} */
+function violation(command, cwd) {
   /** @type {any} */
   let t;
   try {
@@ -167,7 +170,7 @@ function violation(command) {
     }
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
-    const option = optionViolation(w);
+    const option = optionViolation(w, cwd);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -205,23 +208,21 @@ function allowedWords(w) {
  * it can be the value of one (`rg -e -- --pre=sh x` reads `--` as the pattern and `--pre` as an option). So a word
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
- * @param {string[]} w @returns {string | null}
+ * @param {string[]} w @param {string} cwd @returns {string | null}
  */
-function optionViolation(w) {
+function optionViolation(w, cwd) {
   const first = w[0] ?? "";
   const args = w.slice(1);
   if (first === "find") {
     const action = args.find((x) => FIND_ACTIONS.test(x));
     return action ? `find ${action} runs a program or writes a file` : null;
   }
-  if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
-  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail or a search reading for ever, also
-  // as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
-  const device = args.find((a) => {
-    const path = DEVICE.exec(a)?.[1];
-    return path !== undefined && path !== "/dev/null";
-  });
+  if (!SEARCH.has(first) && !PAGERS.has(first) && !READERS.has(first)) return null;
+  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail, wc or a search reading for ever,
+  // also as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
+  const device = args.find((a) => readsDevice(a, cwd));
   if (device) return `${first} ${device} reads a device that may never end`;
+  if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
   for (const a of args) {
     if (a.startsWith("--")) {
       if (a === "--") continue;
@@ -235,6 +236,30 @@ function optionViolation(w) {
     }
   }
   return null;
+}
+
+/**
+ * Does an argument name a device other than /dev/null: as a whole word, as a long option's value (`--file=/dev/zero`)
+ * or attached to short options (`-f/dev/zero`, `-rf../dev/zero`)? Each candidate path is resolved against `cwd`
+ * (which normalises `.`, `..` and repeated slashes) and, when it exists, through its symlinks.
+ * @param {string} arg @param {string} cwd
+ */
+function readsDevice(arg, cwd) {
+  const candidates = [arg];
+  const long = /^--[^=]+=(.*)$/.exec(arg);
+  if (long) candidates.push(long[1] ?? "");
+  const short = /^-[A-Za-z0-9]+=?(.*)$/.exec(arg);
+  if (short && !arg.startsWith("--")) candidates.push(short[1] ?? "");
+  return candidates.some((p) => {
+    if (!p) return false;
+    const paths = [posix.resolve(cwd, p)];
+    try {
+      paths.push(realpathSync(paths[0] ?? p));
+    } catch {
+      // no such file: the lexical path decides
+    }
+    return paths.some((x) => x.startsWith("/dev/") && x !== "/dev/null");
+  });
 }
 
 // Run as a hook only when executed directly (the tests import researcherViolation).
@@ -251,7 +276,7 @@ if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
   const type = typeof input?.agent_type === "string" ? input.agent_type.replace(/^orchestration:/, "") : "";
   const command = input?.tool_input?.command;
   if (type !== "researcher" || (input.tool_name !== undefined && input.tool_name !== "Bash") || typeof command !== "string" || !command.trim()) process.exit(0);
-  const v = researcherViolation(command);
+  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : process.cwd());
   if (!v) process.exit(0);
   try {
     ensureStateDir();

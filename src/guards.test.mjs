@@ -329,6 +329,31 @@ test("researcher guard: a refused command's reason says what to use instead, in 
   }
 });
 
+// Audit 2026-11-16 T-5: the device rule judges the normalised path (also a relative one, against the command's
+// folder), and wc is under it too. /dev/null stays allowed where it was.
+test("researcher guard (T-5): a device reached by another spelling of its path, or through wc, is refused", () => {
+  for (const c of [
+    "cat /./dev/zero",
+    "cat //dev/zero",
+    "cat /private/../dev/zero",
+    "tail -c +1 /./dev/urandom",
+    "head -c 8 /dev/./zero",
+    "grep --file=//dev/zero x",
+    "rg -f/./dev/urandom x",
+    "grep -rf//dev/urandom x .",
+    "wc /dev/zero",
+    "wc -c /dev/stdin",
+    "wc -l //dev/zero",
+    "cat ../../../../../../../../../../dev/zero",
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat a.txt /dev/null", "cat a.txt //dev/null", "wc -l a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", "wc -l /x/a.txt /x/b.txt", "cat ../notes/devices.md", "grep -rn dev ../dev-notes"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
 
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
