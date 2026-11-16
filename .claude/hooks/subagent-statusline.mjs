@@ -125,14 +125,24 @@ export function rowFor(task, launches, columns = 0, index) {
   return columns > 8 ? fitColumns(row, columns) : row;
 }
 
-/** East Asian Wide and Fullwidth ranges, and the emoji blocks, that a terminal draws two columns wide. */
-const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{3FFFD}]|\p{Extended_Pictographic}️/u;
+// Two columns, from character properties: emoji presentation (by default, or forced by U+FE0F, which covers
+// keycaps), and East Asian Wide or Fullwidth text. JavaScript has no East_Asian_Width property, so the wide scripts
+// (Han, Hiragana, Katakana, Hangul syllables, Bopomofo, Yi) and the CJK symbol and fullwidth forms stand for it;
+// the halfwidth forms (U+FF61-FFDC) stay one column. Text presentation (U+FE0E) is one column.
+const EMOJI = /\p{Emoji_Presentation}|\p{Emoji}️/u;
+const WIDE_TEXT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}\p{Script=Yi}가-힣ᄀ-ᅟ⺀-〾㈀-㏿︰-﹏＀-｠￠-￦]/u;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
-/** Terminal columns of one grapheme: 0 for a control or a lone mark, 2 when wide, else 1. @param {string} g */
+/**
+ * Terminal columns of one grapheme: 0 when it is only marks, joiners, variation selectors or controls; 2 for emoji
+ * presentation or wide text; else 1. @param {string} g
+ */
 function graphemeWidth(g) {
-  if (WIDE.test(g)) return 2;
-  return /^[\p{M}\p{Cc}\p{Cf}]+$/u.test(g) ? 0 : 1;
+  if (/^[\p{M}\p{Cc}\p{Cf}]+$/u.test(g)) return 0;
+  if (g.includes("︎")) return 1;
+  if (EMOJI.test(g)) return 2;
+  const first = String.fromCodePoint(g.codePointAt(0) ?? 0);
+  return WIDE_TEXT.test(first) && !/[｡-ￜ]/.test(first) ? 2 : 1;
 }
 
 /**

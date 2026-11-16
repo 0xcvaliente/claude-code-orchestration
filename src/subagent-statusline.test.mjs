@@ -64,6 +64,18 @@ test("rowFor: a row is cut by display width, whole characters only (wide CJK and
   assert.equal(rowFor(task("impl1", "implementer", { label: accents }), LAUNCHES, 39), `implementer a risky · 41.2k · ${accents}`);
 });
 
+test("rowFor: every emoji with emoji presentation counts two columns; a variation selector or a joined sequence is never split", () => {
+  // "implementer a risky · 41.2k · " is 30 columns; at 40, 9 are left before the "…": four two-column characters
+  for (const e of ["🚀", "✅", "⌛", "⏩", "☕", "🛠️", "❤️", "👩‍💻", "🇳🇴", "1️⃣"]) {
+    assert.equal(rowFor(task("impl1", "implementer", { label: e.repeat(10) }), LAUNCHES, 40), `implementer a risky · 41.2k · ${e.repeat(4)}…`, JSON.stringify(e));
+  }
+  // text presentation (U+FE0E) and a plain symbol stay one column: 9 fit
+  assert.equal(rowFor(task("impl1", "implementer", { label: "☕︎".repeat(12) }), LAUNCHES, 40), `implementer a risky · 41.2k · ${"☕︎".repeat(9)}…`);
+  // mixed text: whole characters only, the cut lands between them
+  const mixed = rowFor(task("impl1", "implementer", { label: "ok 👩‍💻 ❤️ 漢字 done" }), LAUNCHES, 40);
+  assert.equal(mixed, "implementer a risky · 41.2k · ok 👩‍💻 ❤️ …"); // 1+1+1+2+1+2+1 = 9 columns
+});
+
 test("rowFor: other agents keep Claude Code's own row", () => {
   for (const type of ["Explore", "general-purpose", "other-plugin:reviewer-bot", "orchestration:orchestrator", "", undefined]) assert.equal(rowFor(task("x", /** @type {any} */ (type)), LAUNCHES), null, String(type));
   assert.equal(rowFor(null, LAUNCHES), null);
