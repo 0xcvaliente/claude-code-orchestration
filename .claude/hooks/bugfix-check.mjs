@@ -56,7 +56,8 @@ const real = (p) => {
 //   node --test TAP: "not ok" with the YAML "location:" file; spec reporter: the "✖ failing tests:" summary, where
 //     each "✖ name" follows a "test at <file>" line;
 //   jest: "FAIL <file>" header, then "●"/"✕" names; vitest: "FAIL  <file> > name", or "❯ <file>" then "×" names;
-//   pytest: "FAILED/ERROR path::name"; go: "--- FAIL: TestX" qualified by the "FAIL <pkg>" line that follows;
+//   pytest: "FAILED/ERROR path::name"; unittest: "FAIL:/ERROR: name (module.Class.name)", the module as its .py path;
+//   go: "--- FAIL: TestX" qualified by the "FAIL <pkg>" line that follows;
 //   cargo: "test name ... FAILED" qualified by the preceding "Running <target>".
 // A failure with no file or package goes to `unqualified`; a suite-level crash sets `crash`.
 // Absolute paths under `root` (the run's tree) are made relative so two trees compare.
@@ -166,6 +167,19 @@ export function parseFailures(text, root = "") {
       else add(jsFile, n);
     } else if ((m = /^\s*[✕×]\s+(.+?)(?:\s+\d[\d.]*\s*m?s|\s+\(\d[\d.]*\s*m?s\))?$/.exec(line))) {
       add(jsFile, m[1]);
+    } else if ((m = /^(?:FAIL|ERROR): (\S+) \(([\w.]+)\)/.exec(line))) {
+      // unittest: "FAIL: test_x (pkg.mod.Class.test_x)" (Python 3.11+) or "(pkg.mod.Class)" before; a module that
+      // fails to import shows as unittest.loader._FailedTest, a crash with no test of its own.
+      const test = m[1] ?? "";
+      const parts = (m[2] ?? "").split(".");
+      if (/^unittest\.loader\._Failed/.test(m[2] ?? "")) {
+        res.crash = true;
+        continue;
+      }
+      if (parts.length > 2 && parts[parts.length - 1] === test) parts.pop();
+      const cls = parts.length > 1 ? parts.pop() : undefined;
+      if (cls) add(`${parts.join("/")}.py`, `${cls}.${test}`);
+      else add(null, test);
     } else if ((m = /^(FAILED|ERROR)\s+(\S+?\[.*?\]|\S+)(?:\s+-\s.*)?$/.exec(line))) { // a parametrized id may hold spaces
       const id = m[2] ?? "";
       if (id.startsWith("(")) continue; // unittest's "FAILED (failures=1)"
@@ -215,6 +229,7 @@ export function inFiles(name, files) {
   const q = name.slice(0, k).replace(/\\/g, "/");
   return files.some((t) => {
     if (q === t || q.endsWith(`/${t}`)) return true;
+    if (/\.py$/.test(q) && t.endsWith(`/${q}`)) return true; // unittest: a module path relative to discover's start folder
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });
