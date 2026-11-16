@@ -512,6 +512,29 @@ test("classify: floor, judged and pass cases", () => {
   assert.deepEqual(wrong, []);
 });
 
+/** Rows of [command, expected class] that classify wrongly, as readable lines. */
+const misread = (rows: Array<[string, BashClass]>) =>
+  rows.filter(([cmd, want]) => classify(cmd, CWD) !== want).map(([cmd, want]) => `${JSON.stringify(cmd)}: want ${want}, got ${classify(cmd, CWD)}`);
+
+// Audit items J1 to J5: each row of a hardening test was a way past the judge (the shell runs what the guard did not
+// read), and each guard row is an ordinary form that must classify as it did before the fix.
+test("classify (J1): << inside ((...)) or $((...)) is a left shift, not a here document, and is denied", () => {
+  assert.deepEqual(misread([
+    ["((1<<EOF))\nrm -rf .git\nEOF", "deny"],
+    ["((1<<EOF))\nsudo id\nEOF", "deny"],
+    ["((1<<EOF))\ngit push origin main\nEOF", "deny"],
+    ["for ((i=0; i<<EOF; i++)); do :; done\nrm -rf .git\nEOF", "deny"],
+    ["echo $((1<<'EOF'\n$(sudo id)\nEOF\n))", "deny"],
+    // guards: real here documents and arithmetic without a shift
+    ["cat <<EOF\nhi\nEOF", "pass"],
+    ["cat <<-EOF\n\thi\n\tEOF", "pass"],
+    ["python3 - <<'EOF'\nprint(1 << 2)\nEOF", "pass"],
+    ["for ((i=0; i<3; i++)); do echo $i; done", "pass"],
+    ["((n++))", "pass"],
+    ["echo $((1 + 2))", "pass"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.

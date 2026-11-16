@@ -61,6 +61,15 @@ function closeBacktick(src, open) {
   throw new Doubt("unterminated backtick");
 }
 
+/**
+ * `((` at `open` (a `((...))` command or the inside of `$((...))`) is arithmetic, where `<<` is a left shift: read as a
+ * here document it would hide the lines after it (`((1<<EOF))` then `rm -rf .git`), so any `<<` in the span is a doubt.
+ * @param {string} src @param {number} open
+ */
+function arithShift(src, open) {
+  if (src.slice(open, closeParen(src, open) + 1).includes("<<")) throw new Doubt("<< inside ((...)) is a left shift, not a here document");
+}
+
 /** `$'...'` starting at the quote after `$`: the decoded text and the index of the closing quote. */
 function ansiC(src, open) {
   const simple = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
@@ -141,6 +150,7 @@ export function tokenize(src) {
   const dollar = (i, inDouble) => {
     const n = src.charAt(i + 1);
     if (n === "(") {
+      if (src.charAt(i + 2) === "(") arithShift(src, i + 1);
       const end = closeParen(src, i + 1);
       substitutions.push(src.slice(i + 2, end));
       plain = false;
@@ -240,6 +250,7 @@ export function tokenize(src) {
       const eol = src.indexOf("\n", i);
       i = (eol < 0 ? src.length : eol) - 1;
     } else if (c === "(") {
+      if (next === "(") arithShift(src, i);
       const word = pieces?.map((p) => ("lit" in p ? p.lit : "?")).join("") ?? "";
       if (/^\s*\)/.test(src.slice(i + 1)) && !word.endsWith("=")) defines = true; // name() { ... }
       else if (pieces && !word.endsWith("=")) throw new Doubt("a ( attached to a word (zsh glob qualifier or extglob)");

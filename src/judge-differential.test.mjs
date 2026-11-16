@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyDetail as next } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as old } from "./fixtures/judge-core-1.4.0.mjs";
+import { classifyDetail as sdk } from "./judge.js"; // tsx resolves it to judge.ts
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CWD = "/w";
@@ -55,6 +56,18 @@ function generated() {
   return out;
 }
 
+// Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
+// denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
+const HARDENING_REASONS = [/\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/];
+/** @type {Array<[string, string[]]>} [command, the classes it may get] */
+const HARDENED = [
+  ["((1<<EOF))\nrm -rf .git\nEOF", ["deny"]],
+  ["((1<<EOF))\nsudo id\nEOF", ["deny"]],
+  ["((1<<EOF))\ngit push origin main\nEOF", ["deny"]],
+  ["for ((i=0; i<<EOF; i++)); do :; done\nrm -rf .git\nEOF", ["deny"]],
+  ["echo $((1<<'EOF'\n$(sudo id)\nEOF\n))", ["deny"]],
+];
+
 /** @param {{ cls: string, reason?: string }} r */
 const fires = (r) => r.cls === "deny" && /^setting /.test(r.reason ?? "");
 
@@ -78,7 +91,7 @@ test("differential (J1): never weaker than 1.4.0 on every judge test string and 
 test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the intended new rules", () => {
   const corpus = JSON.parse(readFileSync(join(here, "fixtures", "judge-corpus.json"), "utf8"));
   const tested = [...strings("judge.test.ts"), ...strings("judge-hook.test.mjs"), ...corpus.cases.map((/** @type {{ command: string }} */ c) => c.command)];
-  const intended = (/** @type {{ reason?: string }} */ r) => /^setting [A-Z_0-9]+ on a command line/.test(r.reason ?? "") || /^find -rm /.test(r.reason ?? "");
+  const intended = (/** @type {{ reason?: string }} */ r) => /^setting [A-Z_0-9]+ on a command line/.test(r.reason ?? "") || /^find -rm /.test(r.reason ?? "") || HARDENING_REASONS.some((re) => re.test(r.reason ?? ""));
   const stray = [];
   for (const s of new Set(tested)) {
     const o = old(s, CWD);
@@ -102,4 +115,17 @@ test("exec-env property (J2): every quoting of the word fires the env deny exact
   }
   assert.deepEqual(differ.slice(0, 20), []);
   assert.ok(fired > 1000, `the env deny fired on only ${fired} unquoted lines`);
+});
+
+test("hardening (J1-J5): both copies deny or judge every input that got past 1.4.4, alone and wrapped, and agree", () => {
+  const wrong = [];
+  for (const [s, want] of HARDENED) {
+    for (const form of [s, `${s}; git status`, `true && ${s}`]) {
+      const n = next(form, CWD);
+      const k = sdk(form, CWD);
+      if (JSON.stringify(n) !== JSON.stringify(k)) wrong.push(`${JSON.stringify(form)}: judge-core ${n.cls}, judge.ts ${k.cls}`);
+      if (!want.includes(n.cls)) wrong.push(`${JSON.stringify(form)}: want ${want.join(" or ")}, got ${n.cls}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
 });
