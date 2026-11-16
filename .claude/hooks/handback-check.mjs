@@ -16,10 +16,14 @@
 // other agent, a session in another permission mode (no SubagentHandback tool: the report is the last message, and
 // the gates read it at SubagentStop as before) and malformed input exit 0. ORCH_HANDBACK_CHECK=off disables it.
 // Decisions go to gates.jsonl in the state dir (gate "handback": the reason and ids only, never report text).
+// It also captures every hand-back's parsed fields (handbackFields) in handbacks.jsonl (state.mjs recordHandback), for
+// any agent type with an agent id and even with ORCH_HANDBACK_CHECK=off: at SubagentStop journal.mjs and telemetry.mjs
+// read the report from that capture, since the stop payload of a hand-back carries no last_assistant_message and the
+// subagent transcript does not hold the report just handed back yet.
 import { readFileSync } from "node:fs";
-import { parseReply } from "./brief.mjs";
+import { parseReply, stopRecord } from "./brief.mjs";
 import { appendJsonl, readJsonl } from "./run.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, recordHandback, stateDir } from "./state.mjs";
 
 const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"]);
 
@@ -49,9 +53,23 @@ export function reportProblem(role, message, checks = []) {
   return null;
 }
 
+const CAPTURED = ["status", "answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"];
+/**
+ * The parsed fields of a report that a stop record takes from it (brief.mjs stopRecord): status, answers, open, gaps
+ * (confidence and key), the quote count, and draft, skills_used and skills_skipped only when the report has them.
+ * Never report text beyond what stopRecord itself keeps.
+ * @param {string} message
+ */
+export function handbackFields(message) {
+  const r = /** @type {Record<string, unknown>} */ (stopRecord({ reply: message }));
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  for (const k of CAPTURED) if (k in r) out[k] = r[k];
+  return out;
+}
+
 // Run as a hook only when executed directly (the tests import reportProblem).
 if (process.argv[1]?.endsWith("handback-check.mjs")) {
-  if ((process.env.ORCH_HANDBACK_CHECK ?? "").trim().toLowerCase() === "off") process.exit(0);
   if (duplicate("handback-check.mjs")) process.exit(0);
   /** @type {any} */
   let input;
@@ -63,9 +81,20 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   if (!input || typeof input !== "object" || Array.isArray(input)) process.exit(0);
   const role = typeof input.agent_type === "string" ? (input.agent_type.split(":").pop() ?? "") : "";
   const message = input.tool_input?.message;
-  if (input.tool_name !== "SubagentHandback" || !WORKERS.has(role) || typeof message !== "string") process.exit(0);
   const sessionId = typeof input.session_id === "string" ? input.session_id : "";
   const agentId = typeof input.agent_id === "string" && input.agent_id ? input.agent_id : null;
+  // The capture for the stop records (state.mjs, HANDBACK_LOG): every agent with an id that hands a report back, and
+  // whether or not the check below is switched off. Each attempt is captured, so after a report is sent back the
+  // corrected one is the latest. Parsed fields only.
+  if (input.tool_name === "SubagentHandback" && typeof message === "string" && agentId) {
+    try {
+      recordHandback({ session_id: sessionId, agent_id: agentId, agent_type: role, ...handbackFields(message) });
+    } catch {
+      // the capture must never hold a report back
+    }
+  }
+  if ((process.env.ORCH_HANDBACK_CHECK ?? "").trim().toLowerCase() === "off") process.exit(0);
+  if (input.tool_name !== "SubagentHandback" || !WORKERS.has(role) || typeof message !== "string") process.exit(0);
 
   /** @type {string[]} */
   let checks = [];

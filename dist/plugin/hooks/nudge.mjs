@@ -13,7 +13,18 @@
 // check's block reasons.
 // With CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 an Agent call that passes `name` starts a teammate instead of a
 // subagent; the plan check and the journal never see it, so the nudge adds a warning then.
+// Silent too when the session itself runs as the orchestrator (`claude --agent orchestrator`, or an `agent` setting,
+// as in this repo's own .claude/settings.json): it is already routed, its prompt holds the same rules, and it has no
+// Skill tool to run the route skill with. SessionStart input carries `agent_type` for such a session.
+import { readFileSync } from "node:fs";
+
 if (process.env.ORCH_NO_NUDGE) process.exit(0);
+try {
+  const input = JSON.parse(readFileSync(0, "utf8"));
+  if (String(input?.agent_type ?? "").split(":").pop() === "orchestrator") process.exit(0);
+} catch {
+  // no input, or input that is not JSON: nudge as before
+}
 
 const lines = [
   "Orchestration plugin: before starting a non-trivial task (code, research, writing, analysis or operations; more than a quick edit or a quick question), run the orchestration:route skill with the task description and follow the route it returns.",

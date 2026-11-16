@@ -425,6 +425,16 @@ test("plan check: paths are normalised; overlapping files (equal or a folder pre
   assert.ok(!labels(clean.calls).some((x) => x.endsWith(":recheck")));
 });
 
+test("plan check: a glob with a partial last segment or a ? overlaps the files it matches", async () => {
+  for (const [g, f] of [["src/a*.ts", "src/ab.ts"], ["src/?.ts", "src/a.ts"], ["docs/v?/*.md", "docs/v1/x.md"]]) {
+    const r = await run({ slices: [slice("a", { files: [g] }), slice("b", { files: [f] })] });
+    assert.deepEqual(planLogged(r).slices[1].dependsOn, ["a"], `${g} overlaps ${f}`);
+  }
+  // A glob's fixed folders still bound it: src/a*.ts does not reach lib/ab.ts.
+  const apart = await run({ slices: [slice("a", { files: ["src/a*.ts"] }), slice("b", { files: ["lib/ab.ts"] })] });
+  assert.deepEqual(planLogged(apart).slices[1].dependsOn, []);
+});
+
 test("plan check: a misspelled dependsOn id is dropped, so the remaining slices keep their order (no one-wave fallback)", async () => {
   const r = await run({ slices: [slice("a"), slice("b", { dependsOn: ["aa"] }), slice("c", { dependsOn: ["b"] })] });
   assert.ok(logged(r.logs, /plan fix: b depends on unknown id aa: dropped that dependency/));

@@ -1,7 +1,7 @@
 // Keeps model, effort, maxTurns and the tool policy (tools, disallowedTools) in .claude/agents/*.md in step with ROLES
 // and NATIVE_TOOLS in config.ts.
 // Usage: tsx src/sync-agents.ts [--check]   (--check exits 1 on drift instead of writing)
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { NATIVE_TOOLS, ROLES, type NativeAgent, type Role } from "./config.js";
@@ -76,7 +76,15 @@ export function syncAgents(agentsDir: string, check: boolean): string[] {
   return drift.sort();
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const check = process.argv.includes("--check");
   const drift = syncAgents(join(process.cwd(), ".claude", "agents"), check);
   if (drift.length === 0) console.log("agents in sync with config.ts");

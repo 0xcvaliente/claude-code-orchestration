@@ -17,6 +17,7 @@
     "build-plugin": "node scripts/build-plugin.mjs",
     "check-plugin": "node scripts/build-plugin.mjs --check",
     "orchestrate": "claude --agent orchestrator --plugin-dir dist/dashboard",
+    "plain": "claude --settings '{\"agent\":\"\"}'",
     "test-dashboard": "node scripts/test-dashboard.mjs",
     "install-statusline": "bash scripts/install-statusline.sh",
     "claude-update": "node scripts/claude-update.mjs",
