@@ -115,6 +115,11 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
         disallowedTools: cfg.disallowedTools,
         permissionMode: "dontAsk", // headless: anything not allowed above is denied, never prompted
         settingSources: ["project"],
+        // A worker is never the repo's main agent. With project settings loaded, an `agent` setting there (this
+        // repo's own .claude/settings.json names the orchestrator) would run the worker as that agent, with that
+        // agent's tools instead of cfg.tools: a writer with no Edit or Bash. An empty `agent` in the flag settings,
+        // which rank above the project's, gives the default agent back (probed on Claude Code 2.1.322).
+        settings: { agent: "" },
         env: workerEnv(), // no Claude Code auto memory in a worker (see workerEnv)
         systemPrompt: { type: "preset", preset: "claude_code", append: cfg.system },
         abortController: abort,

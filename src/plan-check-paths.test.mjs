@@ -263,6 +263,24 @@ test("out of reach: two Unicode normal forms of one name are two entries, even w
   }
 });
 
+test("file_overlap: on a case-insensitive project a glob's fixed folder is listed under its on-disk name, not the case-folded one", () => {
+  // The folded name is an identity key, not a path: on a case-sensitive volume it names no folder, so listing it found
+  // no symlink and the alias Sec/lnk -> real was missed. The seam makes Linux behave as such a mixed setup.
+  for (const [a, b] of [["Sec/l*/a.ts", "real/a.ts"], ["real/a.ts", "Sec/l*/a.ts"]]) {
+    const dir = project();
+    try {
+      mkdirSync(join(dir, "Sec"));
+      mkdirSync(join(dir, "real"));
+      writeFileSync(join(dir, "real", "a.ts"), "");
+      symlinkSync(join(dir, "real"), join(dir, "Sec", "lnk"));
+      const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b), INSENSITIVE);
+      assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${a} then ${b}: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 /**
  * A preload that makes readdirSync throw `code` for the one folder `folder` (the tests run as root, so chmod 000 does not
  * deny the read); every other call goes to the real readdirSync.

@@ -1008,12 +1008,15 @@ const canon = (p) => {
     out = p;
   }
   const isFile = !isGlob(out) && onDiskFile(out);
+  canon.onDisk.set(p, out);
   if (caseInsensitive) out = out.toLowerCase();
   if (isFile) fileKind.set(out, true);
   memo.set(p, out);
   return out;
 };
 canon.memo = new Map();
+/** canon() before case folding, keyed by the same entry: the path to hand the file system. @type {Map<string, string>} */
+canon.onDisk = new Map();
 const ALIAS_CAP = 32;
 /**
  * Every name of a normalized entry: its canon(), and for a glob whose first wildcard segment is not the last (and not
@@ -1031,7 +1034,9 @@ const names = (p) => {
   try {
     const c = canon(p);
     out = [c];
-    const segs = c.split("/").filter(Boolean);
+    // List the folder under its on-disk name, not the case-folded key: a folded path is an identity, not a path, and
+    // fails to name the folder when it lies on a case-sensitive volume reached from a case-insensitive project.
+    const segs = (canon.onDisk.get(p) ?? c).split("/").filter(Boolean);
     const g = segs.findIndex(isGlob);
     if (c.startsWith("/") && g !== -1 && g < segs.length - 1 && segs[g] !== "**") {
       const folder = `/${segs.slice(0, g).join("/")}`;
@@ -1043,7 +1048,7 @@ const names = (p) => {
         const code = /** @type {NodeJS.ErrnoException} */ (err).code;
         if (code !== "ENOENT" && code !== "ENOTDIR") out = null;
       }
-      const re = segRe(segs[g] ?? "");
+      const re = segRe(caseInsensitive ? (segs[g] ?? "").toLowerCase() : (segs[g] ?? ""));
       const rest = segs.slice(g + 1).join("/");
       for (const e of ents ?? []) {
         if (!out) break;

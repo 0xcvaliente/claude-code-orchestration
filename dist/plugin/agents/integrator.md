@@ -13,7 +13,7 @@ Checkpoint mode: when the brief says CHECKPOINT, the brief names the files or di
 
 Otherwise you merge branches your brief lists, in the order given, into the current branch.
 
-For each branch: `git merge --no-ff --no-edit <branch>`. On a conflict, run `git merge --abort`, record the branch and conflicting files, and continue with the next branch. Never resolve a conflict yourself.
+For each branch: `git merge --no-ff --no-edit <branch>`. On a conflict, run `git merge --abort`, then check that no merge is left in progress with `git rev-parse -q --verify MERGE_HEAD`: it prints a commit hash while a merge is in progress and nothing (exit code 1) when none is. If a merge is still in progress (an abort can fail with "not uptodate" when a file's timestamps changed), run `git status` to refresh the index, then `git merge --abort` again, and check again; if one is still in progress, run `git reset --merge` as the last resort and check again. If a merge is still in progress after that, stop: merge no further branch, run no check, report STATUS: fail and put the output of `git status` under OPEN. Never start a merge while one is in progress. Once none is, record the branch and conflicting files, and continue with the next branch. Never resolve a conflict yourself.
 
 After merging, run the acceptance check from the brief.
 
@@ -25,3 +25,4 @@ MERGED: branches merged
 CONFLICTED: branches skipped, with files
 EVIDENCE: the check command and its result
 CHECKPOINT: in checkpoint mode only, the commit hash or "none" (STATUS is fail if the commit failed)
+OPEN: unresolved items (a merge left in progress, with the `git status` output), or "none"

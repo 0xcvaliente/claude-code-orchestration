@@ -618,7 +618,15 @@ export function profileSources(list, opts = {}) {
 }
 
 // CLI: node .claude/hooks/file-profile.mjs <paths...>  (only when run directly; importing has no side effects)
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const args = process.argv.slice(2);
   if (!args.length) {
     process.stderr.write("usage: node .claude/hooks/file-profile.mjs <paths or URLs...>\n");

@@ -225,6 +225,20 @@ test("c: secrets and personal details are named by file, line and kind, never ec
   });
 });
 
+test("c: an added README.md line that starts with ++ is scanned, and the lines after it keep their numbers", () => {
+  withSetup((s) => {
+    worktree(s);
+    // git prints the added line `++ token ...` as `+++ token ...`, which looks like a diff header.
+    writeSkill(s, { edit: (_sd, wt) => appendFileSync(join(wt, "README.md"), `++ token ${TOKEN}\nContact: jane.doe@corp-mail.org\n`) });
+    launch(s);
+    const msg = blocked(s, ["secrets"]);
+    assert.match(msg, /README\.md line 6: GitHub token/);
+    assert.match(msg, /README\.md line 7: e-mail address/);
+    assert.doesNotMatch(msg, /README\.md line 6: e-mail address/);
+    assert.ok(!msg.includes(TOKEN) && !msg.includes("jane"), "no matched text in the message");
+  });
+});
+
 test("d: a file changed after the seal fails as seal", () => {
   withSetup((s) => {
     worktree(s);

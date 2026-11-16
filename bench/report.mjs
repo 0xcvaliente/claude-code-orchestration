@@ -3,9 +3,9 @@
 // as Markdown for docs/benchmarks.md (the same tables, no charts). Cost is reported in tokens only.
 // Usage: node bench/report.mjs <summary.json> [--html <file>] [--md <file>] [--html-link <url-or-path>]
 //        (defaults: report.html and benchmarks.md beside summary.json)
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { formatTokens } from "../scripts/tokens.mjs";
 import { median } from "./lib/stats.mjs";
 
@@ -520,7 +520,15 @@ export function renderMarkdown(s, { sources, htmlPath } = {}) {
   return md;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const args = process.argv.slice(2);
   let input = null;
   let html = null;

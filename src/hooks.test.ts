@@ -107,6 +107,20 @@ test("session nudge: tells the session to route non-trivial tasks of any kind, n
   assert.equal(off.stdout, "");
 });
 
+test("session nudge: silent when the session itself runs as the orchestrator, and unchanged for any other input", () => {
+  const run = (input: string) => spawnSync("node", [hook("nudge.mjs")], { input, env: { ...process.env, ORCH_NO_NUDGE: "" }, encoding: "utf8" });
+  // SessionStart input carries agent_type for a session started with --agent or an `agent` setting.
+  for (const agent of ["orchestrator", "orchestration:orchestrator"]) {
+    const r = run(JSON.stringify({ hook_event_name: "SessionStart", source: "startup", agent_type: agent }));
+    assert.deepEqual([r.status, r.stdout], [0, ""], agent);
+  }
+  for (const input of [JSON.stringify({ hook_event_name: "SessionStart", source: "startup" }), JSON.stringify({ agent_type: "reviewer" }), JSON.stringify({ agent_type: "my-orchestrator-fork:planner" }), "", "not json", "null", "[]"]) {
+    const r = run(input);
+    assert.equal(r.status, 0, input);
+    assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /orchestration:route/, input);
+  }
+});
+
 test("test gate: blocks a namespaced implementer while the test command fails, lets reviewers through", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-verify-"));
   const run = (agent_type: string, cmd: string) =>

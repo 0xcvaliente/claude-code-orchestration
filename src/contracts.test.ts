@@ -339,3 +339,19 @@ test("every place that states the acceptance check asks for the narrowest comman
   assert.match(workflow, /not the project's whole suite: the test gate already ran it/, "the reviewer brief leaves the whole suite to the test gate");
   assert.match(workflow, /the command that runs the project's whole test suite, or empty when there is none/, "the planner is asked for the whole-suite command");
 });
+
+// --- The integrator after a conflict: a failed `git merge --abort` must never leave the tree mid-merge. ---
+test("the integrator checks that no merge is left in progress after an abort and never merges on into a half-merged tree", () => {
+  const body = read(".claude/agents/integrator.md").replace(/^---\n[\s\S]*?\n---\n/, "");
+  const conflict = body.split("\n").find((l) => l.startsWith("For each branch:"));
+  assert.ok(conflict, "the per-branch rule is there");
+  // The check is one plain command whose Bash result shows the answer by itself (no `$?`, no variables).
+  assert.match(conflict, /run `git merge --abort`, then check[^.]*`git rev-parse -q --verify MERGE_HEAD`/, "a check right after the abort");
+  assert.match(conflict, /prints a commit hash while a merge is in progress and nothing[^.]*when none is/, "the check reads from the output alone");
+  assert.match(conflict, /`git status` to refresh the index, then `git merge --abort` again/, "refresh, then a second abort");
+  assert.match(conflict, /`git reset --merge` as the last resort/, "the last resort");
+  assert.match(conflict, /still in progress after that[^.]*merge no further branch[^.]*STATUS: fail[^.]*under OPEN/, "a merge left in progress stops the merges and fails");
+  assert.match(conflict, /Never start a merge while one is in progress/, "never continues while a merge is in progress");
+  assert.doesNotMatch(conflict, /\$\?|\$\{|PIPESTATUS/, "the check needs no exit-code variable");
+  assert.match(body, /^OPEN: /m, "the reply format has an OPEN line for the tree state");
+});

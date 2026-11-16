@@ -197,14 +197,17 @@ function addedReadmeLines(draft, mergeBase) {
   const out = [];
   if (r.status !== 0) return out;
   let n = 0;
+  // Header lines (`--- a/README.md`, `+++ b/README.md`) come only before the first hunk; inside a hunk an added line
+  // that itself starts with `++` is printed as `+++ ...` and is still an added line.
+  let inHunk = false;
   for (const l of r.out.split("\n")) {
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
     if (h) {
       n = Number(h[1]);
+      inHunk = true;
       continue;
     }
-    if (l.startsWith("+++") || l.startsWith("---")) continue;
-    if (l.startsWith("+")) out.push({ line: n++, text: l.slice(1) });
+    if (inHunk && l.startsWith("+")) out.push({ line: n++, text: l.slice(1) });
   }
   return out;
 }
