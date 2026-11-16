@@ -26,7 +26,7 @@ import { resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
 import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const LOG = "quotes.jsonl";
 const MAX_TEXT_BYTES = 64 * 1024 * 1024; // larger sources are not read: their quotes count as unverifiable
@@ -233,6 +233,8 @@ try {
   // at SubagentStop logging never changes the decision; at a hand-back an unrecorded refusal is not made (below)
 }
 if (block && (recorded || !atHandback)) {
+  // A refused hand-back is not delivered: mark it, so the stop never takes handback-check.mjs's capture of it (G-14).
+  if (atHandback && agentId) recordHandbackRefusal({ session_id: sessionId, agent_id: agentId, tool_use_id: typeof input.tool_use_id === "string" ? input.tool_use_id : null, gate: "quote" });
   const list = unverifiedLocators.map((l) => `- ${l}`).join("\n");
   try {
     process.stderr.write(
