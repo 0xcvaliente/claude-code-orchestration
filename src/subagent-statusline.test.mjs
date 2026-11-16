@@ -120,3 +120,21 @@ test("indexLaunches: attempt numbers counted once for all rows, the same as coun
   for (const t of many) assert.equal(rowFor(t, watched, 0, idx), "implementer a #2 risky · opus · 41.2k · Running the tests");
   assert.equal(scans, 0);
 });
+
+test("indexLaunches: attempts count per run; a new PLAN REVIEW starts again at 1, a REPLAN keeps counting", () => {
+  const plain = "SLICE: s1\nFILES: s1.py\nDEPENDS: none";
+  const two = [
+    launch(0, "reviewer", "PLAN REVIEW\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: one", "p1"),
+    launch(1, "implementer", plain, "a1"),
+    // a second task in the same session reuses the slice id s1
+    launch(10, "reviewer", "PLAN REVIEW\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: two", "p2"),
+    launch(11, "implementer", plain, "a2"),
+    launch(12, "implementer", plain, "a3"),
+    // a REPLAN extends the same run: the next launch of s1 is its third attempt there
+    launch(13, "reviewer", "PLAN REVIEW\nREPLAN: 1\nSLICE: s1\nFILES: s1.py\nDEPENDS: none\nGOAL: two", "p3"),
+    launch(14, "implementer", plain, "a4"),
+  ];
+  const idx = indexLaunches(two);
+  assert.deepEqual(["a1", "a2", "a3", "a4"].map((id) => idx.nth.get(idx.byAgent.get(id))), [1, 1, 2, 3]);
+  assert.equal(rowFor(task("a2", "implementer", { model: "claude-opus-5-5", label: "" , description: "" }), two), "implementer s1 · opus · 41.2k");
+});

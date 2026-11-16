@@ -61,17 +61,21 @@ export function sessionLaunches(text, sessionId) {
 
 /**
  * One pass over the launches for all rows of a refresh: the latest launch of each agent id, and the attempt number of
- * each implementer launch (fresh launches of its slice up to and including its time; a SendMessage resume makes no
- * launch, so it keeps its number).
- * @param {any[]} launches
+ * each implementer launch (fresh launches of its slice in the same run up to and including its time; a SendMessage
+ * resume makes no launch, so it keeps its number). A run starts at a PLAN REVIEW launch without REPLAN, so a slice id
+ * an earlier run of the session also used starts again at 1; a REPLAN plan review extends the run and keeps counting.
+ * @param {any[]} launches oldest first
  * @returns {{ byAgent: Map<unknown, any>, nth: Map<any, number> }}
  */
 export function indexLaunches(launches) {
   const byAgent = new Map();
   /** @type {Map<string, any[]>} */
-  const bySlice = new Map();
+  let bySlice = new Map();
+  /** @type {Map<string, any[]>[]} */
+  const runs = [bySlice];
   for (const l of launches) {
     byAgent.set(l?.agent_id, l);
+    if (l?.isPlanReview === true && (l.replan === null || l.replan === undefined)) runs.push((bySlice = new Map()));
     if (bare(l?.agent_type) === "implementer" && typeof l.slice === "string") {
       const group = bySlice.get(l.slice) ?? [];
       group.push(l);
@@ -80,7 +84,7 @@ export function indexLaunches(launches) {
   }
   /** @type {Map<any, number>} */
   const nth = new Map();
-  for (const group of bySlice.values()) for (const l of group) nth.set(l, group.filter((o) => o.ts <= l.ts).length);
+  for (const run of runs) for (const group of run.values()) for (const l of group) nth.set(l, group.filter((o) => o.ts <= l.ts).length);
   return { byAgent, nth };
 }
 
