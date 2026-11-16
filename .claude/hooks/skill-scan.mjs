@@ -217,12 +217,13 @@ function eachAdded(out, each) {
  * What a push of the branch would carry: the draft's own commits (merge base with `base` to the tip) and, when
  * `remote` is given, the commits below the merge base that the remote lacks (`unpushed`): a push sends those too.
  * @param {string} dir a work tree of the repository
- * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null }} o `remote`: revision
- *   arguments naming what the target remote has (commit ids from git ls-remote, or --remotes=origin); ids this
- *   repository lacks are ignored.
+ * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null, remotes?: string[][] | null }} o
+ *   `remote`: revision arguments naming what the target remote has (commit ids from git ls-remote, or
+ *   --remotes=origin); ids this repository lacks are ignored. `remotes`, instead of `remote`: one such list per address
+ *   a push goes to; a commit counts as present only when every address has it (the union of what each lacks).
  * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[] }}
  */
-export function scanBranch(dir, { base, branch, name, remote = null }) {
+export function scanBranch(dir, { base, branch, name, remote = null, remotes = null }) {
   /** @type {Finding[]} */
   const findings = [];
   /** @type {string[]} */
@@ -264,14 +265,22 @@ export function scanBranch(dir, { base, branch, name, remote = null }) {
       .sort();
 
     // The commits below the merge base that the remote lacks: a push of the branch sends them too.
-    if (remote) {
-      const rl = git(dir, ["rev-list", "--ignore-missing", mergeBase, "--not", ...remote]);
+    const sets = remotes ?? (remote ? [remote] : []);
+    if (remotes && !remotes.length) {
+      problems.push("there is no remote address to compare its base with");
+      return { mergeBase, findings, outside, unpushed, problems };
+    }
+    /** @type {Set<string>} */
+    const lacking = new Set();
+    for (const has of sets) {
+      const rl = git(dir, ["rev-list", "--ignore-missing", mergeBase, "--not", ...has]);
       if (rl.status !== 0) {
         problems.push("git cannot tell which commits of its base the remote lacks");
         return { mergeBase, findings, outside, unpushed, problems };
       }
-      unpushed = rl.out.split("\n").filter((l) => /^[0-9a-f]{40,64}$/.test(l));
+      for (const l of rl.out.split("\n")) if (/^[0-9a-f]{40,64}$/.test(l)) lacking.add(l);
     }
+    unpushed = [...lacking];
 
     // The branch's last version against the merge base: the lines it adds, by path.
     const netDiff = git(dir, ["diff", ...DIFF_OPTS, mergeBase, head]);

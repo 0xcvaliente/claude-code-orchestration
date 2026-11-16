@@ -7,10 +7,23 @@
   renames, external diff, textconv and replace refs off; names judged raw from `-z` output, control characters never
   allowed). `skill-gate.mjs` imports it (new code `paths`); `scripts/skill-publish.mjs` runs it as step 4, in
   `--dry-run` too. Tests: `src/skill-gate.test.mjs`, `src/skill-publish.test.mjs`.
-- Which commits: publish reads `git ls-remote origin` and also scans every commit below the merge base that origin's
-  refs do not reach (exactly what the push sends), refusing when there is any. The gate does the same with
-  `refs/remotes/origin/*` when `refs/remotes/origin/<base>` exists (as fresh as the last fetch), else the merge-base
-  range only.
+- Which commits (publish, third attempt): publish compares with the push target, not origin's fetch address. It
+  takes every address `git remote get-url --push --all origin` reports (pushurl, else url, after pushInsteadOf and
+  insteadOf rewrites, several when set), reads each with `git ls-remote -- <address>`, and scans every commit below
+  the merge base that some address's refs do not reach (`scanBranch` option `remotes`: one list per address, the
+  union of what each lacks), refusing when there is any. Refused as unclear: an address that cannot be read, one
+  `git ls-remote --get-url` would rewrite again, one starting with `-`, no address, `remote.origin.mirror` set.
+  Step 5 checks `skill/<name>` at every push address, and the push is `git push --recurse-submodules=no -u origin
+  skill/<name>:skill/<name>`: remote and refspec named, so `remote.pushDefault`, `branch.<name>.pushRemote` and
+  `remote.origin.push` cannot redirect it (probed on git 2.54: a push with all three set went to origin's address
+  only; with `remote.origin.mirror` git dies on the refspec). Printed addresses mask any user or password. Tests
+  (dry run only, scratch bare remotes): `src/skill-publish.test.mjs` "W-1 push address: ..." (pushurl lacking the
+  base, pushInsteadOf, two push URLs, unreadable push URL, mirror, and pushurl equal to url or none still pass).
+  Seen failing before the fix (5 of 6; the passing-case test passed before too), all passing after.
+- Which commits (gate, unchanged): the gate runs before any push and makes no network call. Its range is the draft's
+  own commits (merge base to tip) plus, when `refs/remotes/origin/<base>` exists, the base commits no
+  `refs/remotes/origin/*` ref reaches (as fresh as the last fetch, and from origin's fetch address, which may not be
+  the push target); else the merge-base range only. The publish step is the one that compares with the push target.
 - Visible effect: the implementer is blocked for a secret an earlier commit added and a later one removed
   (`<file>, only in earlier commit <sha12>: <kind>`, advice: `git reset --soft <merge base>`, seal, commit once), for
   any committed path outside `skills/<name>/` and `README.md` (a root `.gitignore`, `scripts/`, a link at
@@ -35,3 +48,8 @@
 
 - Commit messages and author or committer identities are pushed but not scanned (a `Co-Authored-By` trailer would be
   an e-mail finding on every commit); docs/skills.md "Limits" says so.
+- A draft branch that merges its base is blocked (the merge, against each parent, shows the base's files as paths
+  outside the skill and repeats older findings); rebase it or recreate its commits on the new base. Stated in
+  docs/skills.md "Limits"; no code change.
+- `.claude/rules/agents.md` and CHANGELOG.md could mention that publish compares with the push addresses; not owned
+  by this slice.

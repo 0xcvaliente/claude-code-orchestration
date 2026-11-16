@@ -251,3 +251,112 @@ test("W-1: a clean branch passes the scan in the dry run, which still pushes not
     assert.equal(spawnSync("git", ["-C", s.origin, "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`]).status, 1, "nothing pushed");
   });
 });
+
+// ---- W-1 third attempt: the scan compares with what every push address of origin has (git remote get-url --push
+// --all), not with origin's fetch address. Dry runs only; every remote is a scratch bare repository.
+
+/**
+ * Rebuild the draft on a new commit of main that holds a token and is on origin's fetch address (as on a remote whose
+ * push address differs). Returns that commit's id.
+ * @param {ReturnType<typeof setup>} s
+ */
+function draftOnTokenBase(s) {
+  git(s.repo, ["worktree", "remove", "--force", s.draft], s.base);
+  git(s.repo, ["branch", "-q", "-D", BRANCH], s.base);
+  writeFileSync(join(s.repo, "notes.txt"), `token ${TOKEN}\n`);
+  git(s.repo, ["add", "-A"], s.base);
+  git(s.repo, ["commit", "-q", "-m", "base with a token"], s.base);
+  const leak = git(s.repo, ["rev-parse", "HEAD"], s.base);
+  git(s.repo, ["push", "-q", "origin", "main"], s.base);
+  git(s.repo, ["worktree", "add", "-q", "-b", BRANCH, s.draft, "main"], s.base);
+  const sd = join(s.draft, "skills", NAME);
+  mkdirSync(sd, { recursive: true });
+  writeFileSync(join(sd, "SKILL.md"), `---\nname: ${NAME}\ndescription: A demo skill.\n---\n# Demo\n`);
+  commitAll(s, "skill");
+  return leak;
+}
+
+/** A new empty bare repository next to origin. @param {ReturnType<typeof setup>} s @param {string} n */
+function bare(s, n) {
+  const p = join(s.base, `${n}.git`);
+  git(s.base, ["init", "-q", "--bare", "-b", "main", p], s.base);
+  return p;
+}
+
+/**
+ * A draft on a token commit that origin's fetch address has; `configure` then sets where origin pushes.
+ * @param {(s: ReturnType<typeof setup>) => void} configure @param {(s: ReturnType<typeof setup>, leak: string) => void} fn
+ */
+function withTokenBase(configure, fn) {
+  const s = setup();
+  try {
+    const leak = draftOnTokenBase(s);
+    configure(s);
+    fn(s, leak);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+}
+
+/** The dry run named the base commit as unscanned and pushed with the branch. @param {string} msg @param {string} leak */
+function namesLeak(msg, leak) {
+  // The empty push address lacks the first commit too, so the base commits named are that one and the token's.
+  assert.match(msg, new RegExp(`2 commits of the base that (one of )?origin's push address(es)? lacks \\(${leak.slice(0, 12)}, [0-9a-f]{12}\\)`));
+  assert.match(msg, new RegExp(`notes\\.txt, in commit ${leak.slice(0, 12)}, which is not part of the draft: GitHub token`));
+}
+
+test("W-1 push address: a push URL that lacks the base commit the fetch URL has is refused, naming that commit", () => {
+  withTokenBase(
+    (s) => git(s.repo, ["config", "remote.origin.pushurl", bare(s, "push")], s.base),
+    (s, leak) => namesLeak(refused(s, ["--dry-run"]), leak),
+  );
+});
+
+test("W-1 push address: the same through a url.<base>.pushInsteadOf rewrite", () => {
+  withTokenBase(
+    (s) => git(s.repo, ["config", `url.${bare(s, "push")}.pushInsteadOf`, s.origin], s.base),
+    (s, leak) => namesLeak(refused(s, ["--dry-run"]), leak),
+  );
+});
+
+test("W-1 push address: two push URLs of which one lacks the base commit are refused", () => {
+  withTokenBase(
+    (s) => {
+      git(s.repo, ["config", "remote.origin.pushurl", s.origin], s.base);
+      git(s.repo, ["config", "--add", "remote.origin.pushurl", bare(s, "second")], s.base);
+    },
+    (s, leak) => namesLeak(refused(s, ["--dry-run"]), leak),
+  );
+});
+
+test("W-1 push address: a push URL that cannot be read is refused, saying so", () => {
+  withSetup((s) => {
+    git(s.repo, ["config", "remote.origin.pushurl", join(s.base, "missing.git")], s.base);
+    const r = publish(s, ["--dry-run"]);
+    assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /cannot read origin's push address/);
+    assert.match(r.stderr, /Nothing was pushed/);
+    assert.doesNotMatch(r.stdout, /Scan the branch for secrets and paths outside the skill\n {3}ok/);
+  });
+});
+
+test("W-1 push address: origin set up as a mirror is refused, since its push would not be the one checked", () => {
+  withSetup((s) => {
+    git(s.repo, ["config", "remote.origin.mirror", "true"], s.base);
+    const r = publish(s, ["--dry-run"]);
+    assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /remote\.origin\.mirror/);
+  });
+});
+
+test("W-1 push address: a push URL that is the fetch URL, and an origin with none, both pass with an up-to-date base", () => {
+  for (const same of [true, false]) {
+    withSetup((s) => {
+      if (same) git(s.repo, ["config", "remote.origin.pushurl", s.origin], s.base);
+      const r = publish(s, ["--dry-run"]);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /Scan the branch for secrets and paths outside the skill\n {3}ok/);
+      assert.deepEqual(ghCalls(s), []);
+    });
+  }
+});
