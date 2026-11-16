@@ -27,6 +27,7 @@
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
 import { appendFileSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tokenize } from "./judge-core.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -70,6 +71,7 @@ const READERS = new Set(["wc", "sed", "cut"]);
 // the folders before it stay too). Not judged: a CDPATH in the shell's environment that differs from the hook's.
 const CD_FORM = "`cd` is allowed only as `cd <path>` with one literal path to the project folder or a folder inside it; for anything else put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
 const MAX_FOLDERS = 32;
+const MAX_WORD = 4096;
 // Long options of grep, ugrep and ripgrep that only change what is searched or how matches print. Anything else is
 // denied by name, which covers the ones that run a program or write a file (ugrep --filter, --pager, --view,
 // --save-config, --config and ---FILE; ripgrep --pre, --hostname-bin) without listing them.
@@ -104,7 +106,12 @@ function insteadOf(word) {
  * @returns {{ reason: string, word?: string } | null}
  */
 export function researcherViolation(command, cwd = process.cwd(), project) {
-  return violation(withoutStderrNull(command), cwd, project);
+  // fix-researcher-cd item 3: a decision for any input; whatever cannot be judged is refused, never thrown.
+  try {
+    return violation(withoutStderrNull(String(command)), String(cwd), project);
+  } catch (err) {
+    return { reason: `the command cannot be judged (${err instanceof Error ? err.message.slice(0, 80) : "error"})` };
+  }
 }
 
 // The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
@@ -273,6 +280,9 @@ function optionViolation(w, folders) {
   if (!SEARCH.has(first) && !PAGERS.has(first) && !READERS.has(first)) return null;
   // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail, wc or a search reading for ever,
   // also as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
+  // A word longer than any path the system opens is not judged suffix by suffix (that took minutes for a word of a few
+  // hundred thousand characters, past the hook's timeout); it is refused.
+  if (args.some((a) => a.length > MAX_WORD)) return `${first}: a word longer than ${MAX_WORD} characters is too long to judge`;
   const device = args.find((a) => folders.some((f) => readsDevice(a, f)));
   if (device) return `${first} ${device} reads a device that may never end`;
   if (first === "cut") return cutViolation(args);
@@ -417,8 +427,20 @@ function isDevice(x) {
   return (l === "/dev" || l.startsWith("/dev/")) && l !== "/dev/null";
 }
 
-// Run as a hook only when executed directly (the tests import researcherViolation).
-if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
+/**
+ * Run as a hook only when executed directly (the tests import researcherViolation): the real paths of the entry script
+ * and of this module are compared, not the name (fix-researcher-cd item 3: a script whose own name ended in
+ * researcher-guard.mjs ran the hook block when it imported the guard, and the block ended that process mid-import).
+ */
+function isEntry() {
+  try {
+    return typeof process.argv[1] === "string" && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntry()) {
   if ((process.env.ORCH_GUARDS ?? "").trim().toLowerCase() === "off") process.exit(0);
   if (duplicate("researcher-guard.mjs")) process.exit(0);
   /** @type {any} */
@@ -431,6 +453,8 @@ if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
   const type = typeof input?.agent_type === "string" ? input.agent_type.replace(/^orchestration:/, "") : "";
   const command = input?.tool_input?.command;
   if (type !== "researcher" || (input.tool_name !== undefined && input.tool_name !== "Bash") || typeof command !== "string" || !command.trim()) process.exit(0);
+  // From here on an unexpected error refuses the command (exit 2), never another exit code.
+  process.on("uncaughtException", () => process.exit(2));
   // Relative paths resolve against the folder the command runs in: the payload's cwd, else the project folder.
   // The project folder bounds `cd`; without an absolute CLAUDE_PROJECT_DIR every cd is refused.
   const project = process.env.CLAUDE_PROJECT_DIR;

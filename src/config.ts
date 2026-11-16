@@ -65,8 +65,11 @@ export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
       // tools also name Bash, so the researcher searches through Bash; researcher-guard.mjs holds each to read-only forms.
       "Bash(grep*)", "Bash(rg*)", "Bash(find*)", "Bash(head*)", "Bash(tail*)", "Bash(cat*)",
       // Narrow read-only forms (audit 2026-11-16 T-11), held by researcher-guard.mjs: sed -n with one line or one
-      // range, cut, stat and echo. cd stays out: a relative path after it can reach a device a text check cannot follow.
+      // range, cut, stat and echo.
       "Bash(sed -n *)", "Bash(cut*)", "Bash(stat*)", "Bash(echo*)",
+      // cd (audit 2026-11-16 fix-researcher-cd, approved by the owner): researcher-guard.mjs allows only one literal path
+      // whose real location is the project folder or a folder inside it, and judges later segments from there.
+      "Bash(cd *)",
       "WebSearch", "WebFetch", "Skill",
     ],
   },

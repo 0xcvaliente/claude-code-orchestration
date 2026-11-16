@@ -4,7 +4,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -678,8 +678,22 @@ test("researcher guard (cd item 3): odd paths, long words, symlink chains and lo
   for (const c of [`grep -${"r".repeat(100000)} x`, `cat /${"x".repeat(300000)}`, "cat /dev/fd/0", "cat /dev/stdin", `cd ${links}/loopA`, `cd ${"a/".repeat(5000)}`, `${"cd sub; ".repeat(200)}cat dev/zero`]) {
     assert.ok(researcherViolation(c, proj, proj), c.slice(0, 40));
   }
-  // A 60-link chain ends in ELOOP for the system too, so it reaches nothing; a 30-link chain to `/` is followed.
-  assert.ok(researcherViolation(`cat ${links}/l30/dev/zero`, proj, proj));
+  // Wherever the system can open a device through a chain of links (one byte read, nothing more), the guard refuses it;
+  // a chain too long for the system (ELOOP) reaches nothing.
+  let opened = 0;
+  for (let i = 0; i < 60; i += 3) {
+    const p = `${links}/l${i}/dev/zero`;
+    try {
+      const fd = openSync(p, "r");
+      readSync(fd, Buffer.alloc(1), 0, 1, null);
+      closeSync(fd);
+      opened++;
+    } catch {
+      continue;
+    }
+    assert.ok(researcherViolation(`cat ${p}`, proj, proj), p);
+  }
+  assert.ok(opened > 0);
 });
 
 test("researcher guard (cd item 3): importing the guard never runs the hook, and a second copy decides the same", async () => {
