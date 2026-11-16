@@ -5,7 +5,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,67 @@ test("W-4: a task that starts with a dash goes after `--` at the end, never as t
   assert.deepEqual(plain.slice(0, 2), ["-p", "fix the bug"]);
   assert.ok(!plain.includes("--"));
 });
+
+/**
+ * A fake `claude` and `npx` in `<dir>/bin`: claude records its folder and arguments and prints `out`; npx records its
+ * arguments and prints a forced plain route. @param {string} dir @param {string} [out]
+ */
+function fakeBin(dir, out = '{"type":"result","is_error":false,"result":"ok","num_turns":1}') {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "claude.out"), `${out}\n`);
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\npwd -P > "${bin}/claude.cwd"\nprintf '%s\\n' "$@" > "${bin}/claude.args"\ncat "${bin}/claude.out"\n`);
+  writeFileSync(join(bin, "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${bin}/npx.args"\nprintf '%s' '{"mode":"plain","source":"forced","reason":"--mode plain","tokens":0}'\n`);
+  chmodSync(join(bin, "claude"), 0o755);
+  chmodSync(join(bin, "npx"), 0o755);
+  return bin;
+}
+/** process.env without undefined values, plus `env`. @param {Record<string, string | undefined>} env */
+function cleanEnv(env) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [k, v] of Object.entries({ ...process.env, ...BASE_ENV, ORCH_DRY_RUN: "", ORCH_MODE: "", ORCH_NO_ESCALATE: "1", ORCH_AGENT_PREFIX: "", ORCH_MODEL: "", ...env })) if (v !== undefined) out[k] = v;
+  return out;
+}
+
+test("W-5: auto.sh resolves a relative repo against the caller's folder, not through an exported CDPATH", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "orch-fix-cdpath-"));
+  try {
+    const work = join(tmp, "work");
+    const cdp = join(tmp, "cdp");
+    for (const d of [join(work, "proj", ".claude", "agents"), join(cdp, "proj")]) mkdirSync(d, { recursive: true });
+    const bin = fakeBin(tmp);
+    const r = spawnSync("bash", [join(root, "scripts", "auto.sh"), "task", "proj"], { cwd: work, env: cleanEnv({ PATH: `${bin}:${process.env.PATH}`, CDPATH: cdp, ORCH_MODE: "plain", GIT_CEILING_DIRECTORIES: tmp }), encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const npxArgs = readFileSync(join(bin, "npx.args"), "utf8").split("\n");
+    const repoArg = npxArgs[npxArgs.indexOf("--repo") + 1];
+    assert.equal(realpathSync(String(repoArg)), realpathSync(join(work, "proj")), `route.ts got ${JSON.stringify(repoArg)}`);
+    assert.equal(readFileSync(join(bin, "claude.cwd"), "utf8").trim(), realpathSync(join(work, "proj")), "the session runs in ./proj");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+for (const script of ["auto.sh", "orchestrate.sh"]) {
+  test(`W-5: scripts/${script} started by a relative path finds its own folder whatever CDPATH says`, () => {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-fix-here-"));
+    try {
+      // A CDPATH folder with a scripts/ of its own: an unguarded `cd scripts` goes there and prints its path.
+      mkdirSync(join(tmp, "cdp", "scripts"), { recursive: true });
+      const repo = join(tmp, "repo");
+      mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+      const bin = fakeBin(tmp);
+      const env = cleanEnv({ PATH: `${bin}:${process.env.PATH}`, CDPATH: join(tmp, "cdp"), ORCH_MODE: "plain", ORCH_TEST_CMD: "pytest", GIT_CEILING_DIRECTORIES: tmp });
+      const r = spawnSync("bash", [join("scripts", script), "task", repo], { cwd: root, env, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stderr.replace(/^route: .*\n/m, ""), "", "no error from a wrong folder");
+      const args = readFileSync(join(bin, "claude.args"), "utf8").split("\n");
+      assert.ok(allowRules(args).includes("Bash(pytest*)"), "the runner rules come from the launcher's own folder");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
   test(`W-4: bench/lib/${launcher} carries a dash-led prompt through as the positional prompt after --`, () => {

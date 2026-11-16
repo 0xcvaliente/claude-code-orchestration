@@ -39,7 +39,7 @@ export ORCH_NO_NUDGE=1 # the plugin's SessionStart nudge must not re-triage a ru
 
 task="${1:?usage: orchestrate.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+here="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)" # CDPATH cleared: a relative dirname must not find another folder
 # The old dollar cap must fail, not be ignored: a run that relied on it would go uncapped.
 if [ -n "${ORCH_BUDGET_USD:-}" ]; then
   echo "ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS (a token count such as 2M)" >&2

@@ -23,9 +23,10 @@ set -uo pipefail
 task="${1:?usage: auto.sh \"task\" [repo]}"
 repo="${2:-$PWD}"
 # Absolute before the cd to the plugin root below: route.ts would resolve a relative path against that root.
-repo="$(cd "$repo" 2>/dev/null && pwd)" || { echo "repo folder not found: ${2:-$PWD}" >&2; exit 1; }
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$(cd "$here/.." && pwd)"
+# CDPATH is cleared: with one exported, cd would search it first for a relative name and print the folder it found.
+repo="$(CDPATH='' cd -- "$repo" 2>/dev/null && pwd)" || { echo "repo folder not found: ${2:-$PWD}" >&2; exit 1; }
+here="$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(CDPATH='' cd -- "$here/.." && pwd)"
 requested="${ORCH_MODE:-auto}"
 nl=$'\n'
 source "$here/../.claude/hooks/test-cmd.sh" # orch_detect_test_cmd, orch_allow_rules
