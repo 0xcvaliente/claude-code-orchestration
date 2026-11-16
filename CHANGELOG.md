@@ -2,9 +2,9 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.4] - 2026-11-16
 
-A session opened in this repo now starts as the orchestrator, and every launcher that must stay plain opts out itself. The rest are fixes: the run journal and telemetry at a hand-back, the plan check on a case-sensitive volume, a failed merge abort, the launcher's repo path, the gated workflow's overlap check, scripts started through a symlinked path, and the skill gate's diff reading. Upgrading: no plugin setting changed, and the plugin does not ship the `agent` setting. `npm run plain` opens a plain session in this repo. The changed hooks take effect in a new session.
+1.4.4 makes a session opened in this repo start as the orchestrator, and every launcher that must stay plain opts out itself. The rest are fixes: the run journal and telemetry at a hand-back, the plan check on a case-sensitive volume, a failed merge abort, the launcher's repo path, the gated workflow's overlap check, scripts started through a symlinked path, and the skill gate's diff reading. Upgrading: no plugin setting changed, and the plugin does not ship the `agent` setting. `npm run plain` opens a plain session in this repo. The changed hooks take effect in a new session.
 
 ### Added
 
@@ -269,6 +269,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.4.4]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.4
 [1.4.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.3
 [1.4.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.2
 [1.4.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.1
