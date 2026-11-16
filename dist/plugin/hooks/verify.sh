@@ -32,9 +32,18 @@
 # say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
 # the bugfix cap are counted separately, each over the blocks since the agent's latest SubagentStart in telemetry.jsonl
 # (a SendMessage resume starts the agent again under its id), or over all its blocks when no start is recorded.
-# Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block, so the whole hook ends
-# within ORCH_HOOK_BUDGET_S (default and maximum 870, 30 s under the 900 s timeout for logging and exit):
-#   test run    min(ORCH_TEST_TIMEOUT_S (default 600), time left). When it is reached the test command and its
+# Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block. Claude Code also fails
+# a subagent that makes no progress for its stall limit (CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS, default 600000 ms), and
+# time in this stop hook counts (live: an agent was failed while its gate still ran). So the whole hook ends within
+# ORCH_HOOK_BUDGET_S, at most min(870, stall limit in seconds - 60), which is also its default: 540 with the stall limit
+# unset (600 - 60), never above 870 (30 s under the 900 s timeout for logging and exit), at least 1. A larger setting is
+# cut to that maximum, a smaller one is kept.
+#   lock wait   the test run and the base run or bugfix check after it hold the project's suite lock (below, at
+#               take_lock); waiting for it sleeps and counts against the budget. It ends when the time left falls to the
+#               floor (min(120, budget / 4, the test run's own limit), at least 1): an isolated agent then gets
+#               tests_failed_isolated with not_run:1 (warn), the shared tree runs without the lock.
+#   test run    min(ORCH_TEST_TIMEOUT_S (default 600), time left): with the default budget always the time left, at most
+#               540 s. When it is reached the test command and its
 #               children (its own process group) are killed and the stop blocks as a test failure (tests_failed, with
 #               timed_out:1 and limit_s; tests_failed_isolated in an isolated worktree in warn mode), under the same
 #               loop guard as any test failure. No base run follows a timed-out suite.
@@ -43,7 +52,7 @@
 #               helper is killed when the budget runs out. A baseline that cannot run only loses its note (the block
 #               stays); a bugfix check that has no time or is killed blocks as unverified (bugfix_timeout), counted
 #               with the other bugfix blocks.
-#   So test run + base run (or bugfix check) <= 870 s < 900 s.
+#   So lock wait + test run + base run (or bugfix check) <= budget: <= 540 s < 600 s by default, <= 870 s < 900 s at most.
 #   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
 #   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
 #   less those 5 s, and only a timed-out test run can add them (see the worst case below).
@@ -53,10 +62,12 @@
 #   answer was lost with it blocks as unverified (bugfix_tmp_lost, counted with the other bugfix blocks), never allows.
 # Each limit is counted in bash's whole SECONDS plus one (a run gets between limit and limit+1 s, never less) and the
 #   watchdog polls once a second, so a run that hangs is signalled within limit+2 s and gone LIM_GRACE_S later: at most
-#   limit + 7 s. SECONDS lags the clock by under a second at the hook's start. Worst cases, in seconds of the clock:
-#   - test run timed out: 870 + 2 + 5 + 1 (lag) = 878 < 900.
+#   limit + 7 s. SECONDS lags the clock by under a second at the hook's start. Worst cases, in seconds of the clock, for
+#   a budget B (540 by default, 870 at most; a lock wait only uses part of B, so it adds nothing):
+#   - test run timed out: B + 2 + 5 + 1 (lag) = B + 8: 548 < 600 by default, 878 < 900 at most.
 #   - bugfix check timed out (its limit is the time left less 5 s), then the kind check (is_bugfix_agent, a 10 s
-#     run_limited) also hung: (870 - 5 + 2 + 5) + (10 + 2 + 5) + 1 (lag) = 872 + 17 + 1 = 890 < 900.
+#     run_limited) also hung: (B - 5 + 2 + 5) + (10 + 2 + 5) + 1 (lag) = B + 20: 560 < 600 by default, 890 < 900 at most.
+#   With a stall limit set, B + 20 <= stall limit - 40: the hook ends at least 40 s before it.
 # Only portable tools: bash job control (set -m) for the process group, kill, sleep 1 and bash's SECONDS.
 # Plugin userConfig: each ORCH_<KEY> setting falls back to CLAUDE_PLUGIN_OPTION_<KEY> when unset (state.mjs mirrors it).
 # Exit 2 blocks and returns stderr to the agent; any other exit lets it finish.
@@ -99,9 +110,21 @@ MAX_BLOCKS=2 # per agent, since its latest SubagentStart (a resume starts a new 
 pos_int() { # value default
   case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) if [ "$1" -gt 0 ] 2>/dev/null; then printf '%s' "$((10#$1))"; else printf '%s' "$2"; fi ;; esac
 }
-budget="$(pos_int "${ORCH_HOOK_BUDGET_S:-}" 870)"
+# Claude Code fails a subagent that makes no progress for its stall limit (CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS, default
+# 600000 ms), and time in this stop hook counts: the gate ends 60 s before it. A value that is not a positive whole
+# number of milliseconds reads as 600 s; more than 15 digits is far above 870 s anyway (and would overflow bash's math).
+stall_s=600
+case "${CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS:-}" in
+  '' | *[!0-9]*) ;;
+  ????????????????*) stall_s=1000000 ;;
+  *) [ "$((10#$CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS))" -lt 1 ] || stall_s="$((10#$CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS / 1000))" ;;
+esac
+budget_max=$((stall_s - 60))
 # Never above 870: a hook killed at its 900 s timeout does not block, so a larger budget could let a slow suite through.
-[ "$budget" -le 870 ] || budget=870
+[ "$budget_max" -le 870 ] || budget_max=870
+[ "$budget_max" -ge 1 ] || budget_max=1
+budget="$(pos_int "${ORCH_HOOK_BUDGET_S:-}" "$budget_max")"
+[ "$budget" -le "$budget_max" ] || budget="$budget_max"
 test_limit="$(pos_int "${ORCH_TEST_TIMEOUT_S:-}" 600)"
 base_limit="$(pos_int "${ORCH_BASE_TIMEOUT_S:-}" 300)"
 time_left() { printf '%s' "$((budget - SECONDS))"; }
@@ -139,6 +162,7 @@ run_limited() { # limit infile outfile errfile cmd...
     "$@" <"$inf" >"$outf" 2>"$errf" &
   fi
   pid=$!
+  lim_pid="$pid" # for on_signal: a TERM, INT or HUP to the hook ends this group first
   set +m
   # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
   # can be reached limit-1 seconds after the start (a run that took 2.6 s was timed out under a 3 s limit); one more
@@ -164,6 +188,7 @@ run_limited() { # limit infile outfile errfile cmd...
     exit 0
   ) >/dev/null 2>&1 &
   wd=$!
+  lim_wd="$wd"
   wait "$pid" 2>/dev/null
   lim_rc=$?
   # Timed out is the hook's own fact, never a file the command could delete: the watchdog exits 124 when it signalled
@@ -181,15 +206,120 @@ run_limited() { # limit infile outfile errfile cmd...
       kill -KILL -- "-$pid" 2>/dev/null # the leader ended on the SIGTERM: its group's stragglers go now
     fi
   fi
+  lim_pid="" lim_wd=""
   return 0
 }
+lim_pid="" lim_wd=""
+
+# A TERM, INT or HUP to the hook: the running command's process group (a test run or the bugfix-check.mjs helper, which
+# runs in a group of its own and would outlive the hook) is ended the way a limit ends it, SIGTERM and SIGKILL after
+# LIM_GRACE_S while its leader is still there, before the EXIT trap releases the lock, so the next gate's suite never
+# overlaps it. bash runs the trap at once while it waits for the job. A hook killed with SIGKILL runs no trap: its lock
+# is then taken over as stale, and its suite may still be running.
+on_signal() { # exit status
+  local g=0
+  trap '' TERM INT HUP
+  [ -z "$lim_wd" ] || kill -KILL "$lim_wd" 2>/dev/null
+  if [ -n "$lim_pid" ]; then
+    kill -TERM -- "-$lim_pid" 2>/dev/null || kill -TERM "$lim_pid" 2>/dev/null
+    while [ "$g" -lt "$LIM_GRACE_S" ] && kill -0 "$lim_pid" 2>/dev/null; do
+      sleep 1
+      g=$((g + 1))
+    done
+    kill -KILL -- "-$lim_pid" 2>/dev/null || kill -KILL "$lim_pid" 2>/dev/null
+  fi
+  exit "$1"
+}
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+trap 'on_signal 129' HUP
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/orch-verify.XXXXXX" 2>/dev/null)" || work=""
 if [ -z "$work" ] || [ ! -d "$work" ]; then
   work="${TMPDIR:-/tmp}/orch-verify.$$"
   mkdir -p "$work" 2>/dev/null || true
 fi
-trap 'rm -rf "$work" 2>/dev/null' EXIT
+# One suite at a time per project. Every worktree of a project shares the state dir (it comes from CLAUDE_PROJECT_DIR,
+# never from the agent's cwd), so a lock file there makes the gates of one wave run their suites, and the base run or
+# bugfix check that follows, one after the other instead of all at once (four at once took 554 to 590 s each, live).
+# The lock is "<pid> <start epoch seconds>" of its holder, made whole in a private file and hard-linked into place (ln
+# fails when the name exists: atomic, and never seen half written). A lock whose holder is gone, or that is older than
+# the hook timeout (LOCK_STALE_S), is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) removes
+# it and all try again. The EXIT trap releases it on every way out (exit, the test run's limit, SIGTERM), and only
+# while it still holds this hook's own token; a hook killed with SIGKILL leaves it to the stale rule.
+lock="$state/test-gate.lock"
+lock_token="" lock_held=0
+LOCK_STALE_S=900 # the hook timeout in the settings
+# A lock that is gone again when the failed link is looked at was released in between: the link is tried again. Only a
+# state dir that is missing or cannot be written (or, after 5 such tries, a file system with no hard links) is "no lock".
+take_lock() { # 0: taken; 1: held by another; 2: no lock can be made here (the gate goes on without one)
+  local priv="$state/.test-gate.lock.$$" tries=0
+  mkdir -p "$state" 2>/dev/null || return 2
+  [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
+  lock_token="$$ $(date +%s)"
+  printf '%s\n' "$lock_token" 2>/dev/null >"$priv" || return 2
+  while [ "$tries" -lt 5 ]; do
+    if ln "$priv" "$lock" 2>/dev/null; then
+      rm -f "$priv"
+      lock_held=1
+      return 0
+    fi
+    if [ -e "$lock" ]; then
+      rm -f "$priv"
+      return 1
+    fi
+    tries=$((tries + 1))
+  done
+  rm -f "$priv"
+  return 2
+}
+lock_stale() { # $1: the lock's content as read; true when its holder is gone or it is older than the hook timeout
+  local pid start
+  pid="${1%% *}" start="${1#* }"
+  case "$pid" in '' | *[!0-9]*) return 0 ;; esac
+  case "$start" in '' | *[!0-9]*) return 0 ;; esac
+  [ "$(($(date +%s) - 10#$start))" -le "$LOCK_STALE_S" ] || return 0
+  kill -0 "$pid" 2>/dev/null && return 1
+  ps -p "$pid" >/dev/null 2>&1 && return 1 # alive under another user (kill -0 is refused)
+  return 0
+}
+take_over() { # 0 when a stale lock was removed
+  local guard="$lock.takeover" seen="" now_seen="" rc=1
+  if ! mkdir "$guard" 2>/dev/null; then
+    [ -z "$(find "$guard" -maxdepth 0 -mmin +2 2>/dev/null)" ] || rmdir "$guard" 2>/dev/null
+    return 1
+  fi
+  { IFS= read -r seen <"$lock"; } 2>/dev/null
+  if [ -e "$lock" ] && lock_stale "$seen"; then
+    { IFS= read -r now_seen <"$lock"; } 2>/dev/null
+    [ "$now_seen" = "$seen" ] && rm -f "$lock" 2>/dev/null && rc=0
+  fi
+  rmdir "$guard" 2>/dev/null
+  return "$rc"
+}
+release_lock() {
+  local cur=""
+  [ "$lock_held" = 1 ] || return 0
+  { IFS= read -r cur <"$lock"; } 2>/dev/null
+  [ "$cur" != "$lock_token" ] || rm -f "$lock" 2>/dev/null
+  lock_held=0
+}
+# Waits, sleeping a second at a time, while the time left stays above $1 (the floor). Sets lock_wait_s. 0: the lock is
+# held; 1: the time left fell to the floor; 2: no lock can be made here.
+acquire_lock() { # floor
+  local t0="$SECONDS" r
+  while :; do
+    take_lock
+    r=$?
+    lock_wait_s=$((SECONDS - t0))
+    [ "$r" = 1 ] || return "$r"
+    take_over && continue
+    [ "$(time_left)" -gt "$1" ] || return 1
+    sleep 1
+  done
+}
+
+trap 'rm -rf "$work" 2>/dev/null; release_lock' EXIT
 # The folder can still be removed from outside while the hook runs (a suite or a cleaner that sweeps TMPDIR). Before
 # each use it is made again; when that fails the caller treats it like no time for the check (never a silent allow).
 ensure_work() { [ -d "$work" ] || mkdir -p "$work" 2>/dev/null; }
@@ -383,6 +513,22 @@ fi
 # An explicit ORCH_TEST_CMD always runs; a detected runner is skipped when only prose changed.
 if [ -z "${ORCH_TEST_CMD:-}" ] && only_prose_changed; then
   log_gate allow no_code_changes
+  exit 0
+fi
+
+# Wait for the project's suite lock, but keep at least the floor for the suite: the smallest of 120 s (about what this
+# repository's suite takes on an idle machine), a quarter of the budget (so a small budget still spends most of its time
+# waiting) and the test run's own limit (a suite is never given more). When the time left falls to the floor, an agent in
+# an isolated worktree gets a warn record that says its tests did not run (tests_failed_isolated, so the run model asks
+# for an opus review); the shared tree runs the suite anyway, without the lock, and never skips.
+floor=120
+[ "$floor" -le "$((budget / 4))" ] || floor=$((budget / 4))
+[ "$floor" -le "$test_limit" ] || floor="$test_limit"
+[ "$floor" -ge 1 ] || floor=1
+lock_wait_s=0
+acquire_lock "$floor"
+if [ "$?" = 1 ] && [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+  log_gate warn tests_failed_isolated "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
   exit 0
 fi
 

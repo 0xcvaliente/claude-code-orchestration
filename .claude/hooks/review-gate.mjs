@@ -27,9 +27,9 @@
 //    last implementer, needs its latest review after its latest attempt to pass (no_reviewer_after_last_implementer,
 //    last_reviewer_failed, last_reviewer_no_status). If that reviewer's brief had CHECKS, every id must be answered
 //    with pass (constraints_unchecked; a brief without CHECKS skips this, logged). If a doubt signal fired (risky,
-//    retry, read_answer, open_items, tests_failed_isolated; ORCH_ESCALATION=off|always), a passing review by an opus
-//    reviewer must exist after the latest attempt (opus_review_required). A slice that failed for good (latest review
-//    failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
+//    retry, read_answer, open_items, tests_failed_isolated, test_gate_gave_up; ORCH_ESCALATION=off|always), a passing
+//    review by an opus reviewer must exist after the latest attempt (opus_review_required). A slice that failed for
+//    good (latest review failed after 3 attempts) does not block: slice_failed_for_good, with a systemMessage naming it.
 //    Reviews count by brief.mjs's fold (docs/brief-grammar.md, "Review counting"): a fail whose gaps are all below
 //    ORCH_GAP_MIN (default 80; 0 = every fail counts) counts as a pass and adds the doubt signal low_confidence_fail;
 //    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
