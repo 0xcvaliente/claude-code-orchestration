@@ -64,6 +64,9 @@ export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
       // Read-only search and paging (1.2.0). On macOS and Linux Claude Code leaves Grep and Glob out of an agent whose
       // tools also name Bash, so the researcher searches through Bash; researcher-guard.mjs holds each to read-only forms.
       "Bash(grep*)", "Bash(rg*)", "Bash(find*)", "Bash(head*)", "Bash(tail*)", "Bash(cat*)",
+      // Narrow read-only forms (audit 2026-11-16 T-11), held by researcher-guard.mjs: cd with one literal path,
+      // sed -n with one line or one range, cut, stat and echo.
+      "Bash(cd *)", "Bash(sed -n *)", "Bash(cut*)", "Bash(stat*)", "Bash(echo*)",
       "WebSearch", "WebFetch", "Skill",
     ],
   },

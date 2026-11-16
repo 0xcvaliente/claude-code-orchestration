@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // PreToolUse hook (matcher Bash): holds the researcher to its read-only Bash allowlist. The researcher's tools line
 // allows only git log/ls-files/rev-list/rev-parse/status/show, git branch --show-current (each also as git -C <dir> ...),
-// wc, ls and du, and (1.2.0) read-only search and paging: grep, rg, find, head, tail and cat. A researcher once wrote a
+// wc, ls and du, (1.2.0) read-only search and paging: grep, rg, find, head, tail and cat, and (audit 2026-11-16 T-11)
+// `cd <one literal path>`, `sed -n '<N>p'`/`'<N>,<M>p'`, cut, stat and echo in narrow forms. A researcher once wrote a
 // file with a heredoc and ran python3 regardless (docs/research-2026-10-31.md, section 6.5). This hook enforces the same
 // list on every segment of the command.
 // Why search runs through Bash: on macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose
@@ -29,9 +30,20 @@ import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 export const ALLOWED_PREFIXES = [
   "git log", "git ls-files", "git rev-list", "git rev-parse", "git status", "git show", "git branch --show-current",
   "git -C <dir> <one of those>", "wc", "ls", "du", "grep", "rg", "find (no -exec, -ok, -delete or -fprint)", "head", "tail (no -f)", "cat",
+  "cd <one literal path>", "sed -n '<N>p' or '<N>,<M>p'", "cut (-b, -c, -f, -d, -s, --complement, --output-delimiter)", "stat", "echo",
 ];
 const GIT_SUBS = new Set(["log", "ls-files", "rev-list", "rev-parse", "status", "show"]);
-const PLAIN = new Set(["wc", "ls", "du"]);
+// Audit 2026-11-16 T-11 (approved by the owner): five more read-only forms, each held to what cannot write a file or
+// start a program. stat reads metadata only (its long options from STAT_LONG); echo only prints (redirection stays
+// refused); cut has no write or exec option, and only -b, -c, -f, -d, -s, --complement and --output-delimiter pass;
+// sed only as `sed -n '<N>p'` or `sed -n '<N>,<M>p'` (no -i, no w, e or s///w script, no glob operand that could expand
+// into an option); cd only with one literal path as a command of its own, never into /dev, and later segments' relative
+// paths are judged from each folder the cd may have reached.
+const PLAIN = new Set(["wc", "ls", "du", "stat", "echo", "cut", "sed"]);
+const STAT_LONG = new Set(["dereference", "file-system", "format", "printf", "terse", "cached", "help", "version"]);
+const CD_FORM = "`cd` is allowed only with one literal path and nothing else, as a command of its own (`cd /repo && git log -1`)";
+const SED_FORM = "`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>` (one line or one line range, no other option or script)";
+const CUT_FORM = "use only -b, -c, -f, -d, -s, --complement and --output-delimiter";
 const SEARCH = new Set(["grep", "egrep", "fgrep", "rg"]);
 // find and bfs actions that run a program or write a file.
 // `-rm` is bfs's own name for -delete.
@@ -64,12 +76,12 @@ const SEARCH_LONG = new Set([
 
 // What a refused researcher should do instead (gate records showed refusals with no way forward). Appended after the
 // reason's first words, which stay the same so the records still group by them.
-const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du and read-only git, and work the result out in the report";
+const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du, cut, stat, echo, `sed -n` line ranges and read-only git, and work the result out in the report";
 
 /** @param {string} word @returns {string} */
 function insteadOf(word) {
   if (word === "cd") return "put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
-  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, or `head` and `tail`";
+  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, `head` and `tail`, or `sed -n '10,40p' <file>`";
   return USE_ALLOWED;
 }
 
@@ -157,10 +169,20 @@ function violation(command, cwd) {
   if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !command.includes("|")))) {
     return { reason: "input redirection, a heredoc or here-string" };
   }
+  // The folders a segment may run in: the given one, and each a `cd` before it may have reached (a cd may fail).
+  let cwds = [cwd];
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
     if (words.some((w) => w.assign)) return { reason: `a variable assignment; ${USE_ALLOWED}`, word: words[0]?.text };
+    if (words[0]?.text === "cd") {
+      const target = cdTarget(words);
+      if (target === null) return { reason: CD_FORM, word: "cd" };
+      const reached = target.startsWith("/") ? [posix.resolve(target)] : [...cwds.map((d) => posix.resolve(d, target)), ...(/^\.\.?\//.test(target) ? [] : [posix.resolve("/", target)])];
+      if (reached.some(inDev)) return { reason: `cd ${target} enters /dev, whose devices may never end`, word: "cd" };
+      cwds = [...new Set([...cwds, ...reached])];
+      continue;
+    }
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
     if (words.some(globInOptionName)) {
       return {
@@ -170,7 +192,8 @@ function violation(command, cwd) {
     }
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
-    const option = optionViolation(w, cwd);
+    if (w[0] === "sed" && !sedForm(words)) return { reason: SED_FORM, word: "sed" };
+    const option = optionViolation(w, cwds);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -192,6 +215,43 @@ function globInOptionName(w) {
   return false;
 }
 
+/** A word with literal text only: no expansion and no glob. @param {any} w */
+const literal = (w) => Array.isArray(w?.pieces) && w.pieces.every((/** @type {any} */ p) => "lit" in p);
+
+/**
+ * The path of a `cd` in its one allowed form, or null: exactly one literal argument, not an option (`-`, `-P`), not
+ * `~`, and no `..` inside a relative path that CDPATH could resolve elsewhere (`x/../../dev`).
+ * @param {any[]} words @returns {string | null}
+ */
+function cdTarget(words) {
+  if (words.length !== 2 || !literal(words[0]) || !literal(words[1])) return null;
+  const p = String(words[1].text);
+  if (!p || p.startsWith("-") || p.startsWith("~")) return null;
+  if (!/^(?:\/|\.\.?\/|\.\.?$)/.test(p) && p.split("/").includes("..")) return null;
+  return p;
+}
+
+/** Is a folder /dev or under it, by its normalised path or, when it exists, its real path? @param {string} dir */
+function inDev(dir) {
+  const paths = [dir];
+  try {
+    paths.push(realpathSync(dir));
+  } catch {
+    // no such folder: the lexical path decides
+  }
+  return paths.some((x) => x === "/dev" || x.startsWith("/dev/"));
+}
+
+/**
+ * `sed -n '<N>p'` or `sed -n '<N>,<M>p'` and file operands that are literal and not options, nothing else.
+ * @param {any[]} words
+ */
+function sedForm(words) {
+  if (words.length < 3 || !words.every(literal)) return false;
+  if (words[1].text !== "-n" || !/^[0-9]+(?:,[0-9]+)?p$/.test(String(words[2].text))) return false;
+  return words.slice(3).every((w) => typeof w.text === "string" && w.text !== "" && !w.text.startsWith("-"));
+}
+
 /** @param {string[]} w */
 function allowedWords(w) {
   const first = w[0] ?? "";
@@ -208,20 +268,26 @@ function allowedWords(w) {
  * it can be the value of one (`rg -e -- --pre=sh x` reads `--` as the pattern and `--pre` as an option). So a word
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
- * @param {string[]} w @param {string} cwd @returns {string | null}
+ * @param {string[]} w @param {string[]} cwds the folders the command may run in @returns {string | null}
  */
-function optionViolation(w, cwd) {
+function optionViolation(w, cwds) {
   const first = w[0] ?? "";
   const args = w.slice(1);
   if (first === "find") {
     const action = args.find((x) => FIND_ACTIONS.test(x));
     return action ? `find ${action} runs a program or writes a file` : null;
   }
+  if (first === "stat") {
+    // stat reads metadata only; its long options still pass by name only (and a lone `--` is not one of them).
+    const bad = args.find((a) => a.startsWith("--") && !STAT_LONG.has(a.slice(2).split("=")[0] ?? ""));
+    return bad ? `stat --${bad.slice(2).split("=")[0]} is not an allowed option (it may run a program, write a file or never end)` : null;
+  }
   if (!SEARCH.has(first) && !PAGERS.has(first) && !READERS.has(first)) return null;
   // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail, wc or a search reading for ever,
   // also as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
-  const device = args.find((a) => readsDevice(a, cwd));
+  const device = args.find((a) => cwds.some((d) => readsDevice(a, d)));
   if (device) return `${first} ${device} reads a device that may never end`;
+  if (first === "cut") return cutViolation(args);
   if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
   for (const a of args) {
     if (a.startsWith("--")) {
@@ -233,6 +299,33 @@ function optionViolation(w, cwd) {
       if (first === "tail" && /[fF]/.test(a)) return `tail ${a} follows the file and never ends`;
       if (first === "rg" && a.includes("z")) return `rg ${a}: -z starts decompression programs`;
       if (first !== "rg" && SEARCH.has(first) && a.includes("Q")) return `${first} ${a}: -Q opens an interactive screen`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Why a cut command is refused, or null: only -b, -c, -f, -d (each with its value attached or as the next word), -s,
+ * --complement and --output-delimiter (with `=` or the next word). Every other word that starts with a dash is refused,
+ * a lone `--` included, so it never ends the check.
+ * @param {string[]} args @returns {string | null}
+ */
+function cutViolation(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === "--complement" || a.startsWith("--output-delimiter=")) continue;
+    if (a === "--output-delimiter") {
+      i++;
+      continue;
+    }
+    if (a.startsWith("--")) return `cut ${a.split("=")[0]} is not an allowed option; ${CUT_FORM}`;
+    if (a.length < 2 || !a.startsWith("-")) continue; // a file operand, or `-` for standard input
+    for (let j = 1; j < a.length; j++) {
+      const ch = a[j] ?? "";
+      if (ch === "s") continue;
+      if (!"bcfd".includes(ch)) return `cut -${ch} is not an allowed option; ${CUT_FORM}`;
+      if (j === a.length - 1) i++; // the value is the next word
+      break;
     }
   }
   return null;

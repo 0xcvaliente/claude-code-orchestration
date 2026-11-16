@@ -73,7 +73,7 @@ const ALLOWED = [
 const DENIED = [
   ["cat > notes.md <<'EOF'\nhello\nEOF", /heredoc|redirection/],
   ["python3 -c 'print(1)'", /python3/],
-  ["cd /tmp && ls", /`cd`/],
+  ["cd /tmp /x && ls", /`cd`/], // T-11: `cd /tmp && ls` passes now; two arguments do not
   ["git log | python3", /python3/],
   ["git ls-files | xargs cat", /xargs/],
   ["ls > out.txt", /redirection/],
@@ -144,7 +144,7 @@ const DENIED = [
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],
-  ["sed -n 1,5p a.txt", /`sed`/],
+  ["sed -i 1,5p a.txt", /`sed`/], // T-11: `sed -n 1,5p a.txt` passes now; -i does not
 ];
 
 test("researcher guard: allowlisted commands pass", () => {
@@ -191,7 +191,8 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["cat package.json", "allow"],
   ["cat > notes.md <<'EOF'\nhello\nEOF", "deny"],
   ["python3 -c 'print(1)'", "deny"],
-  ["cd /tmp && ls", "deny"],
+  ["cd /tmp && ls", "allow"], // T-11 (owner-approved change): was deny
+  ["cd /tmp /x && ls", "deny"],
   ["git log | python3", "deny"],
   ["git ls-files | xargs cat", "deny"],
   ["ls > out.txt", "deny"],
@@ -253,14 +254,18 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["grep foo . > out.txt", "deny"],
   ["cat a.txt | sh", "deny"],
   ["/usr/bin/grep foo .", "deny"],
-  ["sed -n 1,5p a.txt", "deny"],
+  ["sed -n 1,5p a.txt", "allow"], // T-11 (owner-approved change): was deny
+  ["sed -i 1,5p a.txt", "deny"],
   ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
   ["python3 x.py", "deny"],
-  ["cd src && ls", "deny"],
+  ["cd src && ls", "allow"], // T-11: was deny
+  ["cd src docs && ls", "deny"],
   ["git log --oneline | wc -l", "allow"],
-  ["cd /x && grep -n foo a.txt", "deny"],
+  ["cd /x && grep -n foo a.txt", "allow"], // T-11: was deny
+  ["cd /x && rm -r a.txt", "deny"],
   ["grep foo a.txt | sort", "deny"],
-  ["echo hi", "deny"],
+  ["echo hi", "allow"], // T-11: was deny
+  ["echo hi > a.txt", "deny"],
   ["x=0; grep foo a.txt", "deny"],
   // b4: exactly `2>/dev/null` and `2>&1`, each a word of its own, are the only redirections allowed.
   ["grep foo a.txt 2>/dev/null", "allow"],
@@ -308,13 +313,16 @@ test("researcher guard: every recorded command keeps its allow or deny decision"
 
 // A denial says what to use instead, and keeps its first words so the gate records still group.
 const HINTS = [
-  ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
-  ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
-  ["sed -n 1,5p a.txt", /^`sed` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  // T-11: `cd` and `sed` pass in their narrow forms; the refusal of any other form names the allowed one.
+  ["cd /x /y && grep -n foo a.txt", /^`cd` is allowed only with one literal path and nothing else.*`cd \/repo && git log -1`/],
+  ["cd src docs && ls", /^`cd` is allowed only with one literal path/],
+  ["sed -i 1,5p a.txt", /^`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>`/],
+  ["cut -z a.txt", /^cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+  ["stat --bogus a.txt", /^stat --bogus is not an allowed option/],
   ["awk 'NR<5' a.txt", /^`awk` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
   ["grep foo a.txt | sort", /^`sort` is not an allowed command; .*grep, rg, find, head, tail, cat, ls, wc, du.*in the report/],
   ["uniq a.txt", /^`uniq` is not an allowed command; .*grep, rg, find.*in the report/],
-  ["echo hi", /^`echo` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["tr a b", /^`tr` is not an allowed command; .*grep, rg, find.*in the report/], // T-11: `echo hi` passes now
   ["printf hi", /^`printf` is not an allowed command; .*grep, rg, find.*in the report/],
   ["python3 x.py", /^`python3` is not an allowed command; .*grep, rg, find.*in the report/],
   ["x=0; grep foo a.txt", /^a variable assignment; .*grep, rg, find.*in the report/],
@@ -355,12 +363,106 @@ test("researcher guard (T-5): a device reached by another spelling of its path, 
   }
 });
 
+// Audit 2026-11-16 T-11 (approved by the owner): narrow forms of cd, sed -n, cut, stat and echo, which cannot write a
+// file or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
+test("researcher guard (T-11): cd, sed -n, cut, stat and echo in their narrow forms pass", () => {
+  for (const c of [
+    "cd /repo && git log -1",
+    "cd src && ls",
+    "cd /x && grep -n foo a.txt",
+    "cd '/a dir' && ls",
+    "sed -n '10p' a.md",
+    "sed -n '10,40p' a.md b.md",
+    "sed -n 1,5p a.txt",
+    "git show HEAD:a.md | sed -n '3,9p'",
+    "cut -d, -f1 a.csv",
+    "cut -d ',' -f 1,3 a.csv",
+    "cut -c1-10 a.txt",
+    "cut -b 1-4 a.txt",
+    "cut -sf2 -d: a.txt",
+    "cut --complement -f2 a.csv",
+    "cut --output-delimiter=';' -f1,2 -d, a.csv",
+    "cut --output-delimiter ' ' -f1 -d, a.csv",
+    "stat a.txt",
+    "stat -f %z a.txt",
+    "stat -c %s a.txt",
+    "stat --printf='%s\\n' a.txt",
+    "stat -L --format=%y a.txt",
+    "echo ---",
+    "echo hi && cat a.txt",
+    "echo -n done",
+  ]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
+test("researcher guard (T-11): the neighbours of the new forms that could write, run or read for ever stay refused", () => {
+  for (const [c, re] of /** @type {[string, RegExp][]} */ ([
+    // cd: exactly one literal path, as a command of its own; never into /dev.
+    ["cd", /`cd` is allowed only with one literal path/],
+    ["cd /x /y && ls", /`cd` is allowed only with one literal path/],
+    ["cd -P /x", /`cd` is allowed only with one literal path/],
+    ["cd -", /`cd` is allowed only with one literal path/],
+    ["cd ~ && ls", /`cd` is allowed only with one literal path/],
+    ["cd ~/x && ls", /`cd` is allowed only with one literal path/],
+    ["cd $HOME && ls", /`cd` is allowed only with one literal path/],
+    ["cd src* && ls", /`cd` is allowed only with one literal path/],
+    ["cd /x; python3 x.py", /`python3`/],
+    ["cd /dev && cat zero", /device/],
+    ["cd /./dev && head -c 9 zero", /device/],
+    ["cd / && cat dev/zero", /device/],
+    ["cd /x && cd ../../dev && cat zero", /device/],
+    ["cd x/../../dev && cat zero", /`cd` is allowed only with one literal path/],
+    // sed: only -n with one line or one range and p.
+    ["sed -i 's/a/b/' a.txt", /`sed` is allowed only as `sed -n '10p' <file>`/],
+    ["sed -i 1,5p a.txt", /`sed` is allowed only as/],
+    ["sed -n '1w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1e cmd' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/e' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1p;2p' a.txt", /`sed` is allowed only as/],
+    ["sed -n '$p' a.txt", /`sed` is allowed only as|expansion/],
+    ["sed -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -i a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p --in-place a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -- -i", /`sed` is allowed only as/],
+    ["sed -n 1p *", /`sed` is allowed only as/], // a file named -i would turn into an option
+    ["sed -n -s 1p a.txt", /`sed` is allowed only as/],
+    ["sed 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1,5p /dev/zero", /device/],
+    ["sed -n 1p //dev/urandom", /device/],
+    // cut: only -b, -c, -f, -d, -s, --complement and --output-delimiter.
+    ["cut -z -f1 a.txt", /cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+    ["cut -n -b1 a.txt", /cut -n is not an allowed option/],
+    ["cut --delimiter=, -f1 a.txt", /cut --delimiter is not an allowed option/],
+    ["cut --fields=1 a.txt", /cut --fields is not an allowed option/],
+    ["cut --zero-terminated -f1 a.txt", /not an allowed option/],
+    ["cut -d, -- --foo", /not an allowed option/],
+    ["cut -f1 /dev/zero", /device/],
+    ["cut -f1 /./dev/urandom", /device/],
+    // stat: long options from an allowlist only.
+    ["stat --bogus a.txt", /stat --bogus is not an allowed option/],
+    // echo: output only, never into a file.
+    ["echo hi > out.txt", /redirection/],
+    ["echo hi >> out.txt", /redirection/],
+    ["echo $(id)", /substitution/],
+    ["echo $HOME", /expansion/],
+    ["printf hi", /`printf`/],
+  ])) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${JSON.stringify(c)}`);
+    assert.match(v.reason, re, c);
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+});
+
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
 });
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
-  for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src && ls"]) {
+  for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src docs && ls"]) { // T-11: `cd src && ls` passes now
     for (const t of ["researcher", "orchestration:researcher"]) {
       const r = run(RESEARCHER, bash(c, t));
       assert.equal(r.code, 2, c);
