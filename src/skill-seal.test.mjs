@@ -177,6 +177,63 @@ test("created_by: the plugin copy reads the plugin manifest; with neither manife
   }
 });
 
+test("file names that are Object.prototype keys are sealed, checked and reported like any other", () => {
+  const NAMES = ["__proto__", "constructor", "toString", "valueOf", "hasOwnProperty"];
+  const { base, dir } = skill();
+  try {
+    for (const n of NAMES) writeFileSync(join(dir, n), `${n}\n`);
+    const rec = seal(dir);
+    for (const n of NAMES) assert.ok(Object.hasOwn(rec.files, n) && rec.files[n] === sha(`${n}\n`), `${n} is in the seal`);
+    const onDisk = sealOf(dir);
+    for (const n of NAMES) assert.equal(Object.hasOwn(onDisk.files, n) && onDisk.files[n], sha(`${n}\n`), `${n} is in provenance.json`);
+    const lines = Object.keys(onDisk.files).sort().map((p) => `${p}:${onDisk.files[p]}`).join("\n");
+    assert.equal(onDisk.digest, sha(lines), "the digest covers every file");
+    assert.deepEqual(verify(dir), { ok: true, problems: [] });
+    // an edit after sealing is noticed, whatever the name
+    for (const n of NAMES) {
+      writeFileSync(join(dir, n), "edited\n");
+      assert.deepEqual(verify(dir).problems, [`${n} changed after the seal`], n);
+      writeFileSync(join(dir, n), `${n}\n`);
+    }
+    // a listed file that is gone is reported
+    for (const n of NAMES) {
+      unlinkSync(join(dir, n));
+      assert.deepEqual(verify(dir).problems, [`${n} is listed in the seal but is gone`], n);
+      writeFileSync(join(dir, n), `${n}\n`);
+    }
+    assert.equal(verify(dir).ok, true);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+  // a file the seal does not list is reported, whatever the name
+  for (const n of NAMES) {
+    const s = skill();
+    try {
+      seal(s.dir);
+      writeFileSync(join(s.dir, n), "x\n");
+      assert.deepEqual(verify(s.dir).problems, [`${n} is not listed in the seal`], n);
+    } finally {
+      rmSync(s.base, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a seal written by hand in the documented format (as an earlier version wrote it) still verifies", () => {
+  const { base, dir } = skill();
+  try {
+    const files = { "SKILL.md": sha(readFileSync(join(dir, "SKILL.md"), "utf8")), "references/a.md": sha("Ref\n") };
+    const digest = sha(Object.keys(files).sort().map((p) => `${p}:${files[/** @type {keyof typeof files} */ (p)]}`).join("\n"));
+    const old = { v: 1, name: "demo-skill", created_at: "2026-01-01T00:00:00.000Z", created_by: "claude-code-orchestration 1.4.4", target: "private", files, digest };
+    writeFileSync(join(dir, "provenance.json"), `${JSON.stringify(old, null, 2)}\n`);
+    assert.deepEqual(verify(dir), { ok: true, problems: [] });
+    const again = seal(dir);
+    assert.deepEqual(again.files, files, "sealing again writes the same file list");
+    assert.equal(again.digest, digest, "and the same digest");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("seal and verify refuse a skill folder that is itself a symlink", () => {
   const { base, dir } = skill();
   try {

@@ -1,64 +1,66 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 680" width="900" height="680" role="img" aria-labelledby="dc-5a44039a53-title dc-5a44039a53-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
-<title id="dc-5a44039a53-title">One slice&#x27;s life: from planned to merged, failed for good or replaced</title>
-<desc id="dc-5a44039a53-desc">A planned slice is written, then tested unless there are no tests to run (no test command, or only prose changed in a git repository), then reviewed. Failing tests, or a bugfix slice without a test that fails before the fix, send it back to writing. A failed review&#x27;s gaps are validated by a fresh reviewer: confirmed gaps send the slice back to writing for its second attempt (the same writer, resumed) or its third and last (a fresh writer on Opus); when none stand, the slice counts as passed. The same gap in two failed reviews in a row stalls the slice, and a replan replaces it; if the run already had its replan, or three attempts fail, the slice has failed for good. A passed slice is merged into the result branch.</desc>
-<defs><marker id="dc-5a44039a53-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
-<rect width="900" height="680" fill="#0d1117" aria-hidden="true"/>
-<polyline data-edge="t-start" points="80,76 80,176" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-done" points="210,196 360,196" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-fail" points="360,236 210,236" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)" stroke-dasharray="6 5"/>
-<polyline data-edge="t-pass" points="540,216 690,216" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-no-tests" points="160,176 160,126 780,126 780,176" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-review-fail" points="720,256 720,300 450,300 450,340" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)" stroke-dasharray="6 5"/>
-<polyline data-edge="t-confirmed" points="360,372 150,372 150,256" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)" stroke-dasharray="6 5"/>
-<polyline data-edge="t-none" points="540,372 690,372" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-review-pass" points="780,256 780,340" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-stall" points="450,404 450,470" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-attempts" points="80,256 80,470" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-replan-used" points="360,498 210,498" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-stall-replan" points="450,526 450,628 210,628" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-replan" points="120,526 120,600" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<polyline data-edge="t-merge" points="780,396 780,600" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-5a44039a53-arrow)"/>
-<g id="dc-5a44039a53-node-planned" data-node="planned" data-x="30" data-y="20" data-w="180" data-h="56">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700" width="900" height="700" role="img" aria-labelledby="dc-55b86e8e0d-title dc-55b86e8e0d-desc" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<title id="dc-55b86e8e0d-title">One slice&#x27;s life: from planned to merged, failed for good or replaced</title>
+<desc id="dc-55b86e8e0d-desc">A planned slice is written, then tested unless there are no tests to run (no test command, or only prose changed in a git repository), then reviewed; a slice with a doubt signal also needs a passing Opus review. Failing tests, or a bugfix slice without a test that fails before the fix, send it back to writing. A failed review&#x27;s gaps are validated by a fresh reviewer: confirmed gaps send the slice back to writing for its second attempt (the same writer, resumed) or its third and last (a fresh writer on Opus); when none stand, the slice counts as passed. The same gap in two failed reviews in a row stalls the slice, and a replan replaces it; if the run already had its replan, or three attempts fail, the slice has failed for good. A passed slice of code in a git repository is merged into your current branch; other work stays in place.</desc>
+<defs><marker id="dc-55b86e8e0d-arrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0 L10 4 L0 8 Z" fill="#9198a1"/></marker></defs>
+<rect width="900" height="700" fill="#0d1117" aria-hidden="true"/>
+<polyline data-edge="t-start" points="80,76 80,176" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-done" points="210,196 360,196" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-fail" points="360,236 210,236" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="t-pass" points="540,216 690,216" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-no-tests" points="160,176 160,126 780,126 780,176" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-review-fail" points="720,256 720,300 450,300 450,340" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="t-confirmed" points="360,372 150,372 150,256" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)" stroke-dasharray="6 5"/>
+<polyline data-edge="t-none" points="540,372 690,372" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-review-pass" points="780,256 780,340" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-stall" points="450,404 450,470" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-attempts" points="80,256 80,470" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-replan-used" points="360,498 210,498" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-stall-replan" points="450,526 450,628 210,628" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-replan" points="120,526 120,600" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<polyline data-edge="t-merge" points="780,396 780,600" fill="none" stroke="#9198a1" stroke-width="2" stroke-linejoin="round" marker-end="url(#dc-55b86e8e0d-arrow)"/>
+<g id="dc-55b86e8e0d-node-planned" data-node="planned" data-x="30" data-y="20" data-w="180" data-h="56">
 <rect x="30" y="20" width="180" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="54.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="planned"><tspan x="48" dy="0">Planned</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-writing" data-node="writing" data-x="30" data-y="176" data-w="180" data-h="80">
+<g id="dc-55b86e8e0d-node-writing" data-node="writing" data-x="30" data-y="176" data-w="180" data-h="80">
 <rect x="30" y="176" width="180" height="80" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="213.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="writing"><tspan x="48" dy="0">Writing</tspan></text>
 <text x="48" y="239.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="writing"><tspan x="48" dy="0">Attempt 1, 2 or 3</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-testing" data-node="testing" data-x="360" data-y="176" data-w="180" data-h="80">
+<g id="dc-55b86e8e0d-node-testing" data-node="testing" data-x="360" data-y="176" data-w="180" data-h="80">
 <rect x="360" y="176" width="180" height="80" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="378" y="204.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="testing"><tspan x="378" dy="0">Testing</tspan></text>
 <text x="378" y="230.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="testing"><tspan x="378" dy="0">A bugfix needs a</tspan><tspan x="378" dy="18">failing test first</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-reviewing" data-node="reviewing" data-x="690" data-y="176" data-w="180" data-h="80">
+<g id="dc-55b86e8e0d-node-reviewing" data-node="reviewing" data-x="690" data-y="176" data-w="180" data-h="80">
 <rect x="690" y="176" width="180" height="80" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
-<text x="708" y="222.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="reviewing"><tspan x="708" dy="0">Reviewing</tspan></text>
+<text x="708" y="204.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="reviewing"><tspan x="708" dy="0">Reviewing</tspan></text>
+<text x="708" y="230.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="reviewing"><tspan x="708" dy="0">Opus too, on a</tspan><tspan x="708" dy="18">doubt signal</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-validating" data-node="validating" data-x="360" data-y="340" data-w="180" data-h="64">
+<g id="dc-55b86e8e0d-node-validating" data-node="validating" data-x="360" data-y="340" data-w="180" data-h="64">
 <rect x="360" y="340" width="180" height="64" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="378" y="367.0" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="validating"><tspan x="378" dy="0">Validating</tspan><tspan x="378" dy="23">gaps</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-passed" data-node="passed" data-x="690" data-y="340" data-w="180" data-h="56">
+<g id="dc-55b86e8e0d-node-passed" data-node="passed" data-x="690" data-y="340" data-w="180" data-h="56">
 <rect x="690" y="340" width="180" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="708" y="374.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="passed"><tspan x="708" dy="0">Passed</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-failed" data-node="failed" data-x="30" data-y="470" data-w="180" data-h="56">
+<g id="dc-55b86e8e0d-node-failed" data-node="failed" data-x="30" data-y="470" data-w="180" data-h="56">
 <rect x="30" y="470" width="180" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="493.0" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="failed"><tspan x="48" dy="0">Failed for</tspan><tspan x="48" dy="23">good</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-stalled" data-node="stalled" data-x="360" data-y="470" data-w="180" data-h="56">
+<g id="dc-55b86e8e0d-node-stalled" data-node="stalled" data-x="360" data-y="470" data-w="180" data-h="56">
 <rect x="360" y="470" width="180" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="378" y="504.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="stalled"><tspan x="378" dy="0">Stalled</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-replaced" data-node="replaced" data-x="30" data-y="600" data-w="180" data-h="56">
+<g id="dc-55b86e8e0d-node-replaced" data-node="replaced" data-x="30" data-y="600" data-w="180" data-h="56">
 <rect x="30" y="600" width="180" height="56" rx="6" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
 <text x="48" y="634.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="replaced"><tspan x="48" dy="0">Replaced</tspan></text>
 </g>
-<g id="dc-5a44039a53-node-merged" data-node="merged" data-x="690" data-y="600" data-w="180" data-h="56">
-<rect x="690" y="600" width="180" height="56" rx="6" fill="#0f2a4a" stroke="#4493f8" stroke-width="2"/>
-<text x="708" y="634.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="merged"><tspan x="708" dy="0">Merged</tspan></text>
+<g id="dc-55b86e8e0d-node-merged" data-node="merged" data-x="690" data-y="600" data-w="180" data-h="80">
+<rect x="690" y="600" width="180" height="80" rx="6" fill="#0f2a4a" stroke="#4493f8" stroke-width="2"/>
+<text x="708" y="628.5" font-size="18" font-weight="650" fill="#f0f6fc" text-anchor="start" data-node-text="merged"><tspan x="708" dy="0">Merged</tspan></text>
+<text x="708" y="654.5" font-size="13" font-weight="400" fill="#9198a1" text-anchor="start" data-node-text="merged"><tspan x="708" dy="0">Code in git; other</tspan><tspan x="708" dy="18">work stays in place</tspan></text>
 </g>
 <g data-label="t-start" data-x="15" data-y="111" data-w="130" data-h="30"><rect x="15" y="111" width="130" height="30" rx="4" fill="#0d1117"/>
 <text x="23" y="130" font-size="13" font-weight="400" fill="#f0f6fc" text-anchor="start"><tspan x="23" dy="0">worker starts</tspan></text>

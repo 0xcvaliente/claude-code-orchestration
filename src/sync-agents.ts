@@ -20,6 +20,7 @@ const MAP: Partial<Record<Role, { agent: string; keys: Key[] }>> = {
 /** Agent files use aliases so they follow the newest model in a family; unknown ids stay verbatim. */
 export const alias = (model: string): string => /fable|opus|sonnet|haiku/.exec(model)?.[0] ?? model;
 
+// Every replacement below is a function: a replacement string would expand $' $` $& in frontmatter text.
 function frontmatter(text: string): { whole: string; front: string } {
   const m = /^---\n([\s\S]*?)\n---/.exec(text);
   if (!m) throw new Error("no frontmatter");
@@ -30,7 +31,7 @@ export function setKey(text: string, key: Key, value: string): string {
   const { whole, front } = frontmatter(text);
   const line = new RegExp(`^${key}:.*$`, "m");
   if (!line.test(front)) throw new Error(`frontmatter has no "${key}:" line`);
-  return text.replace(whole, `---\n${front.replace(line, `${key}: ${value}`)}\n---`);
+  return text.replace(whole, () => `---\n${front.replace(line, () => `${key}: ${value}`)}\n---`);
 }
 
 /**
@@ -42,10 +43,10 @@ export function upsertKey(text: string, key: string, value: string | undefined):
   const line = new RegExp(`^${key}:.*(?:\\n|$)`, "m");
   let next: string;
   if (value === undefined) next = front.replace(line, "").replace(/\n$/, "");
-  else if (line.test(front)) next = front.replace(new RegExp(`^${key}:.*$`, "m"), `${key}: ${value}`);
+  else if (line.test(front)) next = front.replace(new RegExp(`^${key}:.*$`, "m"), () => `${key}: ${value}`);
   else if (/^maxTurns:.*$/m.test(front)) next = front.replace(/^maxTurns:.*$/m, (m) => `${m}\n${key}: ${value}`);
   else next = `${front}\n${key}: ${value}`;
-  return text.replace(whole, `---\n${next}\n---`);
+  return text.replace(whole, () => `---\n${next}\n---`);
 }
 
 export function syncAgents(agentsDir: string, check: boolean): string[] {

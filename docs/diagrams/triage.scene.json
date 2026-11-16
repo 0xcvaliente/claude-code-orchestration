@@ -5,9 +5,9 @@
   "nodes": [
     {"id": "facts", "label": "Triage facts", "detail": "files, lines, slices, risky, code", "x": 268, "y": 20, "w": 324, "h": 76, "status": "observed", "sources": ["src/triage.ts:11-37"]},
     {"id": "risky", "label": "Risky?", "shape": "decision", "x": 320, "y": 136, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:100-103"]},
-    {"id": "small", "label": "Small?", "shape": "decision", "x": 40, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:100", "src/config.ts:127-132"]},
-    {"id": "big", "label": "12+ files?", "shape": "decision", "x": 600, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:104-106", "src/config.ts:126"]},
-    {"id": "parallel", "label": "Parallel?", "shape": "decision", "x": 600, "y": 490, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:88-93", "src/triage.ts:107-112", "src/config.ts:118-124"]},
+    {"id": "small", "label": "Small?", "shape": "decision", "x": 40, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:100", "src/config.ts TRIAGE (reviewedMaxFiles, reviewedMaxLines)"]},
+    {"id": "big", "label": "12+ files?", "shape": "decision", "x": 600, "y": 310, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:104-106", "src/config.ts TRIAGE.bigFiles"]},
+    {"id": "parallel", "label": "Parallel?", "shape": "decision", "x": 600, "y": 490, "w": 220, "h": 120, "status": "observed", "sources": ["src/triage.ts:88-93", "src/triage.ts:107-112", "src/config.ts TRIAGE (minParallelSlices, minParallelFilesCode, minParallelFilesNonCode, bigLines)"]},
     {"id": "reviewed", "label": "Reviewed", "x": 50, "y": 680, "w": 200, "h": 60, "status": "observed"},
     {"id": "pipeline", "label": "Pipeline", "x": 330, "y": 680, "w": 200, "h": 60, "status": "observed"},
     {"id": "plain", "label": "Plain", "x": 610, "y": 680, "w": 200, "h": 60, "status": "observed"}

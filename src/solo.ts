@@ -28,6 +28,8 @@ export interface SoloOptions {
   /** Add one independent reviewer after the session; its issues go back to the session, up to `maxRetries` times. */
   review?: boolean;
   maxRetries?: number;
+  /** The run's token cap (`--budget`, passed on by auto()); unset means no cap. No round starts once it is spent. */
+  runBudgetTokens?: number;
   log?: (line: string) => void;
 }
 
@@ -44,6 +46,11 @@ export async function solo(opts: SoloOptions): Promise<SoloReport> {
   let feedback = "";
 
   for (let attempt = 1; attempt <= rounds; attempt++) {
+    if (opts.runBudgetTokens !== undefined && run.overBudget(opts.runBudgetTokens)) {
+      report.error = `run budget exhausted${report.error ? `; ${report.error}` : ""}`;
+      log("solo: run budget exhausted");
+      break;
+    }
     report.attempts = attempt;
     delete report.error;
     const r = await opts.run({

@@ -217,6 +217,18 @@ test("picks: explicit SKILLS names first (found, not found, not invocable), then
   assert.equal(picks("implementer", "SLICE: a\nFILES: x.ts\nDEPENDS: none\nSKILLS: a1, a2, a3, a4, a5").length, 3);
 });
 
+test("picks: a FILES or SOURCES entry whose extension is an Object.prototype key is ignored; the other hints stay", () => {
+  for (const ext of ["constructor", "toString", "valueOf", "hasOwnProperty", "__proto__", "isPrototypeOf"]) {
+    const brief = `SLICE: a\nFILES: src/x.${ext}, out/report.docx\nDEPENDS: none\nSKILLS: tdd\nWrite it.`;
+    assert.deepEqual(picks("implementer", brief), [
+      { name: "tdd", reason: "explicit" },
+      { name: "anthropic-skills:docx", reason: "ext_docx" },
+      { name: "documents", reason: "ext_docx" },
+    ], ext);
+    assert.deepEqual(picks("researcher", `SOURCES: notes.${ext}\nSKILLS: tdd\nQ`), [{ name: "tdd", reason: "explicit" }], ext);
+  }
+});
+
 test("picks: goal words need a strong match; one pick per near-duplicate family", () => {
   const brief = "SLICE: hero\nFILES: src/hero.tsx\nDEPENDS: none\nGOAL: add a GSAP ScrollTrigger pinned scroll animation with scrubbing and a timeline";
   assert.deepEqual(picks("implementer", brief), [{ name: "gsap-scrolltrigger", reason: "goal_match" }, { name: "animate", reason: "motion" }], "the best goal match first, then the motion rule");
