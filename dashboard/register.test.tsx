@@ -2083,3 +2083,20 @@ test('run: a VALIDATE: gaps review with a verdict supersedes the earlier reviews
   await s.prompt.submit({ text: 'new thing' }) // the slice is final, so the run is closed and the prompt starts clean
   expect((await texts($)).some(x => /fx/.test(x))).toBe(false)
 })
+
+test('slice diagram: side by side, the bus counts every card nothing depends on, not only the last of its layer', async ($, on) => {
+  await clocked($, on)
+  await spawnWith($, 'a1', brief('s1'), IMPL) // X: fails, nothing depends on it
+  await finish($, 'a1', FAIL)
+  await spawnWith($, 'a2', brief('s2'), IMPL) // Y: feeds s3
+  await finish($, 'a2', PASS)
+  await spawnWith($, 'a3', brief('s3', 's2'), IMPL) // Z: passes
+  await finish($, 'a3', PASS)
+  const ui = await mountLive($)
+  const t = await liveTexts(ui)
+  expect(t.some(x => /^✖ s1 /.test(x)) && t.some(x => /▶$/.test(x))).toBe(true) // side by side: the gutter enters s3 with an arrowhead
+  // the bus joins s1's stub (red) and s3's (green); the bus and its arrow take the best colour of them: failed
+  expect(await colorsOf(ui, /└[─┬]+$/)).toContain('error')
+  expect(await colorsOf(ui, /^┘$/)).toEqual(['success'])
+  await ui.unmount()
+})

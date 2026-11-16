@@ -1451,11 +1451,14 @@ export const register: Register = on => {
       x0 += colW + (gutters[i + 1]?.width ?? 0)
     })
     const needed = new Set(layers.flatMap(l => l.flatMap(parentsOf)))
-    const leafCols = vertical
-      ? [3 + Math.floor(colW / 2)]
-      : layers.flatMap((l, i) => (!needed.has((l[l.length - 1] as Node).id) ? [(xs[i] as number) + Math.floor(colW / 2)] : []))
-    const leafNodes = vertical ? [...map.values()].filter(n => !needed.has(n.id)) : layers.flatMap(l => (!needed.has((l[l.length - 1] as Node).id) ? [l[l.length - 1] as Node] : []))
-    const leafTones = vertical ? [topTone(leafNodes.map(n => toneOf(n, fix.has(n.id))))] : leafNodes.map(n => toneOf(n, fix.has(n.id)))
+    // The final slices are every card nothing depends on, in either layout. Side by side, a layer with any of them drops one stub under its column in
+    // the best colour of its final cards.
+    const leavesOf = (l: Node[]) => l.filter(n => !needed.has(n.id))
+    const leafTone = (l: Node[]) => topTone(leavesOf(l).map(n => toneOf(n, fix.has(n.id))))
+    const leafLayers = layers.flatMap((l, i) => (leavesOf(l).length ? [i] : []))
+    const leafCols = vertical ? [3 + Math.floor(colW / 2)] : leafLayers.map(i => (xs[i] as number) + Math.floor(colW / 2))
+    const leafNodes = [...map.values()].filter(n => !needed.has(n.id))
+    const leafTones = vertical ? [topTone(leafNodes.map(n => toneOf(n, fix.has(n.id))))] : leafLayers.map(i => leafTone(layers[i] as Node[]))
     const bus = leafCols.length ? busOf(leafCols, leafTones) : undefined
 
     // Tasks: one row per slice (or per agent without one) with its tokens, time, and what it reported.
@@ -1782,9 +1785,9 @@ export const register: Register = on => {
                   )}
                   <Box flexDirection="column">
                     {layer.map(card)}
-                    {!needed.has((layer[layer.length - 1] as Node).id) &&
+                    {leavesOf(layer).length > 0 &&
                       Array.from({ length: Math.max(0, diagramRows - layerRows(layer)) }, () => (
-                        <Text color={toneOf(layer[layer.length - 1] as Node, fix.has((layer[layer.length - 1] as Node).id))}>{' '.repeat(Math.floor(colW / 2))}│</Text>
+                        <Text color={leafTone(layer)}>{' '.repeat(Math.floor(colW / 2))}│</Text>
                       ))}
                   </Box>
                 </Box>
