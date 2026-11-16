@@ -114,9 +114,10 @@ export function seal(skillDir, meta = {}) {
   if (!st.isDirectory()) throw new Error(`${dir} is not a folder`);
   if (meta.target !== undefined && !TARGETS.has(meta.target)) throw new Error("target must be private or public");
   const before = readSeal(dir);
+  // Object.fromEntries defines own properties, so a file named __proto__ is a key like any other (an assignment
+  // `files[rel] = ...` would set the prototype instead and leave that file out of the seal).
   /** @type {Record<string, string>} */
-  const files = {};
-  for (const rel of listFiles(dir)) files[rel] = sha256(readFileSync(join(dir, ...rel.split("/"))));
+  const files = Object.fromEntries(listFiles(dir).map((rel) => [rel, sha256(readFileSync(join(dir, ...rel.split("/"))))]));
   const target = meta.target ?? (TARGETS.has(before?.target) ? before.target : null) ?? targetFromPath(dir) ?? "private";
   const record = {
     v: 1,
@@ -185,7 +186,8 @@ export function verify(skillDir) {
       }
       if (hash !== listed[rel]) problems.push(`${rel} changed after the seal`);
     }
-    for (const rel of actual) if (!(rel in listed)) problems.push(`${rel} is not listed in the seal`);
+    // own keys only: `in` would find constructor, toString and the like on the prototype
+    for (const rel of actual) if (!Object.hasOwn(listed, rel)) problems.push(`${rel} is not listed in the seal`);
     const strings = Object.values(listed).every((v) => typeof v === "string");
     if (!strings || digestOf(/** @type {Record<string, string>} */ (listed)) !== s.digest) problems.push("the seal's digest does not match its file list");
   } catch {
