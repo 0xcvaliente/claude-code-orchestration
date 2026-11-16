@@ -442,7 +442,7 @@ test("researcher guard (T-5): a relative device path joined to an option is refu
 
 // Audit 2026-11-16 T-11 (approved by the owner): narrow forms of sed -n, cut, stat and echo, which cannot write a file
 // or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
-// `cd` stays refused as before (the pinned decisions above).
+// `cd` is refused in the pinned decisions above (no project folder given); its one allowed form is under "cd item 2".
 test("researcher guard (T-11): sed -n, cut, stat and echo in their narrow forms pass", () => {
   for (const c of [
     "sed -n '10p' a.md",
