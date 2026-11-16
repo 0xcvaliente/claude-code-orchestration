@@ -29,7 +29,8 @@ PCT=$(int "$PCT"); [ -z "$PCT" ] && PCT=0
 ADDED=$(int "$ADDED"); [ -z "$ADDED" ] && ADDED=0
 REMOVED=$(int "$REMOVED"); [ -z "$REMOVED" ] && REMOVED=0
 
-CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; PURPLE='\033[38;5;183m'; BLUE='\033[38;5;75m'; RESET='\033[0m'
+# Real escape bytes, so the lines go out through printf '%s' and a backslash in a name is printed as it is.
+CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; PURPLE=$'\033[38;5;183m'; BLUE=$'\033[38;5;75m'; RESET=$'\033[0m'
 
 # Pick bar color based on context usage
 if [ "$PCT" -ge 90 ]; then BAR_COLOR="$RED"
@@ -86,7 +87,7 @@ if [ "$ADDED" -gt 0 ] || [ "$REMOVED" -gt 0 ]; then
   LINES=" | ${GREEN}+${ADDED}${RESET} ${RED}-${REMOVED}${RESET}"
 fi
 
-echo -e "${CYAN}[$MODEL]${RESET} 📁 ${DIR##*/}$BRANCH$LINES"
+printf '%s\n' "${CYAN}[$MODEL]${RESET} 📁 ${DIR##*/}$BRANCH$LINES"
 
 # Rate limit windows; only present for Claude.ai subscribers after the first response
 # usage_window <used %> <resets_at epoch> <fallback label> <color> <short window?>
@@ -113,8 +114,8 @@ usage_window() {
     fi
   fi
   filled=$((pct / 10)); [ "$filled" -gt 10 ] && filled=10
-  printf '%b' "${4}[${name}]${left_txt} $(dots_bar "$filled" 10) ${pct}%${RESET}  "
+  printf '%s' "${4}[${name}]${left_txt} $(dots_bar "$filled" 10) ${pct}%${RESET}  "
 }
 LIMITS="$(usage_window "$FIVE_PCT" "$FIVE_RESET" 5h "$BLUE" short)$(usage_window "$WEEK_PCT" "$WEEK_RESET" 7d "$PURPLE")"
 
-echo -e "${LIMITS}${BAR_COLOR}[ctx] ${BAR} ${PCT}%${RESET}"
+printf '%s\n' "${LIMITS}${BAR_COLOR}[ctx] ${BAR} ${PCT}%${RESET}"
