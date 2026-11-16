@@ -2,6 +2,39 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+This batch closes holes in the Bash judge, fixes the SDK pipeline's empty-slice check, budget cap, retry test and flag parsing, fixes five small hook bugs and the dashboard's VALIDATE mirror, and rewrites the README and its diagrams for 1.4.4. Upgrading: no plugin setting changed. The judge now denies some forms that legitimate work may use (below). A skill draft sealed earlier that contains a file named `__proto__` must be sealed again. The changed hooks take effect in a new session.
+
+### Changed
+
+- **The judge refuses legitimate uses that 1.4.4 passed** (`src/judge.ts`, `.claude/hooks/judge-core.mjs`). Any NUL escape inside `$'...'` is refused, such as `read -d $'\0'`: use `read -d ''`, which also reads up to a NUL. A git command line that names a `trailer.*.cmd`, `trailer.*.command`, `difftool.*.path`, `mergetool.*.path` or `submodule.*.update` key is refused, whatever its value and whether it sets or reads the key (`git -c`, `--config-env`, `git config`): edit the config file itself, or leave the key at its default. Under `git bisect run` and `git submodule foreach`, a command whose first word is a shell (`sh`, `bash`, `rbash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `fish`, `csh`, `tcsh` or `busybox` (`SHELLS`)) is refused whatever follows, a script file (`git bisect run sh test.sh`) as much as `-c`: the judge reads only that first word as a script, and a bare shell name reads its commands from stdin. Run the program directly (`git bisect run ./check.sh`, `git bisect run make test`), or for `submodule foreach` give the whole command as one quoted argument (`git submodule foreach 'sh test.sh'`). `git rebase -x '<command>'` is read in full and not affected.
+- **README and diagrams** (`README.md`, `docs/diagrams/`). The README describes current behaviour for 1.4.4 instead of sections layered by version. The six flow diagrams were corrected through their sources and rebuilt; the committed `pipeline` SVGs had drifted from their scene.
+
+### Fixed
+
+- **The Bash judge missed several forms** (`src/judge.ts` and its copy `.claude/hooks/judge-core.mjs`, changed together). It denies any `<<` inside `((...))` and `$((...))`. It had read one as a here document, so when a matching end line followed, the lines in between were skipped; a lone shift such as `$((1<<3))` was already denied, as an unterminated here document. It reads a brace expansion whole across `$(...)`, backticks and `${...}`. It denies a NUL decoded inside `$'...'` (the shell cuts the word there). It reads what git runs through a shell as a script of its own: the whole value of `rebase -x`/`--exec` (also `--exec=`, `-x<cmd>`, `-ix <cmd>`), and for `submodule foreach` and `bisect run` the first word after the verb and its options; further unquoted words stay under the ordinary scan of the line. It counts the keys `trailer.*.cmd`/`.command`, `submodule.*.update` (whatever its value) and `difftool.*.path`/`mergetool.*.path` among the keys that run a program, so a git command line that names one (`git -c`, `--config-env`, `git config`) is denied.
+- **An empty slice passed** (`src/slice.ts`). A slice whose branch has no change against its base now fails, on any attempt; an attempt that adds no commit is still fine when an earlier attempt committed work.
+- **The reviewed route ignored `--budget`** (`src/solo.ts`). It starts no further review-and-retry round once the cap is spent. A session already running is not cut short, the plain route is a single session and is not stopped by the cap, and tokens spent on triage do not count in that check.
+- **A line number read as a rate limit** (`src/retry.ts`). `429` and `529` count as transient only in a status context (`HTTP 429`, `API Error: 529`), so `index.js:429:12` is not one.
+- **A bad flag ended in a stack trace** (`src/cli.ts`, `src/route.ts`, `scripts/auto.sh`). An unknown flag, a missing value or a value that starts with a dash prints the usage message and exits 2. `scripts/auto.sh` passes the task to the triage step as `--task=<task>`, so a task that begins with `-` no longer crashes the argument parsing there.
+- **`--retries`, `--replans` and `--concurrency` took `""`, `0x2` and `1e1`** (`src/args.ts`, `src/cli.ts`). They accept plain decimal digits only.
+- **`sync-agents` expanded `$'`, `` $` `` and `$&` in frontmatter text** (`src/sync-agents.ts`). It copies the text literally.
+- **The skill seal left out a file named `__proto__`** (`.claude/hooks/skill-seal.mjs`). It seals and checks every file whatever its name, `__proto__` and `constructor` included, testing own properties only.
+- **A path ending in `.constructor` dropped every skill hint** (`.claude/hooks/skill-hint.mjs`). The extension lookup tests own properties only, so it no longer throws.
+- **The read log wrote an absolute path for some files inside the project** (`.claude/hooks/read-log.mjs`). A file whose name starts with `..` and a project reached through a symlinked path are now logged project-relative.
+- **The worker status line printed `100.0k` and `1000k`** (`.claude/hooks/subagent-statusline.mjs`). Each count moves to the next unit at its edge: `100k`, `1.0M`.
+- **The xlsx conversion dropped empty rows** (`.claude/hooks/file-profile.mjs`). Line n of the CSV is row n of the sheet, so line numbers in quotes match the sheet.
+- **The dashboard pane did not apply the VALIDATE supersede** (`dashboard/register.tsx`). A `VALIDATE: gaps` review with a verdict replaces the earlier reviews of the same attempt, as in `brief.mjs`. In the side-by-side layout the join counts every slice nothing depends on.
+
+### Known and not fixed
+
+- The judge still passes some forms of the families it was hardened against: arithmetic in other spellings (the `$[...]` form, an array subscript), brace groups that hold a process substitution or other quoting, further git options that take a shell command, and further `git -c` keys that run programs.
+- When the cap stops a reviewed run started with `npm start` and `--budget` (`src/cli.ts`, `src/auto.ts`), the run counts as failed and escalates to the pipeline with almost no budget left, so a little more can be spent. A resumed pipeline run starts its token count at zero.
+- In the pane, a failed review that a gap validation set aside still counts in the header's failed count and the review stage colour. While a resumed implementer is still running, the pane can briefly disagree with the gate about which review counts.
+- A task that begins with `-` still fails once the session is started: the launcher (`scripts/orchestrate.sh`) passes the prompt to `claude -p` without `--`, and `claude` reads it as an unknown option. Until the launcher is changed, start the task with another character.
+- The `routes` diagram does not show that an SDK run leaves its result on an `orch/<id>/result` branch; the README table says it.
+
 ## [1.4.4] - 2026-11-16
 
 1.4.4 makes a session opened in this repo start as the orchestrator, and every launcher that must stay plain opts out itself. The rest are fixes: the run journal and telemetry at a hand-back, the plan check on a case-sensitive volume, a failed merge abort, the launcher's repo path, the gated workflow's overlap check, scripts started through a symlinked path, and the skill gate's diff reading. Upgrading: no plugin setting changed, and the plugin does not ship the `agent` setting. `npm run plain` opens a plain session in this repo. The changed hooks take effect in a new session.

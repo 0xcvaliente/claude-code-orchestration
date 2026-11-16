@@ -33,6 +33,30 @@ test("auto.sh passes an absolute --repo to route.ts when given a relative folder
   }
 });
 
+test("auto.sh passes a task that starts with a dash so route.ts reads it as the task", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-dash-")));
+  try {
+    mkdirSync(join(scratch, "proj"));
+    mkdirSync(join(scratch, "bin"));
+    // The fake npx records auto.sh's arguments, one per line (the task has no newline); route.ts is then run with them.
+    writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
+    chmodSync(join(scratch, "bin", "npx"), 0o755);
+    const env = { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_AGENT_PREFIX: "orchestration:", ORCH_MODE: "plain", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" };
+    const a = spawnSync("bash", [join(scripts, "auto.sh"), "- add tests", "proj"], { cwd: scratch, env, encoding: "utf8" });
+    assert.equal(a.status, 0, a.stderr);
+    const args = readFileSync(join(scratch, "npx-args"), "utf8").split("\n").filter((l) => l !== "");
+    const routeArgs = args.slice(args.indexOf("src/route.ts") + 1);
+    const root = join(scripts, "..");
+    const r = spawnSync(process.execPath, ["--import", "tsx", join(root, "src", "route.ts"), ...routeArgs], { cwd: root, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).mode, "plain");
+    const routes = readFileSync(join(scratch, "proj", ".claude", "state", "routes.jsonl"), "utf8");
+    assert.equal(JSON.parse(routes.trim().split("\n").at(-1) ?? "{}").task, "- add tests");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test("auto.sh exits 1 with 'repo folder not found' before any triage call when the repo folder does not exist", () => {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-missing-")));
   try {

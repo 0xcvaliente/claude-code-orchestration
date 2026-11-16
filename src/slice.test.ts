@@ -128,6 +128,46 @@ test("exhausted retries leave the slice failed with the last issues", async () =
   assert.equal(logs.at(-1), "alpha: failed");
 });
 
+test("a slice with no work against its base fails even when a later attempt changes nothing", async () => {
+  // Attempt 1's writer errors out; attempt 2's writer succeeds but writes nothing. Nothing is committed on the branch.
+  const calls: AgentRequest[] = [];
+  let writers = 0;
+  const run: RunAgent = async (req) => {
+    calls.push(req);
+    if (req.role === "writer") {
+      writers++;
+      return writers === 1 ? result({ ok: false, subtype: "error_during_execution", text: "boom" }) : result();
+    }
+    return result({ structured: { pass: true, issues: [], summary: "" } });
+  };
+  const { ctx } = await ctxFor(run, { maxRetries: 1 });
+  const r = await runSlice(ctx, slice);
+
+  assert.equal(r.status, "failed");
+  assert.equal(calls.filter((c) => c.role === "verifier").length, 0, "no verifier runs on an empty diff");
+  assert.deepEqual(r.issues, ["The worker made no changes. Implement the slice."]);
+});
+
+test("a later attempt that adds no new commit still counts the earlier attempt's work", async () => {
+  // Attempt 1 writes alpha.txt, the verifier rejects; attempt 2 changes nothing and the verifier passes.
+  const calls: AgentRequest[] = [];
+  let verifier = 0;
+  const run: RunAgent = async (req) => {
+    calls.push(req);
+    if (req.role === "writer") {
+      if (!calls.some((c, i) => c.role === "writer" && i < calls.length - 1)) writeFileSync(join(req.cwd, "alpha.txt"), "alpha\n");
+      return result();
+    }
+    const pass = ++verifier >= 2;
+    return result({ structured: { pass, issues: pass ? [] : ["are you sure?"], summary: "" } });
+  };
+  const { ctx } = await ctxFor(run, { maxRetries: 1 });
+  const r = await runSlice(ctx, slice);
+
+  assert.equal(r.status, "passed");
+  assert.equal(r.attempts, 2);
+});
+
 test("a spent token budget stops the slice before the next attempt", async () => {
   const { run, calls } = fake(() => false, 1000);
   const { ctx } = await ctxFor(run, { budget: 2000, maxRetries: 5 });

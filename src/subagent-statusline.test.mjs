@@ -25,6 +25,16 @@ const LAUNCHES = [
 /** @param {string} id @param {string} agentType @param {object} [rest] */
 const task = (id, agentType, rest = {}) => ({ id, type: "local_agent", agentType, status: "running", description: "Build slice a", label: "Running the tests", startTime: 0, tokenCount: 41200, tokenSamples: [41200], cwd: "/x", ...rest });
 
+test("shortTokens: a value near a tier's top prints in the tier its rounded form belongs to", () => {
+  const cases = /** @type {[number, string][]} */ ([
+    [999, "999"], [999.4, "999"], [999.5, "1.0k"], [1000, "1.0k"], [1049, "1.0k"], [1050, "1.1k"],
+    [99_949, "99.9k"], [99_950, "100k"], [99_999, "100k"], [100_000, "100k"], [100_499, "100k"], [100_500, "101k"],
+    [999_499, "999k"], [999_500, "1.0M"], [999_999, "1.0M"], [1_000_000, "1.0M"], [1_049_999, "1.0M"], [1_050_000, "1.1M"],
+  ]);
+  for (const [n, want] of cases) assert.equal(shortTokens(n), want, String(n));
+  for (const bad of [NaN, -1, Infinity * -1]) assert.equal(shortTokens(bad), "0");
+});
+
 test("shortTokens: one compact figure per size", () => {
   assert.deepEqual([0, 941, 12345, 128400, 1_240_000].map(shortTokens), ["0", "941", "12.3k", "128k", "1.2M"]);
 });

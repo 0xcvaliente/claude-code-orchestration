@@ -5,8 +5,8 @@
 //   null), kind (text | code | pdf | image | notebook | office | other).
 //   WebFetch: host only (no path, query or prompt).
 // Never the file or page content. Never blocks: exits 0 always, also on malformed input.
-import { appendFileSync, statSync } from "node:fs";
-import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { appendFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const chunks = [];
@@ -22,6 +22,42 @@ const KINDS = {
   notebook: ["ipynb"],
   office: ["docx", "doc", "xlsx", "xls", "xlsm", "pptx", "ppt", "odt", "ods", "odp", "rtf", "pages", "numbers", "key"],
 };
+/**
+ * A relative path that stays inside its base: not empty (the base itself), not ".." or "../...", and not absolute (another
+ * drive). A name that merely starts with ".." ("..notes.md") is inside.
+ * @param {string} r
+ */
+const inside = (r) => r !== "" && r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r);
+
+/** The real path of `p`'s folder joined with its own name (the file itself is not resolved, and need not exist). @param {string} p */
+function realFolder(p) {
+  try {
+    return join(realpathSync(dirname(p)), basename(p));
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * The path to log: relative to the project (POSIX separators) when the file is inside it, else the absolute path as
+ * given. When the plain comparison puts the file outside, the project and the file's folder are compared again by their
+ * real paths, so a project given as /var/... and a file as /private/var/... (or any symlinked folder) still match.
+ * @param {string} project @param {string} abs
+ */
+export function logPath(project, abs) {
+  let r = relative(project, abs);
+  if (!inside(r)) {
+    let real = project;
+    try {
+      real = realpathSync(project);
+    } catch {
+      // a missing project folder: compare as given
+    }
+    r = relative(real, realFolder(abs));
+  }
+  return inside(r) ? r.split(sep).join("/") : abs;
+}
+
 /** @param {string} ext */
 export const kindOf = (ext) => Object.keys(KINDS).find((k) => KINDS[k]?.includes(ext)) ?? "other";
 
@@ -43,7 +79,6 @@ try {
     if (!file) process.exit(0);
     const project = process.env.CLAUDE_PROJECT_DIR || (typeof p.cwd === "string" ? p.cwd : process.cwd());
     const abs = isAbsolute(file) ? file : resolve(typeof p.cwd === "string" ? p.cwd : project, file);
-    const r = relative(project, abs);
     const ext = extname(abs).slice(1).toLowerCase();
     let bytes = null;
     try {
@@ -51,7 +86,7 @@ try {
     } catch {
       // missing or unreadable: bytes stays null
     }
-    rec.path = r && !r.startsWith("..") && !isAbsolute(r) ? r.split(sep).join("/") : abs;
+    rec.path = logPath(project, abs);
     rec.ext = ext;
     rec.bytes = bytes;
     rec.pages = typeof input.pages === "string" || typeof input.pages === "number" ? String(input.pages).slice(0, 40) : null;

@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyDetail as next } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as old } from "./fixtures/judge-core-1.4.0.mjs";
+import { classifyDetail as sdk } from "./judge.js"; // tsx resolves it to judge.ts
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CWD = "/w";
@@ -55,6 +56,62 @@ function generated() {
   return out;
 }
 
+// Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
+// denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
+const HARDENING_REASONS = [
+  /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
+  /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
+  /\(a NUL in \$'\.\.\.'\)/, // J3
+];
+/** @type {Array<[string, string[]]>} [command, the classes it may get] */
+const HARDENED = [
+  ["((1<<EOF))\nrm -rf .git\nEOF", ["deny"]],
+  ["((1<<EOF))\nsudo id\nEOF", ["deny"]],
+  ["((1<<EOF))\ngit push origin main\nEOF", ["deny"]],
+  ["for ((i=0; i<<EOF; i++)); do :; done\nrm -rf .git\nEOF", ["deny"]],
+  ["echo $((1<<'EOF'\n$(sudo id)\nEOF\n))", ["deny"]],
+  ["env {rm,$(:)-rf,.git}", ["deny"]],
+  ["env {git,$(:)push}", ["deny", "judge"]],
+  ["env {rm,`echo x y`-rf,.git}", ["deny"]],
+  ["env {rm,${X:- }-rf,.git}", ["deny"]],
+  ["env {s,$(:)udo,id}", ["deny"]],
+  ["$'sudo\\x00' id", ["deny"]],
+  ["$'rm\\x00' -rf .git", ["deny"]],
+  ["$'sudo\\0' id", ["deny"]],
+  ["$'sudo\\000' id", ["deny"]],
+  ["$'sudo\\u0000' id", ["deny"]],
+  ["$'sudo\\U00000000' id", ["deny"]],
+  ["$'sudo\\c@' id", ["deny"]],
+  ["git $'push\\x00x' origin main", ["deny"]],
+  ["git submodule foreach 'git push origin HEAD'", ["judge"]],
+  ["git submodule foreach 'sudo id'", ["deny"]],
+  ["git submodule --quiet foreach --recursive 'rm -rf .git'", ["deny"]],
+  ["git submodule foreach 'rm -rf .git;' x", ["deny"]],
+  ['git submodule foreach "$CMD"', ["deny"]],
+  ["git rebase -x 'rm -rf .git' main", ["deny"]],
+  ["git rebase --exec 'rm -rf .git' main", ["deny"]],
+  ["git rebase --exec='rm -rf .git' main", ["deny"]],
+  ["git rebase --exe 'rm -rf .git' main", ["deny"]],
+  ["git rebase -x'rm -rf .git' main", ["deny"]],
+  ["git rebase -ix 'rm -rf .git' main", ["deny"]],
+  ["git rebase -x 'git push origin HEAD' main", ["judge"]],
+  ['git rebase -x "$CMD" main', ["deny"]],
+  ["git -C . rebase -x 'sudo id' main", ["deny"]],
+  ["git bisect run 'rm -rf .git'", ["deny"]],
+  ["git bisect run 'sudo id'", ["deny"]],
+  ["git -c 'trailer.x.cmd=rm -rf .git' interpret-trailers --trailer x=1 f", ["deny"]],
+  ["git -c 'trailer.x.command=rm -rf .git' interpret-trailers --trailer x=1 f", ["deny"]],
+  ["git -c 'submodule.x.update=!rm -rf .git' submodule update", ["deny"]],
+  ["git -c 'difftool.x.path=/tmp/evil' difftool --tool x", ["deny"]],
+  ["git -c 'mergetool.x.path=/tmp/evil' mergetool --tool x", ["deny"]],
+  ["git -c Trailer.X.Cmd=id interpret-trailers f", ["deny"]],
+  ["git config trailer.x.cmd 'rm -rf .git'", ["deny"]],
+  ["git config submodule.x.update '!rm -rf .git'", ["deny"]],
+  ["git config difftool.x.path /tmp/evil", ["deny"]],
+];
+/** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
+const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
+
 /** @param {{ cls: string, reason?: string }} r */
 const fires = (r) => r.cls === "deny" && /^setting /.test(r.reason ?? "");
 
@@ -78,12 +135,12 @@ test("differential (J1): never weaker than 1.4.0 on every judge test string and 
 test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the intended new rules", () => {
   const corpus = JSON.parse(readFileSync(join(here, "fixtures", "judge-corpus.json"), "utf8"));
   const tested = [...strings("judge.test.ts"), ...strings("judge-hook.test.mjs"), ...corpus.cases.map((/** @type {{ command: string }} */ c) => c.command)];
-  const intended = (/** @type {{ reason?: string }} */ r) => /^setting [A-Z_0-9]+ on a command line/.test(r.reason ?? "") || /^find -rm /.test(r.reason ?? "");
+  const intended = (/** @type {{ reason?: string }} */ r) => /^setting [A-Z_0-9]+ on a command line/.test(r.reason ?? "") || /^find -rm /.test(r.reason ?? "") || HARDENING_REASONS.some((re) => re.test(r.reason ?? ""));
   const stray = [];
   for (const s of new Set(tested)) {
     const o = old(s, CWD);
     const n = next(s, CWD);
-    if (o.cls !== "deny" && n.cls === "deny" && !intended(n)) stray.push(`${JSON.stringify(s)}: ${n.reason}`);
+    if (o.cls !== "deny" && n.cls === "deny" && !intended(n) && !HARDENED_INPUTS.has(s)) stray.push(`${JSON.stringify(s)}: ${n.reason}`);
   }
   assert.deepEqual(stray, []);
   for (const s of ["grep -rn 'PATH=' src", 'echo "PATH=x"', "git log --grep 'XPATH='", 'git commit -m "fix PATH= handling"', "git log --grep=PATH=x"]) {
@@ -102,4 +159,17 @@ test("exec-env property (J2): every quoting of the word fires the env deny exact
   }
   assert.deepEqual(differ.slice(0, 20), []);
   assert.ok(fired > 1000, `the env deny fired on only ${fired} unquoted lines`);
+});
+
+test("hardening (J1-J5): both copies deny or judge every input that got past 1.4.4, alone and wrapped, and agree", () => {
+  const wrong = [];
+  for (const [s, want] of HARDENED) {
+    for (const form of [s, `${s}; git status`, `true && ${s}`]) {
+      const n = next(form, CWD);
+      const k = sdk(form, CWD);
+      if (JSON.stringify(n) !== JSON.stringify(k)) wrong.push(`${JSON.stringify(form)}: judge-core ${n.cls}, judge.ts ${k.cls}`);
+      if (!want.includes(n.cls)) wrong.push(`${JSON.stringify(form)}: want ${want.join(" or ")}, got ${n.cls}`);
+    }
+  }
+  assert.deepEqual(wrong, []);
 });

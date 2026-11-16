@@ -67,6 +67,24 @@ test("upsertKey adds after maxTurns, replaces, removes, and never touches the bo
   assert.equal(upsertKey("---\nname: x\n---\n", "tools", "Read"), "---\nname: x\ntools: Read\n---\n");
 });
 
+test("setKey and upsertKey copy $' $` $& and $1 in the frontmatter literally", () => {
+  const doc = "---\nname: x\ndescription: costs $' or $` or $& or $1\nmodel: haiku\nmaxTurns: 5\n---\nBODY\n";
+  assert.equal(setKey(doc, "model", "opus"), doc.replace("model: haiku", "model: opus"));
+  assert.equal(upsertKey(doc, "tools", "Read"), doc.replace("maxTurns: 5\n", "maxTurns: 5\ntools: Read\n"));
+  assert.equal(upsertKey(doc, "tools", undefined), doc);
+});
+
+test("syncAgents on a frontmatter line with $' leaves the file in sync, and --check then reports no drift", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agents-"));
+  cpSync(join(process.cwd(), ".claude", "agents"), dir, { recursive: true });
+  const reviewer = join(dir, "reviewer.md");
+  const withDollar = readFileSync(reviewer, "utf8").replace(/^name:.*$/m, (m) => `${m}\nnote: pays $' and $& and $\``);
+  writeFileSync(reviewer, withDollar);
+  assert.deepEqual(syncAgents(dir, false), []);
+  assert.equal(readFileSync(reviewer, "utf8"), withDollar);
+  assert.deepEqual(syncAgents(dir, true), []);
+});
+
 test("syncAgents writes the orchestrator's tools line with Skill and restores it when Skill is dropped", () => {
   const dir = mkdtempSync(join(tmpdir(), "agents-"));
   cpSync(join(process.cwd(), ".claude", "agents"), dir, { recursive: true });

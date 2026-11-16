@@ -6,7 +6,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -279,6 +279,37 @@ test("read-log: Read records path, ext, bytes, pages and kind; WebFetch records 
     assert.ok(!JSON.stringify(recs).includes(SECRET), "no content, prompt, URL path or query in read records");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("read-log: a file inside the project is logged project-relative, also when its name starts with .. or the paths differ by a symlink", () => {
+  const dir = project();
+  const links = mkdtempSync(join(tmpdir(), "read-log-links-"));
+  try {
+    const real = realpathSync(dir);
+    mkdirSync(join(dir, "sub"));
+    for (const f of ["..notes.md", "...md", "sub/..x.ts", "a.md"]) writeFileSync(join(dir, f), SECRET);
+    const link = join(links, "proj");
+    symlinkSync(real, link);
+    const read = (/** @type {string} */ file, /** @type {string} */ projectDir) =>
+      run(dir, "read-log.mjs", { session_id: "s1", tool_name: "Read", tool_input: { file_path: file } }, [], { CLAUDE_PROJECT_DIR: projectDir });
+    // names that start with ".." but are inside the project
+    for (const f of ["..notes.md", "...md", "sub/..x.ts"]) assert.equal(read(join(real, f), real).status, 0);
+    // the project given through a symlink, the file by its real path, and the other way round
+    assert.equal(read(join(real, "a.md"), link).status, 0);
+    assert.equal(read(join(link, "sub", "..x.ts"), real).status, 0);
+    // a file that does not exist yet, inside the project through the symlink
+    assert.equal(read(join(real, "new.md"), link).status, 0);
+    // outside the project: still absolute
+    assert.equal(read(join(links, "elsewhere.md"), real).status, 0);
+    assert.equal(read(join(real, "..", "sibling.md"), real).status, 0);
+    const recs = log(real, "reads.jsonl");
+    assert.deepEqual(recs.map((r) => r.path), ["..notes.md", "...md", "sub/..x.ts", "a.md", "sub/..x.ts", "new.md", join(links, "elsewhere.md"), join(real, "..", "sibling.md")]);
+    assert.deepEqual(recs.slice(0, 5).map((r) => r.bytes), [SECRET.length, SECRET.length, SECRET.length, SECRET.length, SECRET.length]);
+    assert.ok(!JSON.stringify(recs).includes(SECRET), "paths and sizes only, never content");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(links, { recursive: true, force: true });
   }
 });
 
