@@ -27,7 +27,7 @@ function strings(file) {
 }
 
 // The exec-env names (EXEC_ENV), GIT_CONFIG_* by one example.
-const NAMES = ["GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_ASKPASS", "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_COUNT", "GIT_PROXY_COMMAND", "EDITOR", "VISUAL", "PAGER", "LD_PRELOAD", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "PATH", "SHELLOPTS"];
+const NAMES = ["GIT_EXTERNAL_DIFF", "GIT_EDITOR", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_PAGER", "GIT_ASKPASS", "GIT_SEQUENCE_EDITOR", "GIT_CONFIG_COUNT", "GIT_PROXY_COMMAND", "EDITOR", "VISUAL", "PAGER", "LD_PRELOAD", "BASH_ENV", "ENV", "PROMPT_COMMAND", "IFS", "PATH", "SHELLOPTS", "PS4", "ZDOTDIR", "BASH_FUNC_f%%"];
 
 /** The quotings of one word `N<op>V` that the J2 property covers. @type {Array<(n: string, op: string, v: string) => string>} */
 const QUOTINGS = [
@@ -62,6 +62,13 @@ const HARDENING_REASONS = [
   /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
   /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
   /\(a NUL in \$'\.\.\.'\)/, // J3
+  // Audit 2026-11-16 (J-1 to J-10)
+  /\(<< inside \$\[\.\.\.\] or a subscript is a left shift, not a here document\)/,
+  /\(a here-document delimiter with \$ or a backtick\)/,
+  /^assigning zsh's functions, aliases/,
+  /^a \$\(\.\.\.\) or backtick inside an array subscript/,
+  /^hash -p and hash name=path/,
+  /^enable -f loads a builtin/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -109,8 +116,26 @@ const HARDENED = [
   ["git config submodule.x.update '!rm -rf .git'", ["deny"]],
   ["git config difftool.x.path /tmp/evil", ["deny"]],
 ];
+/** The string literals between `const <name>` and the next `];` of a test file. @param {string} file @param {string} name */
+function listIn(file, name) {
+  const src = readFileSync(join(here, file), "utf8");
+  const at = src.indexOf(`const ${name}`);
+  assert.ok(at >= 0, `${name} not found in ${file}`);
+  const body = src.slice(at, src.indexOf("\n];", at));
+  return [...body.matchAll(/^\s*"((?:[^"\\\n]|\\.)*)",/gm)].map((m) => JSON.parse(`"${m[1]}"`));
+}
+// Audit 2026-11-16, J-1 to J-10: every bypass row of judge.test.ts (AUDIT_1116_DENY) must be denied here too.
+const AUDIT_1116 = listIn("judge.test.ts", "AUDIT_1116_DENY");
+for (const c of AUDIT_1116) HARDENED.push([c, ["deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
+
+/**
+ * Audit 2026-11-16, J-15 (approved by the owner): the only forms 1.4.0 denied that may now pass, exactly these strings
+ * and their wrapped forms. Everything else in GIT_EDITOR, core.editor and IFS stays denied (judge.test.ts, J-15 rows).
+ */
+const RELAXED = ["GIT_EDITOR=true git rebase --continue", "GIT_EDITOR=: git commit --amend", "GIT_EDITOR='true' git merge --continue", "git -c core.editor=true rebase --continue", "git -c core.editor=: commit --amend", "git -c 'core.editor=true' rebase --continue", 'while IFS= read -r f; do git add "$f"; done < files.txt', "IFS='' read -r line < f; git status"];
+const RELAXED_FORMS = new Set(RELAXED.flatMap((s) => [s, `env ${s}`, `${s}; git status`]));
 
 /** @param {{ cls: string, reason?: string }} r */
 const fires = (r) => r.cls === "deny" && /^setting /.test(r.reason ?? "");
@@ -127,9 +152,11 @@ test("differential (J1): never weaker than 1.4.0 on every judge test string and 
   for (const s of all) {
     const o = old(s, CWD);
     const n = next(s, CWD);
+    if (RELAXED_FORMS.has(s) && n.cls === "pass") continue;
     if ((o.cls === "deny" && n.cls !== "deny") || (o.cls === "judge" && n.cls === "pass")) weaker.push(`${JSON.stringify(s)}: 1.4.0 ${o.cls}, now ${n.cls}`);
   }
   assert.deepEqual(weaker, []);
+  assert.ok(AUDIT_1116.length >= 60, `only ${AUDIT_1116.length} audit rows read`);
 });
 
 test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the intended new rules", () => {

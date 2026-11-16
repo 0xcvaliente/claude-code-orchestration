@@ -182,6 +182,7 @@ export function tokenize(src: string): Script {
   let stdin = false;
   let redirectNext = false;
   let allAssign = true; // every word so far in this command is an assignment (kept, not rescanned: long commands)
+  let bracketOpen = 0; // unquoted `[` not yet closed in this command: `$[...]` or a subscript, where `<<` is a shift
   const heredocs: Array<{ delim: string; strip: boolean; quoted: boolean }> = [];
 
   const piece = (p: Piece) => (pieces ??= []).push(p);
@@ -211,6 +212,7 @@ export function tokenize(src: string): Script {
     if (words.length) commands.push({ words, stdin });
     words = [];
     allAssign = true;
+    bracketOpen = 0;
     stdin = pipe;
   };
   // `$` at i (outside single quotes): an expansion piece, or a literal `$`. Returns the index of its last character.
@@ -340,7 +342,8 @@ export function tokenize(src: string): Script {
     } else if (c === "{") {
       // Brace expansion turns one word into several (`{rm,-rf,.git}`): we cannot tell what runs.
       // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole, and steps over substitutions and `${...}`, which
-      // stay inside the word whatever they hold, so `{rm,$(:)-rf,.git}` and `{rm,`x y`-rf,.git}` are seen whole too.
+      // stay inside the word whatever they hold, so `{rm,$(:)-rf,.git}` and `{rm,`x y`-rf,.git}` are seen whole too; so
+      // does a process substitution (`{rm,-rf,x,<(:)}` expands to `rm -rf x /dev/fd/63`).
       let unquoted = "";
       let k = i + 1, depth = 1;
       for (; k < src.length; k++) {
@@ -351,7 +354,7 @@ export function tokenize(src: string): Script {
           if (k < 0) throw new Doubt("unterminated quote");
         } else if (d === '"') k = closeDouble(src, k);
         else if (d === "`") k = closeBacktick(src, k);
-        else if (d === "$" && src.charAt(k + 1) === "(") k = closeParen(src, k + 1);
+        else if ((d === "$" || d === "<" || d === ">") && src.charAt(k + 1) === "(") k = closeParen(src, k + 1);
         else if (d === "$" && src.charAt(k + 1) === "{") {
           k = src.indexOf("}", k + 2);
           if (k < 0) throw new Doubt("unterminated ${...}");
@@ -376,6 +379,7 @@ export function tokenize(src: string): Script {
         continue;
       }
       if (c === "<" && next === "<" && src.charAt(i + 2) !== "<") {
+        if (bracketOpen > 0) throw new Doubt("<< inside $[...] or a subscript is a left shift, not a here document");
         i += 2;
         const strip = src.charAt(i) === "-";
         if (strip) i++;
@@ -383,6 +387,8 @@ export function tokenize(src: string): Script {
         let k = i;
         while (k < src.length && !ENDS_WORD.has(src.charAt(k))) k++;
         const raw = src.slice(i, k);
+        // `<<$'E'` ends at the line `E`, not `$E`: a delimiter with `$` or a backtick is not read the shell's way.
+        if (/[$`]/.test(raw)) throw new Doubt("a here-document delimiter with $ or a backtick");
         const delim = raw.replace(/["'\\]/g, "");
         if (!delim) throw new Doubt("heredoc without a delimiter");
         heredocs.push({ delim, strip, quoted: delim !== raw });
@@ -402,10 +408,16 @@ export function tokenize(src: string): Script {
       if (src.charAt(k) === "]") {
         piece({ glob: "[]" });
         i = k;
-      } else lit("[", false);
+      } else {
+        lit("[", false);
+        bracketOpen++;
+      }
     } else if (c === "~" && !pieces) piece({ dyn: true }); // tilde expansion
     else if (c === "=" && !pieces && /[A-Za-z_(/.]/.test(next)) throw new Doubt("zsh =command or =(...) expansion");
-    else lit(c, false);
+    else {
+      if (c === "]" && bracketOpen > 0) bracketOpen--;
+      lit(c, false);
+    }
   }
   endCommand();
   if (heredocs.length) throw new Doubt("unterminated heredoc");
@@ -504,10 +516,10 @@ const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
 /** git config keys whose value runs a program (or pulls in config that may). `submodule.<name>.update` counts whatever
  * its value: only a `!command` value runs one, and the value is not read. */
 const GIT_EXEC_KEY =
-  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
+  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|gpg\..+\.defaultkeycommand|(browser|man)\..+\.(cmd|path)|imap\.tunnel|gc\.recentobjectshook|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
 /** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
  * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
-const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)\+?=/;
+const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|BASH_FUNC_[^=]*|ZDOTDIR|ENV|PROMPT_COMMAND|PS0|PS1|PS4|IFS|PATH|SHELLOPTS)\+?=/;
 
 
 const deny = (reason: string, kind?: "rm" | "git"): Classification => ({ cls: "deny", reason, ...(kind && { kind }) });
@@ -521,6 +533,10 @@ interface Ctx {
   env?: string;
   /** git, rm or a shell appears as a word. */
   sensitive: boolean;
+  /** The first prompt variable assigned (PS0, PS1, PS4): tracing expands PS4 before every traced command. */
+  prompt?: string;
+  /** `set -x`, `set -o xtrace`, `setopt xtrace` or `shopt -o xtrace` appears. */
+  traced?: boolean;
 }
 
 /**
@@ -583,7 +599,7 @@ function gitRule(ws: Word[], k: number, later: Later): { c: Classification; sub:
       const value = t.startsWith("--config-env=") ? w : ws[++j];
       const kv = value === w ? t.slice("--config-env=".length) : value?.text ?? "";
       if (!value || value.dynamic) return { c: deny(`git ${t} with a value the guard cannot read is always blocked`, "git"), sub: -1 };
-      if (GIT_EXEC_KEY.test(kv.split("=")[0] ?? "")) return { c: deny(`git ${t} ${kv.split("=")[0]}: a config key that runs a program is always blocked`, "git"), sub: -1 };
+      if (GIT_EXEC_KEY.test(kv.split("=")[0] ?? "") && !(t === "-c" && noopSetting(value, "core.editor", NOOP_EDITOR))) return { c: deny(`git ${t} ${kv.split("=")[0]}: a config key that runs a program is always blocked`, "git"), sub: -1 };
     } else if (["-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--attr-source", "--list-cmds"].includes(t)) j++;
     else if (!t.startsWith("-")) break;
   }
@@ -603,9 +619,25 @@ function gitRule(ws: Word[], k: number, later: Later): { c: Classification; sub:
 /** A word that mentions push, remote, their plumbing, or a route to them (alias, url., include). */
 const pushyText = (t: string) => /push|remote|send-pack|receive-pack/i.test(t) || /^(alias|url\.|include)/i.test(t);
 
+/** git subcommands with options whose value git runs through a shell: long names (git also takes a unique prefix, so
+ * any prefix counts) and a short letter; `attached`: the value is never a separate word (`-O<cmd>`, `--name=<cmd>`). */
+const GIT_SHELL_OPTS = new Map<string, { long: readonly string[]; short?: string; attached?: boolean }>([
+  ["rebase", { long: ["exec"], short: "x" }],
+  ["grep", { long: ["open-files-in-pager"], short: "O", attached: true }],
+  ["difftool", { long: ["extcmd"], short: "x" }],
+  ["fetch", { long: ["upload-pack"] }],
+  ["pull", { long: ["upload-pack"] }],
+  ["ls-remote", { long: ["upload-pack"] }],
+  ["fetch-pack", { long: ["upload-pack", "exec"] }],
+  ["clone", { long: ["upload-pack"], short: "u" }],
+  ["archive", { long: ["exec"] }],
+]);
+
 /**
- * The arguments git hands to a shell, after the subcommand `ws[sub]`: the value of `rebase -x`/`--exec` (also `-x<cmd>`,
- * `-ix <cmd>`, `--exec=<cmd>` and a prefix such as `--exe`), and the first word after `submodule foreach` and
+ * The arguments git hands to a shell, after the subcommand `ws[sub]`: the value of an option in GIT_SHELL_OPTS
+ * (`rebase -x`/`--exec`, also `-x<cmd>`, `-ix <cmd>`, `--exec=<cmd>` and a prefix such as `--exe`; `grep -O<cmd>` and
+ * `--open-files-in-pager=<cmd>`; `difftool -x`/`--extcmd`; `--upload-pack` of fetch, pull, ls-remote, fetch-pack and
+ * clone (`clone -u`); `--exec` of archive and fetch-pack), and the first word after `submodule foreach` and
  * `bisect run` (git runs it through a shell, so `'rm -rf .git'` there is a command line, not a name). A quoted argument
  * is otherwise text (`later.pushy` skips it), so each of these is read as a script of its own; a dynamic one is denied.
  * Options are matched on their static prefix, so `-x"$C"` counts too.
@@ -622,7 +654,9 @@ function gitShellArgs(ws: Word[], sub: number, rest: Word[], start: number, seen
   const value = (w: Word | undefined, from: number) => {
     if (w) out.push({ text: w.text.slice(from), dynamic: w.dynamic });
   };
-  if (name === "rebase") {
+  const spec = GIT_SHELL_OPTS.get(name);
+  if (spec) {
+    const shortRe = spec.short ? new RegExp(`^-[A-Za-z]*?${spec.short}`) : undefined;
     for (let i = start; i < rest.length; i++) {
       if (seen.has(i)) break;
       seen.add(i);
@@ -630,13 +664,13 @@ function gitShellArgs(ws: Word[], sub: number, rest: Word[], start: number, seen
       const p = staticPrefix(w);
       if (p === "--" && !w.dynamic) break;
       const long = /^--([^=]+)(=?)/.exec(p);
-      const short = p.startsWith("--") ? null : /^-[A-Za-z]*?x/.exec(p);
-      if (long && "exec".startsWith(long[1]!.toLowerCase())) {
+      const short = p.startsWith("--") || !shortRe ? null : shortRe.exec(p);
+      if (long && spec.long.some((n) => n.startsWith(long[1]!.toLowerCase()))) {
         if (long[2]) value(w, w.text.indexOf("=") + 1);
-        else value(rest[++i], 0);
+        else if (!spec.attached) value(rest[++i], 0);
       } else if (short) {
         if (w.text.length > short[0].length || w.dynamic) value(w, short[0].length);
-        else value(rest[++i], 0);
+        else if (!spec.attached) value(rest[++i], 0);
       }
     }
   } else if (name === "submodule" || name === "bisect") {
@@ -712,6 +746,54 @@ function staticPrefix(w: Word): string {
   return s;
 }
 
+/**
+ * A no-op editor (`GIT_EDITOR=true`, `GIT_EDITOR=:`, `git -c core.editor=true`) and an empty `IFS=` are the only
+ * exceptions to the exec-env and exec-key rules: the word is static and is exactly `<key>=<value>`, unquoted or wholly
+ * quoted (`'GIT_EDITOR=true'`), or `<key>=` with the value wholly quoted (`IFS=''`, `GIT_EDITOR="true"`).
+ */
+function noopSetting(w: Word, key: string, values: readonly string[]): boolean {
+  if (w.dynamic) return false;
+  const [a, b, ...more] = w.pieces as Array<{ lit: string; quoted: boolean }>;
+  if (!a || more.length) return false;
+  const k = key.toLowerCase();
+  if (!b) {
+    const at = a.lit.indexOf("=");
+    return at >= 0 && a.lit.slice(0, at).toLowerCase() === k && values.includes(a.lit.slice(at + 1));
+  }
+  return !a.quoted && b.quoted && a.lit.toLowerCase() === `${k}=` && values.includes(b.lit);
+}
+const NOOP_ENV = new Map<string, readonly string[]>([["GIT_EDITOR", ["true", ":"]], ["IFS", [""]]]);
+const NOOP_EDITOR: readonly string[] = ["true", ":"];
+
+/** zsh's tables of functions and aliases: assigning one defines a function or alias (`functions+=(f 'body')`,
+ * `aliases[p]=...`), so a later word could run anything. Tested on the static prefix, as the exec-env rule is. */
+const ZSH_TABLE = /^(functions|aliases|galiases|saliases|dis_functions)(\[|\+?=|$)/;
+function zshTable(w: Word): boolean {
+  const m = ZSH_TABLE.exec(staticPrefix(w));
+  if (!m) return false;
+  if (m[2]) return true;
+  const next = w.pieces.find((p) => !("lit" in p)); // the piece after the name: a `[...]` glob is a subscript
+  return !!next && "glob" in next && next.glob === "[]";
+}
+
+/**
+ * Literal text that holds `$(` or a backtick inside the subscript of an array element (`'a[$(cmd)]'`). bash evaluates
+ * the subscript, and runs the substitution, wherever the text reaches arithmetic (`$((x))`, `let`, `[[ -v ]]`,
+ * `declare -i`, `printf -v`). Only literal text counts: an unquoted substitution is read as a script already. One pass.
+ */
+function subscriptSubstitution(text: string): boolean {
+  let depth = 0;
+  for (let j = 0; j < text.length; j++) {
+    const c = text.charAt(j);
+    if (c === "[") {
+      if (depth > 0 || (j > 0 && /[A-Za-z0-9_]/.test(text.charAt(j - 1)))) depth++;
+    } else if (c === "]") {
+      if (depth > 0) depth--;
+    } else if (depth > 0 && (c === "`" || (c === "$" && text.charAt(j + 1) === "("))) return true;
+  }
+  return false;
+}
+
 function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: boolean): Classification[] {
   const ws = cmd.words;
   const out: Classification[] = [];
@@ -740,6 +822,10 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
   };
   const forceFrom = once(() => suffixAny(nr, (x) => rmFlag(x.text, "f")));
   const expandAliasesFrom = once(() => suffixAny(nr, (x) => x.text === "expand_aliases"));
+  // hash -p <path> <name> (bash), hash <name>=<path> (zsh), enable -f <lib> <name>: a command name runs something else.
+  const remapFrom = once(() => suffixAny(nr, (x) => x.text.includes("=") || /^-[A-Za-z]*p/.test(x.text)));
+  const loadFrom = once(() => suffixAny(nr, (x) => /^-[A-Za-z]*f/.test(x.text)));
+  const traceFrom = once(() => suffixAny(nr, (x) => !x.dynamic && (/^-[A-Za-z]*x/.test(x.text) || x.text.toLowerCase().replace(/_/g, "") === "xtrace")));
   // `-rm` is bfs's own name for -delete.
   const findAction = once(() => ws.find((x) => x.text === "-delete" || x.text === "-rm")?.text);
   const script = (text: string, dynamic: boolean, what: string) =>
@@ -752,7 +838,18 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     const w = ws[k]!;
     // An exec-env assignment, wherever the word is and however it is quoted: its static prefix starts NAME= or NAME+=.
     const env = EXEC_ENV.exec(staticPrefix(w));
-    if (env) ctx.env ??= env[1];
+    if (env && !noopSetting(w, env[1]!, NOOP_ENV.get(env[1]!) ?? [])) {
+      ctx.env ??= env[1];
+      if (/^PS[014]$/.test(env[1]!)) ctx.prompt ??= env[1];
+    }
+    if (!w.redirect && zshTable(w)) {
+      push(deny("assigning zsh's functions, aliases, galiases, saliases or dis_functions table defines a function or alias: always blocked"));
+      continue;
+    }
+    if (!w.redirect && subscriptSubstitution(w.text)) {
+      push(deny("a $(...) or backtick inside an array subscript runs when arithmetic evaluates it: always blocked"));
+      continue;
+    }
     if (w.assign || w.redirect) continue; // NAME=value and redirection targets are not commands
     if (w.text.toLowerCase().startsWith("--no-preserve-root")) push(deny("--no-preserve-root is always blocked", "rm"));
     if (w.dynamic) {
@@ -773,6 +870,9 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     else if (name === "find" && findAction()) push(deny(`find ${findAction()} is always blocked; remove specific paths with a plain rm -r <path>`, "rm"));
     else if (k === at && (name === "alias" || name === "function")) push(deny(`${name} definitions are always blocked: a later word could run anything`));
     else if (name === "shopt" && expandAliasesFrom()[s]) push(deny("shopt expand_aliases is always blocked"));
+    else if (name === "hash" && (k === at || afterWrapper(ws, k)) && remapFrom()[s]) push(deny("hash -p and hash name=path point a command name at another program, like an alias: always blocked"));
+    else if (name === "enable" && (k === at || afterWrapper(ws, k)) && loadFrom()[s]) push(deny("enable -f loads a builtin from a library: always blocked"));
+    else if ((name === "set" || name === "setopt" || name === "shopt") && (k === at || afterWrapper(ws, k)) && traceFrom()[s]) ctx.traced = true;
     else if (k === at && (name === "at" || name === "batch")) push(deny(`${name} schedules commands the guard cannot see: always blocked`));
     else if (name === "eval") {
       const rest = after(k);
@@ -963,6 +1063,9 @@ export function classifyDetail(command: string, cwd?: string): Classification {
   const r = analyze(command, ctx, 0);
   if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(
       `setting ${ctx.env} on a command line that runs git, rm or a shell is always blocked (any word starting ${ctx.env}= counts, quoted or not, even as an argument: run a search or echo of it as its own command)`,
+    );
+  if (r.cls !== "deny" && ctx.prompt && ctx.traced) return deny(
+      `setting ${ctx.prompt} on a command line that turns on tracing (set -x, set -o xtrace, setopt xtrace) is always blocked: the shell expands it before every traced command`,
     );
   return r;
 }

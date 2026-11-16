@@ -626,6 +626,176 @@ test("classify (J5): git config keys that run a program (trailer, submodule upda
   ]), []);
 });
 
+// Audit 2026-11-16 (docs/data/audit-2026-11-16/judge-sdk.md), J-1 to J-10: every command the audit ran past the judge
+// (each deleted a folder or pushed in bash or zsh), and variants of the same family; guard rows stay as they were.
+const AUDIT_1116_DENY: string[] = [
+  // J-1: << inside $[...] or an array subscript is a left shift, not a here document
+  "echo $[1<<EOF]\nrm -rf ../victim\nEOF]",
+  "a[1<<EOF]=1\nrm -rf ../victim\nEOF]=1",
+  "echo $[ 1 <<EOF ]\nrm -rf ../victim\nEOF ]",
+  "a[1<<EOF]=1\ngit push origin main\nEOF]=1",
+  // J-2: a brace expansion that holds a process substitution
+  "{rm,-rf,../victim,<(:)}",
+  "env {rm,-rf,.git,<(:)}",
+  "{git,push,origin,main,>(:)}",
+  // J-3: git options whose value git runs through a shell
+  "git grep --open-files-in-pager='rm -rf ../victim' hello",
+  "git grep -O'rm -rf ../victim' hello",
+  "git grep --open-files-in-pager='sudo id' x",
+  "git fetch --upload-pack='rm -rf ../victim' ../origin.git",
+  "git fetch --upload-pack 'sudo id' ../origin.git",
+  "git pull --upload-pack='sudo id' ../origin.git",
+  "git fetch-pack --exec='sudo id' ../origin.git",
+  "git difftool -x 'rm -rf ../victim'",
+  "git difftool --extcmd='rm -rf ../victim'",
+  "git difftool --extcmd 'sudo id' HEAD",
+  "git difftool -yx 'sudo id' HEAD",
+  "git clone -u 'rm -rf ../victim' ../origin.git x",
+  "git clone --upload-pack='sudo id' ../origin.git x",
+  "git ls-remote --upload-pack='rm -rf ../victim' ../origin.git",
+  "git archive --remote=../origin.git --exec='rm -rf ../victim' HEAD",
+  "git fetch --upload-pack=\"$CMD\" ../origin.git",
+  // J-4: git config keys that run a program
+  "git -c gpg.ssh.defaultKeyCommand='rm -rf ../victim' -c gpg.format=ssh commit --allow-empty -S -m x",
+  "git -c browser.x.cmd=evil help -w log",
+  "git -c browser.x.path=/tmp/evil web--browse x",
+  "git -c man.x.cmd=evil help -m log",
+  "git -c man.x.path=/tmp/evil help log",
+  "git -c imap.tunnel='rm -rf ../victim' imap-send",
+  "git -c gc.recentObjectsHook='rm -rf ../victim' gc",
+  "git config gpg.ssh.defaultKeyCommand 'rm -rf x'",
+  "git config imap.tunnel x",
+  // J-5: a here-document delimiter with a dollar quote, a $ or a backtick
+  "cat <<$'E'\nE\nrm -rf ../victim\n$E",
+  "cat <<$\"E\"\nE\nrm -rf ../victim\n$E",
+  "cat <<$E\nhi\n$E",
+  "cat <<E`x`\nhi\nE`x`",
+  // J-6: PS4 (PS0, PS1) with tracing or a traced shell
+  "PS4='$(rm -rf ../victim)' bash -xc :",
+  "PS4='$(rm -rf ../victim)'; set -x; :",
+  "set -x; PS4='$(sudo id)'; ls",
+  "PS4='`rm -rf x`'; set -o xtrace; ls",
+  "export PS4='$(rm -rf x)'; set -ex; ls",
+  "PATH=/x; PS4='$(rm -rf x)'; set -x; ls",
+  "PS4='$(rm -rf x)'; setopt xtrace; ls",
+  "PS4='$(rm -rf x)' zsh -xc :",
+  "PS0='$(rm -rf x)' bash -ic :",
+  "PS1='$(rm -rf x)' bash -ic :",
+  // J-7: environment names that make a shell run code
+  "env 'BASH_FUNC_git%%=() { rm -rf ../victim; }' bash -c 'git status'",
+  "BASH_FUNC_ls%%='() { rm -rf x; }' bash -c ls",
+  "mkdir z && echo 'rm -rf ../victim' > z/.zshenv && ZDOTDIR=z zsh -c true",
+  "export ZDOTDIR=z; zsh -c true",
+  // J-8: hash and enable remap a command name like an alias
+  "hash -p /usr/bin/git ls; ls push origin main",
+  "hash ls=/usr/bin/git; ls push origin main",
+  "hash -p \"$(printf /bin/r%s m)\" ls; ls -rf ../victim",
+  "builtin hash -p /bin/rm ls",
+  "enable -f ./evil.so evil",
+  // J-9: zsh's function and alias tables
+  "functions+=(f 'rm -rf ../victim')\nf",
+  "functions[f]='rm -rf x'; f",
+  "functions=(f 'rm -rf x'); f",
+  "aliases+=(p 'git push origin main')",
+  "aliases[p]='git push origin main'",
+  "galiases[p]='rm -rf x'",
+  "saliases[txt]='rm -rf x'",
+  "dis_functions+=(f 'rm -rf x')",
+  "typeset 'functions[f]=rm -rf x'",
+  // J-10: a substitution inside a subscript that arithmetic evaluates
+  "x='a[$(rm -rf ../victim)]'; echo $((x))",
+  "x='a[`rm -rf x`]'; echo $((x))",
+  "let 'a[$(rm -rf x)]'",
+  "[[ -v 'a[$(rm -rf x)]' ]]",
+  "declare -i n='a[${b[1]}$(sudo id)]'",
+  "printf -v 'a[$(rm -rf x)]' %s 1",
+];
+
+test("classify (audit 2026-11-16, J-1 to J-10): every bypass and its family is denied; ordinary forms are not", () => {
+  assert.deepEqual(misread(AUDIT_1116_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // J-1 guards
+    ["cat <<EOF\nhi\nEOF", "pass"],
+    ["[ -f x ] && cat <<EOF\nhi\nEOF", "pass"],
+    ["if [ -n \"$x\" ]; then cat <<EOF\nhi\nEOF\nfi", "pass"],
+    ["[[ -f x ]] && cat <<EOF\nhi\nEOF", "pass"],
+    ["echo $[1+2]", "pass"],
+    ["echo ${a[1]}", "pass"],
+    // J-2 guards
+    ["diff <(sort a) <(sort b)", "pass"],
+    ["echo {a,b}", "deny"],
+    // J-3 guards
+    ["git grep -n foo", "pass"],
+    ["git grep -O foo", "pass"],
+    ["git grep --or -e a -e b", "pass"],
+    ["git difftool HEAD~1", "pass"],
+    ["git difftool -x 'diff -u' HEAD", "pass"],
+    ["git fetch origin", "pass"],
+    ["git fetch -u origin main", "pass"],
+    ["git clone https://example.com/x.git", "pass"],
+    ["git archive --format=tar HEAD", "pass"],
+    // J-4 guards
+    ["git -c gpg.format=ssh commit -m x", "pass"],
+    ["git -c man.viewer=less help log", "pass"],
+    ["git -c gc.auto=0 gc", "pass"],
+    ["git config gpg.ssh.allowedSignersFile f", "pass"],
+    // J-5 guards
+    ["cat <<'EOF'\nhi\nEOF", "pass"],
+    ["cat <<\"EOF\"\nhi\nEOF", "pass"],
+    ["cat <<\\EOF\nhi\nEOF", "pass"],
+    // J-6 guards
+    ["set -x; ls", "pass"],
+    ["set -e; npm test", "pass"],
+    ["PS4='+ '; ls", "pass"],
+    ["bash -x run.sh", "pass"],
+    // J-7 guards
+    ["echo $ZDOTDIR", "pass"],
+    ["zsh -c 'echo hi'", "pass"],
+    // J-8 guards
+    ["hash", "pass"],
+    ["hash -r", "pass"],
+    ["hash git", "pass"],
+    ["git log --grep hash", "pass"],
+    // J-9 guards
+    ["functions", "pass"],
+    ["echo functions", "pass"],
+    ["grep -rn functions src", "pass"],
+    ["ls src/functions", "pass"],
+    // J-10 guards
+    ["echo $((x + 2))", "pass"],
+    ["x='a[1]'; echo $((x))", "pass"],
+    ["echo '$(date)'", "pass"],
+    ["git commit -m 'Fix `items[0]` lookup'", "pass"],
+    ["jq '.items[0]' f", "pass"],
+  ]), []);
+});
+
+test("classify (audit 2026-11-16, J-15): a no-op editor and an empty IFS pass; any other value stays denied", () => {
+  assert.deepEqual(misread([
+    ["GIT_EDITOR=true git rebase --continue", "pass"],
+    ["GIT_EDITOR=: git commit --amend", "pass"],
+    ["GIT_EDITOR='true' git merge --continue", "pass"],
+    ["git -c core.editor=true rebase --continue", "pass"],
+    ["git -c core.editor=: commit --amend", "pass"],
+    ["git -c 'core.editor=true' rebase --continue", "pass"],
+    ["while IFS= read -r f; do git add \"$f\"; done < files.txt", "pass"],
+    ["IFS='' read -r line < f; git status", "pass"],
+    // anything else in those names stays denied
+    ["GIT_EDITOR=truex git commit", "deny"],
+    ["GIT_EDITOR='true;rm -rf .git' git commit", "deny"],
+    ["GIT_EDITOR=\"$E\" git commit", "deny"],
+    ["GIT_EDITOR+=true git commit", "deny"],
+    ["GIT_EDITOR=tr'ue' git commit", "deny"],
+    ["git -c core.editor=vim commit", "deny"],
+    ["git -c core.editor=true: commit", "deny"],
+    ["git --config-env=core.editor=true commit", "deny"],
+    ["IFS=x sh run.sh", "deny"],
+    ["IFS=' ' git status", "deny"],
+    ["IFS=$'\\n' git status", "deny"],
+    ["EDITOR=true git commit", "deny"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.
