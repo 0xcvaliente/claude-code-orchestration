@@ -21,13 +21,17 @@
 // agent stops before its PostToolUse (verified on Claude Code 2.1.314: its SubagentStop is logged before its
 // PostToolUse), so an unmatched stop waits in journal-pending.jsonl, with its status, answers and open, and is written
 // when its launch arrives. With a transcript (interactive sessions) the brief is read from it as before.
+// The reply: in auto mode a worker hands its report back through SubagentHandback, and the stop then carries no
+// last_assistant_message while the transcript does not hold that report yet; the stop record then takes the report's
+// parsed fields from the capture handback-check.mjs wrote at the hand-back (state.mjs handbackFor), else, with no
+// capture newer than this agent's previous stop record, from last_assistant_message and the transcript as before.
 // Exits 0 on malformed input.
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
-import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, handbackFor, stateDir } from "./state.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -185,7 +189,23 @@ for (let i = entries.length - 1; report === undefined && i >= 0; i--) {
   if (parseStatus(text) !== null) report = text;
 }
 
+// A report delivered through SubagentHandback is in neither: the stop payload has no last_assistant_message and the
+// transcript does not hold it yet. handback-check.mjs captured its parsed fields at the hand-back (state.mjs
+// handbackFor: the latest capture of this agent newer than its previous stop record here), and that capture wins.
+/** @type {Record<string, any> | null} */
+let handback = null;
+try {
+  handback = handbackFor(sessionId, agentId, ["journal.jsonl", "journal-pending.jsonl"]);
+} catch {
+  // no capture: today's sources
+}
 const touched = role === "implementer" ? filesTouched(transcriptRead ? entries : null, p.cwd) : null;
-const rec = stopRecord({ sessionId, agentId, role, slice, reply: report ?? last, run: slice ? runOf(slice) : null, filesTouched: touched?.files });
+let rec = stopRecord({ sessionId, agentId, role, slice, reply: handback ? "" : (report ?? last), run: slice ? runOf(slice) : null, filesTouched: touched?.files });
+if (handback) {
+  /** @type {Record<string, any>} */
+  const fields = { status: handback.status === "pass" || handback.status === "fail" ? handback.status : null };
+  for (const k of ["answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"]) if (k in handback) fields[k] = handback[k];
+  rec = /** @type {typeof rec} */ ({ ...rec, ...fields });
+}
 append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);

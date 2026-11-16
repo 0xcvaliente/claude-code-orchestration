@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { HookCallback, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import { makeRunAgent, sandboxFor, type AgentRequest } from "./agent.js";
-import { rolesFor, SDK_DENIED_BASH, UNSAFE_BASH, type Role } from "./config.js";
+import { ROLES, rolesFor, SDK_DENIED_BASH, UNSAFE_BASH, type Role } from "./config.js";
 import { solo } from "./solo.js";
 import { HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, type JudgeDeps } from "./judge.js";
 
@@ -75,6 +75,17 @@ test("judge on: Bash roles carry the PreToolUse hook with a timeout above the ju
     assert.ok(HOOK_TIMEOUT_S * 1000 > JUDGE_TIMEOUT_MS);
     assert.deepEqual(o.disallowedTools, SDK_DENIED_BASH);
     assert.ok(o.allowedTools!.includes("Bash"));
+  }
+});
+
+test("every worker opts out of a project's main agent: project settings are loaded, the flag settings unset `agent`", async () => {
+  // With settingSources ["project"], an `agent` setting in the repo (this repo's own names the orchestrator) would run
+  // the worker as that agent, with that agent's tools. Probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md.
+  for (const role of Object.keys(ROLES) as Role[]) {
+    const o = await optionsFor(req(role), {});
+    assert.deepEqual(o.settingSources, ["project"], role);
+    assert.deepEqual(o.settings, { agent: "" }, role);
+    assert.equal((o as { agent?: string }).agent, undefined, `${role}: no --agent equivalent either`);
   }
 });
 

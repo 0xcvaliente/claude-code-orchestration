@@ -2,6 +2,31 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A session opened in this repo now starts as the orchestrator, and every launcher that must stay plain opts out itself. The rest are fixes: the run journal and telemetry at a hand-back, the plan check on a case-sensitive volume, a failed merge abort, the launcher's repo path, the gated workflow's overlap check, scripts started through a symlinked path, and the skill gate's diff reading. Upgrading: no plugin setting changed, and the plugin does not ship the `agent` setting. `npm run plain` opens a plain session in this repo. The changed hooks take effect in a new session.
+
+### Added
+
+- **The repo's default agent is the orchestrator** (`.claude/settings.json`: `"agent": "orchestrator"`). A Claude Code session opened in this repo starts as the orchestrator. What must stay plain opts out itself: `scripts/orchestrate.sh` passes `--settings '{"agent":""}'` when `ORCH_AGENT=none` (for a named agent `--agent` wins over the setting); the SDK workers set `settings: { agent: "" }` (`src/agent.ts`); the new npm script `plain` runs `claude --settings '{"agent":""}'`. `nudge.mjs` stays silent in an orchestrator session, and `scripts/claude-update.mjs` lists `--settings` among the options the launcher passes. The built plugin never ships the setting (`src/policy.test.ts`). The four claims behind it were probed live on Claude Code 2.1.325 ([docs/data/live-checks-2026-11-16.md](docs/data/live-checks-2026-11-16.md)).
+
+### Fixed
+
+- **The run journal and telemetry missed a handed-back report** (`.claude/hooks/handback-check.mjs`, `state.mjs`, `journal.mjs`, `telemetry.mjs`). A report delivered through `SubagentHandback` is neither in the stop payload nor yet in the transcript, so a first stop was recorded with no status, each later stop held the previous report, and the Stop review gate could block a passed review with `last_reviewer_no_status`. `handback-check.mjs` now writes `handbacks.jsonl` (parsed fields only, keyed by session and agent id) for every agent with an id, also when the hand-back check is switched off. At SubagentStop `journal.mjs` and `telemetry.mjs` use the latest capture that is newer than their own previous stop record of that agent; otherwise they use `last_assistant_message` and the transcript as before. No new hook registration.
+- **The plan check missed symlink aliases on a case-sensitive volume** (`.claude/hooks/plan-check.mjs`). It listed a glob's fixed folder under its case-folded identity key instead of its on-disk name, so on a case-sensitive volume the folder was not found and aliases were silently missed (two tests failed on macOS). It now lists the folder under its on-disk name. A test in `src/skill-create.test.mjs` expected a symlinked temp path where the hook reports the real path; the test was corrected.
+- **A failed merge abort could leave a merge in progress** (`.claude/agents/integrator.md`, `src/git.ts`, `scripts/orchestrate.sh`). After a failed `git merge --abort`, the integrator and the SDK pipeline's `mergeAll` refresh the index with `git status`, abort again, then run `git reset --merge`. If a merge is still in progress they stop: the integrator reports STATUS: fail and merges no further branch, the SDK pipeline throws. The headless allow list gained exactly `Bash(git reset --merge)`.
+- **The launcher looked for the test runner in `<repo>/<repo>`** (`scripts/orchestrate.sh`). A relative repo path given on a direct call is now made absolute once.
+- **The gated workflow's overlap check missed some globs** (`.claude/workflows/orchestrate.js`). A glob with a partial last segment (`src/a*.ts`) and a `?` glob now overlap the files in that folder.
+- **Scripts started through a symlinked path did nothing** (`scripts/run-result.mjs`, `scripts/tokens.mjs`, `scripts/claude-update.mjs`, `src/sync-agents.ts`, `.claude/hooks/file-profile.mjs`, `bench/charts.mjs`, `bench/analyze.mjs`, `bench/report.mjs`). They compared `process.argv[1]` with `import.meta.url` to decide whether they were run directly, so from a checkout under macOS `/tmp` or `/var` they skipped their CLI block and exited 0 with no output. They now compare real paths.
+- **The skill gate misread an added README line starting with `++`** (`.claude/hooks/skill-gate.mjs`). It skipped such a line as a header, so the line never reached the secrets scan and later line numbers were off by one. Header lines are now skipped only before the first hunk.
+
+### Known and not fixed
+
+- The three benchmark task graders (`bench/tasks/*/score.mjs`) keep the old entry guard.
+- A report that the hand-back check sends back is still captured, so a worker that then stops without handing back again is recorded with the undelivered report.
+- The gated workflow's overlap check is now coarser than the plan check's: it can make two slices run one after the other that could have run together. It never rejects a plan.
+- The headless allow rule `Bash(git -C *)`, which predates this work, can reach git forms that the narrower rules do not name.
+
 ## [1.4.3] - 2026-11-16
 
 1.4.3 stops workers from each running the whole test suite, makes the plan check treat a symlink and its target as one file, and fixes two timing and trust holes in the test gate and the egress guard. For contributors, `npm run check` runs its steps side by side, and a test file run on its own cleans up its temp folders. Upgrading: no plugin setting changed. `ORCH_READ_ROUTER_BUDGET_MS` is now capped at 40000 (it was 50000): a higher value is not rejected, it is used as 40000. Every new test file must import `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) first, or `npm test` fails. The changed hooks take effect in a new session.

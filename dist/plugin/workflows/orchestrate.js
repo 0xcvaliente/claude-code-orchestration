@@ -188,9 +188,15 @@ const normPath = (p) => {
   return x
 }
 // Equal paths, or one a folder prefix of the other at a path-segment boundary.
-// A glob counts as its literal prefix (as in plan-check.mjs), so src/** and src/*.ts overlap src/a.ts; an empty prefix
-// is the whole folder.
-const globBase = (p) => (p === '.' ? '' : p.replace(/\*.*$/, '').replace(/\/+$/, ''))
+// A glob counts as its fixed folders, the segments before the first one holding `*` or `?`, so src/**, src/*.ts,
+// src/a*.ts and src/?.ts all overlap src/ab.ts (plan-check.mjs matches globs exactly; this is coarser but never misses
+// an overlap); an empty prefix is the whole folder.
+const globBase = (p) => {
+  if (p === '.') return ''
+  const segs = p.split('/')
+  const g = segs.findIndex((s) => /[*?]/.test(s))
+  return (g < 0 ? segs : segs.slice(0, g)).join('/').replace(/\/+$/, '')
+}
 const pathsOverlap = (a, b) => {
   const x = globBase(a)
   const y = globBase(b)

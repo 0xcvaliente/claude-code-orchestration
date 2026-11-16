@@ -3,7 +3,8 @@
 // "Tokens" = input + output + cache-read + cache-write, summed over every model in modelUsage (main loop and subagents);
 // usage (main loop only) is the fallback when modelUsage is missing or empty.
 // CLI: node scripts/tokens.mjs budget-usd <count>   prints the dollar cap for a token count such as 500k or 2M, or the error and exit 1.
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // A rough conversion, used only where `claude` or old logs speak in dollars (the native --max-budget-usd cap and
 // legacy runs.jsonl rows). Real use per list-price dollar ranges from about 0.2M to 1.8M tokens with the cache mix.
@@ -59,7 +60,15 @@ export function parseTokens(text) {
   return count;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   try {
     if (process.argv[2] !== "budget-usd") throw new Error("usage: tokens.mjs budget-usd <count>");
     console.log(String(parseTokens(process.argv[3] ?? "") / TOKENS_PER_USD));

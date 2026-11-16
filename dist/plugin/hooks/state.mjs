@@ -6,7 +6,7 @@
 // When the project registers its own copy of a hook (this repo, or a repo with .claude/ copied in), both copies
 // fire on every event. The plugin copy then exits at once (duplicate) and the project copy does the work; the
 // plugin hooks the project does not register use the project's state, so every gate reads one log.
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -102,4 +102,67 @@ export const stateDir = own.dir;
 export function ensureStateDir(state = own) {
   mkdirSync(state.dir, { recursive: true });
   if (state.inProject && !existsSync(join(state.dir, ".gitignore"))) writeFileSync(join(state.dir, ".gitignore"), "*\n");
+}
+
+// Hand-back captures (handbacks.jsonl). In auto mode a worker delivers its report through the SubagentHandback tool;
+// the SubagentStop that follows carries no last_assistant_message, and the subagent transcript does not yet hold the
+// report just handed back. So handback-check.mjs (PreToolUse on SubagentHandback, already registered there) appends the
+// report's parsed fields here, keyed by session and agent id, and journal.mjs and telemetry.mjs read the latest one at
+// SubagentStop. Parsed fields only, never report text. A capture is never cleared (journal and telemetry run at the same
+// stop and may run at the same time): it belongs to a stop when it is newer than that hook's own previous stop record
+// of the agent, so a resumed agent whose next run ends without a hand-back falls back to today's sources.
+export const HANDBACK_LOG = "handbacks.jsonl";
+
+/** Records of a JSON-lines log in `dir` for one session and agent; [] when unreadable. @param {string} dir @param {string} name @param {string} sessionId @param {string} agentId */
+function agentRecords(dir, name, sessionId, agentId) {
+  const needle = JSON.stringify(agentId);
+  try {
+    return readFileSync(join(dir, name), "utf8")
+      .split("\n")
+      .filter((l) => l.includes(needle))
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter((e) => e && typeof e === "object" && e.agent_id === agentId && (e.session_id ?? "") === sessionId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Append a hand-back capture. Never throws; false when it was not written.
+ * @param {Record<string, unknown>} capture parsed fields of the report, with session_id and agent_id
+ */
+export function recordHandback(capture) {
+  try {
+    ensureStateDir();
+    appendFileSync(join(stateDir, HANDBACK_LOG), `${JSON.stringify({ ts: new Date().toISOString(), ...capture })}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The latest hand-back capture of an agent that is newer than the agent's latest record in the caller's own stop logs
+ * (`stopLogs`, filtered by `isStop`), or null: none, no agent id, or only captures an earlier stop already used.
+ * @param {string} sessionId @param {string | null} agentId @param {string[]} stopLogs
+ * @param {(r: any) => boolean} [isStop] @param {string} [dir]
+ * @returns {Record<string, any> | null}
+ */
+export function handbackFor(sessionId, agentId, stopLogs, isStop = () => true, dir = stateDir) {
+  if (typeof agentId !== "string" || !agentId) return null;
+  const capture = agentRecords(dir, HANDBACK_LOG, sessionId, agentId).at(-1);
+  const at = Date.parse(capture?.ts);
+  if (!capture || !Number.isFinite(at)) return null;
+  for (const name of stopLogs) {
+    for (const r of agentRecords(dir, name, sessionId, agentId)) {
+      if (isStop(r) && Date.parse(r.ts) >= at) return null;
+    }
+  }
+  return capture;
 }

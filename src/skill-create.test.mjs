@@ -6,7 +6,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,7 +170,9 @@ test("a skill slice goes to the private repo by default; facts name every path a
       "- The paths on this brief's FILES line are relative to the draft worktree, not to the project.",
       "- Validator, run in the draft worktree: python3 scripts/validate.py skills/release-notes",
       "- Catalog file: README.md in the draft worktree (one row for the skill)",
-      `- Seal, after the last change: node ${join(s.dir, ".claude", "hooks", "skill-seal.mjs")} ${join(draft, "skills", "release-notes")}`,
+      // The hook names its own folder as Node gives it, the real path (on macOS the temp folder /var/... is a link to
+      // /private/var/...); every other value comes from the paths the hook was given.
+      `- Seal, after the last change: node ${join(realpathSync(join(s.dir, ".claude", "hooks")), "skill-seal.mjs")} ${join(draft, "skills", "release-notes")}`,
       "- Authoring skill: load skill-authoring with the Skill tool before starting",
     ].join("\n");
     assert.equal(o.updatedInput.prompt, `${brief}${facts}`);

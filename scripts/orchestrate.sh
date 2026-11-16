@@ -20,7 +20,7 @@
 #      ORCH_MODEL (passes --model, e.g. sonnet or opus, for plain-model baselines),
 #      ORCH_TEST_CMD (test command; its permission rules are added automatically, else detected from the repo; a Python
 #        runner such as python3 tests/run.py or python3 -m pytest adds Bash(python3 *), so agents can run their own checks),
-#      ORCH_AGENT (default orchestrator; "none" = plain session, no agent),
+#      ORCH_AGENT (default orchestrator; "none" = plain session, no agent, also in a folder whose settings name one),
 #      ORCH_AGENT_PREFIX (e.g. orchestration: always runs <prefix><name>, the plugin's agents, without checking the
 #        folder or the installed plugins; for CI or a plugin loaded another way; a missing trailing colon is added),
 #      ORCH_ADD_DIR (extra directory the agents may read, e.g. a project to analyse),
@@ -49,6 +49,9 @@ budget_usd=""
 if [ -n "${ORCH_BUDGET_TOKENS:-}" ]; then
   budget_usd="$(node "$here/tokens.mjs" budget-usd "$ORCH_BUDGET_TOKENS")" || exit 1
 fi
+# Absolute once, before the cd: later steps (the test runner detection) take $repo again, and a relative path would
+# then point at <repo>/<repo>. A missing folder stays an error. CDPATH is cleared so cd prints nothing.
+repo="$(CDPATH='' cd -- "$repo" && pwd)" || exit 1
 cd "$repo" || exit 1
 
 plugin=orchestration # the plugin name in scripts/build-plugin.mjs
@@ -84,6 +87,7 @@ tools=(
   "Read" "Grep" "Glob" "Agent" "SendMessage" "Edit" "Write"
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
+  "Bash(git reset --merge)" # the integrator's last resort when git merge --abort fails; exactly this form, no other reset
   "Bash(git -C *)" "Bash(cd *)"
   "Bash(npm *)" "Bash(node *)" "Bash(ls*)" "Bash(mkdir -p *)"
 )
@@ -128,7 +132,15 @@ export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
 export CLAUDE_CODE_FORK_SUBAGENT=0
 
 args=(-p "$task")
-[ "$agent" != none ] && args+=(--agent "$agent")
+if [ "$agent" != none ]; then
+  args+=(--agent "$agent") # the flag wins over an `agent` setting in the folder
+else
+  # A plain session must stay plain. A folder's settings can name a main agent (this repo's .claude/settings.json sets
+  # "agent": "orchestrator", and a copy of .claude/ carries it along), and `claude -p` would then run as that agent,
+  # with its tools. An empty `agent` in the flag settings, which rank above the folder's, gives the default agent back
+  # (probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md). It changes no other setting.
+  args+=(--settings '{"agent":""}')
+fi
 # The event stream, not --output-format json: a session that waits for agents produces one result per wake-up, and
 # json prints the last one only. scripts/run-result.mjs reduces the stream to that last result plus the run's totals.
 args+=(--output-format stream-json --verbose --permission-mode dontAsk)
