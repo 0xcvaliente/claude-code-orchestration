@@ -23,7 +23,7 @@ test('the pane follows an implementer from start to its STATUS line', SLOW, asyn
   on('turn.complete', (_, e) => ({ text: e.answer }))
   let now = 1000
   on('clock.now', () => ({ value: (now += 1000) }))
-  on('clock.every', () => ({ value: {} }))
+  on('clock.every', () => ({ value: {} as never }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.agent.spawn({
@@ -170,7 +170,7 @@ test('with no verdict the pane infers the mode and draws only the stages it used
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('agent.spawn', () => ({ model: 'sonnet', agentId: 'r1' }))
   on('clock.now', () => ({ value: 5000 }))
-  on('clock.every', () => ({ value: {} }))
+  on('clock.every', () => ({ value: {} as never }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.agent.spawn({
     tool_use_id: 't1', prompt: 'SLICE: s1\nFILES: a.py\nDEPENDS: none', description: 'review a',
@@ -202,7 +202,7 @@ test('a stage with more cells than fit shows the latest and +N', async ($, on) =
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('agent.spawn', (_: unknown, e: any) => ({ model: 'sonnet', agentId: e.tool_use_id }))
   on('clock.now', () => ({ value: 5000 }))
-  on('clock.every', () => ({ value: {} }))
+  on('clock.every', () => ({ value: {} as never }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (let i = 1; i <= 12; i++) await $.agent.spawn(spawnImpl(`t${i}`, `s${i}`))
   // 100 columns: boxes 14 wide, 10 cells inner; 12 slices -> 8 latest cells and +4
@@ -217,7 +217,7 @@ test('usage by model is one stacked bar with a legend row per model and no bars'
   on('agent.spawn', (_: unknown, e: any) => ({ model: e.tool_use_id === 't1' ? 'claude-opus-4' : 'claude-sonnet-4', agentId: e.tool_use_id }))
   on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
   on('clock.now', () => ({ value: 5000 }))
-  on('clock.every', () => ({ value: {} }))
+  on('clock.every', () => ({ value: {} as never }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.agent.spawn(spawnImpl('t1', 's1'))
   await $.agent.spawn(spawnImpl('t2', 's2'))
@@ -250,7 +250,7 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   on('turn.complete', (_: unknown, e: any) => ({ text: e.answer }))
   let now = 1000
   on('clock.now', () => ({ value: (now += 1000) }))
-  on('clock.every', () => ({ value: {} }))
+  on('clock.every', () => ({ value: {} as never }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const spawn = (id: string, slice: string, deps: string, type: string) =>
     $.agent.spawn({
@@ -672,7 +672,7 @@ for (const sc of SCENES) {
 
 test('triage fork: sizing draws all three routes dim, with no marker and no link', async ($, on) => {
   await boot($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   for (const columns of [24, 36, 43, 44, 60, 100, 140]) {
     const t = await texts($, columns)
     const g = geom(columns, 'plain')
@@ -696,7 +696,7 @@ test('triage fork: sizing draws all three routes dim, with no marker and no link
 
 test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', SLOW, async ($, on) => {
   await boot($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.turn.complete(mainDone('answer'))
   for (let columns = 16; columns <= 200; columns++) {
     for (const m of ROUTES) {
@@ -724,7 +724,7 @@ test('triage fork: every width from 16 to 200 stays inside the pane and the link
 
 test('triage fork: under 16 columns there is no lane and the link goes straight to the first stage', async ($, on) => {
   await boot($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.turn.complete(mainDone('answer'))
   for (const columns of [8, 10, 12, 15]) {
     const t = await texts($, columns)
@@ -747,7 +747,7 @@ test('triage fork: under 16 columns there is no lane and the link goes straight 
 test('triage fork: the dot runs along the link while work runs and stops when it is signed off', async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock, route: verdict('orchestrate') })
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
   await $.agent.spawn(spawnImpl('t1', 's1'))
   const g = geom(100, 'orchestrate')
@@ -777,7 +777,7 @@ test('triage fork: the dot runs along the link while work runs and stops when it
 
 test('the scroll hint counts the fork, the route boxes, the link and the lane', async ($, on) => {
   await boot($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   const hint = async (columns: number, bodyRows: number) => (await texts($, columns, bodyRows)).some(x => /scroll/.test(x))
   // sizing at 100: 26 + 5 (orchestrator box) + 4 (input box) + 5 (one stage row) = 40, plus the 3 fork rows and 4 route rows, less the old 2-row arrow = 45
   expect(await hint(100, 44)).toBe(true)
@@ -915,7 +915,7 @@ test('stale work (no turn.complete, last agent over ten minutes ago) is signed o
   let t = await texts($)
   expect(t.some(x => /all agents passed/.test(x))).toBe(true)
   expect(t.some(x => /dispatching/.test(x))).toBe(false)
-  await $.prompt.submit({ text: 'a fresh job' })
+  await $.prompt.submit({ text: 'a fresh job' } as never)
   t = await texts($)
   expect(t.some(x => /s1/.test(x))).toBe(false)
   expect(t.includes('▸ a fresh job')).toBe(true)
@@ -979,7 +979,7 @@ test('known tradeoff: a main turn busy over ten minutes after the last agent cou
 test('with a recorded verdict, a spawn over two minutes after the last agent while the main turn is open keeps agents and work', async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await boot($, on, { clock, route: verdict('orchestrate') })
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
   await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
   await finish($, 'b1', 'built\nSTATUS: pass')
@@ -1220,7 +1220,7 @@ const clocked = async ($: any, on: any, route?: unknown) => {
 
 test('active path: the arrows up to the furthest running stage are amber and carry the dot, the ones past it are grey', async ($, on) => {
   const clock = await clocked($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
   await finish($, 'p1', PASS)
   await spawnWith($, 'b1', brief('s1'), IMPL)
@@ -1253,7 +1253,7 @@ test('active path: the arrows up to the furthest running stage are amber and car
 
 test('active path: an arrow into a failed stage is red once nothing runs', async ($, on) => {
   await boot($, on)
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await finish($, 'b1', FAIL)
   await $.turn.complete(mainDone('answer'))
@@ -1265,7 +1265,7 @@ test('active path: an arrow into a failed stage is red once nothing runs', async
 
 test('active path: the main session working in a plain run lights the link and the arrow into build; it goes out when the turn ends', async ($, on) => {
   const clock = await clocked($, on, verdict('plain'))
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
   let ui = await mountLive($)
   const a = await arrowsOf(ui)
@@ -1328,7 +1328,7 @@ test('active path: the loop-back carries the dot backward while a retry runs, an
 
 test('spawn on use: before a mode is known only triage shows; a stage appears with its first agent', async ($, on) => {
   await boot($, on, { route: verdict('orchestrate') })
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   const boxes = async () => (await texts($, 100)).filter(x => BOX.test(x)).map(x => x.slice(2))
   expect(await boxes()).toEqual(['triage']) // sizing: no mode
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
@@ -1353,7 +1353,7 @@ test('spawn on use: before a mode is known only triage shows; a stage appears wi
 
 test('spawn on use: plain and reviewed draw the build as the session\'s own work and skip the rest', async ($, on) => {
   await boot($, on, { route: verdict('reviewed') })
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   await $.tool.call({ tool: 'Bash', command: ROUTE_CMD })
   const boxes = async () => (await texts($, 100)).filter(x => BOX.test(x)).map(x => x.slice(2))
   expect(await boxes()).toEqual(['triage', 'build'])
@@ -1419,7 +1419,7 @@ test('slice diagram: a running first card ends the trunk dot above its own fork;
 
 test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', SLOW, async ($, on) => {
   await boot($, on, { route: verdict('orchestrate') })
-  await $.prompt.submit({ text: PROMPT })
+  await $.prompt.submit({ text: PROMPT } as never)
   const WIDE = [24, 28, 32, 36, 39, 40, 44, 52, 60, 64, 80, 99, 100, 120, 140]
   const check = async (want: string[]) => {
     for (const columns of WIDE) {
@@ -1821,6 +1821,67 @@ test('run: a resume of a slice carried over as final (a turn end, no spawn) open
   await s.turn.complete(mainDone('answer'))
   await s.prompt.submit({ text: 'and?' }) // s1 was worked on and its review failed: not final, the run stays
   expect((await texts($)).some(x => /^\S s1 /.test(x))).toBe(true)
+})
+
+test('run: a failing review of a slice carried over as final, with no implementer between, opens it again (brief.mjs G-1)', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' }) // the main turn works while the agents run, so a spawn does not reset the pane
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS) // s1 is final in the first run, s2 never built: the run is open
+  await spawnWith($, 'p2', 'PLAN REVIEW\nSLICE: s1 - one', REVQ) // s1 is carried over as final
+  await finish($, 'p2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', FAIL) // a second opinion fails it, no implementer between
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'and?' }) // s1 is judged like any slice of the run: its latest review failed, so the run stays
+  expect((await texts($)).some(x => /^\S s1 /.test(x))).toBe(true)
+})
+
+test('run: a closed run stays closed when a late review of its final slice fails (brief.mjs closeIfDone; audit D-4)', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' }) // the main turn works while the agents run, so a spawn does not reset the pane
+  await spawnWith($, 'p1', PLAN1, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS) // s1 is final: the gates close the run for good
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', FAIL) // a late second opinion
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'the next job' }) // the run is closed: the prompt starts a clean run
+  const t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect(t.includes('▸ the next job')).toBe(true)
+})
+
+test('run: a retry signal survives more than 80 later agent records (audit D-6)', SLOW, async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  const light = 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light'
+  await spawnWith($, 'b1', light, IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: fx', REVQ)
+  await finish($, 'r1', FAIL) // an earlier counted fail: the retry signal asks for an opus review
+  for (let k = 0; k < 80; k++) {
+    await spawnWith($, `q${k}`, 'look around', RESEARCH)
+    await finish($, `q${k}`, PASS)
+  }
+  await spawnWith($, 'b2', light, IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: fx', REVQ)
+  await finish($, 'r2', PASS) // a sonnet pass: not final until an opus pass
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'and?' }) // the run stays open
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /^\S fx /.test(x))).toBe(true)
+  expect(t.some(x => /fx/.test(x) && x.includes('⇧opus?'))).toBe(true)
 })
 
 test('waiting: the main turn ended with agents still running reads waiting for N agents, then signs off', async ($, on) => {

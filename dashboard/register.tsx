@@ -643,10 +643,10 @@ const trunkOf = (layer: Node[], fix: Map<string, string>, f: number): GRow[] => 
 
 // A join under the diagram: the columns that hold a final slice drop a stub onto one bus that ends in a single arrow. Each stub has its card's
 // colour; the bus itself and its arrow take the best colour of all the stubs.
-type Run = { text: string; color: string }
-const runsOf = (chars: string[], colors: (string | undefined)[]): Run[] => {
+type Seg = { text: string; color: string } // a run of characters in one colour (not the gates' Run)
+const runsOf = (chars: string[], colors: (string | undefined)[]): Seg[] => {
   const full = colors.map((c, i) => c ?? colors.slice(i + 1).find(Boolean) ?? colors.slice(0, i).reverse().find(Boolean) ?? 'subtle')
-  const runs: Run[] = []
+  const runs: Seg[] = []
   chars.forEach((ch, i) => {
     const last = runs[runs.length - 1]
     if (last && last.color === full[i]) last.text += ch
@@ -654,7 +654,7 @@ const runsOf = (chars: string[], colors: (string | undefined)[]): Run[] => {
   })
   return runs
 }
-const busOf = (cols: number[], tones: string[]): { rows: Run[][]; mid: number } => {
+const busOf = (cols: number[], tones: string[]): { rows: Seg[][]; mid: number } => {
   const lo = Math.min(...cols)
   const hi = Math.max(...cols)
   const mid = Math.floor((lo + hi) / 2)
@@ -827,29 +827,61 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
 }
 // G-1 (brief.mjs foldRuns): a PLAN REVIEW without REPLAN that closes an open run hands the new run each slice it names again that is not final and
 // whose latest review after its latest implementer did not fail (its agents move: `carry`), and each slice that was final and passed (`done`: final in
-// the new run until an implementer of it is launched there). The atom keeps the Run shape with these two optional lists.
-type RunMarks = Run & { carry?: string[]; done?: string[] }
+// the new run until an implementer of it works there or a review of it there fails). `closed` (brief.mjs closeIfDone): set once every slice of the run
+// is final at an agent's end, and never cleared, so a late failing review does not reopen the run (audit D-4). The atom keeps the Run shape with these
+// optional marks.
+type RunMarks = Run & { carry?: string[]; done?: string[]; closed?: boolean }
 // The agents of a run: launched in it or ended in it (a resume with no agent.spawn is a record that starts before the run), plus those of the
 // slices it carried over from the run its plan closed.
 const inRunOf = (list: Agent[], run: Run) => {
   const carry = (run as RunMarks).carry ?? []
   return list.filter(a => a.startedAt >= run.at || (a.endedAt !== undefined && a.endedAt >= run.at) || (!!a.slice && carry.includes(a.slice)))
 }
-// A slice the run took over as final: final until an implementer of it works in this run (a launch, or a resume's stop).
+// A slice the run took over as final: final until an implementer of it works in this run (a launch, or a resume's stop) or a review of it in this run
+// counts as a fail (a reviewer's status is already its counted status: a fail with only low-confidence gaps is a pass).
 const doneIn = (inRun: Agent[], run: Run, id: string) =>
   ((run as RunMarks).done ?? []).includes(id) &&
-  !inRun.some(a => a.role === 'implementer' && a.slice === id && (a.startedAt >= run.at || (a.endedAt !== undefined && a.endedAt >= run.at)))
+  !inRun.some(
+    a =>
+      a.slice === id &&
+      ((a.role === 'implementer' && (a.startedAt >= run.at || (a.endedAt !== undefined && a.endedAt >= run.at))) ||
+        (a.role === 'reviewer' && a.status === 'fail' && a.endedAt !== undefined && a.endedAt >= run.at)),
+  )
 // Stale: agents ran, none runs, the last one ended over ten minutes ago (the same escape as the main turn's below).
 const staleOf = (list: Agent[], t: number) =>
   list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS
-// A run is open while it exists, is not stale, and an agent runs or a slice of it is not final. A run with no slice yet (a plan review alone, an
-// old-style plan without SLICE lines) stays open until a slice is known or it goes stale.
-const runOpen = (list: Agent[], plan: Plan | null, run: Run | null, t: number) => {
-  if (!run || staleOf(list, t)) return false
-  if (list.some(a => a.status === 'running')) return true
+// Every slice of the run is final (a run with no slice yet, a plan review alone or an old-style plan without SLICE lines, is not).
+const allFinal = (list: Agent[], plan: Plan | null, run: Run) => {
   const inRun = inRunOf(list, run)
   const ids = run.kind === 'light' ? [run.slice as string] : [...new Set([...(plan?.slices ?? []).map(s => s.id), ...inRun.flatMap(a => (a.slice ? [a.slice] : []))])]
-  return !ids.length || ids.some(id => !doneIn(inRun, run, id) && !sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
+  return ids.length > 0 && ids.every(id => doneIn(inRun, run, id) || sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
+}
+// A run is open while it exists, is not closed or stale, and an agent runs or a slice of it is not final. A run with no slice yet stays open until a slice
+// is known or it goes stale.
+const runOpen = (list: Agent[], plan: Plan | null, run: Run | null, t: number) => {
+  if (!run || (run as RunMarks).closed || staleOf(list, t)) return false
+  if (list.some(a => a.status === 'running')) return true
+  return !allFinal(list, plan, run)
+}
+// The records the run model reads (sliceRunOf, doneIn, runOpen): every slice agent, a REPLAN plan review, a running agent. The state keeps the latest
+// KEPT records and, older than those, the ones the run model reads, up to KEPT_MAX in all; the pane draws only the latest KEPT (audit D-6).
+const KEPT = 80
+const KEPT_MAX = 500
+const kept = (list: Agent[]) => {
+  if (list.length <= KEPT) return list
+  const cut = list.length - KEPT
+  const out = list.filter((a, i) => i >= cut || !!a.slice || !!(a as Rec).replan || a.status === 'running')
+  return out.length > KEPT_MAX ? out.slice(-KEPT_MAX) : out
+}
+let drawnKey: Agent[] | undefined
+let drawnVal: Agent[] = []
+const drawnOf = (all: Agent[]) => {
+  if (all.length <= KEPT) return all
+  if (drawnKey !== all) {
+    drawnKey = all
+    drawnVal = all.slice(-KEPT)
+  }
+  return drawnVal
 }
 
 // A new run drops the old diagram: agents, log, main, plan and run. With `keepVerdict` (the spawn path) the work line stays while the main turn works on
@@ -1056,7 +1088,7 @@ export const register: Register = on => {
         await update($, runAtom, () => ({ kind: 'planned', at: t, ...(carry.length ? { carry } : {}), ...(done.length ? { done } : {}) }) as RunMarks)
       else if (!plan && role === 'implementer' && header.path === 'light' && !header.workflow && slice && (reset || !open0)) await update($, runAtom, () => ({ kind: 'light', at: t, slice }) as Run)
       // a spawn whose id already has a record (a resume that fires agent.spawn again) is a new record, so the earlier run stays as history
-      const grown = await update($, agents, list => [...list, agent].slice(-80))
+      const grown = await update($, agents, list => kept([...list, agent]))
       await update($, main, () => e.parentModel)
       // The plan the review checks is the plan the progress bar follows; a brief that names no slice leaves the last plan in place. REPLAN extends the
       // plan of the open run: a slice it names again is updated, a new one is added.
@@ -1138,7 +1170,7 @@ export const register: Register = on => {
       // the list must never change the tool call
     }
     // An Agent launch a gate blocked (the plan check denies before the agent exists, so no agent.spawn follows): log the reason.
-    if ((e.tool === 'Agent' || e.tool === 'Task') && (('deny' in ran && ran.deny) || ran.isError)) {
+    if ((e.tool === 'Agent' || (e.tool as string) === 'Task') && (('deny' in ran && ran.deny) || ran.isError)) {
       try {
         const reason = denialOf(ran)
         if (reason) {
@@ -1178,7 +1210,7 @@ export const register: Register = on => {
       // the main session's turn ended: the work is answered, or stopped (aborted, refused, failed)
       try {
         const now = await $.clock.now()
-        const outcome = e.reason === 'answer' ? 'answered' : 'stopped'
+        const outcome: Work['outcome'] = e.reason === 'answer' ? 'answered' : 'stopped'
         await update($, workAtom, w => (w && !w.endedAt ? { ...w, endedAt: now, outcome } : w))
       } catch {
         // the pane must never change the turn
@@ -1220,14 +1252,17 @@ export const register: Register = on => {
           const again = { ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
           hold.one = again
           hold.resumed = true
-          return [...l, again].slice(-80)
+          return kept([...l, again])
         })
         const one = hold.one
         if (one) {
-          const entry: LogEntry = { at: now, kind: one.status, role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
+          const entry: LogEntry = { at: now, kind: one.status as LogEntry['kind'], role: one.role, label: one.label, model: one.model, ms: now - one.startedAt, tokens: one.tokens }
           const note = hold.resumed ? startNote(list, one) : undefined
           if (note) await update($, log, l => [...l, { at: one.startedAt, kind: 'start', role: one.role, label: one.label, model: one.model, note } as LogEntry].slice(-60))
           await update($, log, l => [...l, entry].slice(-60))
+          // The gates close a run once every slice is final at a slice's stop, and a closed run stays closed (brief.mjs closeIfDone; audit D-4).
+          const run = one.slice ? await read($, runAtom) : null
+          if (run && !(run as RunMarks).closed && allFinal(list, await read($, planAtom), run)) await update($, runAtom, r => (r ? ({ ...r, closed: true } as RunMarks) : r))
         }
       } catch {
         // the agent's record is the pane's: the turn goes on
@@ -1238,7 +1273,8 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const list = await read($, agents)
+    const all = await read($, agents) // what the run model reads (marks); the pane draws the latest KEPT of it
+    const list = drawnOf(all)
     const lines = await read($, log)
     const orchestrator = await read($, main)
     const verdict = await read($, triage)
@@ -1274,7 +1310,7 @@ export const register: Register = on => {
     // (RISKY, a failed review before, a (read) answer or OPEN items in its passing review) asks for an opus review, and whether one passed; then one
     // tick per constraint from its latest review: C1✔ passed by a command, C1✓ passed by reading, C1✖ failed, C1· not answered.
     const marksOf = (id: string) => {
-      const sr = sliceRunOf(list, id, plan?.slices.find(s => s.id === id))
+      const sr = sliceRunOf(all, id, plan?.slices.find(s => s.id === id))
       const ids = [...new Set([...sr.checks, ...Object.keys(sr.answers)])]
       const ticks = ids.map(c => {
         const a = sr.answers[c]

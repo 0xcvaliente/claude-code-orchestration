@@ -698,7 +698,8 @@ export function stopRecord(ctx) {
  * testGaveUp: times of the test gate's give-ups for the slice's implementers (max_blocks_reached of gate test,
  * bugfix_unverified_gave_up); testGateGaveUp: one belongs to the latest attempt (later than attemptFrom).
  * carriedFinal: the slice was final and passed in the run a plain PLAN REVIEW closed, and this plan names it again: it
- * counts as final (and passed) here until an implementer of it works in this run (a launch, or a stop: a resume).
+ * counts as final (and passed) here until an implementer of it works in this run (a launch, or a stop: a resume) or a
+ * review of it here counts as a fail.
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
@@ -998,6 +999,9 @@ export function foldRuns(records, opts = {}) {
       }
       s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt, agent });
       s.reviewedSince = true;
+      // A counted failing review of a slice carried over as final ends its carried state, as implementer work does
+      // (spec, "Carried slices"); a pass, a fail that counts as a pass and a reply with no STATUS leave it final.
+      if (s.carriedFinal && countedStatus(/** @type {Review} */ (s.reviews.at(-1))) === "fail") s.carriedFinal = false;
     }
     settle(s, env);
     closeIfDone(run);
