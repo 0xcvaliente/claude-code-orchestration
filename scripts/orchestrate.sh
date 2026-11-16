@@ -88,7 +88,14 @@ tools=(
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git reset --merge)" # the integrator's last resort when git merge --abort fails; exactly this form, no other reset
-  "Bash(git -C *)" "Bash(cd *)"
+  # git -C <dir>: only the subcommands the agents use (reviewer and researcher reads, a worktree implementer's and the
+  # integrator's writes, a skill slice's draft worktree). The `*` for the folder can also stand for other words, so the
+  # git denies below close what it could reach (reset --hard, clean, checkout, restore, rm, config, -c, --config-env).
+  "Bash(git -C * status*)" "Bash(git -C * diff*)" "Bash(git -C * log*)" "Bash(git -C * show*)" "Bash(git -C * rev-parse*)"
+  "Bash(git -C * ls-files*)" "Bash(git -C * rev-list*)" "Bash(git -C * branch --show-current)"
+  "Bash(git -C * worktree list*)" "Bash(git -C * worktree add *)"
+  "Bash(git -C * add *)" "Bash(git -C * commit *)" "Bash(git -C * merge *)" "Bash(git -C * reset --merge)"
+  "Bash(cd *)"
   "Bash(npm *)" "Bash(node *)" "Bash(ls*)" "Bash(mkdir -p *)"
 )
 if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
@@ -156,10 +163,16 @@ args+=(--output-format stream-json --verbose --permission-mode dontAsk)
 # Headless: nobody reads a question before the run ends (the orchestrator then decides instead of asking).
 args+=(--append-system-prompt "This run is unattended: nobody can answer a question during this run, so decide and proceed instead of asking.")
 # Never publish or escalate, whatever the folder's settings say (a plugin user's folder has no deny list, and this
-# repo's leaves git push to interactive sessions). A deny beats every allow rule, so `Bash(git -C *)` cannot reach a
-# push. UNSAFE_BASH in src/config.ts; src/verify.test.ts fails on drift. Variadic: keep it before --allowedTools.
+# repo's leaves git push to interactive sessions). A deny beats every allow rule. The first line is UNSAFE_BASH in
+# src/config.ts (src/verify.test.ts fails on drift). The git lines are for headless runs only: no work lost to
+# reset --hard, clean, checkout, restore or rm, and no -c, --config-env or config, which can set an alias that pushes or a
+# hooks folder that runs any program. `git * <word>*` also refuses a harmless command with that word after a space (a
+# file named clean.txt): the safe side. Variadic: keep it before --allowedTools.
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
-  "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)")
+  "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)"
+  "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)" "Bash(git config*)" "Bash(git * config*)"
+  "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean*)"
+  "Bash(git checkout*)" "Bash(git * checkout*)" "Bash(git restore*)" "Bash(git * restore*)" "Bash(git * rm *)")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last
 
 if [ -n "${ORCH_DRY_RUN:-}" ]; then

@@ -1,91 +1,125 @@
-// Regression tests for scripts/auto.sh (relative repo path) and scripts/report.mjs (legacy runs row).
+// Regression tests for the launcher and script fixes of the 2026-11-16 audit (docs/data/audit-2026-11-16/):
+// W-3 the headless git rules, W-4 a dash-led task, W-5 CDPATH, O-9 the terminal form of the result, O-5 the plain
+// sessions' output style. The launchers run with ORCH_DRY_RUN=1 or a fake `claude` first on PATH: no model call.
 import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const scripts = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const orchestrateSh = join(root, "scripts", "orchestrate.sh");
 
-test("auto.sh passes an absolute --repo to route.ts when given a relative folder", () => {
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-rel-")));
+const BASE_ENV = { ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "", ORCH_SESSION_PERSISTENCE: "", ORCH_SKILL_CREATE: "off", ORCH_OUTPUT_STYLE: undefined };
+
+/** orchestrate.sh's claude arguments, one per element. @param {Record<string, string | undefined>} env @param {string} [task] */
+function dryRun(env = {}, task = "t") {
+  const repo = mkdtempSync(join(tmpdir(), "orch-fix-"));
   try {
-    mkdirSync(join(scratch, "proj"));
-    mkdirSync(join(scratch, "bin"));
-    // A fake npx records its arguments and prints a decision that forces the orchestrator route.
-    writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
-    chmodSync(join(scratch, "bin", "npx"), 0o755);
-    // ORCH_AGENT_PREFIX skips orchestrate.sh's "is the plugin enabled here" check, so the test does not depend on
-    // whether the machine running it has the plugin installed (a CI runner does not).
-    const r = spawnSync("bash", [join(scripts, "auto.sh"), "task", "proj"], {
-      cwd: scratch,
-      env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_AGENT_PREFIX: "orchestration:", ORCH_MODE: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" },
-      encoding: "utf8",
-    });
+    /** @type {Record<string, string>} */
+    const merged = {};
+    for (const [k, v] of Object.entries({ ...process.env, ...BASE_ENV, ...env })) if (v !== undefined) merged[k] = v;
+    const r = spawnSync("bash", [orchestrateSh, task, repo], { env: merged, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
-    const args = readFileSync(join(scratch, "npx-args"), "utf8").split("\n");
-    assert.equal(args[args.indexOf("--repo") + 1], join(scratch, "proj"));
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test("auto.sh passes a task that starts with a dash so route.ts reads it as the task", () => {
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-dash-")));
-  try {
-    mkdirSync(join(scratch, "proj"));
-    mkdirSync(join(scratch, "bin"));
-    // The fake npx records auto.sh's arguments, one per line (the task has no newline); route.ts is then run with them.
-    writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
-    chmodSync(join(scratch, "bin", "npx"), 0o755);
-    const env = { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_AGENT_PREFIX: "orchestration:", ORCH_MODE: "plain", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" };
-    const a = spawnSync("bash", [join(scripts, "auto.sh"), "- add tests", "proj"], { cwd: scratch, env, encoding: "utf8" });
-    assert.equal(a.status, 0, a.stderr);
-    const args = readFileSync(join(scratch, "npx-args"), "utf8").split("\n").filter((l) => l !== "");
-    const routeArgs = args.slice(args.indexOf("src/route.ts") + 1);
-    const root = join(scripts, "..");
-    const r = spawnSync(process.execPath, ["--import", "tsx", join(root, "src", "route.ts"), ...routeArgs], { cwd: root, encoding: "utf8" });
-    assert.equal(r.status, 0, r.stderr);
-    assert.equal(JSON.parse(r.stdout).mode, "plain");
-    const routes = readFileSync(join(scratch, "proj", ".claude", "state", "routes.jsonl"), "utf8");
-    assert.equal(JSON.parse(routes.trim().split("\n").at(-1) ?? "{}").task, "- add tests");
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test("auto.sh exits 1 with 'repo folder not found' before any triage call when the repo folder does not exist", () => {
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "auto-missing-")));
-  try {
-    mkdirSync(join(scratch, "bin"));
-    writeFileSync(join(scratch, "bin", "npx"), `#!/bin/sh\nprintf '%s\\n' "$@" > "${scratch}/npx-args"\necho '{"mode":"orchestrate","reason":"stub"}'\n`);
-    chmodSync(join(scratch, "bin", "npx"), 0o755);
-    const r = spawnSync("bash", [join(scripts, "auto.sh"), "task", "nope"], {
-      cwd: scratch,
-      env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_DRY_RUN: "1", ORCH_MODE: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "" },
-      encoding: "utf8",
-    });
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /repo folder not found/);
-    assert.ok(!existsSync(join(scratch, "npx-args")), "triage (npx) must not run for a missing folder");
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
-  }
-});
-
-test("report.mjs writes a report for a legacy runs.jsonl row without subagents", () => {
-  const repo = mkdtempSync(join(tmpdir(), "report-legacy-"));
-  try {
-    const state = join(repo, ".claude", "state");
-    mkdirSync(state, { recursive: true });
-    writeFileSync(join(state, "runs.jsonl"), JSON.stringify({ ts: "2026-01-01T00:00:00Z", task: "old", ok: true, cost_usd: 0.5 }) + "\n");
-    const r = spawnSync("node", [join(scripts, "report.mjs"), repo], { encoding: "utf8" });
-    assert.equal(r.status, 0, r.stderr);
-    assert.ok(existsSync(join(state, "report.html")));
+    return r.stdout.replace(/\n$/, "").split("\n");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+}
+
+/** Between --disallowedTools and --allowedTools. @param {string[]} args */
+const denyRules = (args) => args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--allowedTools"));
+/** After --allowedTools, up to the `--` that ends the options. @param {string[]} args */
+const allowRules = (args) => {
+  const from = args.indexOf("--allowedTools") + 1;
+  const end = args.indexOf("--", from);
+  return args.slice(from, end < 0 ? undefined : end).filter(Boolean);
+};
+
+// A model of how a permission rule's `*` matches: Bash(<pattern>) matches a command when the whole command fits the
+// pattern with every `*` standing for any run of characters (spaces included). Claude Code splits compound commands
+// before it matches; every command here is one simple command.
+/** @param {string} rule */
+const ruleRe = (rule) => {
+  const m = /^Bash\((.*)\)$/s.exec(rule);
+  if (!m) return null;
+  return new RegExp(`^${String(m[1]).replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "s");
+};
+/** @param {string[]} rules @param {string} cmd */
+const matches = (rules, cmd) => rules.filter((r) => ruleRe(r)?.test(cmd));
+/** @param {string[]} args @param {string} cmd */
+const permitted = (args, cmd) => matches(allowRules(args), cmd).length > 0 && matches(denyRules(args), cmd).length === 0;
+
+// The rules every headless run had before this fix (orchestrate.sh 1.4.5), for the "nothing widens" checks.
+const OLD_ALLOW_GIT = ["Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git rev-parse*)", "Bash(git add*)", "Bash(git commit*)", "Bash(git merge*)", "Bash(git branch*)", "Bash(git worktree*)", "Bash(git reset --merge)", "Bash(git -C *)"];
+const OLD_DENY = ["Bash(git push*)", "Bash(git * push*)", "Bash(git remote*)", "Bash(git * remote*)", "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)"];
+
+const R = "/work/repo";
+const WT = `${R}/.claude/worktrees/agent-a1b2`;
+
+test("W-3: the five git forms the old `Bash(git -C *)` reached are not allowed in a headless run", () => {
+  const args = dryRun();
+  const five = [`git -C ${R} reset --hard`, `git -C ${R} clean -fdx`, `git -C ${R} checkout -- .`, `git -C ${R} -c core.hooksPath=/x commit -m m`, `git -C ${R} -c alias.p=push p origin main`];
+  for (const cmd of five) {
+    assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${matches(allowRules(args), cmd).join(", ")}`);
+  }
+});
+
+test("W-3: other spellings of reset --hard, clean, -c and --config-env, and git forms a wildcard path can reach, are refused", () => {
+  const args = dryRun();
+  const refused = [
+    "git reset --hard", "git reset --hard HEAD~1", "git reset -q --hard", "git reset --har", `git -C ${R} reset -q --hard`, `git -C ${R} reset --ha HEAD`, `git -C${R} reset --hard`,
+    "git clean -fdx", "git clean -n", `git -C ${WT} clean -f`, `git -C ${R} clean -fdx status`,
+    "git -c core.hooksPath=/x commit -m m", "git -c alias.p=push p origin main", `git -C ${R} -c user.name=x commit -m m`, `git -C ${WT} -c core.hooksPath=/x add -A`,
+    "git --config-env=core.hooksPath=X commit -m m", `git -C ${R} --config-env core.hooksPath=X commit -m m`,
+    `git -C ${R} checkout -- . diff`, `git -C ${R} restore --ignore-unmatch . status`, "git checkout -- .", "git restore .",
+    `git -C ${R} config core.hooksPath /x status`, "git config core.hooksPath /x", `git -C ${R} rm -rf --ignore-unmatch . log`,
+  ];
+  for (const cmd of refused) assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${matches(allowRules(args), cmd).join(", ")}`);
+});
+
+test("W-3: every git form the agents use in a headless run is still allowed", () => {
+  const args = dryRun();
+  const needed = [
+    // integrator: merge, abort, the merge-in-progress check, status, the last-resort reset, checkpoint add and commit
+    "git merge --no-ff --no-edit worktree-agent-a1b2", "git merge --abort", "git rev-parse -q --verify MERGE_HEAD", "git status", "git status --short", "git reset --merge",
+    "git add -- src/a.ts docs/b.md", 'git commit -m "orch: checkpoint wave 1"', "git branch --show-current",
+    `git -C ${R} merge --no-ff --no-edit worktree-agent-a1b2`, `git -C ${R} merge --abort`, `git -C ${R} rev-parse -q --verify MERGE_HEAD`, `git -C ${R} reset --merge`,
+    `git -C ${R} add -- src/a.ts`, `git -C ${R} commit -m "orch: checkpoint wave 1"`,
+    // isolated implementer, in its worktree or through git -C
+    "git add -A", 'git commit -m "fix-scripts"', "git diff", "git diff HEAD", `git -C ${WT} add -A`, `git -C ${WT} commit -m "s1"`, `git -C ${WT} status --short`, `git -C ${WT} diff`, `git -C ${WT} branch --show-current`,
+    // reviewer
+    `git -C ${R} diff HEAD...worktree-agent-a1b2`, `git -C ${R} log --oneline -5`, `git -C ${R} show HEAD --stat`, `git -C ${R} status --short`, "git worktree list", `git -C ${R} worktree list`, "git log --oneline -3", "git show HEAD",
+    // researcher's read-only list
+    `git -C ${R} ls-files src`, `git -C ${R} rev-list --count HEAD`, `git -C ${R} rev-parse HEAD`, `git -C ${R} branch --show-current`,
+    // a skill slice: the draft worktree from its brief, then add, commit, status and branch there
+    "git -C /s/skills worktree add -b skill/demo /h/.claude/orchestration/skill-drafts/private/demo main", "git -C /h/.claude/orchestration/skill-drafts/private/demo add -A",
+    'git -C /h/.claude/orchestration/skill-drafts/private/demo commit -m "skill: demo"',
+  ];
+  for (const cmd of needed) assert.ok(permitted(args, cmd), `${cmd}: allow ${matches(allowRules(args), cmd).join(", ") || "none"}, deny ${matches(denyRules(args), cmd).join(", ") || "none"}`);
+});
+
+test("W-3: every rule denied before is still denied, and no git allow rule reaches beyond the old ones", () => {
+  const args = dryRun();
+  const deny = denyRules(args);
+  for (const rule of OLD_DENY) assert.ok(deny.includes(rule), `${rule} is no longer denied`);
+  const gitAllow = allowRules(args).filter((r) => r.startsWith("Bash(git"));
+  assert.ok(!gitAllow.includes("Bash(git -C *)"), "the open git -C rule is gone");
+  for (const rule of gitAllow) {
+    assert.ok(OLD_ALLOW_GIT.includes(rule) || rule.startsWith("Bash(git -C * "), `${rule} is not one of the old rules or a git -C form of one`);
+  }
+  // Each sample still refused, whatever the allow list says.
+  for (const cmd of ["git push origin main", `git -C ${R} push`, "git remote add o u", `git -C ${R} remote -v`, "sudo ls", "rm -rf /", "rm -fr x", "rm -r -f x", "rm -f -r x"]) {
+    assert.equal(permitted(args, cmd), false, cmd);
+  }
+});
+
+test("W-3: the git denies are on every headless run, also with a replaced allow list", () => {
+  const def = denyRules(dryRun());
+  const replaced = denyRules(dryRun({ ORCH_ALLOWED_TOOLS: "Read\nBash(git -C *)" }));
+  assert.deepEqual(replaced, def);
+  assert.equal(permitted(dryRun({ ORCH_ALLOWED_TOOLS: "Read\nBash(git -C *)" }), `git -C ${R} reset --hard`), false);
 });

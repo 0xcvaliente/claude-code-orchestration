@@ -13,6 +13,12 @@ const verifySh = join(root, ".claude", "hooks", "verify.sh");
 const orchestrateSh = join(root, "scripts", "orchestrate.sh");
 
 const tmp = () => mkdtempSync(join(tmpdir(), "orch-vt-"));
+// The git denies orchestrate.sh adds for headless runs only, after UNSAFE_BASH (audit W-3; not in .claude/settings.json).
+const HEADLESS_GIT_DENY = [
+  "Bash(git -c*)", "Bash(git * -c*)", "Bash(git --config-env*)", "Bash(git * --config-env*)", "Bash(git config*)", "Bash(git * config*)",
+  "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean*)",
+  "Bash(git checkout*)", "Bash(git * checkout*)", "Bash(git restore*)", "Bash(git * restore*)", "Bash(git * rm *)",
+];
 function detect(files: Record<string, string>, env: Record<string, string> = {}) {
   const dir = tmp();
   for (const [name, body] of Object.entries(files)) {
@@ -126,7 +132,7 @@ test("orchestrate.sh dry run: push, remote, sudo and rm -rf are denied on the co
     });
     assert.equal(r.status, 0, r.stderr);
     const lines = r.stdout.split("\n");
-    assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), UNSAFE_BASH);
+    assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), [...UNSAFE_BASH, ...HEADLESS_GIT_DENY]);
   }
 });
 
@@ -705,7 +711,7 @@ test("orchestrate.sh dry run: a Python ORCH_TEST_CMD allows python3, and the uns
   const allowed = lines.slice(lines.indexOf("--allowedTools") + 1).filter(Boolean);
   assert.ok(allowed.includes("Bash(python3 *)"), allowed.join(", "));
   assert.ok(allowed.includes("Bash(mkdir -p *)"));
-  assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), UNSAFE_BASH);
+  assert.deepEqual(lines.slice(lines.indexOf("--disallowedTools") + 1, lines.indexOf("--allowedTools")), [...UNSAFE_BASH, ...HEADLESS_GIT_DENY]);
   // No allow rule names a denied command, or a wrapper that could carry one past the deny's prefix match.
   for (const rule of allowed) {
     assert.doesNotMatch(rule, /^Bash\((?:\*|(?:git (?:\* )?(?:push|remote)|sudo|rm|timeout|env|xargs|bash|sh|exec|nohup)[ *)])/, rule);
