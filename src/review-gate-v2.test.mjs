@@ -633,6 +633,35 @@ test("G-1 fold: a slice final and passed in the closed run counts as final in th
   assert.deepEqual([runs[1]?.closed, runs[1]?.slices.a?.final, runs[1]?.slices.a?.attempts], [false, false, 1]);
 });
 
+test("G-1 fold: a resume of the carried-final slice's implementer (a stop, no launch) ends its final state; a failing review then holds it", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const now = T0 + 20 * 60000;
+  const only = "PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a";
+  const head = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3, only)];
+  // The SendMessage resume of impl-a-1: a new stop record of the same agent, no launch record.
+  const resume = { stop: stopRecord({ ts: at(4), sessionId: "s1", agentId: "impl-a-1", role: "implementer", reply: "STATUS: pass" }) };
+  let { runs } = foldRuns(R(...head, resume), { now, env });
+  let a = runs[1]?.slices.a;
+  assert.deepEqual([runs[1]?.closed, a?.final, a?.passed, a?.attempts], [false, false, false, 1], "the resumed slice is open work of the new run");
+  ({ runs } = foldRuns(R(...head, resume, ...review(5, "a", "STATUS: fail\nGAP: 90 broken")), { now, env }));
+  a = runs[1]?.slices.a;
+  assert.deepEqual([runs[1]?.closed, a?.final, a?.passed, a?.reviews.at(-1)?.counted], [false, false, false, "fail"]);
+});
+
+test("G-1 Stop gate: a resume of a carried-final slice that a reviewer then fails blocks", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  s.plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a");
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: id, agent_type: IMPL });
+  s.stop(id, IMPL, "STATUS: pass");
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  const r = s.gate();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["last_reviewer_failed", "a"]);
+});
+
 test("G-1 Stop gate: a slice built before a second PLAN REVIEW and passed after it is allowed", () => {
   const s = session({ ORCH_ESCALATION: "off" });
   s.plan();

@@ -698,7 +698,7 @@ export function stopRecord(ctx) {
  * testGaveUp: times of the test gate's give-ups for the slice's implementers (max_blocks_reached of gate test,
  * bugfix_unverified_gave_up); testGateGaveUp: one belongs to the latest attempt (later than attemptFrom).
  * carriedFinal: the slice was final and passed in the run a plain PLAN REVIEW closed, and this plan names it again: it
- * counts as final (and passed) here until an implementer of it is launched in this run.
+ * counts as final (and passed) here until an implementer of it works in this run (a launch, or a stop: a resume).
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
  * counting once (a test-gate block makes the agent stop again; a SendMessage resume adds a stop, not a launch).
  * lastImplAt: the latest implementer launch or stop. attemptFrom: the review time the latest attempt started after.
@@ -969,6 +969,9 @@ export function foldRuns(records, opts = {}) {
       if (r.reason === "tests_failed_isolated") s.testGates.push(ts);
       else s.testGaveUp.push(ts);
     } else if (role === "implementer") {
+      // Any implementer activity of the slice in this run (a stop: a SendMessage resume makes no launch) is new work:
+      // a slice carried over as final is open again.
+      s.carriedFinal = false;
       if (s.attempts === 0 || s.reviewedSince) {
         s.attempts += 1;
         s.attemptFrom = s.reviews.at(-1)?.ts ?? -Infinity;

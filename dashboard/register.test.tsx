@@ -1804,6 +1804,25 @@ test('run: a second plain plan carries an unreviewed slice with its agents and k
   expect(t.includes('▸ the next job')).toBe(true)
 })
 
+test('run: a resume of a slice carried over as final (a turn end, no spawn) opens it again; its failed review keeps the run open (brief.mjs G-1)', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS) // s1 is final in the first run
+  await spawnWith($, 'p2', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p2', PASS)
+  await finish($, 'b1', PASS) // a SendMessage resume of b1: its turn ends again, with no agent.spawn
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', FAIL)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'and?' }) // s1 was worked on and its review failed: not final, the run stays
+  expect((await texts($)).some(x => /^\S s1 /.test(x))).toBe(true)
+})
+
 test('waiting: the main turn ended with agents still running reads waiting for N agents, then signs off', async ($, on) => {
   await boot($, on)
   const s = $ as any
