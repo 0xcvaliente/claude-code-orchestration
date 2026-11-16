@@ -770,6 +770,334 @@ test("classify (audit 2026-11-16, J-1 to J-10): every bypass and its family is d
   ]), []);
 });
 
+// Audit 2026-11-16, second pass (fix-judge-2): spellings in the J-3, J-4, J-8 and J-9 families that still got past,
+// each confirmed in a shell, and their close variants. judge-differential.test.mjs reads this list too.
+const AUDIT_1116_2_DENY: string[] = [
+  // J-9: set -A and an assigning ${...} expansion write zsh's function and alias tables
+  "set -A functions f 'rm -rf ../victim'\nf",
+  "set +A functions f 'rm -rf x'",
+  "set -sA functions f 'rm -rf x'",
+  "set -A 'functions' f 'rm -rf x'",
+  "set -A aliases p 'git push origin main'",
+  "set -A galiases p 'rm -rf x'",
+  "builtin set -A functions f 'rm -rf x'",
+  "command set -A dis_functions f 'rm -rf x'",
+  ": ${functions[f]::=rm -rf ../victim}; f",
+  ": ${functions[f]:=rm -rf x}; f",
+  ": ${functions[f]=rm -rf x}; f",
+  "echo \"${aliases[p]::=git push origin main}\"",
+  ": ${saliases[txt]::=rm -rf x}",
+  ": ${functions::=x}",
+  "read -A functions <<< 'f x'",
+  "printf -v 'functions[f]' 'rm -rf x'",
+  "print -v 'aliases[p]' 'git push origin main'",
+  "export 'functions[f]=rm -rf x'",
+  "local 'functions[f]=rm -rf x'",
+  "declare -x aliases[p]=x",
+  "command declare 'functions[f]=rm -rf x'",
+  "builtin typeset 'functions[f]=rm -rf x'",
+  "env 'functions[f]=rm -rf x' zsh -c f",
+  "FOO=1 functions[f]='rm -rf x'",
+  "typeset -A functions; functions[f]='rm -rf ../victim'; f",
+  // J-9 behind a shell keyword, a zsh precommand modifier or `!` (the second review ran each in zsh -f)
+  "if typeset 'functions[f]=echo MARK'; then f; fi",
+  "if true; then typeset 'functions[f]=echo MARK'; fi; f",
+  "while typeset 'functions[f]=echo MARK'; do f; break; done",
+  "! typeset 'functions[f]=echo MARK'; f",
+  "if functions[f]='echo MARK'; then f; fi",
+  "! functions[f]='echo MARK'; f",
+  "if true; then functions[f]='echo MARK'; fi; f",
+  "noglob typeset 'functions[f]=echo MARK'; f",
+  "nocorrect typeset 'functions[f]=echo MARK'; f",
+  "true; - typeset 'functions[f]=echo MARK'; f",
+  "coproc typeset 'functions[f]=echo MARK'",
+  "repeat 1 typeset 'functions[f]=echo MARK'; f",
+  "if true; then set -A functions f 'echo MARK'; fi; f",
+  "if set -A functions f 'echo MARK'; then f; fi",
+  "noglob set -A functions f 'echo MARK'; f",
+  "noglob functions[f]='echo MARK'; f",
+  "do functions[f]=x",
+  "elif aliases[p]=x",
+  "if grep -q functions= f; then :; fi",
+  "! grep functions= f",
+  "noglob grep functions= f",
+  "eval grep functions= f",
+  "eval 'functions[f]=x'",
+  "printf -v x functions=y",
+  "env grep functions= f",
+  "FOO=1 grep functions= f",
+  "xargs grep functions= f",
+  // J-8: zsh's commands table points a command name at another program
+  "commands+=(ls /usr/bin/git); ls push origin main",
+  "commands[ls]=/usr/bin/git; ls push origin main",
+  "commands[ls]='/bin/rm'; ls -rf ../victim",
+  "commands=(ls /usr/bin/git)",
+  "commands+=(ls /bin/rm)",
+  "typeset 'commands[ls]=/usr/bin/git'",
+  "export commands[ls]=/usr/bin/git",
+  "set -A commands ls /usr/bin/git",
+  ": ${commands[ls]::=/usr/bin/git}; ls push origin main",
+  "! commands+=(zz /bin/echo); zz MARK",
+  "if commands[zz]=/bin/echo; then zz MARK; fi",
+  "then commands[ls]=/bin/rm",
+  // J-4: hook.<name>.command runs a program
+  "git -c hook.x.command='rm -rf ../victim' -c hook.x.event=pre-commit commit -m x",
+  "git -c 'hook.x.command=rm -rf x' commit -m x",
+  "git -c Hook.X.Command=evil commit -m x",
+  "git -c hook.a.b.command=evil hook run pre-commit",
+  "git --config-env=hook.x.command=CMD commit -m x",
+  "git --config-env hook.x.command=CMD commit -m x",
+  "git config hook.x.command 'rm -rf ../victim'",
+  "git config --add hook.x.command evil",
+  "git config --global hook.pre.command evil",
+  "env git -c hook.x.command=evil commit -m x",
+  // J-3: git filter-branch runs its filters through a shell
+  "git filter-branch -f --tree-filter 'rm -rf ../victim' HEAD",
+  "git filter-branch -f --msg-filter 'rm -rf ../victim' HEAD",
+  "git filter-branch --tree-filter='rm -rf ../victim' HEAD",
+  "git filter-branch --setup 'rm -rf x' HEAD",
+  "git filter-branch --env-filter 'sudo id' HEAD",
+  "git filter-branch --index-filter \"rm -rf x\" HEAD",
+  "git filter-branch --parent-filter 'rm -rf x' HEAD",
+  "git filter-branch --commit-filter 'rm -rf x' HEAD",
+  "git filter-branch --tag-name-filter 'rm -rf x' -- --all",
+  "git filter-branch --tree-filter \"$CMD\" HEAD",
+  "git -C . filter-branch --tree-filter 'rm -rf x' HEAD",
+  "env git filter-branch --msg-filter 'sudo id' HEAD",
+];
+
+test("classify (audit 2026-11-16, fix-judge-2): J-3, J-4, J-8, J-9 spellings are denied; J-9 and J-10 refuse only assignments and substitutions", () => {
+  assert.deepEqual(misread(AUDIT_1116_2_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // J-3 neighbours
+    ["git filter-branch --tree-filter 'git push origin main' HEAD", "judge"],
+    ["git filter-branch --subdirectory-filter lib HEAD", "pass"],
+    ["git filter-branch --msg-filter 'sed s/a/b/' HEAD", "pass"],
+    ["git filter-branch --tree-filter 'rm -f secret.txt' HEAD", "pass"],
+    ["git filter-branch --prune-empty -f HEAD", "pass"],
+    ["git log --grep filter-branch", "pass"],
+    // J-4 neighbours
+    ["git -c hook.x.event=pre-commit commit -m x", "pass"],
+    ["git config hook.x.event pre-commit", "pass"],
+    ["git hook run pre-commit", "pass"],
+    // J-8 neighbours
+    ["grep commands= f", "pass"],
+    ["rg 'commands\\[' src", "pass"],
+    ["echo commands", "pass"],
+    ["npm run commands", "pass"],
+    // J-9: a table word that is not an assignment passes
+    ["grep functions= f", "pass"],
+    ["rg 'aliases\\[' src", "pass"],
+    ["grep -rn 'functions\\[' src", "pass"],
+    ["grep -e 'functions+=' f", "pass"],
+    ["git log --grep 'functions='", "pass"],
+    ["echo 'aliases[p]=x'", "pass"],
+    ["sed -i 's/functions=/fns=/' f", "pass"],
+    ["git commit -m 'set functions=[] by default'", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${aliases[p]:-none}", "pass"],
+    ["set -e; grep functions= f", "pass"],
+    ["git grep 'functions\\[' -- src", "pass"],
+    ["echo functions=x", "pass"],
+    ["cat a | grep commands=", "pass"],
+    ["ls functions", "pass"],
+    ["< f grep functions=", "pass"],
+    ["/usr/bin/grep -n 'aliases[p]=' f", "pass"],
+    // J-10: arithmetic alone in a subscript runs no command
+    ["echo 'arr[$((i+1))]'", "pass"],
+    ["git commit -m 'use arr[$((i+1))]'", "pass"],
+    ["echo 'a[$((b[1]))]'", "pass"],
+    ["printf '%s\\n' 'x[$(( n * 2 ))]'", "pass"],
+    // J-10: a command substitution or a backtick in the subscript, also inside the arithmetic, stays denied
+    ["x='a[$(( $(rm -rf x) ))]'; echo $((x))", "deny"],
+    ["x='a[$((`rm -rf x`))]'; echo $((x))", "deny"],
+    ["x='a[$((rm -rf x) )]'; echo $((x))", "deny"],
+    ["x='a[$((rm -rf x); (y))]'; echo $((x))", "deny"],
+    ["let 'a[$((1))$(rm -rf x)]'", "deny"],
+    ["x='a[$((1)]'; echo $((x))", "deny"],
+    ["x='a[$(( (1) ))]'; echo $((x))", "deny"],
+  ]), []);
+});
+
+// fix-judge-2, third attempt: an assigning ${...} into a zsh table with something before the name. The first five got
+// past the judge and took effect in zsh -f 5.9 (a body that echoes a marker); the rest are the family around them:
+// each prefix character alone, doubled and combined, parameter flags, a nested expansion, each assigning operator,
+// with and without a subscript, in double quotes, behind a keyword, modifier or wrapper. judge-differential.test.mjs
+// reads this list too.
+const AUDIT_1116_2_TABLE_EXPANSION_DENY: string[] = [
+  "${#functions[f]::=echo MARK1}; f",
+  "${+functions[f]::=echo MARK2}; f",
+  "${+aliases[p]::=echo MARK3}",
+  "${#aliases[p]::=echo MARK}",
+  "${#commands[zz]::=/bin/echo}; zz MARK4",
+  ": ${#functions[f]::=echo MARK1}; f",
+  ": ${+functions[f]::=echo MARK2}; f",
+  ": ${+aliases[p]::=echo MARK3}",
+  ": ${#aliases[p]::=echo MARK}",
+  ": ${#commands[zz]::=/bin/echo}; zz MARK4",
+  ": ${#functions[f]::=rm -rf ../victim}; f",
+  ": ${+functions[f]:=rm -rf x}; f",
+  ": ${#functions[f]=rm -rf x}; f",
+  ": ${+commands[ls]=/bin/rm}; ls -rf x",
+  ": ${#commands[ls]:=/usr/bin/git}; ls push origin main",
+  ": ${#galiases[G]::=echo MARK}",
+  ": ${+saliases[txt]::=echo MARK}",
+  ": ${#dis_functions[g]::=echo MARK}; enable -f g; g",
+  ": ${+dis_aliases[q]:=echo MARK}",
+  ": ${#dis_galiases[G]=echo MARK}",
+  ": ${+dis_saliases[txt]::=echo MARK}",
+  ": ${^functions[f]::=echo MARK}; f",
+  ": ${=functions[f]::=echo MARK}; f",
+  ": ${~functions[f]::=echo MARK}; f",
+  ": ${##functions[f]::=echo MARK}",
+  ": ${++aliases[p]::=echo MARK}",
+  ": ${^^functions[f]::=echo MARK}; f",
+  ": ${==functions[f]::=echo MARK}",
+  ": ${~~functions[f]=echo MARK}; f",
+  ": ${#+functions[f]::=echo MARK}",
+  ": ${+#commands[zz]::=/bin/echo}",
+  ": ${#^functions[f]::=echo MARK}",
+  ": ${#~aliases[p]:=echo MARK}",
+  ": ${#=commands[zz]=/bin/echo}",
+  ": ${!functions[f]::=echo MARK}",
+  ": ${ functions[f]::=echo MARK}",
+  ": ${#functions::=x}",
+  ": ${+aliases:=x}",
+  ": ${#commands=x}",
+  ": ${(P)functions[f]::=echo MARK}",
+  ": ${(k)functions[f]::=echo MARK}; f",
+  ": ${(e)functions[f]::=echo MARK}; f",
+  ": ${(@)commands[zz]::=/bin/echo}; zz MARK",
+  ": ${(AA)functions::=f 'echo MARK'}",
+  ": ${(#)aliases[p]:=echo MARK}",
+  ": ${${functions[f]::=echo MARK}}; f",
+  ": ${#${functions[f]::=echo MARK}}; f",
+  ": ${+${aliases[p]::=echo MARK}}",
+  "echo \"${#functions[f]::=echo MARK}\"; f",
+  "echo \"${+commands[zz]=/bin/echo}\"; zz MARK",
+  ": \"x${#aliases[p]:=echo MARK}y\"",
+  "if : ${+functions[f]::=echo MARK}; then f; fi",
+  "while : ${#functions[f]::=echo MARK}; do f; break; done",
+  "! : ${#functions[f]::=echo MARK}; f",
+  "noglob : ${#functions[f]::=echo MARK}; f",
+  "builtin : ${#functions[f]::=echo MARK}; f",
+  "command echo ${+aliases[p]::=echo MARK}",
+  "env echo ${#commands[zz]::=/bin/echo}",
+  "grep ${#functions[f]::=echo MARK} x",
+  "git log --grep ${+functions[f]::=echo MARK}",
+  "x=${#functions[f]::=echo MARK}; f",
+];
+
+test("classify (audit 2026-11-16, fix-judge-2): an assigning ${...} into a zsh table is denied whatever stands before the name", () => {
+  assert.deepEqual(misread(AUDIT_1116_2_TABLE_EXPANSION_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // reading a table: no assigning operator
+    ["echo ${#functions}", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${+commands[git]}", "pass"],
+    ["echo ${+functions[f]}", "pass"],
+    ["echo ${#aliases[p]}", "pass"],
+    ["echo ${#functions[f]:-none}", "pass"],
+    ["echo \"${+commands[git]}\"", "pass"],
+    // an assigning operator on another name, also one that ends in or starts with a table name
+    ["echo ${x:=default}", "pass"],
+    ["echo ${count::=0}", "pass"],
+    ["echo ${#x:=default}", "pass"],
+    ["echo ${+count::=0}", "pass"],
+    ["echo ${x:=functions}", "pass"],
+    ["echo ${myfunctions::=1}", "pass"],
+    ["echo ${#functions_seen::=0}", "pass"],
+  ]), []);
+});
+
+// fix-judge-3: the same rule, decided on the widest reading instead of where the tokenizer thinks the expansion ends.
+// The escaped-brace and backslash-newline forms got past the judge and took effect in zsh -f 5.9 (a body that echoes a
+// marker); so did the quoted }, the nested expansion, the newline and the spaces in the subscript or the body.
+// judge-differential.test.mjs reads this list too.
+const AUDIT_1116_3_TABLE_EXPANSION_DENY: string[] = [
+  ": ${functions[x\\}]::=echo MARK two words}; 'x}'",
+  ": ${aliases[y\\}]::=echo MARK two words}; alias",
+  ": ${galiases[Y\\}]::=echo MARK}; alias -g",
+  ": ${commands[w\\}]::=/bin/echo}; 'w}' MARK two words",
+  ": ${dis_functions[x\\}]::=echo MARK}",
+  ": ${functions[f]::=echo a\\}b MARK}; f",
+  ": ${#functions[x\\}]:=echo MARK}; 'x}'",
+  ": ${func\\\ntions[h]::=echo MARK}; h",
+  ": ${#func\\\ntions[r]::=echo MARK}; r",
+  ": ${#\\\nfunctions[r]::=echo MARK}; r",
+  ": ${\\\nfunctions[r]::=echo MARK}; r",
+  ": ${functions[f]:\\\n:=echo MARK}; f",
+  ": ${functions[f]::\\\n=echo MARK}; f",
+  ": $\\\n{functions[f]::=echo MARK}; f",
+  ": ${functions\\\n[f]::=echo MARK}; f",
+  ": ${commands[q]:\\\n:=/bin/echo}; q MARK",
+  ": ${ali\\\nases[p]::=echo MARK}; alias",
+  ": ${functions['}']::=echo MARK}; f",
+  ": ${functions[\"}\"]::=echo MARK}; f",
+  ": ${aliases['}']::=echo MARK}; alias",
+  ": ${functions[${x:-g}]::=echo MARK}; g",
+  ": ${functions[${x:-\\}}]::=echo MARK}; '}'",
+  ": ${functions[a\nb]::=echo MARK}; $'a\\nb'",
+  ": ${functions[f]::=echo MARK\necho MARK}; f",
+  ": ${functions[a b]::=echo MARK}; 'a b'",
+  ": ${commands[a b]::=/bin/echo}; 'a b' MARK",
+  "if : ${functions[x\\}]::=echo MARK}; then 'x}'; fi",
+  "builtin : ${func\\\ntions[h]::=echo MARK}; h",
+  "env echo ${commands[w\\}]::=/bin/echo}",
+  ": \"${functions[x\\}]::=echo MARK}\"; 'x}'",
+  ": \"${func\\\ntions[h]::=echo MARK}\"; h",
+  ": \"${functions[a\nb]::=echo MARK}\"",
+  "zsh -c ': ${functions[x\\}]::=echo MARK}; f'",
+  "zsh -c ': ${func\\\ntions[h]::=echo MARK}; h'",
+  "bash -c \": \\${functions[x\\\\}]::=echo MARK}; 'x}'\"",
+  "eval ': ${functions[a b]::=echo MARK}; f'",
+  "zsh -fc 'if : \"${functions[x\\}]::=echo MARK}\"; then :; fi'",
+  "x=$(: ${functions[x\\}]::=echo MARK}); echo $x",
+];
+
+test("classify (audit 2026-11-16, fix-judge-3): a table name after ${ with any = later is denied, however the expansion is spelled", () => {
+  assert.deepEqual(misread(AUDIT_1116_3_TABLE_EXPANSION_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // reading a table with no = later, or an = only before the expansion
+    ["echo ${#functions}", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${+commands[git]}", "pass"],
+    ["n=${#functions}; echo $n", "pass"],
+    // assigning expansions of other names, also names that only contain a table's name
+    ["echo ${x:=default}", "pass"],
+    ["echo ${count::=0}", "pass"],
+    ["echo ${functions_dir:=x}", "pass"],
+    ["echo ${my_commands:=y}", "pass"],
+    // text inside single quotes at the top level stays text
+    ["echo '${functions[x\\}]::=echo MARK}'", "pass"],
+    ["git commit -m 'doc: ${functions[f]::=body} defines f'", "pass"],
+    ["grep -n '${func\\\ntions[h]::=' src/a.zsh", "pass"],
+    // the accepted over-block: a reading expansion of a table followed by any = (write the read as its own command)
+    ["[[ ${#functions} == 0 ]]", "deny"],
+    ["(( ${+commands[git]} )) && x=1", "deny"],
+    ["echo ${#aliases}; y=1", "deny"],
+  ]), []);
+});
+
+test("classify (fix-judge-3): the table-expansion scan is linear: 400,000 characters classify well under a second", () => {
+  const n = 100000;
+  const shapes = [
+    `: ${"${#}".repeat(n)} x=1`,
+    `echo ${"'${functions'".repeat(n / 3)}; x=1`,
+    `echo "${"${#x}".repeat(n)}"; y=1`,
+    `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
+    `echo ${"${functions_x}".repeat(n / 4)} z=1`,
+    `echo ${"${#\\\n".repeat(n / 2)}`,
+    `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
+  ];
+  for (const cmd of shapes) {
+    const t = performance.now();
+    classifyDetail(cmd, CWD);
+    const ms = performance.now() - t;
+    assert.ok(ms < 1000, `${cmd.slice(0, 20)}... (${cmd.length} characters): ${Math.round(ms)} ms`);
+  }
+});
+
 test("classify (audit 2026-11-16, J-15): a no-op editor and an empty IFS pass; any other value stays denied", () => {
   assert.deepEqual(misread([
     ["GIT_EDITOR=true git rebase --continue", "pass"],
