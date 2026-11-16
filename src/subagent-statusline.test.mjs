@@ -2,7 +2,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -89,6 +89,10 @@ test("rowFor: a row of Hangul Compatibility Jamo is cut to the width, never wide
 
 test("displayWidth: one code point's width matches Python's unicodedata for the Basic and Supplementary Multilingual Planes", (t) => {
   // Python's reference: 0 for marks and Cc/Cf, 2 for East Asian Wide or Fullwidth, else 1; "x" for unassigned.
+  // The widths change between Unicode versions, so Python is a fair reference only when its Unicode version is the
+  // one the hook's WIDE table was generated from (the hook says which). With another version the test is skipped.
+  const table = /generated from Unicode (\d+\.\d+\.\d+)/.exec(readFileSync(script, "utf8"))?.[1];
+  assert.ok(table, `no "generated from Unicode X.Y.Z" in ${script}: the WIDE table's Unicode version is unknown`);
   const py = [
     "import sys, unicodedata as u",
     "def w(c):",
@@ -101,6 +105,7 @@ test("displayWidth: one code point's width matches Python's unicodedata for the 
   const r = spawnSync("python3", ["-I", "-c", py], { encoding: "utf8", maxBuffer: 1 << 22 });
   if (r.error || r.status !== 0) return t.skip("python3 not available");
   const [version, want = ""] = r.stdout.split("\n");
+  if (version !== table) return t.skip(`python3 has Unicode ${version}, the WIDE table was generated from Unicode ${table}`);
   assert.equal(want.length, 0x20000);
   const wrong = [];
   for (let cp = 0; cp < 0x20000; cp++) {
