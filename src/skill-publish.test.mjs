@@ -153,3 +153,74 @@ test("a sealed file that is ignored, so never committed, stops the publish at th
     },
   );
 });
+
+// ---- W-1 (audit 2026-11-16): the same branch scan and path check as the skill gate, before anything is pushed and in
+// the dry run too.
+
+// Built at run time so this file holds no token-shaped literal.
+const TOKEN = ["gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"].join("");
+
+/** Seal the skill again and commit everything in the draft. @param {ReturnType<typeof setup>} s @param {string} msg */
+function commitAll(s, msg) {
+  seal(join(s.draft, "skills", NAME), { target: "private" });
+  git(s.draft, ["add", "-A"], s.base);
+  git(s.draft, ["commit", "-q", "-m", msg], s.base);
+}
+
+/** The publish was refused at the branch scan: exit 1, nothing pushed, gh never called. @param {ReturnType<typeof setup>} s @param {string[]} args */
+function refused(s, args) {
+  const r = publish(s, args);
+  assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
+  assert.match(r.stderr, /the branch skill\/demo-skill cannot be published as it is/);
+  assert.ok(!r.stderr.includes(TOKEN) && !r.stdout.includes(TOKEN), "no matched text in the output");
+  assert.deepEqual(ghCalls(s), []);
+  assert.equal(spawnSync("git", ["-C", s.origin, "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`]).status, 1, "nothing pushed");
+  return r.stderr;
+}
+
+test("W-1: a token added and then removed in a later commit stops the dry run and the publish before the push", () => {
+  withSetup(
+    (s) => {
+      rmSync(join(s.draft, "skills", NAME, "notes.md"));
+      commitAll(s, "remove the token");
+      for (const args of [["--dry-run"], ["--merge"]]) {
+        const msg = refused(s, args);
+        assert.match(msg, /skills\/demo-skill\/notes\.md, only in earlier commit [0-9a-f]{12}: GitHub token/);
+        assert.match(msg, /Recreate the branch's commits without it/);
+      }
+    },
+    { edit: (sd) => writeFileSync(join(sd, "notes.md"), `token ${TOKEN}\n`) },
+  );
+});
+
+test("W-1: a token in a file outside the skill folder stops the dry run, naming the file and the path", () => {
+  withSetup(
+    (s) => {
+      const msg = refused(s, ["--dry-run"]);
+      assert.match(msg, /notes\/leak\.md line 1: GitHub token/);
+      assert.match(msg, /The branch changes paths outside skills\/demo-skill\/ and README\.md: notes\/leak\.md\./);
+    },
+    { edit: (_sd, draft) => { mkdirSync(join(draft, "notes")); writeFileSync(join(draft, "notes", "leak.md"), `token ${TOKEN}\n`); } },
+  );
+});
+
+test("W-1: an extra file outside the allowed paths with no secret stops the publish for the path alone", () => {
+  withSetup(
+    (s) => {
+      const msg = refused(s, ["--merge"]);
+      assert.match(msg, /outside skills\/demo-skill\/ and README\.md: plan\.txt\./);
+      assert.doesNotMatch(msg, /GitHub token|e-mail|home-directory/);
+    },
+    { edit: (_sd, draft) => writeFileSync(join(draft, "plan.txt"), "A plan with nothing secret.\n") },
+  );
+});
+
+test("W-1: a clean branch passes the scan in the dry run, which still pushes nothing", () => {
+  withSetup((s) => {
+    const r = publish(s, ["--dry-run"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Scan the branch for secrets and paths outside the skill\n {3}ok/);
+    assert.deepEqual(ghCalls(s), []);
+    assert.equal(spawnSync("git", ["-C", s.origin, "rev-parse", "--verify", "--quiet", `refs/heads/${BRANCH}`]).status, 1, "nothing pushed");
+  });
+});

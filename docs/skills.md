@@ -1,6 +1,6 @@
 # Skills in the orchestrator
 
-How the native orchestrator uses installed skills, how a run can draft a new one, and how a person publishes that draft. The brief and reply lines are specified in [brief-grammar.md](brief-grammar.md); the gate details are in the hooks' own header comments (`plan-check.mjs`, `skill-gate.mjs`, `skill-seal.mjs`).
+How the native orchestrator uses installed skills, how a run can draft a new one, and how a person publishes that draft. The brief and reply lines are specified in [brief-grammar.md](brief-grammar.md); the gate details are in the hooks' own header comments (`plan-check.mjs`, `skill-gate.mjs`, `skill-scan.mjs`, `skill-seal.mjs`).
 
 ## Using installed skills
 
@@ -24,7 +24,7 @@ A run may draft one new skill when no installed skill covers knowledge the task 
 | 3. Design and architecture | Implementer | `SKILL.md` as a short router, long material in `references/`. |
 | 4. Draft | Implementer | Creates the draft worktree with the command the plan check gave, writes the skill and one catalog row. |
 | 5. Evaluate and iterate | Implementer, then the reviewer | The implementer checks trigger queries and walks two tasks through the draft; the reviewer does the same independently and checks claims against their sources. |
-| 6. Package and compliance | Implementer, checked by the skill gate | Validator, secret and personal-detail check, seal. |
+| 6. Package and compliance | Implementer, checked by the skill gate | Validator, secret and personal-detail check of the whole branch, path check, seal. |
 | 7. Deploy and verify | Implementer commits; a person publishes | The implementer commits on `skill/<name>` and never pushes or installs. `npm run skill-publish` pushes, opens the pull request and, after review, merges and installs. |
 | 8. Monitor and evolve | Implementer, then `npm run report` | The implementer names what to watch; the report's Skills section shows use over time. |
 
@@ -64,11 +64,12 @@ On an allow it appends one facts block through its single allow with `updatedInp
 
 1. `skills/<name>/SKILL.md` exists, its frontmatter `name` equals the folder, its `description` has 1 to 1024 characters, and it has at most 500 lines.
 2. The repository's `scripts/` is unchanged from its base, and `python3 -I -B scripts/validate.py skills/<name>` exits 0 (it includes the catalog-row check).
-3. No secret or personal detail in the skill's files or in the README lines the branch adds: private key blocks, well-known token prefixes, e-mail addresses, home-directory paths.
-4. `provenance.json` exists and the seal verifies.
-5. The worktree is clean, on `skill/<name>` (a branch git cannot name fails too), the branch is ahead of its base, and every file under `skills/<name>` is committed on the branch: the seal covers ignored and untracked files, which `git status` does not show and a push would not carry.
+3. No secret or personal detail (`secrets`): private key blocks, well-known token prefixes (GitHub, AWS, Slack, OpenAI, Anthropic, Google), e-mail addresses (the reserved example domains and `git@<host>` excepted), and home-directory paths: `/root`, `/home/<user>` and `/Users/<user>` followed by a slash or the end of the word (so `cd /Users/alice` and `see /home/bob.` count), also after a URL scheme such as `file://`, and the Windows form `C:\Users\<user>`; `/Users/Shared` and `C:\Users\Public`, `Default` and `All Users` name no person and pass. It scans every file under `skills/<name>/` on disk (bytes, whatever the content; a file over 5 MB or unreadable is a finding of its own), the README lines the branch adds, and every line that any commit of the branch adds, on every path: the commits from the branch's merge base with its base to the tip of `skill/<name>`, merge commits against each parent, binary files read as text. A hit that only an earlier commit holds is named with that commit, and the message says to recreate the branch's commits without it (for example `git reset --soft <merge base>`, seal, commit once), because removing the line in a new commit leaves it in the history the publish step pushes. The message gives file, line or commit, and kind, never the matched text.
+4. Only the skill's folder and README.md (`paths`): every path the branch's commits change, renames counted as both the old and the new path, is under `skills/<name>/` or is `README.md` (the catalog file). Anything else is named and blocks, with or without a secret in it, and so does a branch that shares no commit with its base: then what it would push cannot be checked.
+5. `provenance.json` exists and the seal verifies.
+6. The worktree is clean, on `skill/<name>` (a branch git cannot name fails too), the branch is ahead of its base, and every file under `skills/<name>` is committed on the branch: the seal covers ignored and untracked files, which `git status` does not show and a push would not carry.
 
-It blocks with one message listing every failure; after three blocks it lets the stop through and logs `skill_gate_gave_up` (the reviewer still reviews). Records go to `skill-gate.jsonl`.
+The branch scan and the path check live in `.claude/hooks/skill-scan.mjs`, which the publish script runs too. It blocks with one message listing every failure; after three blocks it lets the stop through and logs `skill_gate_gave_up` (the reviewer still reviews). Records go to `skill-gate.jsonl`: the failed reason codes and counts, never a matched secret.
 
 ### Publishing
 
@@ -76,14 +77,14 @@ A person runs:
 
 ```
 npm run skill-publish                                  # list the drafts
-npm run skill-publish -- <name> --dry-run              # print the steps
+npm run skill-publish -- <name> --dry-run              # print the steps (the branch scan still runs)
 npm run skill-publish -- <name>                        # push and open the pull request
 npm run skill-publish -- <name> --merge                # after review: merge, update, install, clean up
 ```
 
 Options: `--target private|public` (default private; a name that exists only under public is taken from there), `--base <branch>` (default: the branch the repository's main checkout is on), `--install "<command>"` (default `scripts/install.sh --target claude` when that file exists, else the install is skipped with a note).
 
-`scripts/skill-publish.mjs` verifies the seal, runs the validator in the draft, checks the worktree is clean, the branch has a commit of its own and every file under `skills/<name>` is committed on it, and records the branch's head commit. It refuses to push when origin's `skill/<name>` exists and is neither that head nor an ancestor of it (commits the seal never covered); otherwise it pushes `skill/<name>` (never a force push) and opens a pull request with `gh`. The body names the skill, the target, the provenance digest, and says an agent created it and a person must review it. With `--merge` it merges the pull request with `gh pr merge --match-head-commit <that head>`, so nothing pushed after the checks is merged, fast-forwards the main checkout, runs the installer and removes the draft worktree. Each failing step exits non-zero and says what to do. It refuses to run, except with `--dry-run`, inside a Claude Code session: publishing is a person's step.
+`scripts/skill-publish.mjs` verifies the seal, runs the validator in the draft, checks the worktree is clean, the branch has a commit of its own and every file under `skills/<name>` is committed on it, and records the branch's head commit. Then it runs the skill gate's branch scan and path check (checks 3 and 4 above, from `skill-scan.mjs`, against its merge base with the base branch) and refuses with the same findings, before anything is pushed; this step only reads, so it runs in `--dry-run` too. It refuses to push when origin's `skill/<name>` exists and is neither that head nor an ancestor of it (commits the seal never covered); otherwise it pushes `skill/<name>` (never a force push) and opens a pull request with `gh`. The body names the skill, the target, the provenance digest, and says an agent created it and a person must review it. With `--merge` it merges the pull request with `gh pr merge --match-head-commit <that head>`, so nothing pushed after the checks is merged, fast-forwards the main checkout, runs the installer and removes the draft worktree. Each failing step exits non-zero and says what to do. It refuses to run, except with `--dry-run`, inside a Claude Code session: publishing is a person's step.
 
 ### Monitoring
 
