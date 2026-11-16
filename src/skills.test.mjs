@@ -333,16 +333,41 @@ test("preference table: ui_work, motion, bugfix, tdd and security pick the first
   assert.deepEqual(preferenceRules({ role: "implementer", files: ["a.html"], kind: null, risky: false, text: "style the screen" }).map((r) => r.reason), ["ui_work"]);
 });
 
-test("goal picks: a goal match needs every word of the skill's name, two at least, so one shared word no longer suggests an unrelated skill", () => {
-  // Descriptions shaped like the installed skills the project's own audit and fix runs were offered (W-10).
-  const catalog = [
-    { name: "konnected-product-rules", description: "Product rules: who can see what, the approval workflow, project and application statuses, login, agreements and the version scope." },
-    { name: "anthropic-skills:built-in-browser", description: "The browser pane: persistent sign-ins, tabs, reading pages as text, site approvals, what the pane cannot open." },
-    { name: "documents", description: "Create, read, review and check documents and office files: Word, spreadsheets (.xlsx), slide decks, PDFs, reports and specs." },
-    { name: "payload", description: "Build, review or troubleshoot Payload CMS collections, fields, access control, hooks and migrations." },
-    { name: "repo-context", description: "Navigate a code repository using compact architecture notes, check notes against current source evidence." },
-    { name: "gsap-scrolltrigger", description: "GSAP ScrollTrigger scroll animation: scrubbing, pinning, trigger geometry." },
-  ];
+// Names and descriptions shaped like the installed skills of the project's own runs (W-10): words such as rules,
+// built, documents, payload and context are shared by several skills; supabase and vercel by two at most.
+const W10_CATALOG = [
+  { name: "konnected-product-rules", description: "Konnected product rules: who can see what, the approval workflow, project and application statuses, login, agreements and the version scope." },
+  { name: "konnected-payload-backend", description: "Konnected backend patterns on Payload CMS 3 with PostgreSQL. Collections for users, students, companies and projects, fail-closed access control, status-transition hooks, migrations." },
+  { name: "konnected-google-signin", description: "Sign-in for Konnected with Google, an email magic link, or password. Server-side OpenID Connect authorization code flow with PKCE, state and nonce, login sessions." },
+  { name: "konnected-access-testing", description: "Automated tests that prove Konnected's access rules through REST and the Local API of Payload, with test users; use the product rules for context." },
+  { name: "konnected-email", description: "Konnected emails sent from Payload hooks: templates, documents attached, the rules for consent and context." },
+  { name: "anthropic-skills:built-in-browser", description: "The built-in browser pane: persistent sign-ins, tabs, reading pages as text, site approvals, what the pane cannot open." },
+  { name: "anthropic-skills:chrome-browser", description: "Automate Chrome, not the built-in browser: clicks, forms, screenshots of documents and pages." },
+  { name: "claude-in-chrome", description: "Drive your Chrome session; the built-in pane has its own skill. Context windows and site rules apply." },
+  { name: "documents", description: "Create, read, review and check documents and office files: Word, spreadsheets (.xlsx), slide decks, PDFs, reports and specs." },
+  { name: "payload", description: "Build, review or troubleshoot Payload CMS collections, fields, access control, hooks and migrations." },
+  { name: "repo-context", description: "Navigate a code repository using compact architecture notes, check notes against current source evidence." },
+  { name: "supabase", description: "Any task involving Supabase: database, auth, edge functions, storage, logs and migrations." },
+  { name: "supabase-postgres-best-practices", description: "Postgres best practices maintained by Supabase: creating or altering a table, a migration, RLS policies, indexes, slow queries." },
+  { name: "security-threat-model", description: "Repository-grounded threat modeling that enumerates trust boundaries, assets, attacker capabilities, abuse paths and mitigations for a codebase." },
+  { name: "vercel-react-best-practices", description: "Review or improve React and Next.js code for performance, rendering, bundle size, waterfalls and data fetching." },
+  { name: "gsap-scrolltrigger", description: "GSAP ScrollTrigger scroll animation: scrubbing, pinning, trigger geometry." },
+];
+
+test("goal picks: a distinctive name word, or two name words, make a goal match; the skills a goal names are found", () => {
+  const p = (/** @type {string} */ role, /** @type {string} */ brief) => skillHints({ role, header: parseHeader(brief), brief, catalog: W10_CATALOG }).filter((x) => x.reason === "goal_match").map((x) => x.name);
+  const goal = (/** @type {string} */ files, /** @type {string} */ text) => `SLICE: a\nFILES: ${files}\nDEPENDS: none\nGOAL: ${text}`;
+  assert.deepEqual(p("implementer", goal("src/collections/Projects.ts", "add the Konnected Payload CMS Projects collection with fail-closed access control and status-transition hooks"))[0], "konnected-payload-backend");
+  assert.deepEqual(p("implementer", goal("src/auth/google.ts", "build the Konnected Google sign-in with OpenID Connect PKCE and magic link login"))[0], "konnected-google-signin");
+  assert.deepEqual(p("implementer", goal("supabase/migrations/001.sql", "add a Supabase migration with RLS policies for the profiles table"))[0], "supabase-postgres-best-practices");
+  assert.deepEqual(p("researcher", "GOAL: threat model the codebase, enumerate trust boundaries and abuse paths")[0], "security-threat-model");
+  assert.deepEqual(p("implementer", goal("app/page.tsx", "improve Next.js React performance, waterfalls and bundle size following Vercel React best practices"))[0], "vercel-react-best-practices");
+  // the audit's unrelated matches stay out
+  assert.deepEqual(p("reviewer", "SLICE: a\nGOAL: audit the hook code for defects in the rules, built context and documents payload handling"), []);
+});
+
+test("goal picks: one name word that several skills share no longer suggests an unrelated skill", () => {
+  const catalog = W10_CATALOG;
   const p = (/** @type {string} */ role, /** @type {string} */ brief) => skillHints({ role, header: parseHeader(brief), brief, catalog });
   const audit = [
     "SLICE: audit-hooks", "FILES: docs/data/audit/hooks.md", "DEPENDS: none",
