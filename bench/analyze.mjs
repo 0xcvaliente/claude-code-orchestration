@@ -201,10 +201,13 @@ export const READER_ARMS = ["reader-haiku", "reader-sonnet", "reader-routed"];
 // Document kinds the read router profiles as sonnet; same list as bench/tasks/d3-reader/score.mjs HARD (a test keeps them equal).
 export const READER_HARD = ["pdf-table", "pdf-scan", "chart", "xlsx-formula", "docx"];
 // Paired differences B - A for the reader arms (same machinery as PAIRS), with the reader metrics added.
+// What each arm runs today (bench/arms.mjs): reader-haiku a haiku researcher (rewritten, ORCH_ALLOW_HAIKU=1); reader-sonnet
+// every subagent forced to sonnet; reader-routed the researcher as shipped (sonnet since 1.3.0) plus the read router's notes.
+// In 0.4.0, when the published runs were made, the shipped researcher was haiku.
 export const READER_PAIRS = [
-  ["reader-haiku", "reader-routed"],
-  ["reader-sonnet", "reader-routed"],
-  ["reader-haiku", "reader-sonnet"],
+  ["reader-haiku", "reader-routed"], // haiku researcher -> sonnet researcher with router notes
+  ["reader-sonnet", "reader-routed"], // forced sonnet -> shipped sonnet with router notes
+  ["reader-haiku", "reader-sonnet"], // haiku researcher -> sonnet researcher
 ];
 export const READER_METRICS = ["score_pct", "pass", "tokens", "researcher_tokens", "hard_pct"];
 
@@ -669,11 +672,14 @@ export function evaluateHypotheses(runs) {
 // ---------- paired arm differences and pass^k ----------
 
 // Arm pairs (A, B) reported as paired differences B - A when both ran on the same (task, cell, rep).
+// What each arm runs today (bench/arms.mjs): all-haiku a haiku researcher (rewritten, ORCH_ALLOW_HAIKU=1), other agents
+// unchanged; all-sonnet every subagent forced to sonnet; routed shipped models (researcher on sonnet since 1.3.0) plus the
+// read router. In 0.4.0, when the published runs were made, the shipped researcher was haiku.
 export const PAIRS = [
   ["O-mix-030", "O-mix-plugin"],
-  ["all-haiku", "all-sonnet"],
-  ["all-haiku", "routed"],
-  ["all-sonnet", "routed"],
+  ["all-haiku", "all-sonnet"], // haiku researcher -> every subagent forced to sonnet
+  ["all-haiku", "routed"], // haiku researcher -> sonnet researcher with the read router
+  ["all-sonnet", "routed"], // forced sonnet -> shipped models with the read router
 ];
 
 const metricOf = (r, metric) => {
