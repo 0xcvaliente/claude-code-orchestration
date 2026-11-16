@@ -346,7 +346,8 @@ test("plan check: while a run is open, built-in and fork agents are blocked (bui
     for (const t of ["general-purpose", "Explore", "Plan", "claude", "claude-code-guide", "statusline-setup", "web-fetch", "fork", undefined]) {
       const r = builtin(t);
       assert.equal(r.status, 2, String(t));
-      assert.match(r.stderr, /run 1 is open.*built-in or a fork.*ORCH_ALLOW_BUILTINS=1/);
+      assert.match(r.stderr, /run 1 is open.*built-in or a fork/);
+      assert.doesNotMatch(r.stderr, /ORCH_/, "a block message never names an environment switch (G-6)");
       assert.equal(lastCheck(dir).reason, "builtin_agent_in_run");
     }
     for (const t of ["orchestration:researcher", "my-project-agent", "acme:Explore", "reviewer"]) assert.equal(builtin(t).status, 0, t);
@@ -437,6 +438,15 @@ test("plan check: records without a run id (older plan check) own files only whe
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// G-6 (audit 2026-11-16): block messages go to the orchestrator, which cannot set an environment switch, so none names
+// one. Every block message of the plan check is one source line holding a literal that starts with "Plan check:".
+test("plan check: no block message names an ORCH_ environment variable", () => {
+  const src = readFileSync(join(root, ".claude", "hooks", "plan-check.mjs"), "utf8");
+  const messages = src.split("\n").filter((l) => /["`]Plan check:/.test(l));
+  assert.ok(messages.length >= 14, `found ${messages.length} block messages`);
+  for (const m of messages) assert.doesNotMatch(m, /ORCH_[A-Z_]*/, m);
 });
 
 // G-12 (audit 2026-11-16): PATH: light is for a task with a single slice; a planned run whose plan names several slices

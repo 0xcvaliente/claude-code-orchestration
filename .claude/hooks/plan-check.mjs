@@ -856,7 +856,7 @@ if (role !== "implementer") {
   decide(
     "block",
     "builtin_agent_in_run",
-    `Plan check: run ${open.id} is open, and subagent_type "${type || "general-purpose"}" is a Claude Code built-in or a fork, which the run's gates do not track. Use orchestration:researcher to read or research, orchestration:implementer to change files and orchestration:reviewer to review. ORCH_ALLOW_BUILTINS=1 allows built-ins.`,
+    `Plan check: run ${open.id} is open, and subagent_type "${type || "general-purpose"}" is a Claude Code built-in or a fork, which the run's gates do not track. Use orchestration:researcher to read or research, orchestration:implementer to change files and orchestration:reviewer to review.`,
   );
 }
 
@@ -930,7 +930,7 @@ if (open && st?.stalled && stallGateOn(process.env)) {
     decide(
       "block",
       "replan_required",
-      `Plan check: slice ${slice} is stalled in run ${open.id}: its last two failed reviews report the same gap. Send the plan to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, then launch it again; or report the slice as failed. ORCH_STALL_GATE=off turns this check off.`,
+      `Plan check: slice ${slice} is stalled in run ${open.id}: its last two failed reviews report the same gap. Send the plan to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, then launch it again; or report the slice as failed.`,
     );
   }
   gaveUp.push("replan_required_gave_up");
