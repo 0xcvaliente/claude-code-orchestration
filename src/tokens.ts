@@ -1,4 +1,4 @@
-import { formatTokens as sharedFormatTokens, usageOf } from "../scripts/tokens.mjs";
+import { formatTokens as sharedFormatTokens, TOKENS_PER_USD as sharedTokensPerUsd, usageOf } from "../scripts/tokens.mjs";
 
 /** Token accounting for one worker, session or run: input + output + cache-read + cache-write, over every model used. */
 export interface TokenUsage {
@@ -23,3 +23,6 @@ export const totalTokens = (u: TokenUsage) => u.input + u.output + u.cacheRead +
 
 /** 950 -> "950", 4500 -> "4.5k", 45600 -> "46k", 1234567 -> "1.23M", 12345678 -> "12.3M". Single-sourced in scripts/tokens.mjs. */
 export const formatTokens: (count: number) => string = sharedFormatTokens;
+
+/** The launcher's rough conversion where a cap must be in dollars (claude's --max-budget-usd, the SDK's maxBudgetUsd). Single-sourced in scripts/tokens.mjs. */
+export const TOKENS_PER_USD: number = sharedTokensPerUsd;

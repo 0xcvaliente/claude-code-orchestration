@@ -15,6 +15,8 @@ export interface AgentRequest {
   auditFile?: string;
   /** JSON Schema for the final answer; the parsed value comes back as `structured`. */
   schema?: Record<string, unknown>;
+  /** A dollar cap for this one call (the SDK's maxBudgetUsd: the call ends with an `error_max_budget_usd` result). Triage only. */
+  maxBudgetUsd?: number;
 }
 
 export interface AgentResult {
@@ -65,6 +67,26 @@ export function sandboxFor(env: NodeJS.ProcessEnv, cwd: string): Options["sandbo
     allowUnsandboxedCommands: false,
     filesystem: { allowWrite: [cwd, tmpdir()] },
     network: { allowedDomains: domains },
+  };
+}
+
+/**
+ * Options for the triage call only. The triager reads the folder with Read, Glob and Grep under dontAsk, so it can never
+ * use an MCP tool, yet in a live run the session carried the MCP tools of the person's claude.ai account connectors,
+ * which the triager can never use, in every turn (about 110k tokens each) and wrote a session transcript
+ * (docs/data/live-checks-2026-11-16.md, Checks 8 and 10). strictMcpConfig with no
+ * servers drops every configured MCP server, disableClaudeAiConnectors the account connectors, and persistSession false
+ * the transcript, unless ORCH_SESSION_PERSISTENCE=1 (the launcher's switch for keeping transcripts). A request's
+ * maxBudgetUsd becomes the call's cap. Every other role's options stay as they were.
+ */
+function triageOptions(req: AgentRequest, env: NodeJS.ProcessEnv): Partial<Options> {
+  if (req.role !== "triager") return {};
+  return {
+    strictMcpConfig: true,
+    mcpServers: {},
+    settings: { agent: "", disableClaudeAiConnectors: true },
+    ...(env.ORCH_SESSION_PERSISTENCE !== "1" && { persistSession: false }),
+    ...(req.maxBudgetUsd !== undefined && { maxBudgetUsd: req.maxBudgetUsd }),
   };
 }
 
@@ -139,6 +161,7 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
         ...(hooks && { hooks }),
         ...(sandbox && { sandbox }),
         ...(req.schema && { outputFormat: { type: "json_schema" as const, schema: req.schema } }),
+        ...triageOptions(req, env),
       },
     });
 

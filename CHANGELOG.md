@@ -2,6 +2,33 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-11-16
+
+1.5.1 fixes the triage call: the one read-only model call that picks a route for `npm run auto`, `npm run route`, the `/route` skill and the SDK pipeline (`npm start`). It carried the MCP tools of the person's claude.ai account connectors, which it can never use, the token cap did not reach it, and it wrote a session transcript. Measured once, on one machine, the same triage used 14,030 tokens instead of 437,331, about 0.03 instead of 0.69 USD, with the same route and the same facts ([docs/data/live-checks-2026-11-16.md](docs/data/live-checks-2026-11-16.md), Check 10). Upgrading: no plugin setting and no hook changed; the plugin changes only in its version. The `/route` skill runs `npm run route` in a checkout of this repo (`$ORCH_HOME`, by default `~/claude-code-orchestration`), so it gets the fix only when that checkout is updated. `ORCH_BUDGET_TOKENS` now also caps the triage call of `npm run auto`, and a triage that reaches the cap sends the task to the orchestrate route (below, under Changed).
+
+### Changed
+
+- **`ORCH_BUDGET_TOKENS` also caps the triage call** (`scripts/auto.sh`, `src/route.ts`, `src/triage.ts`). `scripts/auto.sh` passes the cap to `src/route.ts` as `--budget`, and the triage call gets it as the SDK's `maxBudgetUsd`, at 1,000,000 tokens per dollar, the rate the launcher uses for its sessions. The cap applies to each session on its own: first the triage call, then each session the route starts. A run can therefore spend more than the cap in total. A triage stopped by the cap is not retried. It takes the fallback of a failed triage, the orchestrate route, and its logged reason says `the token cap stopped it, error_max_budget_usd`; that orchestrate session gets the same cap again. What to do: keep the cap well above what a triage costs, or force a route with `ORCH_MODE` to skip triage. The cap is spent in dollars, not in tokens used, and a dollar of real use is between about 0.2M and 1.8M tokens, depending on the mix of cache and output tokens. The recorded triage used 14,030 tokens but cost about 0.029 USD, so it took about 29k tokens of the cap; a cap of 20k would have stopped it.
+- **`npm run route` takes `--budget`** (`src/route.ts`). `npm run route -- --repo <folder> --task "..." --budget 300k` caps the triage call with a token count of at least 10k. A bad value prints the usage message and exits 2 before any model call. What to do: nothing; without the flag the call has no cap, as before. The `/route` skill passes none.
+
+### Fixed
+
+- **The triage call carried MCP tools it can never use** (`src/agent.ts`, `triageOptions`). It loaded the MCP tools of the person's claude.ai account connectors: 144 in the recorded run (Notion, Google Drive, Claude Docs and Canva), 99 in the tool list of every request and 45 more that arrived later. The triager reads with Read, Glob and Grep only, so it can use none of them. The call now passes `strictMcpConfig: true` and `mcpServers: {}`, and `disableClaudeAiConnectors: true` in its `settings`, so it takes no account connector and no MCP server, also none a project or a plugin names. In Check 10 its session had no MCP tool. Part of the measured cut is one request fewer, which was the model's choice, not the fix.
+- **The token cap did not reach the triage call** (`scripts/auto.sh`, `src/route.ts`); 1.5.0 listed this as known. See Changed.
+- **The triage call wrote a session transcript** (`src/agent.ts`). It writes none under `~/.claude/projects/` unless `ORCH_SESSION_PERSISTENCE=1`, the switch that also keeps the transcripts of the launcher's own sessions.
+
+These fixes are in code the SDK pipeline shares, so its triage call also takes no MCP server or account connector and writes no transcript. Its `--budget` accounting is unchanged: triage tokens count as before, and its triage call gets no dollar cap.
+
+### Known and not fixed
+
+- The other SDK roles (planner, explorer, writer, verifier, solo) pass the options the triage call passed before this fix, so nothing keeps MCP servers or account connectors out of them. Their token use was not measured.
+- The cap is per session, not per run (see Changed).
+- The triage session still runs the project's hooks, as in Check 8.
+- A small haiku call of about 1,700 tokens appears in both recorded runs (Checks 8 and 10); its source was not looked into.
+- Whether `strictMcpConfig` alone keeps account connectors out was not established, so `disableClaudeAiConnectors` is passed as well.
+- A triage stopped by the cap is covered by tests only; the live call used 0.03 of its 0.3 USD cap.
+- Benchmark numbers of the `AUTO` arm published before 1.5.1 count the triage call as it ran before this fix (`bench/analyze.mjs` adds each logged route's tokens).
+
 ## [1.5.0] - 2026-11-16
 
 1.5.0 carries the fixes of the audit of 2026-11-16: 79 findings, of which 65 are fixed, 2 fixed in part, 9 were wrong pages, 1 is kept as a stated limit and 2 were decided against. The full list, with the fix of each, is in [docs/research-2026-11-16.md](docs/research-2026-11-16.md); this entry names what a person notices. It also asks for shorter output to the person, keeps the test gate under Claude Code's subagent stall limit, and rewrites the documentation. Upgrading: no plugin setting changed. Plain sessions now use the Concise output style, `npm run native` and `npm run auto` print text to a terminal, the Bash judge and the headless git rules refuse more forms, and the native judge keeps its record of your requests in a new place (each below, under Changed). The changed hooks take effect in a new session.
@@ -387,6 +414,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.5.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.1
 [1.5.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.0
 [1.4.5]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.5
 [1.4.4]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.4

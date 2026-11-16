@@ -84,8 +84,42 @@ test("every worker opts out of a project's main agent: project settings are load
   for (const role of Object.keys(ROLES) as Role[]) {
     const o = await optionsFor(req(role), {});
     assert.deepEqual(o.settingSources, ["project"], role);
-    assert.deepEqual(o.settings, { agent: "" }, role);
+    assert.equal((o.settings as { agent?: string }).agent, "", role);
+    if (role !== "triager") assert.deepEqual(o.settings, { agent: "" }, role);
     assert.equal((o as { agent?: string }).agent, undefined, `${role}: no --agent equivalent either`);
+  }
+});
+
+// Live run of 2026-11-16 (docs/data/live-checks-2026-11-16.md, Checks 8 and 10): the triage session of `npm run auto`
+// carried the MCP tools of the person's claude.ai account connectors, which the triager can never use (about 110k tokens
+// per turn), and wrote a session transcript.
+const LEAN_KEYS = ["strictMcpConfig", "mcpServers", "persistSession", "maxBudgetUsd"] as const;
+
+test("triage call: no MCP server, no claude.ai connector, no session transcript", async () => {
+  const o = await optionsFor(req("triager"), {});
+  assert.equal(o.strictMcpConfig, true);
+  assert.deepEqual(o.mcpServers, {});
+  assert.deepEqual(o.settings, { agent: "", disableClaudeAiConnectors: true });
+  assert.equal(o.persistSession, false);
+  assert.equal("maxBudgetUsd" in o, false, "no cap unless the request carries one");
+  const kept = await optionsFor(req("triager"), { ORCH_SESSION_PERSISTENCE: "1" });
+  assert.equal("persistSession" in kept, false, "ORCH_SESSION_PERSISTENCE=1 keeps the transcript (the SDK default)");
+  assert.equal(kept.strictMcpConfig, true);
+  assert.deepEqual(kept.settings, { agent: "", disableClaudeAiConnectors: true });
+});
+
+test("triage call: a request's dollar cap reaches query() as maxBudgetUsd", async () => {
+  const o = await optionsFor(req("triager", { maxBudgetUsd: 0.3 }), {});
+  assert.equal(o.maxBudgetUsd, 0.3);
+});
+
+test("every other role keeps its options: none of the triage-only keys, the same settings", async () => {
+  for (const role of (Object.keys(ROLES) as Role[]).filter((r) => r !== "triager")) {
+    for (const env of [{}, { ORCH_SESSION_PERSISTENCE: "1" }, { ORCH_SESSION_PERSISTENCE: "0" }]) {
+      const o = await optionsFor(req(role), env);
+      for (const k of LEAN_KEYS) assert.equal(k in o, false, `${role}: ${k}`);
+      assert.deepEqual(o.settings, { agent: "" }, role);
+    }
   }
 });
 
