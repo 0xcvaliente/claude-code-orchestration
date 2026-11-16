@@ -98,6 +98,20 @@ export const duplicate = (script) => plugin && projectRegisters(project, script)
 const own = stateDirFor(project, { plugin });
 export const stateDir = own.dir;
 
+// The native Bash judge's record of what the person typed (prompt-capture.mjs writes it, judge-hook.mjs reads it, and it
+// is the judge's only authority). It lives in a per-user folder outside any project, keyed by the project path like the
+// per-user state dir, for the project and plugin copies alike: <config dir>/orchestration/judge-prompts/<key>. The
+// project's state dir is inside the folder the judged worker writes to, so a store there let a worker append a request
+// the person never typed (audit 2026-11-16 J-12). judge-hook.mjs refuses a Bash command that names this folder.
+export const PROMPT_STORE_NAME = "judge-prompts";
+
+/** @param {string} project @param {NodeJS.ProcessEnv} [env] */
+export const promptStoreDir = (project, env = process.env) =>
+  join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "orchestration", PROMPT_STORE_NAME, stateKey(project));
+
+/** prompts.jsonl of this hook's project. */
+export const promptStore = join(promptStoreDir(project), "prompts.jsonl");
+
 /** @param {{ dir: string, inProject: boolean }} [state] */
 export function ensureStateDir(state = own) {
   mkdirSync(state.dir, { recursive: true });
