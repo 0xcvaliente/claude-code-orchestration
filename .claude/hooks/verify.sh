@@ -10,7 +10,9 @@
 # spec, fixtures, __fixtures__, golden, snapshots or __snapshots__ (golden files and snapshots feed the tests).
 # Logs allow no_code_changes and skips the tests. Judged from git, never from what the agent says. A clean tree (an
 # isolated slice that already committed), a folder that is not a git work tree and any other path keep the test run.
-# Isolated worktrees (cwd under .claude/worktrees/) follow ORCH_GATE_ISOLATED, because sibling slices
+# In an isolated worktree the paths the slice committed since its base (the fork point) must be prose as well.
+# Isolated worktrees (cwd under .claude/worktrees/, other than the session's own project folder, which is the shared
+# tree also when the session itself runs in a worktree) follow ORCH_GATE_ISOLATED, because sibling slices
 # may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
 # block (gate as usual), skip (do not run tests).
 # Test baseline (ORCH_BASELINE: inform by default, allow, or off): when the tests fail and the tree has changes against
@@ -287,7 +289,21 @@ only_prose_changed() {
         ;;
     esac
   done < <(GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=all -z 2>/dev/null)
-  [ "$seen" = 1 ]
+  [ "$seen" = 1 ] || return 1
+  # An isolated slice commits its work, so HEAD moves with it: what it committed since its base (the fork point from the
+  # main worktree's HEAD, as bugfix-check.mjs baseInfo computes it) must be prose too. A base that cannot be found keeps
+  # the tests. --no-renames lists both sides of a move.
+  [ "$isolated" = 1 ] || return 0
+  local main_wt main_head fork
+  main_wt="$(GIT_OPTIONAL_LOCKS=0 git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -n1)"
+  [ -n "$main_wt" ] || return 1
+  main_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$main_wt" rev-parse --verify -q HEAD 2>/dev/null)" || return 1
+  fork="$(GIT_OPTIONAL_LOCKS=0 git merge-base HEAD "$main_head" 2>/dev/null)" || return 1
+  [ -n "$fork" ] || return 1
+  while IFS= read -r -d '' entry; do
+    is_prose "$entry" || return 1
+  done < <(GIT_OPTIONAL_LOCKS=0 git diff --name-only --no-renames -z "$fork" HEAD 2>/dev/null || printf 'x\0')
+  return 0
 }
 
 # A string field of the event JSON, with its escapes \" \\ and \/ undone (sed -E only: it exists wherever the hook
