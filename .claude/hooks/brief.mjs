@@ -674,8 +674,11 @@ export function stopRecord(ctx) {
  * @typedef {{
  *   ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[],
  *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[],
- *   implAt: number | null
+ *   implAt: number | null, agent: string | null
  * }} Review
+ * agent: the reviewer's agent_id (null when the stop record has none). A stop record marked `continues` (journal.mjs: the
+ * same turn going on after a stop hook, such as the stop after a forced hand-back) replaces the slice's latest review
+ * when that review is the same agent's and no implementer launch or stop of the slice came after it: one review.
  * implAt: the slice's latest implementer launch or stop when the review arrived (its attempt): two reviews with
  * different implAt have an implementer attempt between them.
  * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
@@ -690,8 +693,10 @@ export function stopRecord(ctx) {
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
  *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
  *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[],
- *   carriedFinal: boolean
+ *   carriedFinal: boolean, testGaveUp: number[], testGateGaveUp: boolean
  * }} SliceState
+ * testGaveUp: times of the test gate's give-ups for the slice's implementers (max_blocks_reached of gate test,
+ * bugfix_unverified_gave_up); testGateGaveUp: one belongs to the latest attempt (later than attemptFrom).
  * carriedFinal: the slice was final and passed in the run a plain PLAN REVIEW closed, and this plan names it again: it
  * counts as final (and passed) here until an implementer of it is launched in this run.
  * launches: implementer launch records. attempts: implementer stops, a run of stops with no review between them
@@ -713,6 +718,9 @@ export function stopRecord(ctx) {
  * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
  */
 
+// Test-gate records the fold reads (joined to a launch by agent_id): an isolated failure, and the test gate's give-ups
+// (T-9, audit 2026-11-16), each a doubt signal for the slice's latest attempt.
+const TEST_GATE_REASONS = new Set(["tests_failed_isolated", "max_blocks_reached", "bugfix_unverified_gave_up"]);
 /** @param {unknown} ts */
 const time = (ts) => (typeof ts === "number" ? ts : Date.parse(String(ts ?? "")) || 0);
 /** @param {unknown} v @returns {any[]} */
@@ -725,6 +733,7 @@ const newSlice = (slice, planned) => ({
   slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
   countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [], carriedFinal: false,
+  testGaveUp: [], testGateGaveUp: false,
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
@@ -764,6 +773,7 @@ function settle(s, env) {
   const latest = currentReviews(s).at(-1);
   const counted = latest ? countedStatus(latest) : null;
   s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
+  s.testGateGaveUp = s.testGaveUp.some((t) => t > s.attemptFrom);
   s.passed = s.carriedFinal || counted === "pass";
   s.gaveUp = !s.carriedFinal && counted === "fail" && s.attempts >= 1 + MAX_RETRIES;
   s.final = s.carriedFinal || s.gaveUp || (s.passed && (hasOpusPass(s) || doubtSignals(s, env).length === 0));
@@ -807,7 +817,7 @@ export function foldRuns(records, opts = {}) {
   const gates = arr(rec.gates).filter(
     (g) =>
       g.gate === "test" &&
-      g.reason === "tests_failed_isolated" &&
+      TEST_GATE_REASONS.has(g.reason) &&
       typeof g.agent_id === "string" &&
       byAgent.has(g.agent_id) &&
       (g.session_id === undefined || g.session_id === byAgent.get(g.agent_id)?.session_id),
@@ -956,7 +966,8 @@ export function foldRuns(records, opts = {}) {
     const s = slice ? run.slices[slice] : undefined;
     if (!s) continue;
     if (kind === 2) {
-      s.testGates.push(ts);
+      if (r.reason === "tests_failed_isolated") s.testGates.push(ts);
+      else s.testGaveUp.push(ts);
     } else if (role === "implementer") {
       if (s.attempts === 0 || s.reviewedSince) {
         s.attempts += 1;
@@ -970,6 +981,10 @@ export function foldRuns(records, opts = {}) {
       const checks = strings(Array.isArray(r.checks) ? r.checks : launch?.checks);
       const answers = r.answers && typeof r.answers === "object" ? r.answers : {};
       const validate = launch?.validate === true;
+      const agent = typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null;
+      // G-8: the stop after a forced hand-back is the same review as the stop before it: the later record replaces it.
+      const prev = s.reviews.at(-1);
+      if (r.continues === true && agent && prev?.agent === agent && (s.lastImplAt === null || prev.ts > s.lastImplAt)) s.reviews.pop();
       // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes, but only
       // with a verdict of its own: a validation reply with no STATUS supersedes nothing.
       if (validate && status !== null) {
@@ -978,7 +993,7 @@ export function foldRuns(records, opts = {}) {
           prev.counted = null;
         }
       }
-      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt });
+      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt, agent });
       s.reviewedSince = true;
     }
     settle(s, env);
@@ -1020,7 +1035,8 @@ function finish(run, s, env) {
 /**
  * Doubt signals for a slice: why it needs a passing opus review after its latest implementer. Empty when ORCH_ESCALATION
  * is off; ["always"] when it is always. Signals: risky, retry (an earlier counted failed review), read_answer and
- * open_items (in its latest counted passing review), tests_failed_isolated (for its latest implementer attempt),
+ * open_items (in its latest counted passing review), tests_failed_isolated and test_gate_gave_up (for its latest
+ * implementer attempt),
  * low_confidence_fail (a review after its latest implementer reported fail with every gap below the cutoff).
  * @param {SliceState} s @param {Record<string, string | undefined>} [env] @returns {string[]}
  */
@@ -1036,6 +1052,7 @@ export function doubtSignals(s, env = {}) {
   if (pass && Object.values(pass.answers).some((a) => a?.mode === "read")) signals.push("read_answer");
   if (pass && pass.open.length) signals.push("open_items");
   if (s.isolatedTestFailure) signals.push("tests_failed_isolated");
+  if (s.testGateGaveUp) signals.push("test_gate_gave_up");
   if (current.some((r) => r.lowConfidence === true && countedStatus(r) === "pass")) signals.push("low_confidence_fail");
   return signals;
 }

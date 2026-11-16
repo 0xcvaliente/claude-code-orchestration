@@ -80,6 +80,32 @@ test("report: cost by role and model at list prices, cache rewrites, unpriced st
   }
 });
 
+test("report: a continued stop record (G-8, one review recorded twice) counts its skills once; a resume counts again", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-continues-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    /** @param {string} id @param {string[]} used @param {object} [rest] */
+    const stop = (id, used, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "reviewer", slice: "a", run: 1, status: "pass", answers: {}, open: [], skills_used: used, ...rest });
+    const rows = [
+      stop("r1", ["tdd"]),
+      stop("r1", ["tdd", "code-review"], { continues: true }), // the stop after the hand-back: replaces the first
+      stop("r2", ["tdd"]),
+      stop("r2", ["tdd"]), // a SendMessage resume: another review
+    ];
+    writeFileSync(join(state, "journal.jsonl"), rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    // report.html goes where telemetry is.
+    writeFileSync(join(state, "telemetry.jsonl"), `${JSON.stringify({ ts: "t", session_id: "s1", hook_event_name: "SubagentStop", agent_id: "r1", agent_type: "reviewer" })}\n`);
+    const r = spawnSync("node", [join(root, "scripts", "report.mjs"), dir], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    const html = readFileSync(join(state, "report.html"), "utf8");
+    assert.match(html, /<td>tdd<\/td><td>0<\/td><td>3<\/td><td>0<\/td>/);
+    assert.match(html, /<td>code-review<\/td><td>0<\/td><td>1<\/td><td>0<\/td>/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("report: an agent that stops several times is counted once, with its last record (each record is a running total)", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-report-once-"));
   try {

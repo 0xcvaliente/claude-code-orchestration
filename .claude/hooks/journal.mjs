@@ -207,5 +207,17 @@ if (handback) {
   for (const k of ["answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"]) if (k in handback) fields[k] = handback[k];
   rec = /** @type {typeof rec} */ ({ ...rec, ...fields });
 }
+// The same turn going on after a stop hook (stop_hook_active true: the stop after a forced hand-back, or after a test-gate
+// block) with an earlier stop record of this agent: `continues: true` (G-8, audit 2026-11-16). The fold lets a reviewer's
+// continued stop replace its previous review instead of adding one; a SendMessage resume (stop_hook_active false) is a
+// new review. Only set when it applies, so other stops keep the record they had.
+if (p.stop_hook_active === true && agentId) {
+  try {
+    const log = slice ? "journal.jsonl" : "journal-pending.jsonl";
+    if (readJsonl(stateDir, log, sessionId).some((r) => r.session_id === sessionId && r.agent_id === agentId)) rec = /** @type {typeof rec} */ ({ ...rec, continues: true });
+  } catch {
+    // no earlier record readable: a stop of its own
+  }
+}
 append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);

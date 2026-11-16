@@ -230,14 +230,26 @@ for (const r of skillLogs.hints.rows) if (r?.decision === "hint") for (const n o
 const sliceKey = (r) => `${r?.session_id ?? ""}\n${r?.run ?? ""}\n${r?.slice ?? ""}`;
 /** @type {Map<string, string | null>} the latest review status of each slice */
 const lastReview = new Map();
-/** @type {{ skill: string, key: string, slice: string }[]} */
+/** @type {{ skill: string, key: string, slice: string, row: any }[]} */
 const usedIn = [];
+/** @type {Map<string, any>} each agent's latest stop record, so a continued stop (G-8: `continues`, the stop after a forced hand-back) replaces it */
+const lastOfAgent = new Map();
 for (const r of skillLogs.journal.rows) {
   if (!r || typeof r !== "object") continue;
+  const agentKey = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
+  const earlier = r.continues === true && agentKey ? lastOfAgent.get(agentKey) : undefined;
+  if (earlier) {
+    // One review recorded twice: take back what the earlier record counted.
+    for (const n of names(earlier.skills_used)) countOf(n).used--;
+    for (const n of names(earlier.skills_skipped)) countOf(n).skipped--;
+    const at = usedIn.findIndex((u) => u.row === earlier);
+    while (at >= 0 && usedIn[at]?.row === earlier) usedIn.splice(at, 1);
+  }
+  if (agentKey) lastOfAgent.set(agentKey, r);
   if (String(r.role ?? r.agent_type ?? "").split(":").pop() === "reviewer" && r.slice) lastReview.set(sliceKey(r), typeof r.status === "string" ? r.status : null);
   for (const n of names(r.skills_used)) {
     countOf(n).used++;
-    if (r.slice) usedIn.push({ skill: n, key: sliceKey(r), slice: String(r.slice) });
+    if (r.slice) usedIn.push({ skill: n, key: sliceKey(r), slice: String(r.slice), row: r });
   }
   for (const n of names(r.skills_skipped)) countOf(n).skipped++;
 }

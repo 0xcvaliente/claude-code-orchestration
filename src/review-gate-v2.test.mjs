@@ -516,6 +516,46 @@ test("Stop gate: an unfinished implementer next to another open problem is named
   assert.deepEqual(s.last().unfinished, [orphan]);
 });
 
+// ---- T-9 (audit 2026-11-16, fold side): a test gate that gave up for the slice's latest attempt is a doubt signal. ----
+test("T-9 fold: max_blocks_reached (gate test) or bugfix_unverified_gave_up of the latest attempt adds test_gate_gave_up", () => {
+  const items = [...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass")];
+  /** @param {string} reason @param {number} min @param {string} [gate] */
+  const fold = (reason, min, gate = "test") => {
+    const recs = { ...R(planLaunch(0), ...items), gates: [{ ts: at(min), gate, decision: "allow", reason, session_id: "s1", agent_id: "impl-a-1" }] };
+    return foldRuns(recs, { now: T0 + 30 * 60000, env: {} }).runs[0]?.slices.a;
+  };
+  for (const reason of ["max_blocks_reached", "bugfix_unverified_gave_up"]) {
+    const s = fold(reason, 1.6);
+    assert.deepEqual([s?.signals, s?.passed, s?.final], [["test_gate_gave_up"], true, false], reason);
+  }
+  assert.deepEqual(fold("max_blocks_reached", 1.6, "review")?.signals, [], "only the test gate's give-up");
+  assert.deepEqual(fold("tests_passed", 1.6)?.signals, []);
+  assert.deepEqual(foldRuns({ ...R(planLaunch(0), ...items), gates: [{ ts: at(1.6), gate: "test", reason: "max_blocks_reached", session_id: "s1", agent_id: "impl-a-1" }] }, { now: T0, env: { ORCH_ESCALATION: "off" } }).runs[0]?.slices.a?.signals, []);
+});
+
+// ---- G-8 (audit 2026-11-16): a reviewer stop marked `continues` (journal.mjs: stop_hook_active true after an earlier
+// stop of the same agent, the stop after a forced hand-back) replaces that reviewer's previous review of the slice. ----
+/** A second stop record of the reviewer that stopped at `min` in review(min, ...). @param {number} min @param {string} slice @param {string} reply @param {boolean} continues @returns {Item} */
+const again = (min, slice, reply, continues) => {
+  const first = `rev-${slice}-${min}`;
+  const rec = stopRecord({ ts: at(min + 0.1), sessionId: "s1", agentId: first, role: "reviewer", reply });
+  return { stop: continues ? { ...rec, continues: true } : rec };
+};
+test("G-8 fold: a continued reviewer stop is the same review; an unmarked second stop (a resume) is another review", () => {
+  const env = { ORCH_ESCALATION: "" };
+  const one = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), again(2, "a", "STATUS: fail\nGAP: 90 broken", true)], "a", env);
+  assert.deepEqual([one.reviews.length, one.countedFails], [1, 1]);
+  // The later record replaces the earlier: the delivered report decides.
+  const replaced = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass\nOPEN: none"), again(2, "a", "STATUS: pass\nOPEN: the edge case", true)], "a", env);
+  assert.deepEqual([replaced.reviews.length, replaced.signals], [1, ["open_items"]]);
+  // A resume of the same reviewer that turns a fail into a pass is two reviews: the fail still counts (retry).
+  const resumed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), again(2, "a", "STATUS: pass", false)], "a", env);
+  assert.deepEqual([resumed.reviews.length, resumed.signals], [2, ["retry"]]);
+  // A continued stop after an implementer attempt of the slice is a review of its own.
+  const later = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), ...implAttempt(2.05, "a"), again(2, "a", "STATUS: pass", true)], "a", env);
+  assert.equal(later.reviews.length, 2);
+});
+
 // ---- G-2 (audit 2026-11-16): the test gate runs beside the journal at an implementer's stop and decides minutes later,
 // so it can block after a reviewer already passed the slice. An implementer whose latest test-gate record is a block
 // with no later SubagentStop is gated like an unfinished one. ----
