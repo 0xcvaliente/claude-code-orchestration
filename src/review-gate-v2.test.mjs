@@ -4,7 +4,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -514,6 +514,49 @@ test("Stop gate: an unfinished implementer next to another open problem is named
   assert.equal(gaveUp.status, 0);
   assert.match(JSON.parse(gaveUp.stdout).systemMessage, /gave up after 2 blocks \(implementer_unfinished, last_reviewer_failed\)/);
   assert.deepEqual(s.last().unfinished, [orphan]);
+});
+
+// ---- G-2 (audit 2026-11-16): the test gate runs beside the journal at an implementer's stop and decides minutes later,
+// so it can block after a reviewer already passed the slice. An implementer whose latest test-gate record is a block
+// with no later SubagentStop is gated like an unfinished one. ----
+/** @param {{ dir: string }} s @param {string} agentId @param {string} decision @param {string} reason */
+const testGate = (s, agentId, decision, reason) =>
+  appendFileSync(join(s.dir, ".claude", "state", "gates.jsonl"), `${JSON.stringify({ ts: new Date(Date.now() + 5).toISOString(), gate: "test", decision, reason, session_id: "s1", agent_id: agentId })}\n`);
+
+test("G-2 Stop gate: a test-gate block after a passing review, with no later stop, blocks as implementer_unfinished, then gives up", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "tests_failed");
+  const stop = () => s.run("review-gate.mjs", { background_tasks: [] });
+  let r = stop();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.match(r.stderr, new RegExp(`test gate.*SendMessage \\(to: ${id}\\)`));
+  assert.equal(stop().status, 2);
+  r = stop();
+  assert.equal(r.status, 0);
+  assert.equal(s.last().reason, "implementer_unfinished_gave_up");
+});
+
+test("G-2 Stop gate: a test-gate block followed by a stop of the same implementer is answered; an allow record never gates", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  testGate(s, id, "block", "tests_failed");
+  // The agent fixed the tests and stopped again; then the review passed.
+  s.stop(id, IMPL, "STATUS: pass");
+  s.review("a", "STATUS: pass");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  const t = session({ ORCH_ESCALATION: "off" });
+  t.plan();
+  const other = t.impl("a");
+  t.review("a", "STATUS: pass");
+  testGate(t, other, "allow", "tests_passed");
+  assert.equal(t.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(t.last().reason, "reviewer_passed");
 });
 
 // ---- G-1 (audit 2026-11-16): a second plain PLAN REVIEW while slices are in flight. The run it closes hands an
