@@ -324,6 +324,10 @@ function readsDevice(arg, cwd) {
   return candidates.some((p) => {
     if (!p) return false;
     const normalised = posix.resolve(cwd, p);
+    // fix-researcher-cd: /dev itself is refused too (a recursive search of it reads devices), except a bare one-segment
+    // word run from `/` whose text alone names it (`grep -rn dev x`: a pattern, or an option's letters, pinned allowed);
+    // a researcher's folder is the project, and cd cannot reach `/`. Through a symlink it is refused like any spelling.
+    if (!p.includes("/") && normalised === "/dev") return false;
     const paths = [normalised];
     for (const q of [normalised, p.startsWith("/") ? p : `${cwd}/${p}`]) {
       try {
@@ -332,8 +336,14 @@ function readsDevice(arg, cwd) {
         // no such file: the other paths decide
       }
     }
-    return paths.some((x) => x.startsWith("/dev/") && x !== "/dev/null");
+    return paths.some(isDevice);
   });
+}
+
+/** Is `x` /dev itself or under it, other than /dev/null (case-folded: /DEV is /dev on a case-insensitive disk)? @param {string} x */
+function isDevice(x) {
+  const l = x.toLowerCase();
+  return (l === "/dev" || l.startsWith("/dev/")) && l !== "/dev/null";
 }
 
 // Run as a hook only when executed directly (the tests import researcherViolation).
