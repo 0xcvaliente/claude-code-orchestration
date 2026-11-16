@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
 import { LIMITS } from "./config.js";
-import { addWorktree, commitAll, deleteBranch, headRef, mergeAll, removeWorktree, sh } from "./git.js";
+import { addWorktree, commitAll, deleteBranch, git, headRef, mergeAll, removeWorktree, sh } from "./git.js";
 import type { Run } from "./state.js";
 import { parseVerdict, VERDICT_SCHEMA } from "./verdict.js";
 
@@ -103,7 +103,9 @@ export async function runSlice(ctx: SliceContext, slice: Slice): Promise<SliceRe
       res.issues = [feedback];
       continue;
     }
-    if (!(await commitAll(dir, `orchestrator: ${slice.id} (attempt ${attempt})`)) && attempt === 1) {
+    await commitAll(dir, `orchestrator: ${slice.id} (attempt ${attempt})`);
+    // An attempt that adds no commit is fine when an earlier one committed work; a branch empty against its base is not.
+    if ((await git(dir, "diff", "--name-only", sliceBase, "HEAD")) === "") {
       feedback = "The worker made no changes. Implement the slice.";
       res.issues = [feedback];
       continue;
