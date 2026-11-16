@@ -155,6 +155,9 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 **Run scope.** A run belongs to one session. It opens at a `PLAN REVIEW` launch, or at a light-path implementer launch; a `PLAN REVIEW` with `REPLAN:` extends it; it closes when every slice is final. A slice is final when it failed for good (its latest review failed after 3 implementer attempts), or when its latest review passed and the escalation rule is met: no doubt signal, or a passing opus review after its latest attempt. A sonnet pass that still needs its opus review keeps the run open, so that review and any further launch of the slice join the same run instead of opening a new one ([docs/brief-grammar.md, Final slice](docs/brief-grammar.md#run-model)). A new user prompt does not close it. After `ORCH_RUN_STALE_MIN` minutes (default 30) with nothing running, the plan check treats it as closed, while the review gate still gates its unreviewed slices. A run waiting for an opus review that never comes, for example after the review gate gave up on it (`opus_review_required_gave_up`), stays open until it goes stale. Until then a new light task is blocked with `light_path_multi` and an unplanned implementer with `not_in_plan`, each at most twice. `foldRuns` in `.claude/hooks/brief.mjs` computes all of this from the log records alone.
 
+<a id="what-040-adds-to-the-gates"></a>
+<a id="what-120-adds"></a>
+
 ### Gate details
 
 - **Gap cutoff.** Reviewers write each gap as `GAP: <0-100> <text>`. A `STATUS: fail` review counts as a fail when it has a gap at or above the cutoff (default 80), a gap with no number, a failed checked id, or no gaps at all (an old-style reply). A fail whose gaps are all below the cutoff counts as a pass with the doubt signal `low_confidence_fail`.
