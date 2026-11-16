@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { runAgent as baseAgent } from "./agent.js";
 import { withTransientRetry } from "./retry.js";
-import { count, parseTokens } from "./args.js";
+import { parseCount, parseTokens } from "./args.js";
 import { formatTokens } from "./tokens.js";
 import { isDirty } from "./git.js";
 import { auto, MODES, type RequestedMode } from "./auto.js";
@@ -14,41 +14,52 @@ const byRole = (tokens: Record<string, number>) => Object.entries(tokens).map(([
 const SCOPE = "The SDK pipeline (npm start) works on code in a git repository.";
 const OTHER_TASKS = "For other tasks (research, writing, analysis, operations) use the plugin's /route, `claude --agent orchestrator` or `npm run auto`.";
 
-const { values } = parseArgs({
-  options: {
-    repo: { type: "string" },
-    task: { type: "string" },
-    "test-cmd": { type: "string" },
-    "setup-cmd": { type: "string" },
-    "keep-worktrees": { type: "boolean", default: false },
-    out: { type: "string", default: "runs" },
-    budget: { type: "string" },
-    concurrency: { type: "string" },
-    retries: { type: "string" },
-    "plan-only": { type: "boolean", default: false },
-    mode: { type: "string", default: "auto" },
-    resume: { type: "string" },
-    replans: { type: "string" },
-    "no-escalate": { type: "boolean", default: false },
-  },
-});
-
-if (!values.repo || !(values.task || values.resume)) {
+function usage(problem?: string): never {
   console.error(
-    'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
+    (problem ? `${problem}\n` : "") +
+      'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
       "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget TOKENS] [--concurrency N] [--retries N] [--replans N] " +
-      `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]\n${SCOPE} ${OTHER_TASKS}`,
+      `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]\n` +
+      `A task that starts with a dash goes as --task=<task>.\n${SCOPE} ${OTHER_TASKS}`,
   );
   process.exit(2);
 }
+
+// parseArgs throws on an unknown flag, a missing value or a value that starts with a dash: that is a usage error.
+let parsed;
+try {
+  parsed = parseArgs({
+    options: {
+      repo: { type: "string" },
+      task: { type: "string" },
+      "test-cmd": { type: "string" },
+      "setup-cmd": { type: "string" },
+      "keep-worktrees": { type: "boolean", default: false },
+      out: { type: "string", default: "runs" },
+      budget: { type: "string" },
+      concurrency: { type: "string" },
+      retries: { type: "string" },
+      "plan-only": { type: "boolean", default: false },
+      mode: { type: "string", default: "auto" },
+      resume: { type: "string" },
+      replans: { type: "string" },
+      "no-escalate": { type: "boolean", default: false },
+    },
+  });
+} catch (err) {
+  usage(err instanceof Error ? err.message : String(err));
+}
+const { values } = parsed;
+
+if (!values.repo || !(values.task || values.resume)) usage();
 
 let limits: { runBudgetTokens?: number; concurrency?: number; maxRetries?: number; maxReplans?: number };
 try {
   limits = {
     runBudgetTokens: values.budget === undefined ? undefined : parseTokens("--budget", values.budget),
-    concurrency: values.concurrency === undefined ? undefined : count("--concurrency", Number(values.concurrency), 1),
-    maxRetries: values.retries === undefined ? undefined : count("--retries", Number(values.retries), 0),
-    maxReplans: values.replans === undefined ? undefined : count("--replans", Number(values.replans), 0),
+    concurrency: values.concurrency === undefined ? undefined : parseCount("--concurrency", values.concurrency, 1),
+    maxRetries: values.retries === undefined ? undefined : parseCount("--retries", values.retries, 0),
+    maxReplans: values.replans === undefined ? undefined : parseCount("--replans", values.replans, 0),
   };
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));

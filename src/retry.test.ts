@@ -28,6 +28,21 @@ test("isTransient: service errors yes, task failures and our own limits no", () 
   assert.equal(isTransient(res({ ok: false, subtype: "exception", text: "tests failed" })), false);
 });
 
+test("isTransient: 429 and 529 count only in a status context", () => {
+  for (const text of ["API Error: 429", "status 429", "HTTP 529", "error: 529", "429 Too Many Requests", "529 overloaded"]) {
+    assert.equal(isTransient(res({ ok: false, subtype: "exception", text })), true, text);
+  }
+  for (const text of ["TypeError: x is undefined\n    at run (index.js:429:12)", "expected 529 rows, got 3", "line 429: syntax error"]) {
+    assert.equal(isTransient(res({ ok: false, subtype: "exception", text })), false, text);
+  }
+});
+
+test("withTransientRetry: a task failure whose stack trace holds :429: is not retried", async () => {
+  const broken = scripted([res({ ok: false, subtype: "error_during_execution", text: "TypeError at index.js:429:12" })]);
+  await withTransientRetry(broken.run, noWait)({ role: "writer", prompt: "p", cwd: "." });
+  assert.equal(broken.calls(), 1);
+});
+
 test("withTransientRetry: retries a rate limit, then returns the success with summed tokens", async () => {
   const { run, calls } = scripted([res({ ok: false, subtype: "exception", text: "429 rate limit" }), res({ text: "done" })]);
   const seen: number[] = [];

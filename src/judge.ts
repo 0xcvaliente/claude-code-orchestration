@@ -125,13 +125,25 @@ function closeBacktick(src: string, open: number): number {
   throw new Doubt("unterminated backtick");
 }
 
+/**
+ * `((` at `open` (a `((...))` command or the inside of `$((...))`) is arithmetic, where `<<` is a left shift: read as a
+ * here document it would hide the lines after it (`((1<<EOF))` then `rm -rf .git`), so any `<<` in the span is a doubt.
+ */
+function arithShift(src: string, open: number): void {
+  if (src.slice(open, closeParen(src, open) + 1).includes("<<")) throw new Doubt("<< inside ((...)) is a left shift, not a here document");
+}
+
 /** `$'...'` starting at the quote after `$`: the decoded text and the index of the closing quote. */
 function ansiC(src: string, open: number): { text: string; end: number } {
   const simple: Record<string, string> = { a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?" };
   let text = "";
   for (let j = open + 1; j < src.length; j++) {
     const c = src.charAt(j);
-    if (c === "'") return { text, end: j };
+    if (c === "'") {
+      // The shell cuts the word at a NUL (`$'sudo\x00'` runs sudo): the decoded text would not be what runs.
+      if (text.includes("\0")) throw new Doubt("a NUL in $'...'");
+      return { text, end: j };
+    }
     if (c !== "\\") {
       text += c;
       continue;
@@ -205,6 +217,7 @@ export function tokenize(src: string): Script {
   const dollar = (i: number, inDouble: boolean): number => {
     const n = src.charAt(i + 1);
     if (n === "(") {
+      if (src.charAt(i + 2) === "(") arithShift(src, i + 1);
       const end = closeParen(src, i + 1);
       substitutions.push(src.slice(i + 2, end));
       plain = false;
@@ -304,6 +317,7 @@ export function tokenize(src: string): Script {
       const eol = src.indexOf("\n", i);
       i = (eol < 0 ? src.length : eol) - 1;
     } else if (c === "(") {
+      if (next === "(") arithShift(src, i);
       const word = pieces?.map((p) => ("lit" in p ? p.lit : "?")).join("") ?? "";
       if (/^\s*\)/.test(src.slice(i + 1)) && !word.endsWith("=")) defines = true; // name() { ... }
       else if (pieces && !word.endsWith("=")) throw new Doubt("a ( attached to a word (zsh glob qualifier or extglob)");
@@ -325,7 +339,8 @@ export function tokenize(src: string): Script {
       plain = false;
     } else if (c === "{") {
       // Brace expansion turns one word into several (`{rm,-rf,.git}`): we cannot tell what runs.
-      // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole.
+      // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole, and steps over substitutions and `${...}`, which
+      // stay inside the word whatever they hold, so `{rm,$(:)-rf,.git}` and `{rm,`x y`-rf,.git}` are seen whole too.
       let unquoted = "";
       let k = i + 1, depth = 1;
       for (; k < src.length; k++) {
@@ -335,7 +350,12 @@ export function tokenize(src: string): Script {
           k = src.indexOf("'", k + 1);
           if (k < 0) throw new Doubt("unterminated quote");
         } else if (d === '"') k = closeDouble(src, k);
-        else if (d === "{") depth++;
+        else if (d === "`") k = closeBacktick(src, k);
+        else if (d === "$" && src.charAt(k + 1) === "(") k = closeParen(src, k + 1);
+        else if (d === "$" && src.charAt(k + 1) === "{") {
+          k = src.indexOf("}", k + 2);
+          if (k < 0) throw new Doubt("unterminated ${...}");
+        } else if (d === "{") depth++;
         else if (d === "}" && --depth === 0) break;
         else if (ENDS_WORD.has(d)) break;
         else unquoted += d;
@@ -481,9 +501,10 @@ const GIT_PUSHY = ["push", "remote", "send-pack", "receive-pack", "config", "ali
 const MAX_DEPTH = 3;
 /** Script paths that are really stdin or another process: `bash /dev/stdin`, `source /dev/fd/3`. */
 const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
-/** git config keys whose value runs a program (or pulls in config that may). */
+/** git config keys whose value runs a program (or pulls in config that may). `submodule.<name>.update` counts whatever
+ * its value: only a `!command` value runs one, and the value is not read. */
 const GIT_EXEC_KEY =
-  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.cmd|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
+  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
 /** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
  * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
 const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)\+?=/;
@@ -582,6 +603,56 @@ function gitRule(ws: Word[], k: number, later: Later): { c: Classification; sub:
 /** A word that mentions push, remote, their plumbing, or a route to them (alias, url., include). */
 const pushyText = (t: string) => /push|remote|send-pack|receive-pack/i.test(t) || /^(alias|url\.|include)/i.test(t);
 
+/**
+ * The arguments git hands to a shell, after the subcommand `ws[sub]`: the value of `rebase -x`/`--exec` (also `-x<cmd>`,
+ * `-ix <cmd>`, `--exec=<cmd>` and a prefix such as `--exe`), and the first word after `submodule foreach` and
+ * `bisect run` (git runs it through a shell, so `'rm -rf .git'` there is a command line, not a name). A quoted argument
+ * is otherwise text (`later.pushy` skips it), so each of these is read as a script of its own; a dynamic one is denied.
+ * Options are matched on their static prefix, so `-x"$C"` counts too.
+ */
+function gitShellArgs(ws: Word[], sub: number, rest: Word[], start: number, seen: Set<number>): Array<{ text: string; dynamic: boolean }> {
+  // `rest` is the command's words that are not redirection targets, `rest[start]` the first after the subcommand. Every
+  // git word of a command reads from its own subcommand on: `seen` holds the option positions an earlier rebase read
+  // already, and a read that reaches one stops there (from there on it would find the same arguments again), so a
+  // command of many git words is read in linear time.
+  const s = ws[sub];
+  if (!s || s.dynamic) return [];
+  const name = s.text.toLowerCase();
+  const out: Array<{ text: string; dynamic: boolean }> = [];
+  const value = (w: Word | undefined, from: number) => {
+    if (w) out.push({ text: w.text.slice(from), dynamic: w.dynamic });
+  };
+  if (name === "rebase") {
+    for (let i = start; i < rest.length; i++) {
+      if (seen.has(i)) break;
+      seen.add(i);
+      const w = rest[i]!;
+      const p = staticPrefix(w);
+      if (p === "--" && !w.dynamic) break;
+      const long = /^--([^=]+)(=?)/.exec(p);
+      const short = p.startsWith("--") ? null : /^-[A-Za-z]*?x/.exec(p);
+      if (long && "exec".startsWith(long[1]!.toLowerCase())) {
+        if (long[2]) value(w, w.text.indexOf("=") + 1);
+        else value(rest[++i], 0);
+      } else if (short) {
+        if (w.text.length > short[0].length || w.dynamic) value(w, short[0].length);
+        else value(rest[++i], 0);
+      }
+    }
+  } else if (name === "submodule" || name === "bisect") {
+    let i = start;
+    while (i < rest.length && !rest[i]!.dynamic && rest[i]!.text.startsWith("-")) i++;
+    const verb = rest[i];
+    if (!verb || verb.dynamic || verb.text !== (name === "submodule" ? "foreach" : "run")) return [];
+    for (i++; i < rest.length && !rest[i]!.dynamic && rest[i]!.text.startsWith("-"); i++) if (rest[i]!.text === "--") {
+      i++;
+      break;
+    }
+    if (rest[i]) value(rest[i], 0);
+  }
+  return out;
+}
+
 /** Facts about the later words of one simple command, each computed at most once per command (see analyzeCommand). */
 interface Later {
   /** pushy[i]: a word at or after ws[i], not a redirection target and not wholly quoted, mentions push or remote (pushyText), or is dynamic and could be either. */
@@ -674,6 +745,7 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
   const script = (text: string, dynamic: boolean, what: string) =>
     push(dynamic ? deny(`${what} with a string the guard cannot read is always blocked`) : analyze(text, ctx, depth + 1));
   const gitSubs = new Set<number>();
+  const rebaseSeen = new Set<number>(); // see gitShellArgs
   let trapped = false; // a trap word already read every later word as a script
   // The first deny decides (see analyze), so the words after it are not read.
   for (let k = 0; k < ws.length && !denied; k++) {
@@ -741,6 +813,7 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
       const g = gitRule(ws, k, later);
       push(g.c);
       gitSubs.add(g.sub);
+      if (!denied) for (const p of gitShellArgs(ws, g.sub, nr, from[g.sub] ?? nr.length, rebaseSeen)) if (!denied) script(p.text, p.dynamic, `git ${ws[g.sub]!.text}`);
     } else if (name === "rm") {
       if (gitSubs.has(k)) {
         // `git rm` is git's own command: it refuses to drop uncommitted changes unless forced.
