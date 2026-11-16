@@ -10,7 +10,9 @@
 //             completely, so a failure that never shows as a named test can slip through; the guards are: never
 //             when a failure is unqualified or a runner-level crash marker is present (suite failed to run,
 //             collection or import error, build failure, go FAIL <pkg> without a named test, panics, vitest
-//             unhandled errors, cargo binary crash or signal, jest coverage threshold), never when the base run
+//             unhandled errors, cargo binary crash or signal, jest coverage threshold), never when cargo stopped at a
+//             failing target (its rerun hint ends the run without the --no-fail-fast summary) or the command is a
+//             unittest run with failfast (-f, --failfast), never when the base run
 //             timed out, could not use the main worktree's dependencies, or failed without parsable names.
 //   bugfix    (stdin: the SubagentStop event; ORCH_BUGFIX_CHECK=off skips it) -- for an implementer whose brief says
 //             KIND: bugfix, after the tests passed: at least one test file must be changed or added against the base,
@@ -225,6 +227,32 @@ export function parseFailures(text, root = "") {
 
 /** Names to compare: at least one, all qualified, no crash. @param {Failures} f */
 export const complete = (f) => f.names.length > 0 && f.unqualified.length === 0 && !f.crash;
+
+/**
+ * A cargo run that stopped at a failing test target: cargo (without --no-fail-fast) stops after the first target that
+ * fails, so its last line is that target's rerun hint and the targets after it never ran. Under --no-fail-fast every
+ * target runs and cargo ends with an "error: N target(s) failed:" summary, which closes the hints before it. The names
+ * such a run printed stay usable (bugfix check, the inform note); only the allow decision treats it as incomplete.
+ * @param {unknown} text
+ */
+export function stoppedEarly(text) {
+  if (typeof text !== "string") return false;
+  let stopped = false;
+  // eslint-disable-next-line no-control-regex
+  for (const l of text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/)) {
+    if (/^error: test failed, to rerun pass `/.test(l)) stopped = true;
+    else if (/^error: \d+ targets? failed:\s*$/.test(l)) stopped = false;
+  }
+  return stopped;
+}
+
+/**
+ * A unittest command that stops at its first failure (-f, --failfast, or -f among combined short flags): unittest
+ * prints its FAIL:/ERROR: blocks only after the run, but that output carries no mark of a failfast stop, so the
+ * command is the only sign. Without failfast a run cut short (a crash, os._exit, a kill) prints no names at all.
+ * @param {string} cmd
+ */
+export const failFastCmd = (cmd) => /\bunittest\b/.test(cmd) && /(?:^|\s)(?:--failfast|-[A-Za-z]*f[A-Za-z]*)(?=\s|;|&|\||$)/.test(cmd);
 
 // Test files by path: under a test folder, or named like a test in the common runners.
 /** @param {string} path */
@@ -524,7 +552,8 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   const quick = parseFailures(output);
   if (quick.names.length === 0) return null; // nothing qualified to compare
   const allow = mode === "allow";
-  if (allow && !complete(quick)) return null; // unqualified names or a crash: keep the block
+  // unqualified names, a crash, a cargo stop at a failing target or a unittest failfast command: keep the block
+  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd))) return null;
   const info = baseInfo(cwd, isolated);
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);

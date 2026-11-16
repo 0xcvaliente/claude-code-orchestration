@@ -179,6 +179,23 @@ test("T-4: a unittest reproduction test is verified at the first stop", { skip: 
   assert.deepEqual([last(dir).reason, last(dir).new_failing], ["bugfix_verified", 1]);
 });
 
+test("T-4: under the allow baseline, a unittest run with --failfast keeps the block (the tests after the first failure never ran)", { skip: !hasPython && "python3 missing" }, () => {
+  const failing = "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertEqual(1, 2)\n";
+  const dir = repo({ "test_a.py": failing, ".gitignore": ".claude/\n__pycache__/\n" });
+  write(dir, { "test_b.py": "import unittest\nclass T(unittest.TestCase):\n    def test_b(self):\n        self.assertEqual(1, 3)\n" });
+  for (const [id, flag] of [["a1", "-f"], ["a2", "--failfast"], ["a3", "-qf"]]) {
+    const r = gate(dir, { id, env: { ORCH_TEST_CMD: `python3 -B -m unittest discover ${flag}`, ORCH_BASELINE: "allow", ORCH_BUGFIX_CHECK: "off" } });
+    assert.equal(r.status, 2, `${flag}: test_b never ran`);
+    assert.equal(last(dir).reason, "tests_failed");
+  }
+  // Without failfast every test runs, so the allow baseline still applies when the only failure is on the base.
+  const dir2 = repo({ "test_a.py": failing, "app.py": "x = 1\n", ".gitignore": ".claude/\n__pycache__/\n" });
+  write(dir2, { "app.py": "x = 2\n" });
+  const ok = gate(dir2, { env: { ORCH_TEST_CMD: "python3 -B -m unittest discover -q", ORCH_BASELINE: "allow", ORCH_BUGFIX_CHECK: "off" } });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(last(dir2).reason, "tests_failed_baseline");
+});
+
 // ---- T-13: cargo test --quiet ----
 
 test("T-13: the terse form of cargo test --quiet is parsed, qualified by cargo's rerun hint", () => {
@@ -199,6 +216,72 @@ test("T-13: a workspace member's quiet cargo failure matches the member's change
   assert.ok(!inFiles(lib, ["crates/other/src/lib.rs"]));
   // A single crate keeps its root-relative qualifier.
   assert.ok(inFiles(parseFailures("adds --- FAILED\nerror: test failed, to rerun pass `--test add_test`\n").names[0] ?? "", ["tests/add_test.rs"]));
+});
+
+// cargo stops after the first test target that fails (unless --no-fail-fast), so the targets after it never ran: real
+// `cargo test --quiet` output (cargo 1.100) of a crate whose lib test fails; tests/api.rs was never run.
+const CARGO_STOP =
+  "\nrunning 1 test\ntests::pre_existing --- FAILED\n\nfailures:\n\n---- tests::pre_existing stdout ----\n\nthread 'tests::pre_existing' panicked at src/lib.rs:5:25:\nassertion `left == right` failed\n  left: 1\n right: 2\n\nfailures:\n    tests::pre_existing\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `--lib`\n";
+// The same failure under --no-fail-fast: every target ran, and cargo ends with its summary of the failed targets.
+const CARGO_ALL =
+  CARGO_STOP +
+  "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\nerror: 1 target failed:\n    `--lib`\n";
+
+test("T-13: under the allow baseline, a quiet cargo run that stopped at its first failing target keeps the block", () => {
+  const dir = repo({ "failures.txt": CARGO_STOP, "tests/api.rs": "#[test]\nfn api() {}\n" });
+  write(dir, { "tests/api.rs": "#[test]\nfn api() { assert!(false); }\n" }); // broken, but cargo never reaches it
+  const allow = gate(dir, { env: { ORCH_TEST_CMD: TAP_CMD, ORCH_BASELINE: "allow", ORCH_BUGFIX_CHECK: "off" } });
+  assert.equal(allow.status, 2, "the targets after the failing one never ran");
+  assert.equal(last(dir).reason, "tests_failed");
+  // The names it printed still serve the default mode's note.
+  const inform = gate(dir, { id: "a2", env: { ORCH_TEST_CMD: TAP_CMD, ORCH_BUGFIX_CHECK: "off" } });
+  assert.equal(inform.status, 2);
+  assert.deepEqual([last(dir).reason, last(dir).failing, last(dir).on_base], ["tests_failed", 1, 1]);
+  assert.match(inform.stderr, /src\/lib\.rs::tests::pre_existing/);
+  // A --no-fail-fast run ran every target: the allow baseline still applies to it.
+  const dir2 = repo({ "failures.txt": CARGO_ALL, "app.rs": "x\n" });
+  write(dir2, { "app.rs": "y\n" });
+  const all = gate(dir2, { env: { ORCH_TEST_CMD: TAP_CMD, ORCH_BASELINE: "allow", ORCH_BUGFIX_CHECK: "off" } });
+  assert.equal(all.status, 0, all.stderr);
+  assert.equal(last(dir2).reason, "tests_failed_baseline");
+});
+
+const hasCargo = spawnSync("cargo", ["--version"]).status === 0;
+test("T-13: real cargo: a broken integration test behind a lib test that fails on the base is not let through", { skip: !hasCargo && "cargo missing" }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), "orch-tga-cargo-"));
+  const dir = repo({
+    "Cargo.toml": '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n',
+    "src/lib.rs": "pub fn one() -> i32 { 1 }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn pre_existing() { assert_eq!(super::one(), 2); }\n}\n",
+    "tests/api.rs": "#[test]\nfn api() { assert_eq!(c::one(), 1); }\n",
+    ".gitignore": ".claude/\n/target/\nCargo.lock\n",
+  });
+  write(dir, { "tests/api.rs": "#[test]\nfn api() { assert_eq!(c::one(), 3); }\n" });
+  const env = { ORCH_TEST_CMD: "cargo test --quiet --offline", ORCH_BASELINE: "allow", ORCH_BUGFIX_CHECK: "off", CARGO_TARGET_DIR: join(scratch, "target"), CARGO_HOME: join(scratch, "home") };
+  const r = gate(dir, { env });
+  assert.equal(r.status, 2, r.stderr);
+  assert.equal(last(dir).reason, "tests_failed");
+});
+
+test("T-13: real cargo: a reproduction test is still verified, in a single crate and in a workspace member", { skip: !hasCargo && "cargo missing" }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), "orch-tga-cargo-"));
+  const env = { ORCH_TEST_CMD: "cargo test --quiet --offline", CARGO_TARGET_DIR: join(scratch, "target"), CARGO_HOME: join(scratch, "home") };
+  const lib = (/** @type {number} */ v) => `pub fn one() -> i32 { ${v} }\n`;
+  const single = repo({ "Cargo.toml": '[package]\nname = "c"\nversion = "0.1.0"\nedition = "2021"\n', "src/lib.rs": lib(2), ".gitignore": ".claude/\nCargo.lock\n" });
+  write(single, { "src/lib.rs": lib(1), "tests/api.rs": "#[test]\nfn api() { assert_eq!(c::one(), 1); }\n" });
+  const r1 = gate(single, { transcript: bugfixTranscript(), env });
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.deepEqual([last(single).reason, last(single).new_failing], ["bugfix_verified", 1]);
+
+  const ws = repo({
+    "Cargo.toml": '[workspace]\nmembers = ["crates/mycrate"]\nresolver = "2"\n',
+    "crates/mycrate/Cargo.toml": '[package]\nname = "mycrate"\nversion = "0.1.0"\nedition = "2021"\n',
+    "crates/mycrate/src/lib.rs": lib(2),
+    ".gitignore": ".claude/\nCargo.lock\n",
+  });
+  write(ws, { "crates/mycrate/src/lib.rs": lib(1), "crates/mycrate/tests/foo.rs": "#[test]\nfn it_works() { assert_eq!(mycrate::one(), 1); }\n" });
+  const r2 = gate(ws, { transcript: bugfixTranscript(), env: { ...env, CARGO_TARGET_DIR: join(scratch, "target-ws") } });
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.deepEqual([last(ws).reason, last(ws).new_failing], ["bugfix_verified", 1]);
 });
 
 // ---- T-9: the block caps restart when the agent is started again (a SendMessage resume) ----
