@@ -302,6 +302,35 @@ test("the orchestrator says once that an answer it writes itself is reviewed", (
   assert.equal(read(ORCH).match(/answer you write yourself/g)?.length, 1);
 });
 
+// --- Output to the person: keywords, not prose (the three-places rule). ---
+test("the orchestrator, the route skill and the nudge state the same terse output rule", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /short bullets or key: value lines/, `${file} asks for short bullets or key: value lines`);
+    assert.match(text, /one short line, only when something changed/, `${file} limits progress notes to one line when something changed`);
+    assert.match(text, /final report of at most 15 lines/i,`${file} caps the final report at 15 lines`);
+    assert.match(text, /<id>: pass\|fail - <evidence pointer>/, `${file} gives the per-slice report line`);
+    assert.match(text, /more detail only when (the (person|user) )?asks/i, `${file} gives more detail only when asked`);
+  }
+});
+
+test("the orchestrator shows the plan once as summary lines and puts the full plan only into the PLAN REVIEW brief", () => {
+  const orch = read(ORCH);
+  assert.match(orch, /full plan[^.]*goes? only into the PLAN REVIEW brief/, `${ORCH} keeps the full plan out of the visible reply`);
+  assert.match(orch, /one line per slice/, `${ORCH} shows one line per slice`);
+  assert.match(orch, /Path: light\|full - <reason/, `${ORCH} gives the path line's form`);
+  assert.doesNotMatch(orch, /write the plan in your reply/, `${ORCH} no longer writes the full plan in the reply`);
+  assert.match(orch, /Do not claim success without evidence/, `${ORCH} still requires evidence`);
+});
+
+test("the three texts name a test gate that gave up as a doubt signal where they list doubt signals", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    const list = text.match(/doubt signal \(([^)]*\([^)]*\)[^)]*)\)/)?.[1] ?? "";
+    assert.match(list, /a test gate that gave up on (its|the slice's) latest attempt/, `${file} lists a test gate that gave up among the doubt signals`);
+  }
+});
+
 test("nudge warns about agent teams only when they are switched on", () => {
   assert.doesNotMatch(nudgeContext(), /agent teams/i);
   assert.doesNotMatch(nudgeContext({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" }), /agent teams/i);
