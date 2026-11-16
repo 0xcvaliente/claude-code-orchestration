@@ -11,7 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { skillCatalog, skillRoots, frontmatter } from "../.claude/hooks/skill-catalog.mjs";
 import { skillHints, hintBlock, sameFamily, safeName, preferenceRules, maxPicks, HINT_INTRO } from "../.claude/hooks/skill-hint.mjs";
-import { parseHeader, parseReply } from "../.claude/hooks/brief.mjs";
+import { parseHeader, parsePlan, parseReply } from "../.claude/hooks/brief.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const fx = (/** @type {string} */ f) => join(root, "src", "fixtures", "files", f);
@@ -227,6 +227,34 @@ test("picks: a FILES or SOURCES entry whose extension is an Object.prototype key
     ], ext);
     assert.deepEqual(picks("researcher", `SOURCES: notes.${ext}\nSKILLS: tdd\nQ`), [{ name: "tdd", reason: "explicit" }], ext);
   }
+});
+
+test("hint names: no suggested name can be read as a line of any key brief.mjs parses", () => {
+  const src = readFileSync(join(root, ".claude", "hooks", "brief.mjs"), "utf8");
+  const keys = new Set([
+    ...[...src.matchAll(/\b(?:field\(t|lineValue\(l), "([A-Z][A-Z-]*)"\)/g)].map((m) => String(m[1])),
+    ...[...src.matchAll(/\/\^\[[^\]]*\]\*([A-Z][A-Z-]+)\[/g)].map((m) => String(m[1])),
+    ...[...src.matchAll(/\$\{PRE\}([A-Z][A-Z-]+):/g)].map((m) => String(m[1])),
+  ]);
+  for (const k of ["SLICE", "FILES", "SKILL", "SKILLS", "TARGET", "UPDATE", "DRAFTS", "DRAFT", "SKILLS-USED", "SKILLS-SKIPPED", "STATUS", "OPEN", "GAP", "QUOTE", "GOAL", "CONSTRAINTS", "REPLAN", "ORCHESTRATION"]) {
+    assert.ok(keys.has(k), `the scan of brief.mjs finds ${k}`);
+  }
+  const base = "SLICE: a\nFILES: x.ts\nDEPENDS: none\nWrite it.";
+  for (const k of [...keys, "C1", "C12"]) {
+    for (const name of [`${k.toLowerCase()}:foo`, `${k}:foo`, `${k.toLowerCase()}:${k.toLowerCase()}`]) {
+      if (k === "ORCHESTRATION" && !/^orchestration:workflow/i.test(name)) continue; // only "ORCHESTRATION: workflow" is a line
+      const brief = `${base}\nSKILLS: ${name}`;
+      const got = skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog: [{ name, description: "x" }] });
+      const block = hintBlock(got);
+      const withBlock = `${base}${block}`;
+      assert.deepEqual(parseHeader(withBlock), parseHeader(base), `${name}: the brief's header is unchanged`);
+      assert.deepEqual(parsePlan(`PLAN REVIEW\n${withBlock}`), parsePlan(`PLAN REVIEW\n${base}`), `${name}: a plan is unchanged`);
+      assert.deepEqual(parseReply(block), parseReply(""), `${name}: no reply line`);
+      assert.ok(!safeName(name), `${name} is not a safe name`);
+    }
+  }
+  const ok = "SLICE: a\nFILES: x.ts\nDEPENDS: none\nSKILLS: skillful:thing";
+  assert.deepEqual(skillHints({ role: "implementer", header: parseHeader(ok), brief: ok, catalog: [{ name: "skillful:thing" }] }), [{ name: "skillful:thing", reason: "explicit" }], "a key as a mere prefix of the first part is fine");
 });
 
 test("picks: goal words need a strong match; one pick per near-duplicate family", () => {

@@ -63,10 +63,13 @@ user users agent agents claude tool tools hook hooks change changes slices
 `.split(/\s+/).filter(Boolean));
 // Name tokens too generic to signal a skill on their own.
 const GENERIC = new Set(["code", "review", "design", "web", "best", "practices", "frontend", "core", "skills", "skill", "docs", "data", "react", "anthropic"]);
-// Keys that, as the first part of a name, would make a hint line parse as a brief or reply line.
+// Keys that, as the first part of a name, would make a hint line parse as a brief or reply line: every key brief.mjs
+// reads (src/skills.test.mjs scans brief.mjs and fails when a key is missing here). A hint line is "- <name> (<reason>)",
+// and brief.mjs allows a leading "-", so a plugin skill named "skill:foo" would read as a "SKILL: foo" line.
 const BRIEF_KEYS = new Set([
   "slice", "files", "depends", "path", "risky", "checks", "focus", "sources", "read", "kind", "validate", "skills", "goal",
-  "replan", "constraints", "status", "open", "gap", "quote",
+  "replan", "constraints", "status", "open", "gap", "quote", "skill", "target", "update", "draft", "drafts",
+  "skills-used", "skills-skipped",
 ]);
 const NAME_RE = /^[A-Za-z0-9][\w./-]*(?::[A-Za-z0-9][\w./-]*)*$/;
 
