@@ -321,6 +321,20 @@ fi
 
 isolated=0
 case "$PWD" in */.claude/worktrees/*) isolated=1 ;; esac
+# A session that itself runs in a worktree (its project folder under .claude/worktrees/) is the shared tree: inside the
+# project folder only a worktree under the project's own .claude/worktrees/ is isolated, never the folder itself.
+if [ "$isolated" = 1 ]; then
+  here="$(pwd -P)"
+  proj_real="$(cd "$project" 2>/dev/null && pwd -P)"
+  if [ -n "$proj_real" ]; then
+    case "$here/" in
+      "$proj_real"/*)
+        rel="${here#"$proj_real"}"
+        case "$rel/" in /.claude/worktrees/*/*) ;; *) isolated=0 ;; esac
+        ;;
+    esac
+  fi
+fi
 mode="${ORCH_GATE_ISOLATED:-warn}"
 if [ "$isolated" = 1 ] && [ "$mode" = skip ]; then
   log_gate allow isolated_skipped
