@@ -182,6 +182,21 @@ test("telemetry: a missing transcript and non-stop events leave the new fields o
   }
 });
 
+test("telemetry: a payload that is valid JSON but not a plain object (null, number, string, array) exits 0 quietly and logs nothing", () => {
+  const dir = project();
+  try {
+    for (const p of ["null", "5", '"x"', "[]", "true"]) {
+      const r = run(dir, "telemetry.mjs", p);
+      assert.equal(r.status, 0, `${p}: ${r.stderr}`);
+      assert.equal(r.stdout, "", p);
+      assert.equal(r.stderr, "", p);
+    }
+    assert.deepEqual(log(dir, "telemetry.jsonl"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /** @param {string} cwd @param {string[]} args */
 const git = (cwd, args) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });

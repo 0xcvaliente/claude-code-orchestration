@@ -108,6 +108,14 @@ test("claims classifier on labelled examples", () => {
   for (const [text, want] of cases) assert.equal(classifyClaim(text), want, JSON.stringify(text));
 });
 
+test("claims classifier skips the template line STATUS: pass or fail, as brief.mjs does (audit B-4)", () => {
+  // The audit's two examples: the template alone is no claim; a real STATUS: pass beside it still counts.
+  assert.equal(classifyClaim("Reply in this format:\nSTATUS: pass or fail\nThe parser module is not finished yet."), "failure");
+  assert.equal(classifyClaim("STATUS: pass\nSTATUS: pass or fail"), "success");
+  assert.equal(classifyClaim("STATUS: pass / fail\nNothing else."), "unclear");
+  assert.equal(classifyClaim("**STATUS:** fail or pass\nAll tests pass."), "success");
+});
+
 test("claims classifier is linear on pathological text", () => {
   for (const t of ["\n".repeat(200000) + "STATUS", "added " + "x ".repeat(100000), "added ".repeat(40000), " ".repeat(200000) + "STATUS"]) {
     const t0 = performance.now();

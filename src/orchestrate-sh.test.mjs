@@ -44,8 +44,11 @@ test("orchestrate.sh dry run: a plain session (ORCH_AGENT=none) unsets a folder'
   // named agent; a plain session passes an empty `agent` in the flag settings, which rank above the folder's.
   const plain = dryRunArgs({ ORCH_AGENT: "none" });
   assert.ok(!plain.includes("--agent"));
-  assert.equal(plain[plain.indexOf("--settings") + 1], '{"agent":""}');
-  assert.deepEqual(JSON.parse(plain[plain.indexOf("--settings") + 1] ?? "null"), { agent: "" });
+  // The same settings JSON asks for the built-in Concise output style (audit O-5); ORCH_OUTPUT_STYLE=default drops it.
+  assert.equal(plain[plain.indexOf("--settings") + 1], '{"agent":"","outputStyle":"Concise"}');
+  assert.deepEqual(JSON.parse(plain[plain.indexOf("--settings") + 1] ?? "null"), { agent: "", outputStyle: "Concise" });
+  const unstyled = dryRunArgs({ ORCH_AGENT: "none", ORCH_OUTPUT_STYLE: "default" });
+  assert.equal(unstyled[unstyled.indexOf("--settings") + 1], '{"agent":""}');
   // --disallowedTools and --allowedTools take every word after them: the settings flag must come before both.
   assert.ok(plain.indexOf("--settings") < plain.indexOf("--disallowedTools") && plain.indexOf("--disallowedTools") < plain.indexOf("--allowedTools"));
 

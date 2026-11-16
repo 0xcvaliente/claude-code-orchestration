@@ -5,7 +5,7 @@ import { count } from "./args.js";
 import { LIMITS } from "./config.js";
 import { deleteBranch, headRef, mergeInto, removeWorktree } from "./git.js";
 import { newRunId, Run } from "./state.js";
-import { runSlice, type Slice, type SliceContext, type SliceResult } from "./slice.js";
+import { runSlice, SliceError, type Slice, type SliceContext, type SliceResult } from "./slice.js";
 
 export type { Slice, SliceResult };
 
@@ -298,7 +298,8 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log(`${slice.id}: error: ${msg}`);
-      r = { id: slice.id, branch: `orch/${run.id}/${slice.id}`, status: "failed", attempts: 0, issues: [`error: ${msg}`] };
+      const attempts = err instanceof SliceError ? err.attempts : 0; // the attempts it had before the error
+      r = { id: slice.id, branch: `orch/${run.id}/${slice.id}`, status: "failed", attempts, issues: [`error: ${msg}`] };
     }
     finished.set(r.id, r); // recorded at once, so a crash later in the run keeps this slice's result for --resume
     saveJournal();

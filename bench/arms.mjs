@@ -13,17 +13,24 @@
 //   O-mix-plugin  orchestrator from this checkout's plugin build dist/plugin, loaded with --plugin-dir (launcher "plugin",
 //          bench/lib/plugin-launch.sh), ORCH_AGENT_PREFIX=orchestration:, no .claude/ copied, shipped models
 //   O-mix-030     the same from the 0.3.0 plugin: dist/plugin at ref BASELINE_030_REF (ef62288), extracted with git archive
-//   all-haiku     O-mix as shipped (researcher on haiku, today's default); the d2-docs researcher comparison (H14)
+//   all-haiku     O-mix with the researcher's model: line rewritten to haiku and ORCH_ALLOW_HAIKU=1 (without it the plan check
+//          raises a haiku launch to sonnet); the d2-docs researcher comparison (H14). Haiku was the shipped researcher model in
+//          0.4.0, when the published runs were made; the researcher ships on sonnet since 1.3.0.
 //   all-sonnet    O-mix with CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 and CLAUDE_CODE_SUBAGENT_MODEL=sonnet: forces EVERY subagent
 //          (researcher, implementer, reviewer, integrator) to sonnet, not the researcher alone
-//   routed        O-mix with ORCH_READ_ROUTER=on (the read router lands in a later 0.4.0 slice; the arm only sets the variable)
+//   routed        O-mix with ORCH_READ_ROUTER=on, shipped models (researcher on sonnet since 1.3.0; it was haiku in 0.4.0)
 //   reader-haiku  d3-reader router arms (H14 amendment for d3-reader). A PLAIN sonnet main session (ORCH_AGENT=none, ORCH_MODEL=sonnet,
-//          no orchestrator) with this checkout's .claude/ copied in, so the project researcher (haiku as shipped) and the hooks (plan
+//          no orchestrator) with this checkout's .claude/ copied in (its researcher's model: line rewritten to haiku, and
+//          ORCH_ALLOW_HAIKU=1), so the project researcher and the hooks (plan
 //          check with the router, telemetry, quote check) are present; the task's driver prompt makes it launch one researcher per
 //          question. ORCH_SESSION_PERSISTENCE=1 asks scripts/orchestrate.sh to keep subagent transcripts, so telemetry's SubagentStop
 //          records carry per-agent tokens (without it those fields are empty). The existing plain-session path needs no runner change.
 //   reader-sonnet the same with CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 and CLAUDE_CODE_SUBAGENT_MODEL=sonnet (every subagent here is a researcher)
-//   reader-routed the same as reader-haiku with ORCH_READ_ROUTER=on (raises hard files to sonnet and appends converted-text notes)
+//   reader-routed the reader session with ORCH_READ_ROUTER=on and the researcher as shipped (sonnet since 1.3.0, haiku in 0.4.0),
+//          so the router only appends converted-text notes (it never lowers a model)
+// Every arm that can start a plain session through scripts/orchestrate.sh (ORCH_AGENT=none: P-S, P-O, W-mix, N-UC, the reader
+// arms, and AUTO's plain and reviewed routes) sets ORCH_OUTPUT_STYLE=default, Claude Code's default output style as in the
+// published runs (orchestrate.sh otherwise gives a plain session the Concise style).
 // Every run repo gets .claude/settings.json with "enabledPlugins": {<each user-enabled plugin>: false}.
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -39,25 +46,30 @@ export const NUC_PREFIX = "ultracode Use a workflow (the Workflow tool) to orche
 export const BASELINE_030_REF = "ef62288";
 const PLUGIN_ENV = { ORCH_AGENT: "orchestrator", ORCH_AGENT_PREFIX: "orchestration:" };
 // d3-reader arms: a plain sonnet main session (no orchestrator) that keeps subagent transcripts (per-agent telemetry tokens).
-export const READER_ENV = Object.freeze({ ORCH_AGENT: "none", ORCH_MODEL: "sonnet", ORCH_SESSION_PERSISTENCE: "1" });
+export const READER_ENV = Object.freeze({ ORCH_AGENT: "none", ORCH_MODEL: "sonnet", ORCH_SESSION_PERSISTENCE: "1", ORCH_OUTPUT_STYLE: "default" });
+// Plain sessions keep Claude Code's default output style (see the header).
+const DEFAULT_STYLE = Object.freeze({ ORCH_OUTPUT_STYLE: "default" });
+// Haiku arms: the researcher rewritten to haiku, and the switch that stops the plan check raising it to sonnet.
+const HAIKU_RESEARCHER = Object.freeze({ researcher: "haiku" });
+const ALLOW_HAIKU = Object.freeze({ ORCH_ALLOW_HAIKU: "1" });
 
 export const ARMS = {
-  "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet" }, copyClaude: false },
-  "P-O": { label: "Plain session (Opus)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false },
+  "P-S": { label: "Plain session (Sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "sonnet", ...DEFAULT_STYLE }, copyClaude: false },
+  "P-O": { label: "Plain session (Opus)", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus", ...DEFAULT_STYLE }, copyClaude: false },
   "O-mix": { label: "Orchestrator, shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
   "O-O": { label: "Orchestrator, all agents Opus", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, agentModel: "opus" },
-  AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true, settings: { model: "sonnet" } },
-  "N-UC": { label: "Native ultracode (plugin off, built-ins allowed, Opus)", launcher: "native", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus" }, copyClaude: false, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `${NUC_PREFIX}${p}` },
-  "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none" }, copyClaude: true, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
+  AUTO: { label: "Auto (triage routes)", script: "auto.sh", env: { ORCH_AGENT: "orchestrator", ...DEFAULT_STYLE }, copyClaude: true, settings: { model: "sonnet" } },
+  "N-UC": { label: "Native ultracode (plugin off, built-ins allowed, Opus)", launcher: "native", env: { ORCH_AGENT: "none", ORCH_MODEL: "opus", ...DEFAULT_STYLE }, copyClaude: false, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `${NUC_PREFIX}${p}` },
+  "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ...DEFAULT_STYLE }, copyClaude: true, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
   SDK: { label: "SDK pipeline (orchestrate mode)", launcher: "sdk", env: {}, copyClaude: false, snapshots: false },
   "O-mix-plugin": { label: "Orchestrator, current plugin build (--plugin-dir dist/plugin)", launcher: "plugin", pluginRef: null, env: PLUGIN_ENV, copyClaude: false },
   "O-mix-030": { label: "Orchestrator, 0.3.0 plugin (dist/plugin at ef62288, --plugin-dir)", launcher: "plugin", pluginRef: BASELINE_030_REF, env: PLUGIN_ENV, copyClaude: false },
-  "all-haiku": { label: "Orchestrator, researcher on haiku (shipped default)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator" }, copyClaude: true },
+  "all-haiku": { label: "Orchestrator, researcher rewritten to haiku (ORCH_ALLOW_HAIKU=1), other agents unchanged", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", ...ALLOW_HAIKU }, copyClaude: true, agentModels: HAIKU_RESEARCHER },
   "all-sonnet": { label: "Orchestrator, every subagent forced to sonnet (CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" }, copyClaude: true },
-  routed: { label: "Orchestrator, read router on (ORCH_READ_ROUTER=on)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", ORCH_READ_ROUTER: "on" }, copyClaude: true },
-  "reader-haiku": { label: "Plain sonnet session launching researchers, researcher on haiku (shipped)", script: "orchestrate.sh", env: { ...READER_ENV }, copyClaude: true },
+  routed: { label: "Orchestrator, read router on (ORCH_READ_ROUTER=on), shipped models (researcher on sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", ORCH_READ_ROUTER: "on" }, copyClaude: true },
+  "reader-haiku": { label: "Plain sonnet session launching researchers, researcher rewritten to haiku (ORCH_ALLOW_HAIKU=1)", script: "orchestrate.sh", env: { ...READER_ENV, ...ALLOW_HAIKU }, copyClaude: true, agentModels: HAIKU_RESEARCHER },
   "reader-sonnet": { label: "Plain sonnet session launching researchers, every subagent forced to sonnet (CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1)", script: "orchestrate.sh", env: { ...READER_ENV, CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" }, copyClaude: true },
-  "reader-routed": { label: "Plain sonnet session launching researchers, read router on (ORCH_READ_ROUTER=on)", script: "orchestrate.sh", env: { ...READER_ENV, ORCH_READ_ROUTER: "on" }, copyClaude: true },
+  "reader-routed": { label: "Plain sonnet session launching researchers, read router on (ORCH_READ_ROUTER=on), researcher on sonnet as shipped", script: "orchestrate.sh", env: { ...READER_ENV, ORCH_READ_ROUTER: "on" }, copyClaude: true },
 };
 
 export function armOf(id) {
@@ -147,6 +159,11 @@ export function prepareClaudeDir(armId, runRepo, root, disabledIds) {
         const file = join(agents, f);
         writeFileSync(file, readFileSync(file, "utf8").replace(/^model:.*$/m, `model: ${arm.agentModel}`));
       }
+    }
+    // Haiku arms: only the named agents (agentModels: {name: model}).
+    for (const [name, model] of Object.entries(arm.agentModels ?? {})) {
+      const file = join(dest, "agents", `${name}.md`);
+      writeFileSync(file, readFileSync(file, "utf8").replace(/^model:.*$/m, `model: ${model}`));
     }
   }
   mkdirSync(dest, { recursive: true });

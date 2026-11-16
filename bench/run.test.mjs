@@ -198,14 +198,15 @@ test("executeRun: outputs, results, snapshots, deadline", { timeout: 60_000 }, a
     assert.match(readFileSync(join(out, "prompt.txt"), "utf8"), /^Fake task\.\n\nHARD TIME LIMIT: 0\.05 minutes/);
     assert.ok(existsSync(join(out, "state", "routes.jsonl")));
 
-    ctx.commandFor = () => script(`echo '${doc("You have hit your usage limit", true)}'; sleep 30`);
+    // The rate_limited and deadline cases both wait for the 3 s deadline, so they run at the same time
+    // (distinct run ids, so distinct output folders and repos; each its own commandFor).
     const t0 = Date.now();
-    const late = await executeRun({ ...run, run_id: "fx__P-O__main__r1", arm: "P-O" }, ctx);
+    const [late, dl] = await Promise.all([
+      executeRun({ ...run, run_id: "fx__P-O__main__r1", arm: "P-O" }, { ...ctx, commandFor: () => script(`echo '${doc("You have hit your usage limit", true)}'; sleep 30`) }),
+      executeRun({ ...run, run_id: "fx__O-mix__main__r1", arm: "O-mix" }, { ...ctx, commandFor: () => script("sleep 30") }),
+    ]);
     assert.equal(late.end_reason, "rate_limited");
     assert.ok(Date.now() - t0 < 15_000, "killed at the deadline");
-
-    ctx.commandFor = () => script("sleep 30");
-    const dl = await executeRun({ ...run, run_id: "fx__O-mix__main__r1", arm: "O-mix" }, ctx);
     assert.equal(dl.end_reason, "deadline");
     assert.deepEqual(dl.results, []);
   } finally {

@@ -173,6 +173,7 @@ if (process.argv[1]?.endsWith("telemetry.mjs")) {
   } catch {
     process.exit(0);
   }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) process.exit(0); // valid JSON, not a hook payload
 
   let status;
   if (payload.hook_event_name === "SubagentStop") {

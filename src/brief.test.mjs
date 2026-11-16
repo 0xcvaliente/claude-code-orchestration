@@ -579,7 +579,13 @@ test("run model: a PLAN REVIEW opens a planned run; REPLAN extends it; a new PLA
   assert.equal(f.runs.length, 2);
   assert.equal(f.runs[0]?.closed, true);
   assert.equal(f.open?.id, 2);
-  assert.equal(f.open?.slices.a?.launches, 0, "the new run starts its own counts");
+  // Changed for G-1 (audit 2026-11-16): a slice the new plan names again whose attempt had no review yet moves into the
+  // new run with its launch, so its later stop and review meet it there.
+  assert.equal(f.open?.slices.a?.launches, 1, "the unreviewed launch of a re-planned slice moves into the new run");
+  assert.equal(f.runs[0]?.slices.a, undefined);
+  assert.equal(f.open?.slices.b?.launches, 0, "the new run starts its own counts");
+  f = foldRuns(R(planLaunch(0), impl(1, "a"), planLaunch(2, "PLAN REVIEW\nSLICE: c\nFILES: c.py\nDEPENDS: none")), { now: T0 + 3 * 60000 });
+  assert.deepEqual([f.runs[0]?.slices.a?.launches, f.open?.slices.a], [1, undefined], "a slice the new plan does not name stays in the closed run");
   assert.equal(foldRuns(R(planLaunch(0, replan)), { now: T0 }).open?.planned.join(), "c", "a REPLAN with no open run opens one");
 });
 

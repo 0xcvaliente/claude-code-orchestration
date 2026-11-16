@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,7 @@ import type { HookCallback, Options, query as sdkQuery } from "@anthropic-ai/cla
 import { makeRunAgent, sandboxFor, type AgentRequest } from "./agent.js";
 import { ROLES, rolesFor, SDK_DENIED_BASH, UNSAFE_BASH, type Role } from "./config.js";
 import { solo } from "./solo.js";
-import { HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, type JudgeDeps } from "./judge.js";
+import { HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, statPath, type JudgeDeps } from "./judge.js";
 
 const BASH_ROLES: Role[] = ["solo", "writer", "verifier"];
 const NO_BASH_ROLES: Role[] = ["planner", "explorer", "triager"];
@@ -199,5 +199,44 @@ test("solo passes the original task and a per-run audit file on every Bash role 
   for (const c of calls) {
     assert.equal(c.task, "THE TASK");
     assert.equal(c.auditFile, join(out, r.runId, "judge-audit.jsonl"));
+  }
+});
+
+test("audit 2026-11-16 J-13: through makeRunAgent, rm targets resolve against the hook input's folder, bounded by the worktree", async () => {
+  const outer = realpathSync(mkdtempSync(join(tmpdir(), "agent-cwd-")));
+  const wt = join(outer, "wt");
+  mkdirSync(join(wt, "src"), { recursive: true });
+  mkdirSync(join(outer, "outside"));
+  symlinkSync(join(outer, "outside"), join(wt, "src", "out"));
+  const judge = fakeJudge(["allow", "allow"]);
+  judge.deps.stat = statPath; // the real file system check
+  const o = await optionsFor(req("solo", { cwd: wt, task: "clean up" }), {}, judge);
+  const at = (cwd: string, command: string) =>
+    hookOf(o)({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command }, tool_use_id: "t1", session_id: "s", transcript_path: "", cwd } as never, "t1", { signal: new AbortController().signal });
+  assert.equal(decisionOf(await at(join(wt, "src"), "rm -rf out"))?.permissionDecision, "deny", "src/out is a symlink to a folder outside");
+  assert.equal(decisionOf(await at(join(outer, "outside"), "rm -r x"))?.permissionDecision, "deny", "the shell left the worktree");
+  assert.equal(judge.prompts.length, 0);
+});
+
+/** A query() that streams assistant messages (one repeated under its id, as the SDK does per content block), then fails. */
+function failingQuery(end: "throw" | "no_result") {
+  return (() =>
+    (async function* () {
+      const usage = { input_tokens: 100_000, output_tokens: 5_000, cache_read_input_tokens: 100_000, cache_creation_input_tokens: 0 };
+      yield { type: "assistant", message: { id: "m1", usage } };
+      yield { type: "assistant", message: { id: "m1", usage } }; // the same message again: counted once
+      yield { type: "assistant", message: { id: "m2", usage } };
+      yield { type: "assistant", message: { id: "m3", usage: { input_tokens: Number.NaN, output_tokens: 7 } } }; // NaN counts 0
+      if (end === "throw") throw new Error("stream died");
+    })()) as unknown as typeof sdkQuery;
+}
+
+test("audit 2026-11-16 S-2: a worker that crashes or ends without a result is charged the tokens its stream reported", async () => {
+  for (const end of ["throw", "no_result"] as const) {
+    const res = await makeRunAgent({ query: failingQuery(end), env: {} })(req("planner"));
+    assert.equal(res.ok, false, end);
+    assert.equal(res.subtype, end === "throw" ? "exception" : "no_result");
+    assert.equal(res.tokens, 2 * 205_000 + 7, end);
+    assert.deepEqual(res.usage, { input: 200_000, output: 10_007, cacheRead: 200_000, cacheWrite: 0 }, end);
   }
 });

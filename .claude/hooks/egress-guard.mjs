@@ -13,14 +13,17 @@
 // Later messages: a reviewer resumed by SendMessage may also fetch the hosts that message names (laterUserTexts: an
 // allowlist of the coordinator's resume messages only; never tool results, fetched content, reminders, notifications,
 // compaction summaries or any other later record).
-// Brief unreadable: exit 0 and log egress_unverified.
+// Brief unreadable (headless runs with --no-session-persistence keep no subagent transcript): the reviewer's launch
+// record in journal-launches.jsonl (latest of this session and agent id) stands in for it, with the hosts in its `urls`
+// and `sources` fields and the planned FILES of its slice (audit 2026-11-16 T-6). Only when no launch record of the
+// agent is found either: exit 0 and log egress_unverified.
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output; never an allow or ask decision. Acts only for
 // the bare agent_type `reviewer`; ORCH_GUARDS=off disables it; malformed input exits 0. Decisions go to gates.jsonl
 // (gate "egress", the host only, never the URL path, the brief or file text).
 import { appendFileSync, closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { briefUrls, parseHeader } from "./brief.mjs";
-import { sessionRuns } from "./run.mjs";
+import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BYTES = 1 << 20;
@@ -145,6 +148,39 @@ export function allowedHosts(brief, files, baseDir) {
 }
 
 /**
+ * The agent's latest launch record in this session (journal-launches.jsonl, joined by agent id), or null.
+ * @param {any} input @param {string} dir @returns {Record<string, any> | null}
+ */
+function launchOf(input, dir) {
+  const sid = input.session_id;
+  const aid = input.agent_id;
+  if (typeof sid !== "string" || typeof aid !== "string" || !aid) return null;
+  try {
+    return readJsonl(dir, "journal-launches.jsonl", sid).findLast((l) => l && l.session_id === sid && l.agent_id === aid) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hosts a launch record names: every entry of `urls` (the hosts of the brief's URLs, SOURCES included), and each
+ * `sources` entry that has a host's shape (an http(s) source is stored as its host) and is not a path that exists from
+ * `base` (a path entry stays a path). Older records without these fields name no host.
+ * @param {Record<string, any>} launch @param {string} base @returns {string[]}
+ */
+function launchHosts(launch, base) {
+  /** @type {string[]} */
+  const out = [];
+  for (const h of Array.isArray(launch.urls) ? launch.urls : []) if (typeof h === "string" && h) out.push(h);
+  for (const s of Array.isArray(launch.sources) ? launch.sources : []) {
+    if (typeof s !== "string" || !s || hostOf(`http://${s}`) !== s) continue;
+    if (existsSync(resolve(base, s))) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+/**
  * The decision for one WebFetch input. "skip": not ours; "unverified": the brief cannot be read; else allow or deny.
  * @param {any} input @param {{ env?: NodeJS.ProcessEnv, dir?: string }} [opts]
  * @returns {{ decision: "skip" | "unverified" | "allow" | "deny", host?: string | null, reason?: string }}
@@ -160,10 +196,12 @@ export function egressDecision(input, opts = {}) {
   const host = hostOf(url);
   const path = agentTranscript(input.transcript_path, input.agent_id);
   const brief = path ? firstUserText(path) : null;
-  if (!brief) return { decision: "unverified", host };
+  // T-6: no readable brief (headless runs keep no subagent transcript): the reviewer's launch record stands in for it.
+  const launch = brief ? null : launchOf(input, opts.dir ?? stateDir);
+  if (!brief && !launch) return { decision: "unverified", host };
   /** @type {string[]} */
   let files = [];
-  const slice = parseHeader(brief).slice;
+  const slice = brief ? parseHeader(brief).slice : typeof launch?.slice === "string" && launch.slice ? launch.slice : null;
   if (slice && typeof input.session_id === "string") {
     try {
       const { open } = sessionRuns(input.session_id, { dir: opts.dir ?? stateDir, env });
@@ -178,7 +216,8 @@ export function egressDecision(input, opts = {}) {
   const base = typeof input.cwd === "string" && input.cwd ? input.cwd : env.CLAUDE_PROJECT_DIR || process.cwd();
   // A resumed reviewer may also fetch what the messages it was resumed with name (laterUserTexts); the slice and the
   // planned files still come from the brief alone.
-  const allowed = allowedHosts([brief, ...(path ? laterUserTexts(path) : [])].join("\n"), files, base);
+  const allowed = allowedHosts(brief ? [brief, ...(path ? laterUserTexts(path) : [])].join("\n") : "", files, base);
+  if (launch) for (const h of launchHosts(launch, base)) allowed.add(h);
   if (host && allowed.has(host)) return { decision: "allow", host };
   return {
     decision: "deny",

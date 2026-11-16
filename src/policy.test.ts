@@ -73,5 +73,8 @@ test("this repo runs as the orchestrator: the project settings name it, the plug
   // Everything that must stay a plain session says so itself.
   assert.match(readFileSync(new URL("../scripts/orchestrate.sh", import.meta.url), "utf8"), /args\+=\(--settings '\{"agent":""\}'\)/);
   assert.match(readFileSync(new URL("./agent.ts", import.meta.url), "utf8"), /settings: \{ agent: "" \}/);
-  assert.match(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.plain, /^claude --settings '\{"agent":""\}'$/);
+  // npm run plain clears the agent and names the Concise output style, as orchestrate.sh does for a plain session.
+  const plain = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.plain;
+  assert.match(plain, /^claude --settings '\{"agent":"","outputStyle":"Concise"\}'$/);
+  assert.deepEqual(JSON.parse(plain.match(/^claude --settings '(.*)'$/)[1]), { agent: "", outputStyle: "Concise" });
 });
