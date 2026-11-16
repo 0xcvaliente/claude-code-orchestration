@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { runAgent as baseAgent } from "./agent.js";
 import { withTransientRetry } from "./retry.js";
-import { count, parseTokens } from "./args.js";
+import { parseCount, parseTokens } from "./args.js";
 import { formatTokens } from "./tokens.js";
 import { isDirty } from "./git.js";
 import { auto, MODES, type RequestedMode } from "./auto.js";
@@ -57,9 +57,9 @@ let limits: { runBudgetTokens?: number; concurrency?: number; maxRetries?: numbe
 try {
   limits = {
     runBudgetTokens: values.budget === undefined ? undefined : parseTokens("--budget", values.budget),
-    concurrency: values.concurrency === undefined ? undefined : count("--concurrency", Number(values.concurrency), 1),
-    maxRetries: values.retries === undefined ? undefined : count("--retries", Number(values.retries), 0),
-    maxReplans: values.replans === undefined ? undefined : count("--replans", Number(values.replans), 0),
+    concurrency: values.concurrency === undefined ? undefined : parseCount("--concurrency", values.concurrency, 1),
+    maxRetries: values.retries === undefined ? undefined : parseCount("--retries", values.retries, 0),
+    maxReplans: values.replans === undefined ? undefined : parseCount("--replans", values.replans, 0),
   };
 } catch (err) {
   console.error(err instanceof Error ? err.message : String(err));

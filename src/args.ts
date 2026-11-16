@@ -15,6 +15,16 @@ export function parseTokens(label: string, text: string): number {
   return value;
 }
 
+/**
+ * A count typed on the command line: plain decimal digits only. Number() would read "" and " " as 0 and accept 0x2 and
+ * 1e1, so an empty --retries would silently mean no retries.
+ */
+export function parseCount(label: string, text: string, min: number): number {
+  const n = /^\d+$/.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(n) || n < min) throw new RangeError(`${label} must be a whole number >= ${min} (got ${JSON.stringify(text)})`);
+  return n;
+}
+
 export function count(label: string, n: number, min: number): number {
   if (!Number.isInteger(n) || n < min) throw new RangeError(`${label} must be an integer >= ${min} (got ${n})`);
   return n;
