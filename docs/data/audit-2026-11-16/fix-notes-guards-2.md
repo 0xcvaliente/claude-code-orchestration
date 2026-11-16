@@ -6,14 +6,22 @@
   dropped, the check now runs `tokenize` (judge-core.mjs, unchanged) and looks, case ignored, for `judge-prompts` in
   each run of literal text of every word (redirection targets and assignments included) of every command of the line,
   and of every `$(...)`, backtick and process substitution it records (nested up to 8 levels). Quoting is removed and
-  `$'...'` escapes are decoded there. Test: `src/judge-hook.test.mjs` "J-12: a store name spelled with $'...', ...".
+  `$'...'` escapes are decoded there. Review round: the decoded words are then read again as command text, whichever
+  command would run them (`bash -c`, `sh -c`, `zsh -c`, `eval` or none), up to 4 levels (`DECODE_LEVELS`): each
+  command's decoded words joined by spaces (each word alone when that text cannot be read) get the same looks, the raw
+  one with `$` dropped too; a text with no quote, backslash, `$` or backtick is not read again. Tests:
+  `src/judge-hook.test.mjs` "J-12: a store name spelled with $'...', ..." and "J-12: ... inside a script string ...".
 - Visible effect (judge on): `cat ~/.claude/orchestration/judge-$'prompts'/...`, `judge-$"prompts"`,
   `$'judge\x2dprompts'`, `$'\x6a'udge-prompts`, octal escapes, the name in a later command, a redirection, a
-  substitution or an assignment are refused with the same message and no model call. Unchanged: `judge-$'notes'
-  prompts.txt` and `judge-$P` pass as before.
+  substitution or an assignment, and the same spellings inside a script string (`bash -c "cat judge-\$'prompts'/x"`,
+  `sh -c`, `zsh -c`, `eval cat judge-\$\'prompts\'/x`, a script string inside a script string, `\x70` escapes there)
+  are refused with the same message and no model call. Unchanged: `judge-$'notes' prompts.txt`, `judge-$P` and a
+  script string that does not name the store pass as before. A script string holding `judge-$prompts` (a variable) is
+  now refused too (safe side). A 100,000-character command decides in about 0.1 s (hook process included).
 - Limits: a run of literal text ends at an expansion or glob, so a glob (`judge-*`), a name built at run time from
-  variables or command output, and a `cd` into the parent then a relative glob stay out of reach; a line the tokenizer
-  cannot read gets only the raw-text look (the judge's floor denies it anyway). Write and Edit never reach the hook.
+  variables or command output, and a `cd` into the parent then a relative glob stay out of reach; so does a spelling
+  nested deeper than 4 script strings; a top-level line the tokenizer cannot read gets only the raw-text look (the
+  judge's floor denies it anyway). Write and Edit never reach the hook.
 - Docs to update: `docs/bash-judge.md` "Native hook" (the refusal also covers `$'...'`/`$"..."` spellings) and its
   Limits (globs and run-time names only); CHANGELOG.md. `dist/plugin` needs `npm run build-plugin`.
 

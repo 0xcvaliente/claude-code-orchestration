@@ -456,6 +456,44 @@ test("J-12: a store name spelled with $'...', $\"...\" or escapes, in any word o
   }
 });
 
+// fix-guards-2 item 1, review gap: a quoted spelling inside a string that a command of the line runs as a script
+// (`bash -c`, `sh -c`, `zsh -c`, `eval`) decodes to the name only in the inner shell. Each form below, with `cat`
+// replaced by `echo` and run in a real bash, prints a path holding `judge-prompts`.
+test("J-12: a store name spelled with quoting inside a script string, one or two levels deep, is refused with no model call", () => {
+  const commands = [
+    `bash -c "cat ~/.claude/orchestration/judge-\\$'prompts'/x"`,
+    `sh -c 'cat ~/.claude/orchestration/judge-$'"'"'prompts'"'"'/x'`,
+    `eval cat judge-\\$\\'prompts\\'/x`,
+    `bash -c "sh -c 'cat judge-\\$'\\"'\\"'prompts'\\"'\\"'/x'"`,
+    `zsh -c "cat judge-\\$'prompts'/x"`,
+    `bash -c "cat judge-\\$'\\x70rompts'/x"`,
+  ];
+  for (const command of commands) {
+    reset();
+    capture("ns3", "push feature/login to origin");
+    const r = run(HOOK, bash(command, "ns3"), { ...ON, STUB_MODE: "approve" });
+    assert.equal(r.code, 2, command);
+    assertNoDecision(r);
+    assert.match(r.stderr, /always blocked: the command names the judge's record of the user's requests/, command);
+    assert.equal(stubCalls().length, 0, `${command}: no model call`);
+  }
+  // Script strings that do not name the store keep passing.
+  for (const command of [`bash -c "cat notes-\\$'prompts'/x && echo judge"`, "eval echo judge prompts", `sh -c 'ls judge-$'"'"'notes'"'"' prompts'`]) {
+    reset();
+    const r = run(HOOK, bash(command, "ns3"), ON);
+    assert.equal(r.code, 0, `${command}: ${r.stderr}`);
+    assert.equal(r.stdout + r.stderr, "", command);
+    assert.equal(stubCalls().length, 0, command);
+  }
+  // A long command still decides quickly.
+  const long = `echo ${"'a b' \"c d\" e\\$'f' ".repeat(5263)}x`;
+  assert.ok(long.length >= 100000);
+  const t = Date.now();
+  const r = run(HOOK, bash(long, "ns3"), ON);
+  assert.equal(r.code, 0, r.stderr.slice(0, 200));
+  assert.ok(Date.now() - t < 3000, `a 100,000-character command decides in ${Date.now() - t} ms`);
+});
+
 test("rm targets: symlinked, through a symlink, outside or unresolvable are denied without a model call; a plain dir is judged", () => {
   assert.match(/** @type {any} */ (checkRmTargets(["linked"], work)).reason, /is a symlink/);
   assert.match(/** @type {any} */ (checkRmTargets(["linked/sub"], work)).reason, /outside the working folder/);

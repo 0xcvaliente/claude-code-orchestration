@@ -66,36 +66,73 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
 
 // The judge's authority must stay out of the judged worker's reach: a command that names the record's folder (its
 // absolute path, `~/...`, `$HOME/...`, or the bare folder name, all of which hold the name) is refused, even one that
-// only reads. Case is ignored (a case-insensitive file system). Two looks, either one refuses:
+// only reads. Case is ignored (a case-insensitive file system). What it looks at, any hit refuses:
 // - the raw text with quotes and backslashes dropped, so `judge'-'prompts` and `judge\-prompts` count, also where the
 //   tokenizer cannot read the line;
 // - each word as the judge's tokenizer decodes it (`tokenize` in judge-core.mjs), in every command of the line and of
-//   the `$(...)`, backtick and process substitutions it records: each run of literal text in a word, with its quoting
-//   removed and `$'...'` escapes decoded, so `judge-$'prompts'`, `judge-$"prompts"` and `$'judge\x2dprompts'` count.
-//   A run ends at an expansion or a glob character, so a name joined to a value known only at run time is not seen.
+//   the `$(...)`, backtick and process substitutions it records (up to 8 deep): each run of literal text in a word,
+//   with its quoting removed and `$'...'` escapes decoded, so `judge-$'prompts'`, `judge-$"prompts"` and
+//   `$'judge\x2dprompts'` count. A run ends at an expansion or a glob character.
+// - the decoded words read again as command text, whichever command would run them (`bash -c`, `sh -c`, `zsh -c`,
+//   `eval`, or none), up to DECODE_LEVELS levels: each command's decoded words joined by spaces (each word alone when
+//   that joined text cannot be read) get the same looks, the raw one with `$` dropped too. So `bash -c "cat
+//   judge-\$'prompts'/x"`, `eval cat judge-\$\'prompts\'/x` and a script string inside a script string count. A
+//   decoded text with no quote, backslash, `$` or backtick decodes to itself and is not read again.
 // Out of reach (best-effort, not a sandbox): a glob (`judge-*`), a name built at run time from variables or command
-// output, a `cd` into the parent then a relative glob, and a line the tokenizer cannot read (the judge's floor denies
-// that one anyway).
-/** @param {string} text @param {number} [depth] @returns {boolean} */
-function namesPromptStore(text, depth = 0) {
-  if (text.replace(/[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) return true;
+// output, a `cd` into the parent then a relative glob, a spelling nested deeper than DECODE_LEVELS script strings, and
+// a line the tokenizer cannot read at the top level (the judge's floor denies that one anyway).
+const DECODE_LEVELS = 4;
+
+/** @param {string} command @returns {boolean} */
+function namesPromptStore(command) {
+  return scanForStore(command, 0, 0) === true;
+}
+
+/**
+ * true when `text` (decoded `level` times already) names the store, false when it is read and does not, null when the
+ * tokenizer cannot read it (only the raw look was made).
+ * @param {string} text @param {number} level @param {number} subDepth @returns {boolean | null}
+ */
+function scanForStore(text, level, subDepth) {
+  if (text.replace(level ? /[\\'"$]/g : /[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) return true;
   /** @type {{ commands: { words: { pieces: ({ lit: string } | object)[] }[] }[], substitutions: string[] }} */
   let t;
   try {
     t = tokenize(text);
   } catch {
-    return false; // unreadable: the raw-text look above is all this check can do
+    return null; // unreadable: the raw-text look above is all this check can do here
   }
-  for (const { words } of t.commands)
+  /** @type {string[][]} */
+  const decoded = [];
+  for (const { words } of t.commands) {
+    /** @type {string[]} */
+    const texts = [];
     for (const { pieces } of words) {
       let run = "";
+      let whole = "";
       for (const p of [...pieces, {}]) {
-        if ("lit" in p) run += p.lit;
-        else if (run.toLowerCase().includes(PROMPT_STORE_NAME)) return true;
-        else run = "";
+        if ("lit" in p) {
+          run += p.lit;
+          whole += p.lit;
+        } else if (run.toLowerCase().includes(PROMPT_STORE_NAME)) return true;
+        else {
+          run = "";
+          whole += " ";
+        }
       }
+      texts.push(whole.trim());
     }
-  return depth < 8 && t.substitutions.some((s) => namesPromptStore(s, depth + 1));
+    decoded.push(texts);
+  }
+  if (subDepth < 8 && t.substitutions.some((s) => scanForStore(s, level, subDepth + 1) === true)) return true;
+  if (level >= DECODE_LEVELS) return false;
+  const again = (/** @type {string} */ s) => (/[\\'"$`]/.test(s) ? scanForStore(s, level + 1, subDepth) : false);
+  for (const texts of decoded) {
+    const joined = again(texts.join(" "));
+    if (joined === true) return true;
+    if (joined === null && texts.some((w) => again(w) === true)) return true;
+  }
+  return false;
 }
 
 if (namesPromptStore(command)) deny("always blocked: the command names the judge's record of the user's requests");
