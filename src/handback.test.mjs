@@ -2,8 +2,8 @@
 // answers) and quote-check.mjs on the same event, run as child processes with fixture state (no model call).
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -330,6 +330,36 @@ test("handback capture (d, e): no agent id, no hand-back, or only an earlier sto
     stopHooks(dir, { ...stopOf(staleTranscript(dir), { agent: "e1" }), last_assistant_message: "STATUS: fail\nOPEN: none" });
     const e = lastStop(dir, "e1");
     assert.deepEqual([e.journal?.status, e.telemetry?.status], ["fail", "fail"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Audit 2026-11-16 T-7: a page the PDF does not have is not "a page with no text". ----
+
+const hasPoppler = (() => {
+  try {
+    for (const t of ["pdfinfo", "pdftotext", "pdfimages"]) execFileSync(t, ["-v"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("quote check (T-7): a made-up quote that cites a page beyond the PDF is unverified and sent back once", { skip: hasPoppler ? false : "poppler is not installed" }, () => {
+  const dir = project();
+  try {
+    copyFileSync(join(root, "src", "fixtures", "files", "text.pdf"), join(dir, "report.pdf")); // 3 pages
+    const stopFor = (/** @type {string} */ agent, /** @type {string} */ page) =>
+      run(dir, "quote-check.mjs", { session_id: "s1", hook_event_name: "SubagentStop", agent_id: agent, agent_type: "researcher", agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: `STATUS: pass\nQUOTE: report.pdf p. ${page} | The board approved a merger with Initech.\nOPEN: none` });
+    for (const [agent, page] of [["p1", "1"], ["p4", "4"], ["p999", "999"], ["p0", "0"]]) {
+      const r = stopFor(agent, page);
+      assert.equal(r.code, 2, `page ${page}: ${r.stderr}`);
+      assert.match(r.stderr, /1 of your QUOTE lines was not found/);
+      const e = stateLog(dir, "quotes.jsonl").at(-1);
+      assert.deepEqual([e.agent_id, e.unverified, e.unverifiable, e.blocked], [agent, 1, 0, true], `page ${page}`);
+      assert.equal(stopFor(agent, page).code, 0, `page ${page}: the second stop passes`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
