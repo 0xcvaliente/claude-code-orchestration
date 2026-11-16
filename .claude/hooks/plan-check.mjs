@@ -13,7 +13,8 @@
 //   missing_lines         a brief without SLICE or FILES (counted per run).
 //   no_plan_review        until a reviewer of this run's PLAN REVIEW brief has stopped (journal.mjs records it).
 //                         PATH: light skips the wait, but only for the run's single slice; a light brief once another
-//                         slice ran in scope is light_path_multi. Counted per slice; giving up opens the gate for the
+//                         slice ran in scope, or while the open run's plan names several slices, is light_path_multi.
+//                         Counted per slice; giving up opens the gate for the
 //                         run (no_plan_review_gave_up). A session whose log has a plan reviewer stop but no launch
 //                         records (older journal.mjs) counts as reviewed, as before.
 //   replan_required       the open run's slice is stalled: its last two counted failed reviews share a gap key at or
@@ -24,9 +25,13 @@
 //                         dir; a planned folder covers what is under it, a planned glob only what it matches: `*` in
 //                         one segment, `**` across segments, `?` one character). Without plan slice lines, or for a
 //                         planned slice without FILES, this skips with a logged reason. Counted per slice.
-//   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS
-//                         (both normalized; entries overlap when some path could match both).
-//   dependency_cycle      DEPENDS closes a cycle.
+//   file_overlap          a FILES entry overlaps a file another slice of the run owns and the two are in no order in
+//                         the run's order graph (planOrder: each slice's latest launch's DEPENDS, this launch's line
+//                         replacing a retry's earlier one, followed through other slices, either way); or a retry's new
+//                         line drops the only order between two other slices that share a file. Both normalized,
+//                         entries overlap when some path could match both.
+//   dependency_cycle      DEPENDS closes a cycle in that graph. A retry's DEPENDS on a slice already ordered after it
+//                         is not an edge.
 //   worktree_base_not_head  (after the two above, with the usual two-block guard per slice) tool_input.isolation is
 //                         "worktree", the effective worktree.baseRef (first of <project>/.claude/settings.local.json,
 //                         <project>/.claude/settings.json, <CLAUDE_CONFIG_DIR or ~/.claude>/settings.json that sets it)
@@ -278,7 +283,7 @@ function raiseHaiku() {
     if (String(process.env.ORCH_ALLOW_HAIKU ?? "").trim() === "1") return false;
     const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
     const model = explicit ?? agentFileModel();
-    if (modelRank(model) !== 0) return false;
+    if (modelRank(model) !== 0 && !haikuFamily(model)) return false;
     tool.model = FLOOR_MODEL;
     try {
       ensureStateDir();
@@ -573,6 +578,15 @@ function modelRank(m) {
   return family === undefined ? null : ({ haiku: 0, sonnet: 1, opus: 2, fable: 3 })[family] ?? null;
 }
 
+/**
+ * The haiku rule's own test, wider than modelRank (which stays strict for the read router): the word haiku anywhere in
+ * the id, between non-letters, so dated and provider-prefixed ids (claude-3-5-haiku-20241022,
+ * us.anthropic.claude-haiku-4-5-20251001-v1:0) count. @param {unknown} m
+ */
+function haikuFamily(m) {
+  return /(?:^|[^a-z])haiku(?:$|[^a-z])/.test(String(m ?? "").trim().toLowerCase());
+}
+
 /** Short reason codes from a profile (never file text). @param {any} r @param {import("./brief.mjs").Header} hd */
 function reasonCodes(r, hd) {
   const codes = new Set();
@@ -847,7 +861,7 @@ if (role !== "implementer") {
   decide(
     "block",
     "builtin_agent_in_run",
-    `Plan check: run ${open.id} is open, and subagent_type "${type || "general-purpose"}" is a Claude Code built-in or a fork, which the run's gates do not track. Use orchestration:researcher to read or research, orchestration:implementer to change files and orchestration:reviewer to review. ORCH_ALLOW_BUILTINS=1 allows built-ins.`,
+    `Plan check: run ${open.id} is open, and subagent_type "${type || "general-purpose"}" is a Claude Code built-in or a fork, which the run's gates do not track. Use orchestration:researcher to read or research, orchestration:implementer to change files and orchestration:reviewer to review.`,
   );
 }
 
@@ -894,7 +908,9 @@ if (skillInfo) {
 
 const launched = scoped.filter((e) => e.decision === "allow" && e.slice);
 const others = [...new Set(launched.map((e) => e.slice).filter((id) => id !== slice))];
-const light = lightBrief && others.length === 0;
+// The light path is for a task with a single slice: none other launched, and no open plan naming several slices.
+const plannedMany = open?.kind === "planned" && Array.isArray(open.planned) && open.planned.length > 1;
+const light = lightBrief && others.length === 0 && !plannedMany;
 const legacyReviewed = k === 0 && records.stops.some((e) => e.slice === "plan" && String(e.role ?? e.agent_type ?? "").split(":").pop() === "reviewer");
 const reviewed =
   (open?.kind === "planned" && open.planReviewed) ||
@@ -903,7 +919,7 @@ const reviewed =
 if (!reviewed && !light) {
   if (blocks("no_plan_review", (e) => e.slice === slice) + blocks("light_path_multi", (e) => e.slice === slice) < MAX_BLOCKS) {
     if (lightBrief) {
-      decide("block", "light_path_multi", `Plan check: PATH: light is only for a task with a single slice, and this run already has ${others.join(", ")}. A plan with several slices needs a plan review first: send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, then launch the implementers.`);
+      decide("block", "light_path_multi", `Plan check: PATH: light is only for a task with a single slice, and this run ${others.length ? `already has ${others.join(", ")}` : `plans ${open?.planned.join(", ")}`}. A plan with several slices needs a plan review first: send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, then launch the implementers.`);
     }
     decide("block", "no_plan_review", "Plan check: no plan review has finished in this run. Send the plan to a reviewer in a brief that starts with PLAN REVIEW, wait for its report, fix the plan, then launch the implementers. Only the light path (a single slice) skips this, with the line PATH: light in the brief.");
   }
@@ -919,7 +935,7 @@ if (open && st?.stalled && stallGateOn(process.env)) {
     decide(
       "block",
       "replan_required",
-      `Plan check: slice ${slice} is stalled in run ${open.id}: its last two failed reviews report the same gap. Send the plan to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, then launch it again; or report the slice as failed. ORCH_STALL_GATE=off turns this check off.`,
+      `Plan check: slice ${slice} is stalled in run ${open.id}: its last two failed reviews report the same gap. Send the plan to the plan reviewer first in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, then launch it again; or report the slice as failed.`,
     );
   }
   gaveUp.push("replan_required_gave_up");
@@ -1193,37 +1209,91 @@ function plannedDraft(id) {
   }
 }
 
+/**
+ * The run's order graph (G-7), the one both file_overlap and dependency_cycle read. Pure: no I/O and no free variables
+ * (src/plan-check-overlap.test.mjs lifts it out of this file and calls it in-process). Edges point from a slice to the
+ * slices its DEPENDS names. Each slice's edges are the DEPENDS of its latest allowed launch in log order: a retry replaces
+ * its earlier line, so an edge of a superseded launch orders nothing. A retry's entry naming a slice that already leads
+ * back to it, directly or through other slices (a slice ordered after it), is dropped: the retry does not reverse that
+ * order. A first launch's line is kept whole, and so is a slice naming itself, so a real cycle is still a cycle.
+ * `prior` is the graph of `launches`, `graph` the same with this launch applied; `cycle`: this launch's edges lead back
+ * to it; `unordered`: the launched slices this launch is in no order with; `lost`: two other launched slices that `prior`
+ * orders and `graph` no longer does (a retry dropped the only path between them).
+ * @param {{ slice?: unknown, depends?: unknown }[]} launches @param {string} slice @param {string[]} depends
+ * @returns {{ prior: Map<string, string[]>, graph: Map<string, string[]>, cycle: boolean, unordered: string[], lost: [string, string][] }}
+ */
+function planOrder(launches, slice, depends) {
+  /** Following edges from `from` leads to `to`. @param {Map<string, string[]>} g @param {string} from @param {string} to */
+  const leads = (g, from, to) => {
+    const seen = new Set();
+    const todo = [...(g.get(from) ?? [])];
+    while (todo.length) {
+      const s = /** @type {string} */ (todo.pop());
+      if (s === to) return true;
+      if (seen.has(s)) continue;
+      seen.add(s);
+      todo.push(...(g.get(s) ?? []));
+    }
+    return false;
+  };
+  /** @param {Map<string, string[]>} g @param {string} x @param {string} y */
+  const ordered = (g, x, y) => leads(g, x, y) || leads(g, y, x);
+  /** The graph with one launch applied (a new Map). @param {Map<string, string[]>} g @param {string} s @param {unknown} line */
+  const apply = (g, s, line) => {
+    const retry = g.has(s);
+    const named = [...new Set((Array.isArray(line) ? line : []).filter((d) => typeof d === "string" && d !== ""))];
+    const next = new Map(g);
+    next.set(s, named.filter((d) => !(retry && d !== s && leads(g, d, s))));
+    return next;
+  };
+  /** @type {Map<string, string[]>} */
+  let prior = new Map();
+  for (const e of launches) if (e && typeof e.slice === "string" && e.slice) prior = apply(prior, e.slice, e.depends);
+  const graph = apply(prior, slice, depends);
+  const others = [...prior.keys()].filter((s) => s !== slice);
+  /** @type {[string, string][]} */
+  const lost = [];
+  for (const x of others) for (const y of others) if (x < y && ordered(prior, x, y) && !ordered(graph, x, y)) lost.push([x, y]);
+  return { prior, graph, cycle: leads(graph, slice, slice), unordered: others.filter((s) => !ordered(graph, slice, s)), lost };
+}
+
+// This launch against the run's order graph: each launched slice's latest DEPENDS line, this launch's line applied.
+const order = planOrder(launched, slice, depends);
+/** FILES of one launch record, as written. @param {any} e @returns {string[]} */
+const ownedBy = (e) => (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
+/** Some path could match both entries; an entry whose names cannot be decided overlaps. @param {string} a @param {string} b */
+const clash = (a, b) => {
+  const x = names(normalizeFiles([a], dir)[0] ?? a);
+  const y = names(normalizeFiles([b], dir)[0] ?? b);
+  return !x || !y || x.some((n) => y.some((g) => overlaps(n, g)));
+};
+
 const clashes = [];
 for (const e of launched) {
-  if (e.slice === slice || depends.includes(e.slice)) continue;
+  if (e.slice === slice || !order.unordered.includes(e.slice)) continue;
   // FILES are logged as written and compared normalized; an entry that does not normalize is compared as written.
-  /** @type {string[]} */
-  const owned = (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
-  // Each entry with all its names (names()); an entry whose names cannot be decided overlaps.
-  const theirs = owned.map((g) => names(normalizeFiles([g], dir)[0] ?? g));
-  for (const f of files) {
-    const mine = names(normalizeFiles([f], dir)[0] ?? f);
-    if (theirs.some((t) => !t || !mine || mine.some((n) => t.some((g) => overlaps(n, g))))) clashes.push(`${f} (owned by ${e.slice})`);
-  }
+  const owned = ownedBy(e);
+  for (const f of files) if (owned.some((g) => clash(f, g))) clashes.push(`${f} (owned by ${e.slice})`);
 }
 // file_overlap and dependency_cycle block every time, as before this hook was scoped to runs: two owners of one file,
 // or a cycle, is a broken plan that letting the launch through would not fix (C2: no existing block is weakened).
 if (clashes.length) {
   decide("block", "file_overlap", `Plan check: slice ${slice} would change files another slice owns: ${[...new Set(clashes)].join(", ")}. Give each file one owner, or list the owning slice in DEPENDS if this slice runs after it.`);
 }
-
-// Cycle: following DEPENDS from this slice's dependencies leads back to this slice.
-const deps = new Map(launched.map((e) => [e.slice, e.depends ?? []]));
-deps.set(slice, depends);
-const seen = new Set();
-const stack = [...depends];
-while (stack.length) {
-  const s = stack.pop();
-  if (s === slice) decide("block", "dependency_cycle", `Plan check: DEPENDS of slice ${slice} forms a cycle. Fix the order in the plan.`);
-  if (seen.has(s)) continue;
-  seen.add(s);
-  stack.push(...(deps.get(s) ?? []));
+// A retry whose new DEPENDS line removes the only order between two other slices that share a file.
+const loose = [];
+for (const [x, y] of order.lost) {
+  const xs = launched.filter((e) => e.slice === x).flatMap(ownedBy);
+  const ys = launched.filter((e) => e.slice === y).flatMap(ownedBy);
+  const shared = xs.find((f) => ys.some((g) => clash(f, g)));
+  if (shared !== undefined) loose.push(`${x} and ${y} (${shared})`);
 }
+if (loose.length) {
+  decide("block", "file_overlap", `Plan check: this DEPENDS line of slice ${slice} drops the only order between slices that share files: ${loose.join(", ")}. Keep the slices ${slice} depended on in its DEPENDS line, or give each file one owner.`);
+}
+
+// Cycle: following DEPENDS from this slice through the order graph leads back to this slice.
+if (order.cycle) decide("block", "dependency_cycle", `Plan check: DEPENDS of slice ${slice} forms a cycle. Fix the order in the plan.`);
 
 // Worktree base: an isolated launch whose worktree would start from origin's default branch while the checked-out HEAD
 // differs (the session did not load a settings file with worktree.baseRef "head"). Anything it cannot establish allows.
