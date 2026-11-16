@@ -652,6 +652,38 @@ test("classify: a command of 20,000 words is analysed in linear time (the hook d
   assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
 });
 
+// The same long commands, plus the git shapes whose shell arguments are read (rebase -x, submodule foreach, bisect run),
+// at 1,000 and 8,000 words. Eight times the words must take under 20 times as long: linear work gives about 8 times or
+// less, quadratic about 50 times, whatever the machine's speed. A fixed deadline alone missed a quadratic rule on a fast
+// machine (2 s for 20,000 words here, 12 s on CI). Best of three runs after a warm-up; a run past 64 times stops early.
+const LONG_GROWTH = `const many = (n, w) => Array(n).fill(w).join(" ");
+const shapes = ["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a", "git rebase", "git rebase -x a", "git submodule foreach x", "git bisect run x", "git -C x rebase --exec a"];
+const set = (n) => [...shapes.map((w) => "echo " + many(n, w)), many(n, "A=1") + " ls", "echo x" + "$a".repeat(n)];
+const time = (cmds, cap = Infinity) => {
+  const t = performance.now();
+  for (const c of cmds) if (performance.now() - t < cap) classifyDetail(c, "/w");
+  return performance.now() - t;
+};
+const small = set(1000), large = set(8000);
+time(small);
+const s = Math.min(time(small), time(small), time(small));
+let l = Infinity;
+for (let i = 0; i < 3 && l > 20 * s; i++) {
+  l = Math.min(l, time(large, 64 * s)); // a quadratic run stops at 64 times
+  if (l >= 64 * s) break;
+}
+if (l > 20 * s) {
+  console.log("8x the words took " + (l / s).toFixed(1) + "x as long (" + Math.round(s) + " ms, " + Math.round(l) + " ms): not linear");
+  process.exit(1);
+}`;
+
+test("classify: eight times the words take well under 64 times as long (linear growth, on any machine)", () => {
+  const code = `const { classifyDetail } = await import(${JSON.stringify(new URL("./judge.ts", import.meta.url).href)});\n${LONG_GROWTH}`;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { encoding: "utf8", timeout: 120000 });
+  assert.equal(r.signal, null, "timed out after 120 s");
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+});
+
 test("tokenize: words carry their literal text and whether the shell decides them", () => {
   const [cmd] = tokenize(`r""m -rf "a b" $X *.ts`).commands;
   assert.deepEqual(cmd?.words.map((w) => [w.text, w.dynamic, w.quoted]), [["rm", false, true], ["-rf", false, false], ["a b", false, true], ["", true, false], [".ts", true, false]]);
