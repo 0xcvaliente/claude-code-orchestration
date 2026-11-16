@@ -2,8 +2,8 @@
 // PreToolUse hook (matcher Bash): holds the researcher to its read-only Bash allowlist. The researcher's tools line
 // allows only git log/ls-files/rev-list/rev-parse/status/show, git branch --show-current (each also as git -C <dir> ...),
 // wc, ls and du, (1.2.0) read-only search and paging: grep, rg, find, head, tail and cat, and (audit 2026-11-16 T-11)
-// `sed -n '<N>p'`/`'<N>,<M>p'`, cut, stat and echo in narrow forms. `cd` stays refused: a relative path after it could
-// reach a device in ways a check of the command text cannot follow. A researcher once wrote a
+// `sed -n '<N>p'`/`'<N>,<M>p'`, cut, stat and echo in narrow forms, and (fix-researcher-cd) `cd` with one literal path
+// whose real location is the project folder or a folder inside it (CD_FORM, cdReach). A researcher once wrote a
 // file with a heredoc and ran python3 regardless (docs/research-2026-10-31.md, section 6.5). This hook enforces the same
 // list on every segment of the command.
 // Why search runs through Bash: on macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose
@@ -25,8 +25,9 @@
 // exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
 // allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
-import { appendFileSync, readFileSync, realpathSync } from "node:fs";
+import { appendFileSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tokenize } from "./judge-core.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -34,6 +35,7 @@ export const ALLOWED_PREFIXES = [
   "git log", "git ls-files", "git rev-list", "git rev-parse", "git status", "git show", "git branch --show-current",
   "git -C <dir> <one of those>", "wc", "ls", "du", "grep", "rg", "find (no -exec, -ok, -delete or -fprint)", "head", "tail (no -f)", "cat",
   "sed -n '<N>p' or '<N>,<M>p'", "cut (-b, -c, -f, -d, -s, --complement, --output-delimiter)", "stat", "echo",
+  "cd <one literal path to the project folder or a folder inside it>",
 ];
 const GIT_SUBS = new Set(["log", "ls-files", "rev-list", "rev-parse", "status", "show"]);
 // Audit 2026-11-16 T-11 (approved by the owner): five more read-only forms, each held to what cannot write a file or
@@ -59,6 +61,27 @@ const PAGERS = new Set(["head", "tail", "cat"]);
 // `..` (`<link>/../dev/zero`, whose text-normalised form does not exist). The commands that read their operands are
 // under the rule: the search and paging commands, wc, and the narrow sed and cut forms.
 const READERS = new Set(["wc", "sed", "cut"]);
+// fix-researcher-cd (approved by the owner; researchers were refused `cd` more than any other command): `cd` passes only
+// as a segment of its own with exactly one literal path argument (no option, `-`, `+N`, `~`, `=`, expansion, glob or
+// control character), absolute or starting with `./` or `../` (bash and zsh skip CDPATH, and zsh its cdable_vars, for
+// those), whose physical location from every folder the shell may be in at that point is the project folder
+// (CLAUDE_PROJECT_DIR, compared by device and inode) or a folder inside it, and exists from at least one of them. Both
+// the shell's logical reading (`..` removed as text) and the physical one (symlinks first) are judged, so no symlink
+// and no `..` leads out. The folders a cd may leave the shell in are kept, and every later segment's relative
+// operands, the device rule included, are judged from each of them (a cd in a pipe or a subshell changes nothing, so
+// the folders before it stay too). Not judged: a shell function or alias named `cd`.
+const CD_FORM = "`cd` is allowed only as `cd <path>` with one literal path that starts with `./`, `../` or `/` (`cd ./src`) and leads to the project folder or a folder inside it; elsewhere put absolute paths in the command itself (`grep -n foo /repo/a.txt`)";
+const MAX_FOLDERS = 32;
+const MAX_WORD = 4096;
+// Round 2 (item A): `realpathSync.native` on a long path that reaches /dev itself through a symlink ends the process with
+// SIGTRAP or SIGSEGV, or reports a false ENOENT, after a few dozen calls (Node 24.22.2, Darwin 27.2; the cause of the
+// exit 133). The guard never makes that call: `resolve` walks a path with lstat and readlink, and the identity of /dev
+// and /dev/null (device and inode, from stat, which showed no fault) decides what reaches a device.
+const DEV_ID = statId("/dev");
+const NULL_ID = statId("/dev/null");
+// The lstat calls one decision may make; past it the command is refused as too complex to judge.
+const WALK_BUDGET = 20000;
+let walkBudget = WALK_BUDGET;
 // Long options of grep, ugrep and ripgrep that only change what is searched or how matches print. Anything else is
 // denied by name, which covers the ones that run a program or write a file (ugrep --filter, --pager, --view,
 // --save-config, --config and ---FILE; ripgrep --pre, --hostname-bin) without listing them.
@@ -82,7 +105,6 @@ const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du, cut, 
 
 /** @param {string} word @returns {string} */
 function insteadOf(word) {
-  if (word === "cd") return "put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
   if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, `head` and `tail`, or `sed -n '10,40p' <file>`";
   return USE_ALLOWED;
 }
@@ -90,10 +112,17 @@ function insteadOf(word) {
 /**
  * Why `command` is outside the researcher's allowlist, or null when it is inside.
  * @param {string} command @param {string} [cwd] the folder the command runs in (relative paths resolve against it)
+ * @param {string} [project] the project folder; without an absolute one every `cd` is refused
  * @returns {{ reason: string, word?: string } | null}
  */
-export function researcherViolation(command, cwd = process.cwd()) {
-  return violation(withoutStderrNull(command), cwd);
+export function researcherViolation(command, cwd = process.cwd(), project) {
+  // fix-researcher-cd item 3: a decision for any input; whatever cannot be judged is refused, never thrown.
+  walkBudget = WALK_BUDGET;
+  try {
+    return violation(withoutStderrNull(String(command)), String(cwd), project);
+  } catch (err) {
+    return { reason: `the command cannot be judged (${err instanceof Error ? err.message.slice(0, 80) : "error"})` };
+  }
 }
 
 // The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
@@ -149,8 +178,8 @@ function withoutStderrNull(command) {
   return out;
 }
 
-/** @param {string} command @param {string} cwd @returns {{ reason: string, word?: string } | null} */
-function violation(command, cwd) {
+/** @param {string} command @param {string} cwd @param {string | undefined} project @returns {{ reason: string, word?: string } | null} */
+function violation(command, cwd, project) {
   /** @type {any} */
   let t;
   try {
@@ -171,8 +200,17 @@ function violation(command, cwd) {
   if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !command.includes("|")))) {
     return { reason: "input redirection, a heredoc or here-string" };
   }
+  // The folders the shell may be in when a segment runs: where the command starts, plus each folder an allowed cd reached.
+  const folders = [cwd];
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
+    if (words[0]?.text === "cd") {
+      const reached = cdReach(words, folders, project);
+      if (!reached) return { reason: CD_FORM, word: "cd" };
+      for (const f of reached) if (!folders.includes(f)) folders.push(f);
+      if (folders.length > MAX_FOLDERS) return { reason: CD_FORM, word: "cd" };
+      continue;
+    }
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
     if (words.some((w) => w.assign)) return { reason: `a variable assignment; ${USE_ALLOWED}`, word: words[0]?.text };
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
@@ -185,7 +223,7 @@ function violation(command, cwd) {
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
     if (w[0] === "sed" && !sedForm(words)) return { reason: SED_FORM, word: "sed" };
-    const option = optionViolation(w, cwd);
+    const option = optionViolation(w, folders);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -236,9 +274,9 @@ function allowedWords(w) {
  * it can be the value of one (`rg -e -- --pre=sh x` reads `--` as the pattern and `--pre` as an option). So a word
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
- * @param {string[]} w @param {string} cwd the folder the command runs in @returns {string | null}
+ * @param {string[]} w @param {string[]} folders the folders the command may run in @returns {string | null}
  */
-function optionViolation(w, cwd) {
+function optionViolation(w, folders) {
   const first = w[0] ?? "";
   const args = w.slice(1);
   if (first === "find") {
@@ -253,7 +291,12 @@ function optionViolation(w, cwd) {
   if (!SEARCH.has(first) && !PAGERS.has(first) && !READERS.has(first)) return null;
   // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail, wc or a search reading for ever,
   // also as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
-  const device = args.find((a) => readsDevice(a, cwd));
+  // A word longer than any path the system opens is not judged suffix by suffix (that took minutes for a word of a few
+  // hundred thousand characters, past the hook's timeout); it is refused.
+  if (args.some((a) => a.length > MAX_WORD)) return `${first}: a word longer than ${MAX_WORD} characters is too long to judge`;
+  // For grep and rg `.` too: with no path they search the folder they run in (round 2, item C: so in /dev or below it
+  // every search is refused, also one with a path elsewhere, since a pattern and a path cannot be told apart).
+  const device = [...args, ...(SEARCH.has(first) ? ["."] : [])].find((a) => folders.some((f) => readsDevice(a, f)));
   if (device) return `${first} ${device} reads a device that may never end`;
   if (first === "cut") return cutViolation(args);
   if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
@@ -301,12 +344,12 @@ function cutViolation(args) {
 
 /**
  * Does an argument name a device other than /dev/null: as a whole word, as a long option's value (`--file=/dev/zero`)
- * or attached to short options (`-f/dev/zero`, `-rf../dev/zero`)? Each candidate path is judged three ways: resolved
- * against `cwd` as text (which normalises `.`, `..` and repeated slashes), and, when it exists, the system's real path
- * of that normalised path and of the string as written (joined to `cwd` when relative). The last one matters: the
- * system follows a symlink before it applies the `..` after it, so `<link to />/../dev/zero` is /dev/zero although its
- * text-normalised form names a file that does not exist. `realpathSync.native` asks the system; Node's own
- * `realpathSync` normalises the text first and would miss it.
+ * or attached to short options (`-f/dev/zero`, `-rf../dev/zero`)? Each candidate path, a bare word included (round 2,
+ * item C), is judged on its text resolved against `cwd` (`.`, `..` and repeated slashes collapsed: a path that is /dev
+ * or under it, other than /dev/null, is refused, whatever the system says, since /dev/fd and /dev/stdin differ between
+ * this process and the shell), and by `judged` on that normalised path and on the string as written (joined to `cwd`
+ * when relative): the system follows a symlink before it applies the `..` after it, so `<link to />/../dev/zero` is
+ * /dev/zero although its text-normalised form names a file that does not exist.
  * @param {string} arg @param {string} cwd
  */
 function readsDevice(arg, cwd) {
@@ -324,20 +367,183 @@ function readsDevice(arg, cwd) {
   return candidates.some((p) => {
     if (!p) return false;
     const normalised = posix.resolve(cwd, p);
-    const paths = [normalised];
-    for (const q of [normalised, p.startsWith("/") ? p : `${cwd}/${p}`]) {
-      try {
-        paths.push(realpathSync.native(q));
-      } catch {
-        // no such file: the other paths decide
-      }
-    }
-    return paths.some((x) => x.startsWith("/dev/") && x !== "/dev/null");
+    if (isDevice(normalised)) return true;
+    return [normalised, p.startsWith("/") ? p : `${cwd}/${p}`].some((q) => judged(q) === "device");
   });
 }
 
-// Run as a hook only when executed directly (the tests import researcherViolation).
-if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
+/**
+ * What the system says about the absolute path `q`, asked only with lstat, readlink and stat: "device" when it reaches
+ * a device, FIFO or socket other than /dev/null, or passes through /dev's file system on the way to anything but
+ * /dev/null, or when two answers disagree (one says it exists, the other that it is missing), or when the walk is over
+ * budget; "missing" when neither finds it; else its physical path (symlinks followed, `..` applied after them).
+ * @param {string} q @returns {string}
+ */
+function judged(q) {
+  const walked = resolve(q);
+  /** @type {import("node:fs").Stats | null} */
+  let st = null;
+  try {
+    st = statSync(q);
+  } catch {
+    // missing or unreachable: compared with the walk below
+  }
+  if (walked === "device" || walked === "budget") return "device";
+  const found = walked !== "missing" && walked !== "unknown";
+  if (found !== (st !== null)) return "device";
+  if (!st) return "missing";
+  if (sameId(st, NULL_ID)) return walked;
+  if (st.isCharacterDevice() || st.isBlockDevice() || st.isFIFO() || st.isSocket()) return "device";
+  if (DEV_ID && st.dev === DEV_ID.dev) return "device";
+  return isDevice(walked) ? "device" : walked;
+}
+
+/**
+ * The physical path of the absolute path `p`, walked one name at a time with lstat and readlink, the way the kernel
+ * reads it: a symlink is followed before the `..` after it. "missing" when a name does not exist or a non-folder has
+ * names after it, "unknown" for a loop (over 40 links) or any other error, "device" when the walk passes through /dev's
+ * file system and does not end at /dev/null, "budget" past the lstat budget of this decision.
+ * @param {string} p @returns {string}
+ */
+function resolve(p) {
+  let rest = p.split("/").filter((x) => x !== "");
+  const wantsFolder = p.endsWith("/") || p.endsWith("/.") || p.endsWith("/..");
+  let cur = "/";
+  let links = 0;
+  let throughDev = false;
+  /** @type {import("node:fs").Stats | null} */
+  let last = null;
+  while (rest.length) {
+    const name = /** @type {string} */ (rest.shift());
+    if (name === ".") continue;
+    if (name === "..") {
+      cur = posix.dirname(cur);
+      continue;
+    }
+    const next = cur === "/" ? `/${name}` : `${cur}/${name}`;
+    if (--walkBudget < 0) return "budget";
+    /** @type {import("node:fs").Stats} */
+    let st;
+    try {
+      st = lstatSync(next);
+    } catch (err) {
+      const code = /** @type {any} */ (err)?.code;
+      return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+    }
+    if (st.isSymbolicLink()) {
+      if (++links > 40) return "unknown";
+      let target;
+      try {
+        target = readlinkSync(next);
+      } catch {
+        return "unknown";
+      }
+      if (target.startsWith("/")) cur = "/";
+      rest = [...target.split("/").filter((x) => x !== ""), ...rest];
+      continue;
+    }
+    if (DEV_ID && st.dev === DEV_ID.dev) throughDev = true;
+    if (rest.length && !st.isDirectory()) return "missing";
+    cur = next;
+    last = st;
+  }
+  if (wantsFolder && last && !last.isDirectory()) return "missing";
+  if (last && sameId(last, NULL_ID)) return cur;
+  if (throughDev) return "device";
+  return cur;
+}
+
+/** @param {string} p @returns {{ dev: number, ino: number } | null} */
+function statId(p) {
+  try {
+    const s = statSync(p);
+    return { dev: s.dev, ino: s.ino };
+  } catch {
+    return null;
+  }
+}
+
+/** @param {{ dev: number, ino: number }} s @param {{ dev: number, ino: number } | null} id */
+function sameId(s, id) {
+  return id !== null && s.dev === id.dev && s.ino === id.ino;
+}
+
+/**
+ * The folders a `cd` segment may leave the shell in, or null when it is refused (see CD_FORM).
+ * @param {any[]} words @param {string[]} folders @param {string | undefined} project @returns {string[] | null}
+ */
+function cdReach(words, folders, project) {
+  if (typeof project !== "string" || !project.startsWith("/")) return null;
+  const root = judged(project);
+  const rootId = statId(project);
+  if (!root.startsWith("/") || !rootId) return null;
+  if (words.length !== 2 || !words.every(literal) || words.some((w) => w.redirect || w.assign)) return null;
+  const target = String(words[1].text);
+  if (!target || target.length > 1024 || /^[-+~=]/.test(target) || /[\x00-\x1f\x7f]/.test(target)) return null;
+  // A relative path starts with `.` or `..` as its first name, so neither shell looks it up in CDPATH.
+  const first = target.split("/")[0];
+  if (!target.startsWith("/") && first !== "." && first !== "..") return null;
+  /** @type {string[]} */
+  const reached = [];
+  for (const f of folders) {
+    const logical = posix.resolve(f, target);
+    for (const q of [logical, target.startsWith("/") ? target : `${f}/${target}`]) {
+      const r = judged(q);
+      if (r === "missing") continue; // no such folder from here: a cd there fails and leaves the shell where it was
+      if (!r.startsWith("/") || isDevice(r) || !insideId(r, rootId)) return null;
+      if (!isFolder(r)) continue;
+      reached.push(r);
+      if (q === logical) reached.push(logical); // the shell's $PWD after a logical cd
+    }
+  }
+  return reached.length ? [...new Set(reached)] : null;
+}
+
+/**
+ * Is the physical path `r` the folder with identity `rootId` or inside it? Compared by device and inode up the parents,
+ * so a different spelling of the project folder (case, a symlinked parent) does not matter.
+ * @param {string} r @param {{ dev: number, ino: number }} rootId
+ */
+function insideId(r, rootId) {
+  for (let d = r; ; d = posix.dirname(d)) {
+    try {
+      if (sameId(statSync(d), rootId)) return true;
+    } catch {
+      return false;
+    }
+    if (d === "/") return false;
+  }
+}
+
+/** @param {string} p */
+function isFolder(p) {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/** Is `x` /dev itself or under it, other than /dev/null (case-folded: /DEV is /dev on a case-insensitive disk)? @param {string} x */
+function isDevice(x) {
+  const l = x.toLowerCase();
+  return (l === "/dev" || l.startsWith("/dev/")) && l !== "/dev/null";
+}
+
+/**
+ * Run as a hook only when executed directly (the tests import researcherViolation): the real paths of the entry script
+ * and of this module are compared, not the name (fix-researcher-cd item 3: a script whose own name ended in
+ * researcher-guard.mjs ran the hook block when it imported the guard, and the block ended that process mid-import).
+ */
+function isEntry() {
+  try {
+    return typeof process.argv[1] === "string" && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntry()) {
   if ((process.env.ORCH_GUARDS ?? "").trim().toLowerCase() === "off") process.exit(0);
   if (duplicate("researcher-guard.mjs")) process.exit(0);
   /** @type {any} */
@@ -350,8 +556,12 @@ if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
   const type = typeof input?.agent_type === "string" ? input.agent_type.replace(/^orchestration:/, "") : "";
   const command = input?.tool_input?.command;
   if (type !== "researcher" || (input.tool_name !== undefined && input.tool_name !== "Bash") || typeof command !== "string" || !command.trim()) process.exit(0);
+  // From here on an unexpected error refuses the command (exit 2), never another exit code.
+  process.on("uncaughtException", () => process.exit(2));
   // Relative paths resolve against the folder the command runs in: the payload's cwd, else the project folder.
-  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : process.env.CLAUDE_PROJECT_DIR || process.cwd());
+  // The project folder bounds `cd`; without an absolute CLAUDE_PROJECT_DIR every cd is refused.
+  const project = process.env.CLAUDE_PROJECT_DIR;
+  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : project || process.cwd(), project?.startsWith("/") ? project : undefined);
   if (!v) process.exit(0);
   try {
     ensureStateDir();
