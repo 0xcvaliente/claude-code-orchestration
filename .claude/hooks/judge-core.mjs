@@ -170,6 +170,8 @@ export function tokenize(src) {
       if (end < 0) throw new Doubt("unterminated ${...}");
       const inner = src.slice(i + 2, end);
       if (/[$`{'"(]/.test(inner)) throw new Doubt("nested expansion in ${...}");
+      // `${functions[f]::=body}` (also `:=`, `=`) assigns the table it names: a function, an alias or a command path.
+      if (ZSH_TABLE_EXPANSION.test(inner)) throw new Doubt("an assigning ${...} of a zsh function, alias or commands table");
       piece({ dyn: true });
       return end;
     }
@@ -453,7 +455,7 @@ const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
 /** git config keys whose value runs a program (or pulls in config that may). `submodule.<name>.update` counts whatever
  * its value: only a `!command` value runs one, and the value is not read. */
 const GIT_EXEC_KEY =
-  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|gpg\..+\.defaultkeycommand|(browser|man)\..+\.(cmd|path)|imap\.tunnel|gc\.recentobjectshook|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
+  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|gpg\..+\.defaultkeycommand|(browser|man)\..+\.(cmd|path)|imap\.tunnel|gc\.recentobjectshook|hook\..+\.command|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
 /** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
  * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
 const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|BASH_FUNC_[^=]*|ZDOTDIR|ENV|PROMPT_COMMAND|PS0|PS1|PS4|IFS|PATH|SHELLOPTS)\+?=/;
@@ -557,13 +559,15 @@ const GIT_SHELL_OPTS = new Map([
   ["fetch-pack", { long: ["upload-pack", "exec"] }],
   ["clone", { long: ["upload-pack"], short: "u" }],
   ["archive", { long: ["exec"] }],
+  ["filter-branch", { long: ["setup", "env-filter", "tree-filter", "index-filter", "parent-filter", "msg-filter", "commit-filter", "tag-name-filter"] }],
 ]);
 
 /**
  * The arguments git hands to a shell, after the subcommand `ws[sub]`: the value of an option in GIT_SHELL_OPTS
  * (`rebase -x`/`--exec`, also `-x<cmd>`, `-ix <cmd>`, `--exec=<cmd>` and a prefix such as `--exe`; `grep -O<cmd>` and
  * `--open-files-in-pager=<cmd>`; `difftool -x`/`--extcmd`; `--upload-pack` of fetch, pull, ls-remote, fetch-pack and
- * clone (`clone -u`); `--exec` of archive and fetch-pack), and the first word after `submodule foreach` and
+ * clone (`clone -u`); `--exec` of archive and fetch-pack; the `--setup` and `--*-filter` scripts of filter-branch), and
+ * the first word after `submodule foreach` and
  * `bisect run` (git runs it through a shell, so `'rm -rf .git'` there is a command line, not a name). A quoted argument
  * is otherwise text (`later.pushy` skips it), so each of these is read as a script of its own; a dynamic one is denied.
  * Options are matched on their static prefix, so `-x"$C"` counts too.
@@ -686,20 +690,46 @@ const NOOP_ENV = new Map([["GIT_EDITOR", ["true", ":"]], ["IFS", [""]]]);
 const NOOP_EDITOR = ["true", ":"];
 
 /** zsh's tables of functions and aliases: assigning one defines a function or alias (`functions+=(f 'body')`,
- * `aliases[p]=...`), so a later word could run anything. Tested on the static prefix, as the exec-env rule is. */
-const ZSH_TABLE = /^(functions|aliases|galiases|saliases|dis_functions)(\[|\+?=|$)/;
-function zshTable(w) {
-  const m = ZSH_TABLE.exec(staticPrefix(w));
-  if (!m) return false;
-  if (m[2]) return true;
+ * `aliases[p]=...`), so a later word could run anything; assigning `commands` points a command name at another
+ * program, as `hash -p` does. Tested on the static prefix, as the exec-env rule is. */
+const ZSH_TABLES = "functions|aliases|galiases|saliases|dis_functions|dis_aliases|dis_galiases|dis_saliases|commands";
+const ZSH_TABLE = new RegExp(`^(${ZSH_TABLES})(\\[|\\+?=|$)`);
+/** The inside of `${...}` that may assign a table (`functions[f]::=body`, `aliases[p]:=x`, `commands=path`): any `=`
+ * after the name counts, so a default value holding `=` (`${aliases[p]:-a=b}`) is refused too. */
+const ZSH_TABLE_EXPANSION = new RegExp(`^(${ZSH_TABLES})\\b.*=`);
+/** The value of an assignment that names a table (`zparseopts -A x f:=functions`): read after an assigning builtin. */
+const ZSH_TABLE_VALUE = new RegExp(`=(${ZSH_TABLES})$`);
+/** Builtins whose arguments are assignments or the names of variables they assign. `set` counts with an `-A`/`+A`
+ * cluster, `printf` and `print` with a `-v` cluster. */
+const ASSIGNERS = new Set(["typeset", "declare", "local", "export", "readonly", "integer", "float", "set", "read", "printf", "print", "getopts", "vared", "zparseopts", "let"]);
+/** A word shaped like an assignment (`NAME=`, `NAME+=`, `NAME[`), or a subscripted name (`a[1]=x`, read as a glob). */
+const ASSIGN_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*(\[|\+?=)/;
+function assignShaped(w) {
+  const p = staticPrefix(w);
+  if (w.assign || ASSIGN_SHAPE.test(p)) return true;
+  const next = w.pieces[1];
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) && !!next && "glob" in next && next.glob === "[]";
+}
+/**
+ * The table a word writes, or undefined. `bare`: the word follows an assigning builtin, where the bare name counts
+ * (`set -A functions f body`, `read -A functions`) and so does a value naming a table. Otherwise the word must assign:
+ * `NAME=`, `NAME+=` or a subscript.
+ */
+function zshTable(w, bare) {
+  const p = staticPrefix(w);
+  const m = ZSH_TABLE.exec(p);
+  if (!m) return bare ? ZSH_TABLE_VALUE.exec(p)?.[1] : undefined;
+  if (m[2] || bare) return m[1];
   const next = w.pieces.find((p) => !("lit" in p)); // the piece after the name: a `[...]` glob is a subscript
-  return !!next && "glob" in next && next.glob === "[]";
+  return next && "glob" in next && next.glob === "[]" ? m[1] : undefined;
 }
 
 /**
  * Literal text that holds `$(` or a backtick inside the subscript of an array element (`'a[$(cmd)]'`). bash evaluates
  * the subscript, and runs the substitution, wherever the text reaches arithmetic (`$((x))`, `let`, `[[ -v ]]`,
  * `declare -i`, `printf -v`). Only literal text counts: an unquoted substitution is read as a script already. One pass.
+ * Arithmetic alone runs nothing: `$((...))` is stepped over when it closes with the first `))` and holds no parenthesis
+ * or backtick (else the shell may read it as `$( (...) )`, a command substitution), so `'arr[$((i+1))]'` passes.
  */
 function subscriptSubstitution(text) {
   let depth = 0;
@@ -709,7 +739,11 @@ function subscriptSubstitution(text) {
       if (depth > 0 || (j > 0 && /[A-Za-z0-9_]/.test(text.charAt(j - 1)))) depth++;
     } else if (c === "]") {
       if (depth > 0) depth--;
-    } else if (depth > 0 && (c === "`" || (c === "$" && text.charAt(j + 1) === "("))) return true;
+    } else if (depth > 0 && (c === "`" || (c === "$" && text.charAt(j + 1) === "("))) {
+      const end = c === "$" && text.charAt(j + 2) === "(" ? text.indexOf("))", j + 3) : -1;
+      if (end < 0 || /[()`]/.test(text.slice(j + 3, end))) return true;
+      j = end + 1;
+    }
   }
   return false;
 }
@@ -746,6 +780,26 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const remapFrom = once(() => suffixAny(nr, (x) => x.text.includes("=") || /^-[A-Za-z]*p/.test(x.text)));
   const loadFrom = once(() => suffixAny(nr, (x) => /^-[A-Za-z]*f/.test(x.text)));
   const traceFrom = once(() => suffixAny(nr, (x) => !x.dynamic && (/^-[A-Za-z]*x/.test(x.text) || x.text.toLowerCase().replace(/_/g, "") === "xtrace")));
+  // Where a word assigns (J-9): before the command word (every earlier word shaped like an assignment), after a
+  // wrapper (`env 'functions[f]=..' zsh`), or after an assigning builtin (ASSIGNERS) as the command word or after a
+  // wrapper. `grep functions= f` assigns nothing.
+  const assignEnd = once(() => {
+    let i = 0;
+    while (i < ws.length && (ws[i].redirect || assignShaped(ws[i]))) i++;
+    return i;
+  });
+  const assigner = once(() => {
+    const aFrom = suffixAny(ws, (x) => !x.redirect && !x.dynamic && /^[-+][A-Za-z]*A/.test(x.text));
+    const vFrom = suffixAny(ws, (x) => !x.redirect && !x.dynamic && /^-[A-Za-z]*v/.test(x.text));
+    for (let i = 0; i < ws.length; i++) {
+      const x = ws[i];
+      if (x.redirect || x.dynamic) continue;
+      const n = base(x.text);
+      if (!ASSIGNERS.has(n) || !(i === at || afterWrapper(ws, i))) continue;
+      if (n === "set" ? aFrom[i + 1] : n === "printf" || n === "print" ? vFrom[i + 1] : true) return i;
+    }
+    return ws.length;
+  });
   // `-rm` is bfs's own name for -delete.
   const findAction = once(() => ws.find((x) => x.text === "-delete" || x.text === "-rm")?.text);
   const script = (text, dynamic, what) =>
@@ -762,8 +816,11 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       ctx.env ??= env[1];
       if (/^PS[014]$/.test(env[1])) ctx.prompt ??= env[1];
     }
-    if (!w.redirect && zshTable(w)) {
-      push(deny("assigning zsh's functions, aliases, galiases, saliases or dis_functions table defines a function or alias: always blocked"));
+    const table = w.redirect ? undefined : zshTable(w, k > assigner());
+    if (table && (k > assigner() || k < assignEnd() || afterWrapper(ws, k))) {
+      push(deny(table === "commands"
+        ? "assigning zsh's commands table points a command name at another program, like hash -p: always blocked"
+        : "assigning zsh's functions, aliases, galiases, saliases or dis_functions table defines a function or alias: always blocked"));
       continue;
     }
     if (!w.redirect && subscriptSubstitution(w.text)) {
@@ -944,8 +1001,10 @@ function analyze(src, ctx, depth) {
  *   `$~X`, `${=X}`, glob qualifiers `*(e:..:)`), nesting deeper than 3, `<<` after an unclosed `[` (`$[1<<E]`, `a[1<<E]`),
  *   a here-document delimiter with `$` or a backtick (`<<$'E'`);
  * - function and alias definitions, `shopt -s expand_aliases`, `at`/`batch`, `hash -p`, `hash name=path`, `enable -f`,
- *   a word assigning zsh's `functions`, `aliases`, `galiases`, `saliases` or `dis_functions` table, quoted text with
- *   `$(` or a backtick inside an array subscript (`'a[$(cmd)]'`), and PS0/PS1/PS4 set on a line that turns on tracing;
+ *   an assignment (before the command word, after a wrapper, or as an argument of typeset, declare, export, read,
+ *   `set -A`, `printf -v` and the like) or an assigning `${...}` of zsh's `functions`, `aliases`, `galiases`,
+ *   `saliases`, `dis_*` or `commands` table, quoted text with `$(` or a backtick inside an array subscript
+ *   (`'a[$(cmd)]'`; arithmetic alone passes), and PS0/PS1/PS4 set on a line that turns on tracing;
  * - a word that is `sudo` or `doas` (after unquoting: `"sudo"`, `\sudo`, `/usr/bin/sudo`, `$'\x73udo'`), anywhere;
  *   `su`, `pkexec` or `runuser` as the command word, followed by an su-style option (`x su -c ...`), or after a
  *   wrapper prefix (`timeout 5 su`, `env su`, `xargs su`); as a bare argument (`grep su file`) they pass;

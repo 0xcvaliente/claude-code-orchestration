@@ -770,6 +770,118 @@ test("classify (audit 2026-11-16, J-1 to J-10): every bypass and its family is d
   ]), []);
 });
 
+// Audit 2026-11-16, second pass (fix-judge-2): spellings in the J-3, J-4, J-8 and J-9 families that still got past,
+// each confirmed in a shell, and their close variants. judge-differential.test.mjs reads this list too.
+const AUDIT_1116_2_DENY: string[] = [
+  // J-9: set -A and an assigning ${...} expansion write zsh's function and alias tables
+  "set -A functions f 'rm -rf ../victim'\nf",
+  "set +A functions f 'rm -rf x'",
+  "set -sA functions f 'rm -rf x'",
+  "set -A 'functions' f 'rm -rf x'",
+  "set -A aliases p 'git push origin main'",
+  "set -A galiases p 'rm -rf x'",
+  "builtin set -A functions f 'rm -rf x'",
+  "command set -A dis_functions f 'rm -rf x'",
+  ": ${functions[f]::=rm -rf ../victim}; f",
+  ": ${functions[f]:=rm -rf x}; f",
+  ": ${functions[f]=rm -rf x}; f",
+  "echo \"${aliases[p]::=git push origin main}\"",
+  ": ${saliases[txt]::=rm -rf x}",
+  ": ${functions::=x}",
+  "read -A functions <<< 'f x'",
+  "printf -v 'functions[f]' 'rm -rf x'",
+  "print -v 'aliases[p]' 'git push origin main'",
+  "export 'functions[f]=rm -rf x'",
+  "local 'functions[f]=rm -rf x'",
+  "declare -x aliases[p]=x",
+  "command declare 'functions[f]=rm -rf x'",
+  "builtin typeset 'functions[f]=rm -rf x'",
+  "env 'functions[f]=rm -rf x' zsh -c f",
+  "FOO=1 functions[f]='rm -rf x'",
+  "typeset -A functions; functions[f]='rm -rf ../victim'; f",
+  // J-8: zsh's commands table points a command name at another program
+  "commands+=(ls /usr/bin/git); ls push origin main",
+  "commands[ls]=/usr/bin/git; ls push origin main",
+  "commands[ls]='/bin/rm'; ls -rf ../victim",
+  "commands=(ls /usr/bin/git)",
+  "commands+=(ls /bin/rm)",
+  "typeset 'commands[ls]=/usr/bin/git'",
+  "export commands[ls]=/usr/bin/git",
+  "set -A commands ls /usr/bin/git",
+  ": ${commands[ls]::=/usr/bin/git}; ls push origin main",
+  // J-4: hook.<name>.command runs a program
+  "git -c hook.x.command='rm -rf ../victim' -c hook.x.event=pre-commit commit -m x",
+  "git -c 'hook.x.command=rm -rf x' commit -m x",
+  "git -c Hook.X.Command=evil commit -m x",
+  "git -c hook.a.b.command=evil hook run pre-commit",
+  "git --config-env=hook.x.command=CMD commit -m x",
+  "git --config-env hook.x.command=CMD commit -m x",
+  "git config hook.x.command 'rm -rf ../victim'",
+  "git config --add hook.x.command evil",
+  "git config --global hook.pre.command evil",
+  "env git -c hook.x.command=evil commit -m x",
+  // J-3: git filter-branch runs its filters through a shell
+  "git filter-branch -f --tree-filter 'rm -rf ../victim' HEAD",
+  "git filter-branch -f --msg-filter 'rm -rf ../victim' HEAD",
+  "git filter-branch --tree-filter='rm -rf ../victim' HEAD",
+  "git filter-branch --setup 'rm -rf x' HEAD",
+  "git filter-branch --env-filter 'sudo id' HEAD",
+  "git filter-branch --index-filter \"rm -rf x\" HEAD",
+  "git filter-branch --parent-filter 'rm -rf x' HEAD",
+  "git filter-branch --commit-filter 'rm -rf x' HEAD",
+  "git filter-branch --tag-name-filter 'rm -rf x' -- --all",
+  "git filter-branch --tree-filter \"$CMD\" HEAD",
+  "git -C . filter-branch --tree-filter 'rm -rf x' HEAD",
+  "env git filter-branch --msg-filter 'sudo id' HEAD",
+];
+
+test("classify (audit 2026-11-16, fix-judge-2): J-3, J-4, J-8, J-9 spellings are denied; J-9 and J-10 refuse only assignments and substitutions", () => {
+  assert.deepEqual(misread(AUDIT_1116_2_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // J-3 neighbours
+    ["git filter-branch --tree-filter 'git push origin main' HEAD", "judge"],
+    ["git filter-branch --subdirectory-filter lib HEAD", "pass"],
+    ["git filter-branch --msg-filter 'sed s/a/b/' HEAD", "pass"],
+    ["git filter-branch --tree-filter 'rm -f secret.txt' HEAD", "pass"],
+    ["git filter-branch --prune-empty -f HEAD", "pass"],
+    ["git log --grep filter-branch", "pass"],
+    // J-4 neighbours
+    ["git -c hook.x.event=pre-commit commit -m x", "pass"],
+    ["git config hook.x.event pre-commit", "pass"],
+    ["git hook run pre-commit", "pass"],
+    // J-8 neighbours
+    ["grep commands= f", "pass"],
+    ["rg 'commands\\[' src", "pass"],
+    ["echo commands", "pass"],
+    ["npm run commands", "pass"],
+    // J-9: a table word that is not an assignment passes
+    ["grep functions= f", "pass"],
+    ["rg 'aliases\\[' src", "pass"],
+    ["grep -rn 'functions\\[' src", "pass"],
+    ["grep -e 'functions+=' f", "pass"],
+    ["git log --grep 'functions='", "pass"],
+    ["echo 'aliases[p]=x'", "pass"],
+    ["sed -i 's/functions=/fns=/' f", "pass"],
+    ["git commit -m 'set functions=[] by default'", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${aliases[p]:-none}", "pass"],
+    ["set -e; grep functions= f", "pass"],
+    // J-10: arithmetic alone in a subscript runs no command
+    ["echo 'arr[$((i+1))]'", "pass"],
+    ["git commit -m 'use arr[$((i+1))]'", "pass"],
+    ["echo 'a[$((b[1]))]'", "pass"],
+    ["printf '%s\\n' 'x[$(( n * 2 ))]'", "pass"],
+    // J-10: a command substitution or a backtick in the subscript, also inside the arithmetic, stays denied
+    ["x='a[$(( $(rm -rf x) ))]'; echo $((x))", "deny"],
+    ["x='a[$((`rm -rf x`))]'; echo $((x))", "deny"],
+    ["x='a[$((rm -rf x) )]'; echo $((x))", "deny"],
+    ["x='a[$((rm -rf x); (y))]'; echo $((x))", "deny"],
+    ["let 'a[$((1))$(rm -rf x)]'", "deny"],
+    ["x='a[$((1)]'; echo $((x))", "deny"],
+    ["x='a[$(( (1) ))]'; echo $((x))", "deny"],
+  ]), []);
+});
+
 test("classify (audit 2026-11-16, J-15): a no-op editor and an empty IFS pass; any other value stays denied", () => {
   assert.deepEqual(misread([
     ["GIT_EDITOR=true git rebase --continue", "pass"],

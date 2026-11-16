@@ -69,6 +69,9 @@ const HARDENING_REASONS = [
   /^a \$\(\.\.\.\) or backtick inside an array subscript/,
   /^hash -p and hash name=path/,
   /^enable -f loads a builtin/,
+  // Audit 2026-11-16, second pass (fix-judge-2)
+  /^assigning zsh's commands table/,
+  /\(an assigning \$\{\.\.\.\} of a zsh function, alias or commands table\)/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -127,6 +130,9 @@ function listIn(file, name) {
 // Audit 2026-11-16, J-1 to J-10: every bypass row of judge.test.ts (AUDIT_1116_DENY) must be denied here too.
 const AUDIT_1116 = listIn("judge.test.ts", "AUDIT_1116_DENY");
 for (const c of AUDIT_1116) HARDENED.push([c, ["deny"]]);
+// The second pass (fix-judge-2): J-3, J-4, J-8 and J-9 spellings (AUDIT_1116_2_DENY).
+const AUDIT_1116_2 = listIn("judge.test.ts", "AUDIT_1116_2_DENY");
+for (const c of AUDIT_1116_2) HARDENED.push([c, ["deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
 
@@ -157,6 +163,7 @@ test("differential (J1): never weaker than 1.4.0 on every judge test string and 
   }
   assert.deepEqual(weaker, []);
   assert.ok(AUDIT_1116.length >= 60, `only ${AUDIT_1116.length} audit rows read`);
+  assert.ok(AUDIT_1116_2.length >= 50, `only ${AUDIT_1116_2.length} second-pass audit rows read`);
 });
 
 test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the intended new rules", () => {
