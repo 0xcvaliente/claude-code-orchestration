@@ -13,7 +13,8 @@
 //   missing_lines         a brief without SLICE or FILES (counted per run).
 //   no_plan_review        until a reviewer of this run's PLAN REVIEW brief has stopped (journal.mjs records it).
 //                         PATH: light skips the wait, but only for the run's single slice; a light brief once another
-//                         slice ran in scope is light_path_multi. Counted per slice; giving up opens the gate for the
+//                         slice ran in scope, or while the open run's plan names several slices, is light_path_multi.
+//                         Counted per slice; giving up opens the gate for the
 //                         run (no_plan_review_gave_up). A session whose log has a plan reviewer stop but no launch
 //                         records (older journal.mjs) counts as reviewed, as before.
 //   replan_required       the open run's slice is stalled: its last two counted failed reviews share a gap key at or
@@ -24,9 +25,10 @@
 //                         dir; a planned folder covers what is under it, a planned glob only what it matches: `*` in
 //                         one segment, `**` across segments, `?` one character). Without plan slice lines, or for a
 //                         planned slice without FILES, this skips with a logged reason. Counted per slice.
-//   file_overlap          a FILES entry overlaps a file another slice of the run owns and that slice is not in DEPENDS
-//                         (both normalized; entries overlap when some path could match both).
-//   dependency_cycle      DEPENDS closes a cycle.
+//   file_overlap          a FILES entry overlaps a file another slice of the run owns and the two are not ordered by
+//                         the run's DEPENDS graph (this launch's line, a retry's earlier launches, followed through
+//                         other slices, either way); both normalized, entries overlap when some path could match both.
+//   dependency_cycle      DEPENDS closes a cycle. A retry's DEPENDS on a slice already ordered after it is not an edge.
 //   worktree_base_not_head  (after the two above, with the usual two-block guard per slice) tool_input.isolation is
 //                         "worktree", the effective worktree.baseRef (first of <project>/.claude/settings.local.json,
 //                         <project>/.claude/settings.json, <CLAUDE_CONFIG_DIR or ~/.claude>/settings.json that sets it)
