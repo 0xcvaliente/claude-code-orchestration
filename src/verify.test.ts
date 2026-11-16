@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -486,11 +486,20 @@ function reviewedWith(reply: string) {
     route: { mode: "reviewed", source: "forced", reason: "--mode reviewed", tokens: 0 },
   });
   // A forced mode: a failed review ends the run with its status instead of escalating to the orchestrator.
-  const r = runAuto(folder, t.bin, { ORCH_MODE: "reviewed", ...notGit(folder) });
-  return { status: r.status, verdict: /^review: (\S+)$/m.exec(r.stderr)?.[1], stderr: r.stderr };
+  // Asynchronous, so the cases of one test run side by side (audit O-11): each has its own folder and fake tools.
+  const clean: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES"]) delete clean[k];
+  const env = { ...clean, PATH: `${t.bin}:${process.env.PATH}`, ORCH_MODE: "reviewed", ORCH_TEST_CMD: "", ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "", ORCH_NO_ESCALATE: "", ORCH_AGENT_PREFIX: "", ...notGit(folder) };
+  return new Promise<{ status: number | null; verdict: string | undefined; stderr: string }>((done, fail) => {
+    const child = spawn("bash", [autoSh, "write the summary", folder], { env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d));
+    child.on("error", fail);
+    child.on("close", (status) => done({ status, verdict: /^review: (\S+)$/m.exec(stderr)?.[1], stderr }));
+  });
 }
 
-test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail line: a preamble is fine, a quoted report is not a verdict", () => {
+test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail line: a preamble is fine, a quoted report is not a verdict", async () => {
   // The reviewer's prompt contains the session's report, which may say STATUS: pass itself.
   const failing = [
     "The session reported: STATUS: pass\nLooks fine.", // no line starts with STATUS: quoting the report is not a verdict
@@ -500,11 +509,6 @@ test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail l
     "STATUS: fail\nGAPS: notes.md cites no source\nSTATUS: pass", // the first STATUS line says fail
     "STATUS: pass or fail", // the format template, not a verdict
   ];
-  for (const reply of failing) {
-    const v = reviewedWith(reply);
-    assert.notEqual(v.status, 0, `${JSON.stringify(reply)} must fail the run`);
-    assert.equal(v.verdict, "fail", JSON.stringify(reply));
-  }
   // A short preamble, emphasis, a heading, indentation and blank lines before the verdict are fine.
   const passing = [
     "Review complete.\n\nSTATUS: pass",
@@ -513,8 +517,14 @@ test("auto.sh passes a review only on a STATUS: pass line with no STATUS: fail l
     "> STATUS: fail\nSTATUS: pass", // the quote is ignored and the reviewer's own line counts
     "Earlier I noted STATUS: fail for the draft; the final report fixes it.\n\nSTATUS: pass\nGAPS: none", // mid-line mentions do not count
   ];
-  for (const reply of passing) {
-    const v = reviewedWith(reply);
+  const [failed, passed] = await Promise.all([Promise.all(failing.map(reviewedWith)), Promise.all(passing.map(reviewedWith))]);
+  for (const [i, reply] of failing.entries()) {
+    const v = failed[i]!;
+    assert.notEqual(v.status, 0, `${JSON.stringify(reply)} must fail the run`);
+    assert.equal(v.verdict, "fail", JSON.stringify(reply));
+  }
+  for (const [i, reply] of passing.entries()) {
+    const v = passed[i]!;
     assert.equal(v.status, 0, `${JSON.stringify(reply)} passes: ${v.stderr}`);
     assert.equal(v.verdict, "pass", JSON.stringify(reply));
   }
