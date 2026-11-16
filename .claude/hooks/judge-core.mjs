@@ -532,6 +532,51 @@ function gitRule(ws, k, later) {
 /** A word that mentions push, remote, their plumbing, or a route to them (alias, url., include). */
 const pushyText = (t) => /push|remote|send-pack|receive-pack/i.test(t) || /^(alias|url\.|include)/i.test(t);
 
+/**
+ * The arguments git hands to a shell, after the subcommand `ws[sub]`: the value of `rebase -x`/`--exec` (also `-x<cmd>`,
+ * `-ix <cmd>`, `--exec=<cmd>` and a prefix such as `--exe`), and the first word after `submodule foreach` and
+ * `bisect run` (git runs it through a shell, so `'rm -rf .git'` there is a command line, not a name). A quoted argument
+ * is otherwise text (`later.pushy` skips it), so each of these is read as a script of its own; a dynamic one is denied.
+ * Options are matched on their static prefix, so `-x"$C"` counts too.
+ */
+function gitShellArgs(ws, sub) {
+  const s = ws[sub];
+  if (!s || s.dynamic) return [];
+  const rest = ws.slice(sub + 1).filter((w) => !w.redirect);
+  const name = s.text.toLowerCase();
+  const out = [];
+  const value = (w, from) => {
+    if (w) out.push({ text: w.text.slice(from), dynamic: w.dynamic });
+  };
+  if (name === "rebase") {
+    for (let i = 0; i < rest.length; i++) {
+      const w = rest[i];
+      const p = staticPrefix(w);
+      if (p === "--" && !w.dynamic) break;
+      const long = /^--([^=]+)(=?)/.exec(p);
+      const short = p.startsWith("--") ? null : /^-[A-Za-z]*?x/.exec(p);
+      if (long && "exec".startsWith(long[1].toLowerCase())) {
+        if (long[2]) value(w, w.text.indexOf("=") + 1);
+        else value(rest[++i], 0);
+      } else if (short) {
+        if (w.text.length > short[0].length || w.dynamic) value(w, short[0].length);
+        else value(rest[++i], 0);
+      }
+    }
+  } else if (name === "submodule" || name === "bisect") {
+    let i = 0;
+    while (i < rest.length && !rest[i].dynamic && rest[i].text.startsWith("-")) i++;
+    const verb = rest[i];
+    if (!verb || verb.dynamic || verb.text !== (name === "submodule" ? "foreach" : "run")) return [];
+    for (i++; i < rest.length && !rest[i].dynamic && rest[i].text.startsWith("-"); i++) if (rest[i].text === "--") {
+      i++;
+      break;
+    }
+    if (rest[i]) value(rest[i], 0);
+  }
+  return out;
+}
+
 /** Facts about the later words of one simple command, each computed at most once per command (see analyzeCommand). */
 
 const SU_OPTS = new Set(["-c", "--command", "-l", "--login", "-", "-s", "--shell", "-m", "-p", "--preserve-environment", "-g", "-G"]);
@@ -685,6 +730,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       const g = gitRule(ws, k, later);
       push(g.c);
       gitSubs.add(g.sub);
+      if (!denied) for (const p of gitShellArgs(ws, g.sub)) if (!denied) script(p.text, p.dynamic, `git ${ws[g.sub].text}`);
     } else if (name === "rm") {
       if (gitSubs.has(k)) {
         // `git rm` is git's own command: it refuses to drop uncommitted changes unless forced.

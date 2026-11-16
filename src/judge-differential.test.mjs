@@ -83,7 +83,25 @@ const HARDENED = [
   ["$'sudo\\U00000000' id", ["deny"]],
   ["$'sudo\\c@' id", ["deny"]],
   ["git $'push\\x00x' origin main", ["deny"]],
+  ["git submodule foreach 'git push origin HEAD'", ["judge"]],
+  ["git submodule foreach 'sudo id'", ["deny"]],
+  ["git submodule --quiet foreach --recursive 'rm -rf .git'", ["deny"]],
+  ["git submodule foreach 'rm -rf .git;' x", ["deny"]],
+  ['git submodule foreach "$CMD"', ["deny"]],
+  ["git rebase -x 'rm -rf .git' main", ["deny"]],
+  ["git rebase --exec 'rm -rf .git' main", ["deny"]],
+  ["git rebase --exec='rm -rf .git' main", ["deny"]],
+  ["git rebase --exe 'rm -rf .git' main", ["deny"]],
+  ["git rebase -x'rm -rf .git' main", ["deny"]],
+  ["git rebase -ix 'rm -rf .git' main", ["deny"]],
+  ["git rebase -x 'git push origin HEAD' main", ["judge"]],
+  ['git rebase -x "$CMD" main', ["deny"]],
+  ["git -C . rebase -x 'sudo id' main", ["deny"]],
+  ["git bisect run 'rm -rf .git'", ["deny"]],
+  ["git bisect run 'sudo id'", ["deny"]],
 ];
+/** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
+const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
 
 /** @param {{ cls: string, reason?: string }} r */
 const fires = (r) => r.cls === "deny" && /^setting /.test(r.reason ?? "");
@@ -113,7 +131,7 @@ test("differential (J3): what 1.4.0 passes or judges becomes a deny only for the
   for (const s of new Set(tested)) {
     const o = old(s, CWD);
     const n = next(s, CWD);
-    if (o.cls !== "deny" && n.cls === "deny" && !intended(n)) stray.push(`${JSON.stringify(s)}: ${n.reason}`);
+    if (o.cls !== "deny" && n.cls === "deny" && !intended(n) && !HARDENED_INPUTS.has(s)) stray.push(`${JSON.stringify(s)}: ${n.reason}`);
   }
   assert.deepEqual(stray, []);
   for (const s of ["grep -rn 'PATH=' src", 'echo "PATH=x"', "git log --grep 'XPATH='", 'git commit -m "fix PATH= handling"', "git log --grep=PATH=x"]) {

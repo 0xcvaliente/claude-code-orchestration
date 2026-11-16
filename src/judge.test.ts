@@ -571,6 +571,41 @@ test("classify (J3): a NUL decoded in $'...' is denied (the shell cuts the word 
   ]), []);
 });
 
+test("classify (J4): a git argument that git runs as a shell command is read as a script", () => {
+  assert.deepEqual(misread([
+    ["git submodule foreach 'git push origin HEAD'", "judge"],
+    ["git submodule foreach 'sudo id'", "deny"],
+    ["git submodule --quiet foreach --recursive 'rm -rf .git'", "deny"],
+    ["git submodule foreach 'rm -rf .git;' x", "deny"],
+    ["git submodule foreach \"$CMD\"", "deny"],
+    ["git rebase -x 'rm -rf .git' main", "deny"],
+    ["git rebase --exec 'rm -rf .git' main", "deny"],
+    ["git rebase --exec='rm -rf .git' main", "deny"],
+    ["git rebase --exe 'rm -rf .git' main", "deny"],
+    ["git rebase -x'rm -rf .git' main", "deny"],
+    ["git rebase -ix 'rm -rf .git' main", "deny"],
+    ["git rebase -x 'git push origin HEAD' main", "judge"],
+    ["git rebase -x \"$CMD\" main", "deny"],
+    ["git -C . rebase -x 'sudo id' main", "deny"],
+    ["git bisect run 'rm -rf .git'", "deny"],
+    ["git bisect run 'sudo id'", "deny"],
+    // guards: the same subcommands without an exec argument, or with a harmless one
+    ["git rebase main", "pass"],
+    ["git rebase -i HEAD~3", "pass"],
+    ["git rebase -X ours main", "pass"],
+    ["git rebase -s ours main", "pass"],
+    ["git rebase --onto main topic", "pass"],
+    ["git rebase -x 'npm test' main", "pass"],
+    ["git submodule update --init --recursive", "pass"],
+    ["git submodule status", "pass"],
+    ["git submodule foreach git status", "pass"],
+    ["git submodule foreach 'git status'", "pass"],
+    ["git bisect run make test", "pass"],
+    ["git bisect run ./test.sh", "pass"],
+    ["git log --grep 'rebase -x'", "pass"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.
