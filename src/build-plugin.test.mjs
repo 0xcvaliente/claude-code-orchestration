@@ -1,6 +1,7 @@
 // Builds the plugin with --out into temp dirs: the workflow ships with namespaced agent types, evals/ is copied only
 // when present, the judge hooks are registered only when their files exist, and dist/ is never touched. Then checks the
 // committed plugin against .claude/settings.json: the 0.4.0 hooks, timeouts, the fail-closed judge and userConfig.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -76,6 +77,10 @@ test("--out builds from the repo into a temp dir, ships the workflow with namesp
     // The plugin verify.sh matcher matches the agent_type a plugin-workflow implementer reports.
     const stop = hooksJson(out).hooks.SubagentStop;
     assert.ok(stop.some((/** @type {any} */ h) => h.matcher === "orchestration:implementer" && /verify\.sh/.test(commands(h))));
+    // PostToolUse: journal first, read-log, then the turn budget with no matcher behind its sh pre-filter.
+    const post = hooksJson(out).hooks.PostToolUse.map((/** @type {any} */ e) => [e.matcher, e.hooks.map((/** @type {any} */ c) => String(c.command).match(/hooks\/([\w-]+\.mjs)/)?.[1])]);
+    assert.deepEqual(post, [["Agent|Task", ["journal.mjs"]], ["Read|WebFetch", ["read-log.mjs"]], [undefined, ["turn-budget.mjs"]]]);
+    assert.ok(existsSync(join(out, "plugin", "hooks", "turn-budget.mjs")), "turn-budget.mjs ships");
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
@@ -207,7 +212,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 16);
+  assert.equal(keys.length, 20);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
@@ -244,4 +249,24 @@ test("--out without a directory fails", () => {
   const r = spawnSync("node", [script, "--out"], { cwd: root, encoding: "utf8" });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /--out needs a directory/);
+});
+
+test("the skill gate sits beside verify.sh with the same disjoint matchers, and both skill files ship", () => {
+  for (const [h, plugin] of /** @type {[any, boolean][]} */ ([[read(".claude/settings.json"), false], [read("dist/plugin/hooks/hooks.json"), true]])) {
+    const gate = entry(h, "SubagentStop", "skill-gate.mjs");
+    assert.ok(gate, "the skill gate is registered");
+    assert.equal(gate, entry(h, "SubagentStop", "verify.sh"), "in the same entry as verify.sh");
+    const cmds = gate.hooks.map((/** @type {any} */ c) => String(c.command));
+    assert.ok(cmds[0].includes("verify.sh") && cmds[1].includes("skill-gate.mjs"), "verify.sh first, then the skill gate");
+    assert.equal(gate.hooks[1].timeout, 120);
+    assert.equal(gate.hooks[1].onFailure, undefined, "deny-only: a crash never blocks");
+    assert.equal(cmds[1].endsWith(" --plugin"), plugin);
+    const m = new RegExp(gate.matcher);
+    assert.equal(m.test("implementer"), !plugin);
+    assert.equal(m.test("orchestration:implementer"), plugin);
+    for (const other of ["reviewer", "orchestration:reviewer", "researcher"]) assert.ok(!m.test(other), other);
+  }
+  for (const f of ["skill-gate.mjs", "skill-seal.mjs"]) {
+    assert.equal(readFileSync(join(root, "dist", "plugin", "hooks", f), "utf8"), readFileSync(join(root, ".claude", "hooks", f), "utf8"), `${f} ships unchanged`);
+  }
 });

@@ -2,6 +2,7 @@
 // files_touched for implementer stops (journal.mjs), the read logger (read-log.mjs) and the report's new sections.
 // The hooks run as processes on synthetic transcripts that mimic Claude Code's layout (one line per content block,
 // usage repeated on each, api-request and attachment lines in between); no real transcript text is used.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

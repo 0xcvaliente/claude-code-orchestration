@@ -16,6 +16,7 @@
       "Agent(Plan)",
       "Agent(claude-code-guide)",
       "Agent(statusline-setup)",
+      "Agent(web-fetch)",
       "Agent(fork)"
     ]
   },
@@ -80,6 +81,11 @@
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/read-log.mjs\"" }
         ]
+      },
+      {
+        "hooks": [
+          { "type": "command", "command": "sh -c 'command -v node >/dev/null 2>&1 || exit 0; p=$(cat); case $p in *\\\"agent_id\\\"*) printf \"%s\" \"$p\" | node \"$0\" \"$@\";; esac; exit 0' \"${CLAUDE_PROJECT_DIR}/.claude/hooks/turn-budget.mjs\"" }
+        ]
       }
     ],
     "SubagentStart": [
@@ -103,7 +109,8 @@
       {
         "matcher": "^implementer$",
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify.sh", "timeout": 900 }
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/verify.sh", "timeout": 900 },
+          { "type": "command", "command": "node \"${CLAUDE_PROJECT_DIR}/.claude/hooks/skill-gate.mjs\"", "timeout": 120 }
         ]
       },
       {

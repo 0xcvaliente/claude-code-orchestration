@@ -1,4 +1,5 @@
 // Tests for the benchmark runner: node --test bench/run.test.mjs (no model calls; one test spawns a fake agent script).
+import "../src/test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -263,6 +264,17 @@ if (!interrupted()) appendFileSync(${JSON.stringify(rowsFile)}, JSON.stringify(r
     const code = await new Promise((r) => child.on("close", (c) => r(c)));
     assert.notEqual(code, 0);
     assert.match(out, /RUNNER INTERRUPTED/);
+    // The runner exits right after its SIGKILL; the killed processes, now orphans, are reaped by init a moment later and
+    // count as group members until then, so on a loaded machine the group can still answer for a while.
+    const t1 = Date.now();
+    while (Date.now() - t1 < 10_000) {
+      try {
+        process.kill(-pgid, 0);
+      } catch {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
     assert.throws(() => process.kill(-pgid, 0), /ESRCH/, "agent group gone after the interrupt");
     assert.equal(existsSync(rowsFile), false, "no row for the interrupted run");
   } finally {

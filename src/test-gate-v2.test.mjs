@@ -1,7 +1,8 @@
 // Test gate 0.4.0: the test baseline, the KIND: bugfix check (both in .claude/hooks/bugfix-check.mjs, called by
 // verify.sh) and the plugin userConfig bridge (state.mjs and verify.sh). Real temporary git repos, as in hooks.test.ts.
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -272,7 +273,8 @@ test("baseline: suite crashes in different files and same-named tests in differe
 
 // The base worktree lacks the git-ignored env.ok: there the command fails without names, or hangs.
 const ENV_CMD = `test -f env.ok || { echo "environment missing"; exit 1; }; ${TAP_CMD}`;
-const SLOW_CMD = `test -f env.ok || exec sleep 5; ${TAP_CMD}`;
+// The base run sleeps far longer than any limit below, so "cut off" never depends on how fast the machine is.
+const SLOW_CMD = `test -f env.ok || exec sleep 60; ${TAP_CMD}`;
 
 test("baseline: a base run that fails without names or times out is no baseline and is not cached", () => {
   const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
@@ -285,7 +287,7 @@ test("baseline: a base run that fails without names or times out is no baseline 
   const slow = gate(dir, { env: { ORCH_TEST_CMD: SLOW_CMD, ORCH_BASE_TIMEOUT_S: "1", ...ALLOW }, id: "a2" });
   assert.equal(slow.status, 2);
   assert.equal(last(dir).reason, "tests_failed");
-  assert.ok(Date.now() - t0 < 4500, `the base run was cut off at the timeout (${Date.now() - t0} ms)`);
+  assert.ok(Date.now() - t0 < 30000, `the base run was cut off at the timeout, not after its 60 s sleep (${Date.now() - t0} ms)`);
   assert.ok(!existsSync(cacheFile(dir)));
   assert.deepEqual(readdirSync(slow.tmp).filter((f) => f.startsWith("orch-base-")), []);
   assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1);
@@ -308,18 +310,54 @@ test("baseline: on timeout the base run's whole process group is killed", () => 
   const pidDir = mkdtempSync(join(tmpdir(), "orch-tg2-pid-"));
   const pidFile = join(pidDir, "pid");
   // In the base (no env.ok) a background grandchild holds the pipes; killing only bash would leave it running.
-  const cmd = `test -f env.ok || { sleep 30 & echo $! > '${pidFile}'; wait; }; ${TAP_CMD}`;
+  const cmd = `test -f env.ok || { sleep 60 & echo $! > '${pidFile}'; wait; }; ${TAP_CMD}`;
   const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
   write(dir, { "env.ok": "", "app.js": "y\n" });
   const t0 = Date.now();
   const r = gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASE_TIMEOUT_S: "1", ...ALLOW } });
   assert.equal(r.status, 2);
   assert.equal(last(dir).reason, "tests_failed");
-  assert.ok(Date.now() - t0 < 4500, `cut off at the timeout (${Date.now() - t0} ms)`);
+  assert.ok(Date.now() - t0 < 30000, `cut off at the timeout, not after its 60 s sleep (${Date.now() - t0} ms)`);
   const pid = readFileSync(pidFile, "utf8").trim();
   const ps = spawnSync("ps", ["-o", "stat=", "-p", pid], { encoding: "utf8" });
   assert.ok(ps.stdout.trim() === "" || ps.stdout.trim().startsWith("Z"), `the grandchild ${pid} is gone (ps: ${ps.stdout.trim()})`);
   assert.deepEqual(readdirSync(r.tmp).filter((f) => f.startsWith("orch-base-")), []);
+});
+
+// verify.sh stops the helper when its time budget runs out. A helper ended by a signal used to skip its `finally`, so
+// the base worktree stayed registered in the repository (pinning the base commit) and its folder stayed in TMPDIR.
+test("helper: SIGTERM, SIGINT or SIGHUP during a base run removes the base worktree, its record, its folder and the run", async () => {
+  for (const sig of /** @type {const} */ (["SIGTERM", "SIGINT", "SIGHUP"])) {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-tg2-tmp-"));
+    const pidFile = join(mkdtempSync(join(tmpdir(), "orch-tg2-pid-")), "pid");
+    const dir = repo({ ".gitignore": "env.ok\n", "failures.txt": FA, "app.js": "x\n" });
+    write(dir, { "env.ok": "", "app.js": "y\n" });
+    const cmd = `test -f env.ok || { echo $$ > '${pidFile}'; exec sleep 120; }; ${TAP_CMD}`;
+    const child = spawn(process.execPath, [hook("bugfix-check.mjs"), "baseline", "--cmd", cmd, "--state", join(dir, ".claude", "state"), "--isolated", "0", "--mode", "allow"], {
+      cwd: dir,
+      env: { ...cleanEnv(), TMPDIR: tmp },
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    child.stdin.end(FA);
+    const closed = new Promise((r) => child.on("close", (code, signal) => r({ code, signal })));
+    const t0 = Date.now();
+    while (!existsSync(pidFile) || !readFileSync(pidFile, "utf8").trim()) {
+      assert.ok(Date.now() - t0 < 60000, `${sig}: the base run never started`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 2, `${sig}: the base worktree is registered while it runs`);
+    const runPid = Number(readFileSync(pidFile, "utf8").trim());
+    child.kill(sig);
+    const end = /** @type {{ code: number | null, signal: string | null }} */ (await closed);
+    assert.ok(end.code !== 0 || end.signal !== null, `${sig}: the helper reports no result (${JSON.stringify(end)})`);
+    assert.equal(git(dir, "worktree", "list", "--porcelain").match(/^worktree /gm)?.length, 1, `${sig}: no base worktree left registered`);
+    assert.deepEqual(readdirSync(tmp).filter((f) => f.startsWith("orch-base-")), [], `${sig}: no base folder left`);
+    const t1 = Date.now();
+    while (spawnSync("ps", ["-o", "stat=", "-p", String(runPid)], { encoding: "utf8" }).stdout.trim().replace(/^Z.*/, "") !== "") {
+      assert.ok(Date.now() - t1 < 10000, `${sig}: the base run ${runPid} is still running`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
 });
 
 test("baseline: the cache key includes the run subdirectory", () => {

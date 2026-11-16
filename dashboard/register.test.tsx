@@ -11,7 +11,11 @@ const PANE = {
   props: { title: 'Orchestration', isFocused: false, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 20 }, view: {} },
 } as const
 
-test('the pane follows an implementer from start to its STATUS line', async ($, on) => {
+// The default limit of a test is 5 s. These tests mount the pane at many widths or advance the clock by minutes of 250 ms pulses, which takes
+// 2 to 5 s on an idle machine and several times that under load, so they get a wider limit.
+const SLOW = { timeoutMs: 30000 }
+
+test('the pane follows an implementer from start to its STATUS line', SLOW, async ($, on) => {
   on('command.register', () => ({ value: { command: 'orchestration' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -299,12 +303,22 @@ test('a failure a later slice made good shows as fixed; a bare GAPS heading is s
   expect(t.some(x => /signed off with/.test(x))).toBe(false)
 })
 
+type Fail = { open?: boolean; close?: boolean; keys?: string[] }
 // The main session's own work: a prompt starts it with no repository and no agents, and the main turn's end finishes it.
-const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model?: (id: string) => string } = {}) => {
+const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model?: (id: string) => string; placed?: boolean; fail?: Fail } = {}) => {
   const seen: any[] = []
   const opened: any[] = []
-  on('command.register', () => ({ value: { command: 'orchestration' } }))
-  on('ui.open', (_: unknown, e: any) => (opened.push(e), { value: { isPlaced: true } }))
+  const closed: any[] = []
+  const commands: any[] = []
+  const toasts: any[] = []
+  on('command.register', (_: unknown, e: any) => (commands.push(e), { value: { command: 'orchestration' } }))
+  const timers: any[] = []
+  const fail = opts.fail ?? {}
+  // what a test breaks on the way: ui.open, ui.close and state writes of the named keys are refused
+  on('ui.open', (_: unknown, e: any) => (fail.open ? { deny: 'ui.open refused' } : (opened.push(e), { value: { isPlaced: opts.placed ?? true } })))
+  on('ui.close', (_: unknown, e: any) => (fail.close ? { deny: 'ui.close refused' } : (closed.push(e), { value: undefined })))
+  if (opts.fail) on('state.set', (_: unknown, e: any, next: any) => (fail.keys?.includes(e.key) ? { deny: `state write of ${e.key} refused` } : next(e)))
+  on('ui.toast', (_: unknown, e: any) => (toasts.push(e), { value: undefined }))
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => (seen.push(e), { text: e.text }))
   on('agent.spawn', (_: unknown, e: any) => ({ model: opts.model?.(e.tool_use_id) ?? 'sonnet', agentId: e.tool_use_id }))
@@ -313,21 +327,24 @@ const boot = async ($: any, on: any, opts: { clock?: any; route?: unknown; model
   if (!opts.clock) {
     let now = 1000
     on('clock.now', () => ({ value: (now += 1000) }))
-    on('clock.every', () => ({ value: {} }))
+    on('clock.every', (_: unknown, e: any) => (timers.push(e), { value: {} }))
   }
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true }) // not a git repository
-  return { seen, opened }
+  return { seen, opened, closed, commands, toasts, timers }
 }
+// The pane is off until the person turns it on with the command.
+const pane = ($: any, args?: string) => $.command.run({ command: 'orchestration', ...(args === undefined ? {} : { args }) })
 const mainDone = (reason: string) =>
   ({ turnId: 'm', answer: 'the reply', durationMs: 5, isAborted: reason === 'aborted', reason, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'x' } }) as never
 const PROMPT = 'research the tide tables\nand write two lines'
 
-test('a prompt in a folder that is not a repository opens the pane and shows the input box', async ($, on) => {
+test('with the pane on, a prompt in a folder that is not a repository opens the pane and shows the input box', async ($, on) => {
   const { opened } = await boot($, on)
-  expect(opened.length).toBe(0)
+  await pane($, 'on')
+  expect(opened.length).toBe(1)
   const out = await ($ as any).prompt.submit({ text: PROMPT })
   expect(out.text).toBe(PROMPT) // handed on unchanged
-  expect(opened.length).toBe(1)
+  expect(opened.length).toBe(2)
   const t = await texts($)
   expect(t.includes('▸ research the tide tables')).toBe(true)
   expect(t.some(x => /working in this session/.test(x))).toBe(true)
@@ -340,6 +357,7 @@ test('a prompt in a folder that is not a repository opens the pane and shows the
 
 test('a slash command, a meta prompt and a blank prompt neither open the pane nor start work', async ($, on) => {
   const { seen, opened } = await boot($, on)
+  await pane($, 'on') // on, so only the prompts themselves could open it again
   const raise = ($ as any).prompt.submit
   for (const extra of [{ text: '/review the diff', command: { name: 'review', args: 'the diff' } }, { text: 'a hint', isMeta: true }, { text: '  \n ' }]) {
     const out = await raise(extra as never)
@@ -348,7 +366,7 @@ test('a slash command, a meta prompt and a blank prompt neither open the pane no
   expect(seen.length).toBe(3)
   expect(seen.some(e => e.command)).toBe(true) // the fields reached the hook
   expect(seen.some(e => e.isMeta)).toBe(true)
-  expect(opened.length).toBe(0)
+  expect(opened.length).toBe(1) // the command's own open
   expect((await texts($)).some(x => /No orchestration agents yet/.test(x))).toBe(true)
 })
 
@@ -676,7 +694,7 @@ test('triage fork: sizing draws all three routes dim, with no marker and no link
   }
 })
 
-test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', async ($, on) => {
+test('triage fork: every width from 16 to 200 stays inside the pane and the link lands inside its stage', SLOW, async ($, on) => {
   await boot($, on)
   await $.prompt.submit({ text: PROMPT })
   await $.turn.complete(mainDone('answer'))
@@ -829,10 +847,11 @@ test('a dependency never launched shows as a queued card only while the run is g
 
 test('a prompt that is a background notification or a peer message is not new work', async ($, on) => {
   const { opened } = await boot($, on)
+  await pane($, 'on')
   for (const kind of ['task-notification', 'peer', 'scheduled-trigger']) {
     await ($ as any).prompt.submit({ text: 'Another Claude session sent a message', origin: { kind } })
   }
-  expect(opened.length).toBe(0)
+  expect(opened.length).toBe(1) // the command's own open
   expect((await texts($)).some(x => /▸ Another Claude/.test(x))).toBe(false)
 })
 
@@ -887,7 +906,7 @@ test('a spawn over two minutes after the last agent, while the main turn is open
   expect(t.some(x => /dispatching\.+ 0 running/.test(x))).toBe(true)
 })
 
-test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', async ($, on) => {
+test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(300_000) // five minutes: still open
@@ -905,13 +924,14 @@ test('stale work (no turn.complete, last agent over ten minutes ago) is signed o
 const mountLive = ($: any) => $.ui.mount({ ...PANE, surface: 'terminal' })
 const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x: any) => x.text ?? '') as string[]
 
-// ~2400 timer redraws of the live pane take about 5 s on a loaded machine, so the default 5 s limit is too tight
-test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', { timeoutMs: 15000 }, async ($, on) => {
+// The pane is mounted only for the last seconds: a mounted pane redraws on each of the ~2400 pulses of the ten minutes before, which took
+// about 30 s and timed the test out. Unmounted, a pulse only writes the tick.
+test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
-  const ui = await mountLive($)
-  expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
+  expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
   for (let i = 0; i < 59; i++) await clock.advance(10_000) // 590 s of 250 ms pulses: still open
+  const ui = await mountLive($)
   expect((await liveTexts(ui)).some(x => /dispatching/.test(x))).toBe(true)
   for (let i = 0; i < 12; i++) await clock.advance(1000) // the pulse that finds it stale draws once more
   const t = await liveTexts(ui)
@@ -943,7 +963,7 @@ test('the timer ticks while work is open with no agents and stops, after a last 
   await ui.unmount()
 })
 
-test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', async ($, on) => {
+test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
   await wave($, on, { clock })
   await clock.advance(700_000) // a long build, no turn.complete yet
@@ -1159,7 +1179,7 @@ test('stage loops: re-plan, retry and rebuild appear when their condition is met
   await ui.unmount()
 })
 
-test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', async ($, on) => {
+test('every width holds a scene with a retry, a re-plan and a rebuild inside the pane', SLOW, async ($, on) => {
   await boot($, on)
   await spawnWith($, 'p1', PLAN_REVIEW, REVQ)
   await finish($, 'p1', FAIL)
@@ -1397,7 +1417,7 @@ test('slice diagram: a running first card ends the trunk dot above its own fork;
   expect(rowsSeen.size).toBe(2)
 })
 
-test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', async ($, on) => {
+test('spawn on use: 1 to 6 drawn stages hold inside the pane at every width from 24 to 140', SLOW, async ($, on) => {
   await boot($, on, { route: verdict('orchestrate') })
   await $.prompt.submit({ text: PROMPT })
   const WIDE = [24, 28, 32, 36, 39, 40, 44, 52, 60, 64, 80, 99, 100, 120, 140]
@@ -1618,11 +1638,12 @@ test('brief grammar: the dashboard parser gives expected.json for every fixture 
   for (const junk of [undefined, null, 42, {}, []]) {
     expect(parseHeader(junk).slice).toBe(null)
     expect(parsePlan(junk)).toEqual({ isPlanReview: false, replan: null, constraints: {}, slices: [] })
-    expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {}, gaps: [], quotes: [] })
-    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] })
+    expect(parseReply(junk)).toEqual({ status: null, open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] })
+    expect(parseHeader(junk)).toEqual({ slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] })
   }
-  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE, SKILLS; GAP, QUOTE) have fixtures of their own, so the loop above covers them
-  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt', 'impl-skills.txt', 'impl-skills-malformed.txt']) expect(names.includes(name)).toBe(true)
+  // the 0.4.0 lines (SOURCES, READ, KIND, VALIDATE, SKILLS; GAP, QUOTE) and the skill-slice lines (SKILL, TARGET, UPDATE, DRAFTS; DRAFT, SKILLS-USED, SKILLS-SKIPPED) have
+  // fixtures of their own, so the loop above covers them
+  for (const name of ['researcher-brief.txt', 'impl-bugfix.txt', 'reply-gaps.txt', 'reply-quotes.txt', 'impl-skills.txt', 'impl-skills-malformed.txt', 'impl-skill.txt', 'impl-skill-malformed.txt', 'plan-skill.txt', 'reply-draft.txt', 'reply-skills.txt']) expect(names.includes(name)).toBe(true)
 })
 
 const RESEARCH = 'orchestration:researcher'
@@ -1862,4 +1883,188 @@ test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as don
   t = await texts($, 100, 200)
   expect(t.some(x => /^✖ s1 /.test(x))).toBe(true)
   expect(t.some(x => /^[◆✔] s1 /.test(x))).toBe(false)
+})
+
+
+// ---- On and off: the pane opens by itself only after /orchestration on in this session, in any terminal.
+const HERDR_ENV = { TERM_PROGRAM: 'herdr-mobile', HC_TERMINAL_SOCKET: '/run/herdr.sock' }
+const PLAIN_ENV = { TERM_PROGRAM: 'iTerm.app' }
+const ROUTE_VERDICT = { mode: 'orchestrate', reason: 'four independent slices' }
+
+for (const [where, env] of [['herdr', HERDR_ENV], ['a plain terminal', PLAIN_ENV]] as const) {
+  test(`off by default in ${where}: a prompt, an agent start and a route verdict open nothing, and the run is still recorded`, async ($, on) => {
+    mock.env(on, env)
+    const { opened, toasts } = await boot($, on, { placed: false })
+    await ($ as any).prompt.submit({ text: PROMPT })
+    await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+    const out = await ($ as any).tool.call({ tool: NAME, ...ROUTE_VERDICT })
+    expect(out.result).toBe('route recorded: orchestrate')
+    expect(opened.length).toBe(0)
+    expect(toasts.length).toBe(0) // the narrow-terminal hint is for a pane that is on
+    // turned on mid-run, the pane shows the run so far
+    const said = await pane($, 'on')
+    expect(said.text).toMatch(/pane is on/i)
+    expect(opened.length).toBe(1)
+    const t = await texts($)
+    expect(t.some(x => /s1/.test(x))).toBe(true)
+    expect(t.some(x => /triage · orchestrate/.test(x))).toBe(true)
+    expect(t.includes(`▸ ${PROMPT.split('\n')[0]}`)).toBe(true)
+  })
+}
+
+test('the command is registered with an [on|off] hint and a description that says it turns the pane on or off', async ($, on) => {
+  const { commands } = await boot($, on)
+  expect(commands.length).toBe(1)
+  expect(commands[0].name).toBe('orchestration')
+  expect(commands[0].argumentHint).toBe('[on|off]')
+  expect(commands[0].description).toMatch(/turn/i)
+  expect(commands[0].description).toMatch(/on or off/i)
+})
+
+test('/orchestration on opens the pane focused, and later prompts, agents and verdicts open it', async ($, on) => {
+  mock.env(on, PLAIN_ENV)
+  const { opened } = await boot($, on)
+  const said = await pane($, 'on')
+  expect(opened.length).toBe(1)
+  expect(opened[0].id).toBe('orchestration')
+  expect(opened[0].focus).toBe(true)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(said.text).toMatch(/\/orchestration off/)
+  expect(said.text.includes('\n')).toBe(false) // one plain line
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(2)
+  expect(opened[1].focus).toBeFalsy() // opened unasked: the prompt keeps the keyboard
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(opened.length).toBe(3)
+  await ($ as any).tool.call({ tool: NAME, ...ROUTE_VERDICT })
+  expect(opened.length).toBe(4)
+})
+
+test('with the pane on, a terminal too narrow to seat it gets the hint once, naming /orchestration on', async ($, on) => {
+  const { toasts } = await boot($, on, { placed: false })
+  await pane($, 'on')
+  await ($ as any).prompt.submit({ text: PROMPT })
+  await ($ as any).prompt.submit({ text: 'again' })
+  expect(toasts.length).toBe(1)
+  expect(String(toasts[0].text)).toMatch(/\/orchestration on/)
+})
+
+test('/orchestration off closes the pane and later prompts open nothing', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  await pane($, 'on')
+  const said = await pane($, 'off')
+  expect(closed.length).toBe(1)
+  expect(closed[0].id).toBe('orchestration')
+  expect(said.text).toMatch(/pane is off/i)
+  expect(said.text).toMatch(/\/orchestration on/)
+  expect(said.text.includes('\n')).toBe(false)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(opened.length).toBe(1) // only the command's own open
+})
+
+test('/orchestration with no argument switches between on and off', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  let said = await pane($)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(opened.length).toBe(1)
+  expect(opened[0].focus).toBe(true)
+  said = await pane($, '  ')
+  expect(said.text).toMatch(/pane is off/i)
+  expect(closed.length).toBe(1)
+  said = await pane($)
+  expect(said.text).toMatch(/pane is on/i)
+  expect(opened.length).toBe(2)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(3)
+})
+
+test('/orchestration with an unknown argument changes nothing and answers with the usage', async ($, on) => {
+  const { opened, closed } = await boot($, on)
+  const said = await pane($, 'maybe')
+  expect(said.text).toMatch(/\/orchestration \[on\|off\]/)
+  expect(said.text.includes('\n')).toBe(false)
+  expect(opened.length).toBe(0)
+  expect(closed.length).toBe(0)
+  await ($ as any).prompt.submit({ text: PROMPT })
+  expect(opened.length).toBe(0) // still off
+  await pane($, 'on')
+  await pane($, 'sideways')
+  await ($ as any).prompt.submit({ text: 'more' })
+  expect(opened.length).toBe(2) // still on
+  expect(closed.length).toBe(0)
+})
+
+// No hook may block or fail the event it wraps: a refused state write or ui.open still hands the event result on, and the rest of the hook's work
+// still runs. The engine reports a hook that fails and skips it, so a test sees the failure as the work the skipped hook never did.
+test('/orchestration answers with a line even when opening or closing the pane fails', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail })
+  fail.open = true
+  fail.close = true
+  const on1 = await pane($, 'on')
+  expect(on1.text).toBe('Orchestration pane is on: arrow keys scroll, Esc returns to the prompt. Type /orchestration off to turn it off.')
+  const off = await pane($, 'off')
+  expect(off.text).toBe('Orchestration pane is off. Type /orchestration on to turn it on.')
+})
+
+test('agent.spawn: a failing ui.open still returns the spawned agent and starts the redraw', async ($, on) => {
+  const fail: Fail = {}
+  const { timers, opened } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.open = true
+  const out = await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(out.agentId).toBe('b1')
+  expect(opened.length).toBe(1) // the command's own open; the spawn's was refused
+  expect(timers.length).toBeGreaterThan(0)
+  expect((await texts($)).some(x => /s1/.test(x))).toBe(true)
+})
+
+test('agent.spawn: a failing state write still returns the spawned agent and opens the pane', async ($, on) => {
+  const fail: Fail = {}
+  const { opened } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.keys = ['agents']
+  const out = await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  expect(out.agentId).toBe('b1')
+  expect(opened.length).toBe(2)
+})
+
+test('tool.call: a failing state write for a running agent still runs the call, returns its result and counts the tool', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail, route: 'read ok' })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  fail.keys = ['agents']
+  const out = await ($ as any).tool.call({ tool: 'Grep', pattern: 'x', agentId: 'b1' })
+  expect(out.result).toBe('read ok')
+  expect(usedOf(await texts($)).some(x => /Grep 1/.test(x))).toBe(true)
+})
+
+test('turn.complete: a failing state write for an agent still passes the turn on', async ($, on) => {
+  const fail: Fail = {}
+  await boot($, on, { fail })
+  await spawnWith($, 'b1', 'SLICE: s1\nFILES: a.py\nDEPENDS: none', 'orchestration:implementer')
+  fail.keys = ['agents', 'log']
+  const out = await finish($, 'b1', 'built\nSTATUS: pass')
+  expect(out.text).toBe('built\nSTATUS: pass')
+})
+
+test('session.start: a failing command registration still starts the session and registers the route tool', async ($, on) => {
+  const registered: any[] = []
+  on('command.register', () => ({ deny: 'no commands here' }))
+  on('tool.register', (_: unknown, e: any) => (registered.push(e), { value: { tool: NAME } }))
+  on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
+  const out = await ($ as any).session.start({ cwd: '/x', surface: 'terminal', isInteractive: true })
+  expect(out.cwd).toBe('/x')
+  expect(registered.length).toBe(1)
+})
+
+test('prompt.submit: a failing ui.open with the pane on still hands the prompt on and starts the redraw', async ($, on) => {
+  const fail: Fail = {}
+  const { timers } = await boot($, on, { fail })
+  await pane($, 'on')
+  fail.open = true
+  const out = await ($ as any).prompt.submit({ text: PROMPT })
+  expect(out.text).toBe(PROMPT)
+  expect(timers.length).toBeGreaterThan(0)
 })

@@ -9,14 +9,17 @@
 // "Glob tool behavior"). Without them the researcher could only Read whole files (docs/research-2026-11-10.md). Each is
 // held to forms that cannot write a file or start a program: `find` without its exec, ok, delete and fprint actions,
 // `grep` and `rg` with long options from SEARCH_LONG only (so no --filter, --pager, --pre or config file) and
-// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them on a /dev/ device. A lone `--`
+// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them on a /dev/ device (also as an
+// option's value); no command may hold a glob in an option's name (`tail -?`, `find . -delet[e]`). A lone `--`
 // never ends the check (review of 2026-11-10: `rg -e -- --pre=sh x` used it to hide an option).
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output (the session's own permission rules then
 // decide). It never prints an allow or ask decision. Acts only when the bare agent_type is `researcher`; any other
 // agent, the main thread and malformed input exit 0 at once. ORCH_GUARDS=off disables it.
 // Allowed only when every simple command (split on ;, &&, ||, |, & and newlines by judge-core.mjs's tokenizer) starts
 // with an allowed prefix and the command has no redirection, heredoc, command or process substitution, backticks,
-// variable expansion, assignment or function definition. Anything the tokenizer cannot read is denied.
+// variable expansion, assignment or function definition. Anything the tokenizer cannot read is denied. The one
+// exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
+// allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -37,6 +40,9 @@ const FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|rm|fprint|fprint0|fprintf|
 // tail's --follow and --retry and every shortened spelling GNU tail accepts for them (--fol, --f).
 const PAGE_LONG = new Set(["lines", "bytes", "quiet", "silent", "verbose", "zero-terminated", "help", "version"]);
 const PAGERS = new Set(["head", "tail", "cat"]);
+// A /dev/ path as a whole argument, as a long option's value (`--file=/dev/zero`) or attached to short options
+// (`-f/dev/zero`, `-rf/dev/zero`): group 1 is the path.
+const DEVICE = /^(?:--[^=]+=|-[A-Za-z0-9]+=?)?(\/dev\/.*)$/;
 // Long options of grep, ugrep and ripgrep that only change what is searched or how matches print. Anything else is
 // denied by name, which covers the ones that run a program or write a file (ugrep --filter, --pager, --view,
 // --save-config, --config and ---FILE; ripgrep --pre, --hostname-bin) without listing them.
@@ -54,11 +60,80 @@ const SEARCH_LONG = new Set([
   "sort", "sortr", "stats", "json", "vimgrep", "help", "version",
 ]);
 
+// What a refused researcher should do instead (gate records showed refusals with no way forward). Appended after the
+// reason's first words, which stay the same so the records still group by them.
+const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du and read-only git, and work the result out in the report";
+
+/** @param {string} word @returns {string} */
+function insteadOf(word) {
+  if (word === "cd") return "put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
+  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, or `head` and `tail`";
+  return USE_ALLOWED;
+}
+
 /**
  * Why `command` is outside the researcher's allowlist, or null when it is inside.
  * @param {string} command @returns {{ reason: string, word?: string } | null}
  */
 export function researcherViolation(command) {
+  return violation(withoutStderrNull(command));
+}
+
+// The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
+const STDERR_OK = ["2>/dev/null", "2>&1"];
+
+/**
+ * The command with each allowed stderr form blanked out, so the checks below never see it. A form counts only outside
+ * quotes and comments, after an unescaped space, tab or newline and before one or the end: `2>/dev/nullx`,
+ * `x;2>&1`, `a\ 2>/dev/null` and `2> /dev/null` stay and are refused. The tokenizer drops a redirection's fd number,
+ * so this works on the raw text. A command with ANSI-C quoting (`$'`), whose quotes this scan does not follow, is
+ * returned unchanged. Inside `$(...)` or backticks a form is blanked too, but the substitution is refused anyway.
+ * @param {string} command @returns {string}
+ */
+function withoutStderrNull(command) {
+  if (command.includes("$'")) return command;
+  let out = "";
+  /** @type {"" | "'" | '"' | "#"} */
+  let state = "";
+  let sep = false; // the previous character was an unquoted, unescaped space, tab or newline
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i] ?? "";
+    const afterSep = sep;
+    sep = state === "" && /[ \t\n]/.test(c);
+    if (state === "'") {
+      if (c === "'") state = "";
+    } else if (state === '"') {
+      if (c === "\\") {
+        out += c + (command[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (c === '"') state = "";
+    } else if (state === "#") {
+      if (c === "\n") state = "";
+    } else if (c === "\\") {
+      out += c + (command[i + 1] ?? "");
+      i++;
+      continue;
+    } else if (c === "'" || c === '"') {
+      state = c;
+    } else if (c === "#" && (i === 0 || afterSep)) {
+      state = "#";
+    } else if (afterSep) {
+      const form = STDERR_OK.find((f) => command.startsWith(f, i) && (i + f.length === command.length || /[ \t\n]/.test(command[i + f.length] ?? "")));
+      if (form) {
+        out += " ".repeat(form.length);
+        i += form.length - 1;
+        continue;
+      }
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** @param {string} command @returns {{ reason: string, word?: string } | null} */
+function violation(command) {
   /** @type {any} */
   let t;
   try {
@@ -82,15 +157,36 @@ export function researcherViolation(command) {
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
-    if (words.some((w) => w.assign)) return { reason: "a variable assignment", word: words[0]?.text };
+    if (words.some((w) => w.assign)) return { reason: `a variable assignment; ${USE_ALLOWED}`, word: words[0]?.text };
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
+    if (words.some(globInOptionName)) {
+      return {
+        reason: "a glob in an option name (the shell may expand it into another option, such as -f or -delete); quote the glob (`rg -g '*.md' x`) or use the long form (`--glob=*.md`)",
+        word: words[0]?.text,
+      };
+    }
     const w = words.map((x) => String(x.text));
-    if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command`, word: w[0] };
+    if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
     const option = optionViolation(w);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
   return null;
+}
+
+/**
+ * Does a glob stand in the name of an option (`-?`, `-delet[e]`, `--fil*`)? The tokenizer leaves glob characters out
+ * of a word's text, so the checks on the text would see `-` and `-delet`, while the shell expands the word into any
+ * option a file of that name spells. A glob in a long option's value (`--include=*.ts`) keeps the name and passes.
+ * @param {any} w
+ */
+function globInOptionName(w) {
+  let head = ""; // the literal text before the current piece
+  for (const p of w.pieces) {
+    if ("lit" in p) head += p.lit;
+    else if ("glob" in p && head.startsWith("-") && !(head.startsWith("--") && head.includes("="))) return true;
+  }
+  return false;
 }
 
 /** @param {string[]} w */
@@ -119,8 +215,12 @@ function optionViolation(w) {
     return action ? `find ${action} runs a program or writes a file` : null;
   }
   if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
-  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail or a search reading for ever.
-  const device = args.find((a) => /^\/dev\//.test(a) && a !== "/dev/null");
+  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail or a search reading for ever, also
+  // as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
+  const device = args.find((a) => {
+    const path = DEVICE.exec(a)?.[1];
+    return path !== undefined && path !== "/dev/null";
+  });
   if (device) return `${first} ${device} reads a device that may never end`;
   for (const a of args) {
     if (a.startsWith("--")) {

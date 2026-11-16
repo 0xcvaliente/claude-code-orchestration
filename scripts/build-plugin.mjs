@@ -69,6 +69,10 @@ const run = (script) => `${script.endsWith(".mjs") ? `node "\${CLAUDE_PLUGIN_ROO
 // The judge refuses on a crash or timeout (onFailure "block"); a missing node exits 0, so it never blocks every command.
 /** @param {string} script */
 const failClosed = (script) => `sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node "$0" "$@"' "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}" --plugin`;
+// The turn budget warns subagents only: sh starts node only when the payload holds "agent_id" (a main-session tool
+// call has none), passes the payload on to node's stdin, and does nothing without node. Never blocks.
+/** @param {string} script */
+const subagentsOnly = (script) => `sh -c 'command -v node >/dev/null 2>&1 || exit 0; p=$(cat); case $p in *\\"agent_id\\"*) printf "%s" "$p" | node "$0" "$@";; esac; exit 0' "\${CLAUDE_PLUGIN_ROOT}/hooks/${script}" --plugin`;
 // Matchers mirror .claude/settings.json. verify.sh takes the namespaced implementer, disjoint from the project's
 // ^implementer$ (no duplicate() check). quote-check's project matcher (^|:)researcher$ covers both researcher types,
 // so the plugin copy exits on duplicate() where the project registers it, and checks plugin researchers elsewhere.
@@ -88,12 +92,15 @@ const hooks = {
     PostToolUse: [
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("journal.mjs") }] },
       { matcher: "Read|WebFetch", hooks: [{ type: "command", command: run("read-log.mjs") }] },
+      // Last, with no matcher: journal.mjs stays PostToolUse[0].
+      { hooks: [{ type: "command", command: subagentsOnly("turn-budget.mjs") }] },
     ],
     SubagentStart: [{ hooks: [{ type: "command", command: run("telemetry.mjs") }] }],
     SubagentStop: [
       { hooks: [{ type: "command", command: run("telemetry.mjs") }] },
       { hooks: [{ type: "command", command: run("journal.mjs") }] },
-      { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh"), timeout: 900 }] },
+      // The skill gate sits beside verify.sh with the same disjoint matcher; it acts only on a KIND: skill slice.
+      { matcher: `${NAME}:implementer`, hooks: [{ type: "command", command: run("verify.sh"), timeout: 900 }, { type: "command", command: run("skill-gate.mjs"), timeout: 120 }] },
       { matcher: `${NAME}:researcher`, hooks: [{ type: "command", command: run("quote-check.mjs") }] },
     ],
     Stop: [{ hooks: [{ type: "command", command: run("review-gate.mjs") }] }],
@@ -135,7 +142,11 @@ const OPTIONS = [
   ["quote_check", "string", "Quote check", "Empty: on; off skips checking researcher QUOTE lines against their sources (ORCH_QUOTE_CHECK)."],
   ["gate_isolated", "string", "Test gate in worktrees", "Test gate in isolated worktrees: warn (default), block or skip (ORCH_GATE_ISOLATED)."],
   ["skill_hints", "string", "Skill hints", "Empty: on; off drops the plan check's suggested-skills block for worker launches (ORCH_SKILL_HINTS)."],
+  ["allow_haiku", "string", "Allow Haiku", "Empty: a launch of this plugin's agents on a haiku model is raised to sonnet; 1 lets it run on haiku (ORCH_ALLOW_HAIKU)."],
   ["handback_check", "string", "Report check", "Empty: on; off skips sending a worker's report back once when it has no STATUS line or leaves a checked id unanswered (ORCH_HANDBACK_CHECK)."],
+  ["skill_create", "string", "Skill creation", "Empty: on; off blocks a KIND: skill implementer launch, so a run creates no skill (ORCH_SKILL_CREATE)."],
+  ["skills_repo_private", "string", "Private skills repository", "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."],
+  ["skills_repo_public", "string", "Public skills repository", "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(

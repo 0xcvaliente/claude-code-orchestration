@@ -1,5 +1,6 @@
 // brief.mjs against docs/brief-grammar.md: every fixture in src/fixtures/briefs against expected.json (the dashboard can
 // reuse the same pair as a contract test), then one test per rule of the spec, and parity with today's hooks.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -69,9 +70,9 @@ test("C1: no parser throws on empty, malformed or non-string input; fields come 
     normalizeFiles(v, "/base");
     agentModel(v, { projectDir: "/nonexistent", pluginRoot: "/nonexistent" });
   }
-  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
+  assert.deepEqual(parseHeader(undefined), { slice: null, files: [], depends: [], path: null, risky: false, checks: [], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] });
   assert.deepEqual(parsePlan(null), { isPlanReview: false, replan: null, constraints: {}, slices: [] });
-  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [] });
+  assert.deepEqual(parseReply(42), { status: null, open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
   assert.deepEqual(briefUrls(42), []);
   assert.equal(gapKey(null), gapKey(""));
   assert.deepEqual(foldRuns(/** @type {any} */ ("nope")), { runs: [], open: null });
@@ -165,8 +166,8 @@ test("plan: REPLAN number, constraints block and per-slice lines", () => {
   assert.equal(p.replan, 3);
   assert.deepEqual(p.constraints, { C1: "first", C2: "second" });
   assert.deepEqual(p.slices, [
-    { slice: "a", files: ["a.py"], depends: [], goal: "the parser", risky: false, checks: ["C1"] },
-    { slice: "b", files: [], depends: ["a"], goal: null, risky: true, checks: ["C2"] },
+    { slice: "a", files: ["a.py"], depends: [], goal: "the parser", risky: false, checks: ["C1"], kind: null, skill: null, target: null },
+    { slice: "b", files: [], depends: ["a"], goal: null, risky: true, checks: ["C2"], kind: null, skill: null, target: null },
   ]);
   assert.equal(parsePlan("PLAN REVIEW\nREPLAN: soon").replan, null);
   assert.equal(parsePlan("PLAN REVIEW\nREPLAN: 0").replan, 0);
@@ -177,7 +178,7 @@ test("C3: old-style plans, briefs and replies parse to empty values", () => {
   assert.deepEqual(parsePlan("PLAN REVIEW\nSplit it into a parser and a CLI."), { isPlanReview: true, replan: null, constraints: {}, slices: [] });
   const h = parseHeader("SLICE: s1\nFILES: a.py\nDEPENDS: none\nDo it.");
   assert.deepEqual([h.risky, h.checks, h.focus, h.path], [false, [], null, null]);
-  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {}, gaps: [], quotes: [] });
+  assert.deepEqual(parseReply("STATUS: pass\nCHANGED: a.py\nEVIDENCE: npm test -> ok"), { status: "pass", open: [], answers: {}, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
 });
 
 test("STATUS: same rule as scripts/auto.sh (src/verify.test.ts cases); no STATUS line is null", () => {
@@ -210,6 +211,25 @@ test("OPEN: empty, none, - and n/a mean nothing; an inline value and list lines 
   assert.deepEqual(parseReply("OPEN: first\n- second\nEVIDENCE: x").open, ["first", "second"]);
   assert.deepEqual(parseReply("OPEN:\n- none").open, []);
   assert.deepEqual(parseReply("No open field at all").open, []);
+});
+
+test("OPEN: emphasis or backticks around an empty value mean nothing; a note after none is an item", () => {
+  for (const v of ["**OPEN: none**", "OPEN: _none_", "OPEN: `none`", "**OPEN: `none`**", "OPEN: *n/a*", "OPEN: **None.**", "OPEN: `-`", "OPEN:\n- _nothing_"])
+    assert.deepEqual(parseReply(v).open, [], v);
+  assert.deepEqual(parseReply("OPEN: none (a note)").open, ["none (a note)"]);
+});
+
+test("slice id: first word without quotes, backticks and *, trailing :,;. removed, the same in a header and a plan", () => {
+  for (const [v, id] of [["A1", "A1"], ["A1.", "A1"], ['"A1"', "A1"], ["`A1`:", "A1"], ["**A1**, the parser", "A1"], ["'A1';", "A1"]]) {
+    assert.equal(parseHeader(`SLICE: ${v}`).slice, id, `header ${v}`);
+    assert.deepEqual(parsePlan(`PLAN REVIEW\nSLICE: ${v}`).slices.map((s) => s.slice), [id], `plan ${v}`);
+  }
+  const p = parsePlan(["PLAN REVIEW", "SLICE: A0", "FILES: a.py", 'SLICE: "A1" - parser', "FILES: b.py", "RISKY: yes", "CHECKS: C1"].join("\n"));
+  assert.deepEqual(p.slices, [
+    { slice: "A0", files: ["a.py"], depends: [], goal: null, risky: false, checks: [], kind: null, skill: null, target: null },
+    { slice: "A1", files: ["b.py"], depends: [], goal: "parser", risky: true, checks: ["C1"], kind: null, skill: null, target: null },
+  ]);
+  assert.equal(parseHeader("SLICE: .").slice, null);
 });
 
 test("answers: pass (cmd) with -> or →, pass (read), fail; quotes and templates ignored; a later fail wins", () => {
@@ -383,9 +403,9 @@ test("header: SKILLS is a list of skill names, namespaced or not, deduplicated, 
 test("C3: old-style briefs and replies parse as before, with the new fields empty", () => {
   const brief = "SLICE: s1\nFILES: app.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C1\nBody: see https://example.com.";
   const h = parseHeader(brief);
-  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [] });
+  assert.deepEqual(h, { slice: "s1", files: ["app.py"], depends: [], path: null, risky: true, checks: ["C1"], focus: null, workflow: false, sources: [], read: null, kind: null, validate: false, skills: [], skill: null, target: null, update: false, drafts: [] });
   const r = parseReply("STATUS: pass\nC1: pass (cmd) npm test -> ok\nOPEN: none");
-  assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [] });
+  assert.deepEqual(r, { status: "pass", open: [], answers: { C1: { verdict: "pass", mode: "cmd", detail: "npm test -> ok" } }, gaps: [], quotes: [], draft: null, skillsUsed: [], skillsSkipped: [] });
   assert.equal(parseStatus("STATUS: pass\nGAP: 90 something"), "pass", "a GAP line does not change the status");
 });
 
@@ -782,7 +802,7 @@ test("parity: parseHeader matches plan-check.mjs, sliceOfBrief matches journal.m
     const state = join(dir, ".claude", "state");
     mkdirSync(hooks, { recursive: true });
     mkdirSync(state, { recursive: true });
-    for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+    for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
     const briefs = [
       "SLICE: toml\nFILES: toolkit/toml.py, ./tests/test_toml.py\nDEPENDS: none",
       "- **SLICE:** auth extra\n- FILES: `src/auth.ts`, 'src/session/'\n- DEPENDS: A0, A1",

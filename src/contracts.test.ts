@@ -1,5 +1,6 @@
 // "Change these together" contracts from .claude/rules/agents.md, enforced per file: the triage numbers, the three
 // route names and the brief-format tokens must agree across the prose files and the hooks that parse the briefs.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -111,7 +112,7 @@ function project(): string {
   const hooks = join(dir, ".claude", "hooks");
   mkdirSync(hooks, { recursive: true });
   mkdirSync(join(dir, ".claude", "state"), { recursive: true });
-  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
+  for (const h of ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "journal.mjs"]) copyFileSync(join(root, ".claude", "hooks", h), join(hooks, h));
   return dir;
 }
 const run = (dir: string, script: string, payload: unknown) =>
@@ -210,18 +211,20 @@ test("worker agents and the conventions skill describe their 0.4.0 lines", () =>
   assert.match(read(IMPLEMENTER), /`KIND: bugfix`, reproduce the bug first: write a test that fails/);
   const researcher = read(RESEARCHER);
   for (const t of ["QUOTE: <locator> | <verbatim text>", "path:line", "p.N", "SOURCES:", "READ:", "`pages` parameter"]) assert.ok(researcher.includes(t), `${RESEARCHER} must mention ${t}`);
+  assert.match(researcher, /redirection are refused, except a stderr redirection written exactly `2>\/dev\/null` or `2>&1`/, `${RESEARCHER} names the two stderr redirections the guard allows`);
   const conventions = read(CONVENTIONS);
   for (const t of ["GAP: <0-100> <text>", "QUOTE: <locator> | <verbatim text>"]) assert.ok(conventions.includes(t), `${CONVENTIONS} must mention ${t}`);
 });
 
 test("model-facing text names gate reasons but no environment switch", () => {
-  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b/;
-  const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS];
+  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE|ALLOW_HAIKU|SKILL_CREATE|SKILLS_REPO_PRIVATE|SKILLS_REPO_PUBLIC)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b|\ballow_haiku\b|\bskill_create\b|\bskills_repo_(private|public)\b/;
+  const authoring = [".claude/skills/skill-authoring/SKILL.md", ...["skill-shape", "evaluation", "compliance"].map((f) => `.claude/skills/skill-authoring/references/${f}.md`)];
+  const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS, ...authoring];
   for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
   for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) assert.doesNotMatch(nudgeContext(env), switches, "the nudge context names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
   const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
-  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
+  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
   assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
 });
 
@@ -252,13 +255,34 @@ test("workers load listed skills with the Skill tool and ignore ones that do not
   assert.doesNotMatch(read(".claude/agents/integrator.md"), /SKILLS|Skill tool/, "the integrator gets no skills");
 });
 
-test("the Skill tool goes to the researcher and the reviewer, not the integrator", async () => {
+test("the Skill tool goes to the orchestrator, the researcher and the reviewer, not the integrator", async () => {
   const { NATIVE_TOOLS } = await import("./config.js");
+  assert.ok(NATIVE_TOOLS.orchestrator.tools?.includes("Skill"));
   assert.ok(NATIVE_TOOLS.researcher.tools?.includes("Skill"));
   assert.ok(NATIVE_TOOLS.reviewer.tools?.includes("Skill"));
   assert.ok(!NATIVE_TOOLS.integrator.tools?.includes("Skill"));
   assert.ok(!NATIVE_TOOLS.implementer.disallowedTools?.includes("Skill"), "the implementer inherits Skill");
-  for (const file of [RESEARCHER, REVIEWER]) assert.match(read(file), /^tools: .*\bSkill\b/m, `${file} frontmatter lists Skill`);
+  for (const file of [ORCH, RESEARCHER, REVIEWER]) assert.match(read(file), /^tools: .*\bSkill\b/m, `${file} frontmatter lists Skill`);
+});
+
+test("the orchestrator, the route skill and the nudge cap plan-shaping skills at two and ask for a SKILLS decision on RISKY slices", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /at most two installed skills that shape the plan itself \(domain rules, architecture, a threat model\)/, `${file} caps plan-shaping skills at two`);
+    assert.match(text, /every other fitting skill (goes )?to the workers/i, `${file} sends other skills to the workers`);
+    assert.match(text, /`?SKILLS: <names>`? or `?SKILLS: none`?/, `${file} gives both forms of the slice's skill decision`);
+    assert.match(text, /a RISKY slice always carries one of the two/, `${file} requires a decision on RISKY slices`);
+    assert.match(text, /PLAN REVIEW/, `${file} puts the decision in the PLAN REVIEW brief`);
+  }
+  assert.match(read(ORCH), /stays in your context/, `${ORCH} says why it loads few skills itself`);
+});
+
+test("the plan reviewer checks each slice's skill choice", () => {
+  const reviewer = read(REVIEWER);
+  assert.match(reviewer, /`SKILLS: <names>` or `SKILLS: none`/);
+  assert.match(reviewer, /Check each slice's skill choice/);
+  assert.match(reviewer, /a named skill that is not installed or does not fit the slice's goal and files is a gap/);
+  assert.match(reviewer, /a RISKY slice with no `SKILLS:` line/);
 });
 
 test("maintainer text describes the skill suggestions and the widened allow", () => {
@@ -287,4 +311,31 @@ test("nudge warns about agent teams only when they are switched on", () => {
   assert.match(on, /outside the plan check/);
   const bad = spawnSync("node", [join(root, NUDGE)], { input: "not json", env: { ...process.env, ORCH_NO_NUDGE: "" }, encoding: "utf8" });
   assert.equal(bad.status, 0, "malformed input exits 0");
+});
+
+// --- The acceptance check: the narrowest command, since the test gate already runs the whole suite. ---
+test("every place that states the acceptance check asks for the narrowest command and leaves the whole suite to the test gate", () => {
+  const texts: [string, string][] = [[IMPLEMENTER, read(IMPLEMENTER)], [ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /narrowest command that proves the slice/, `${file} asks for the narrowest command that proves the slice`);
+    assert.match(text, /tests of the files (it|you) owns?/, `${file} says that for code it is the tests of the files the slice owns`);
+    assert.match(text, /test gate runs the project's whole suite when (an|the|each) implementer stops|test gate runs the project's whole suite when you stop/, `${file} says the test gate runs the whole suite`);
+    assert.match(text, /once more after (integration|the merge)/, `${file} says the whole suite runs once more after integration`);
+    // The test gate fires only on an implementer's stop; the integrator, not the gate, runs the suite after the merge.
+    assert.match(text, /the integrator runs it once more after the merge/, `${file} makes the integrator the one that runs the whole suite after the merge`);
+    assert.doesNotMatch(text, /test gate runs the project's whole suite when [^.:;]*?,? and (it runs )?once more after/, `${file} never makes the test gate run the whole suite after the merge`);
+  }
+  assert.match(read(IMPLEMENTER), /run the whole suite only when your brief asks for it/, `${IMPLEMENTER} runs the whole suite only when asked`);
+  for (const [file, text] of texts.slice(1)) {
+    assert.match(text, /a brief never also asks a worker to run the whole suite/, `${file} keeps the whole suite out of worker briefs`);
+    assert.match(text, /the integrator's brief is the one that names the project's whole suite/, `${file} names the integrator's brief as the exception`);
+  }
+  const review = read(ORCH).split("\n").find((l) => l.startsWith("5. Review"))!;
+  assert.match(review, /slice's own acceptance check/, "a slice's reviewer runs the slice's own check");
+  assert.doesNotMatch(review, /npm --prefix <worktree> test/, "the review example is not the whole suite");
+  assert.match(review, /only the integrator's brief names the whole suite/, "step 5 says which brief names the whole suite");
+  const workflow = read(".claude/workflows/orchestrate.js");
+  assert.equal(workflow.match(/narrowest command that proves the slice/g)?.length, 2, "both planner rules (code and not code) ask for the narrowest command");
+  assert.match(workflow, /not the project's whole suite: the test gate already ran it/, "the reviewer brief leaves the whole suite to the test gate");
+  assert.match(workflow, /the command that runs the project's whole test suite, or empty when there is none/, "the planner is asked for the whole-suite command");
 });

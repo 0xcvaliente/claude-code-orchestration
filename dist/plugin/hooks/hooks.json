@@ -91,6 +91,14 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/read-log.mjs\" --plugin"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh -c 'command -v node >/dev/null 2>&1 || exit 0; p=$(cat); case $p in *\\\"agent_id\\\"*) printf \"%s\" \"$p\" | node \"$0\" \"$@\";; esac; exit 0' \"${CLAUDE_PLUGIN_ROOT}/hooks/turn-budget.mjs\" --plugin"
+          }
+        ]
       }
     ],
     "SubagentStart": [
@@ -127,6 +135,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --plugin",
             "timeout": 900
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/skill-gate.mjs\" --plugin",
+            "timeout": 120
           }
         ]
       },

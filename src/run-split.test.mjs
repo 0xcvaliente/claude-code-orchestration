@@ -5,6 +5,7 @@
 // stops that waited for their foreground launch; foldRuns does not read it) and the test-gate rows of gates.jsonl.
 // Replayed through the old fold, run 1 closed at the sonnet pass of 16:27:11 (a retry signal and no opus pass), the
 // opus review of 16:27:54 landed in that closed run, and the opus implementer of 16:28:33 opened a run 2.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";

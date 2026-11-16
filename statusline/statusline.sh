@@ -8,12 +8,26 @@ if ! command -v jq > /dev/null 2>&1; then
   exit 0
 fi
 
-MODEL=$(echo "$input" | jq -r '.model.display_name')
-DIR=$(echo "$input" | jq -r '.workspace.current_dir')
-PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
-case "$PCT" in ''|*[!0-9]*) PCT=0 ;; esac
-ADDED=$(echo "$input" | jq -r '.cost.total_lines_added // 0')
-REMOVED=$(echo "$input" | jq -r '.cost.total_lines_removed // 0')
+# All fields in one jq call, one per line (newlines inside a value become spaces); a missing field is an empty line.
+{
+  IFS= read -r MODEL; IFS= read -r DIR; IFS= read -r PCT; IFS= read -r ADDED; IFS= read -r REMOVED
+  IFS= read -r FIVE_PCT; IFS= read -r FIVE_RESET; IFS= read -r WEEK_PCT; IFS= read -r WEEK_RESET
+} < <(printf '%s' "$input" | jq -r '
+  [ .model.display_name, .workspace.current_dir, (.context_window.used_percentage // 0),
+    (.cost.total_lines_added // 0), (.cost.total_lines_removed // 0),
+    (.rate_limits.five_hour.used_percentage // ""), (.rate_limits.five_hour.resets_at // ""),
+    (.rate_limits.seven_day.used_percentage // ""), (.rate_limits.seven_day.resets_at // "") ]
+  | .[] | (if type == "string" then . else tojson end) | gsub("[\n\r]"; " ")' 2>/dev/null)
+
+# int <value>: the whole-number part of a number, or empty when the value is not a number
+int() {
+  local v="${1%%.*}"
+  case "$v" in ''|*[!0-9]*) v="" ;; esac
+  printf '%s' "$v"
+}
+PCT=$(int "$PCT"); [ -z "$PCT" ] && PCT=0
+ADDED=$(int "$ADDED"); [ -z "$ADDED" ] && ADDED=0
+REMOVED=$(int "$REMOVED"); [ -z "$REMOVED" ] && REMOVED=0
 
 CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; PURPLE='\033[38;5;183m'; BLUE='\033[38;5;75m'; RESET='\033[0m'
 
@@ -35,7 +49,35 @@ BAR=$(dots_bar $((PCT / 10)) 10)
 BRANCH=""
 if git rev-parse --git-dir > /dev/null 2>&1; then
   BRANCH=" | 🌿 $(git branch --show-current 2>/dev/null)"
-  DIRTY=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  # Tracked changes only, no index lock, and at most about a second (macOS has no `timeout`). git and a watchdog
+  # each run in a process group of their own (set -m); the script waits for git itself, and the watchdog kills
+  # git's group (git and everything it started) at the limit, in which case the line shows no dirty count. The
+  # EXIT trap kills both groups and removes the temp file, also when the script itself is killed.
+  DIRTY=""; STATUS_PID=""; WATCH_PID=""
+  STATUS_OUT=$(mktemp "${TMPDIR:-/tmp}/statusline.XXXXXX" 2>/dev/null)
+  if [ -n "$STATUS_OUT" ]; then
+    git_cleanup() {
+      [ -n "$WATCH_PID" ] && kill -TERM -- "-$WATCH_PID" 2>/dev/null
+      [ -n "$STATUS_PID" ] && kill -TERM -- "-$STATUS_PID" 2>/dev/null
+      [ -n "$STATUS_OUT" ] && rm -f "$STATUS_OUT"
+      WATCH_PID=""; STATUS_PID=""; STATUS_OUT=""
+    }
+    trap git_cleanup EXIT
+    trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+    set -m
+    git --no-optional-locks status --porcelain --untracked-files=no > "$STATUS_OUT" 2>/dev/null < /dev/null &
+    STATUS_PID=$!
+    (sleep 1; kill -TERM -- "-$STATUS_PID" || kill -TERM "$STATUS_PID") > /dev/null 2>&1 < /dev/null &
+    WATCH_PID=$!
+    set +m
+    wait "$STATUS_PID" 2>/dev/null
+    rc=$?
+    STATUS_PID=""
+    [ "$rc" -lt 128 ] && DIRTY=$(wc -l < "$STATUS_OUT" 2>/dev/null | tr -d ' ')
+    git_cleanup
+    wait 2>/dev/null
+  fi
+  case "$DIRTY" in ''|*[!0-9]*) DIRTY=0 ;; esac
   [ "$DIRTY" -gt 0 ] && BRANCH="$BRANCH ${YELLOW}*${DIRTY}${RESET}"
 fi
 
@@ -47,27 +89,32 @@ fi
 echo -e "${CYAN}[$MODEL]${RESET} 📁 ${DIR##*/}$BRANCH$LINES"
 
 # Rate limit windows; only present for Claude.ai subscribers after the first response
-# usage_window <json key> <fallback label> <color> <short window?>
+# usage_window <used %> <resets_at epoch> <fallback label> <color> <short window?>
+NOW=$(date +%s)
+# day_label <epoch>: "Mar 5" in local time; GNU date reads an epoch with -d @N, BSD/macOS date with -r N
+day_label() {
+  if date --version > /dev/null 2>&1; then date -d "@$1" +"%b %-d" 2>/dev/null; else date -r "$1" +"%b %-d" 2>/dev/null; fi
+}
 usage_window() {
   local pct reset name left_txt left filled
-  pct=$(echo "$input" | jq -r ".rate_limits.$1.used_percentage // empty" | cut -d. -f1)
+  pct=$(int "$1")
   [ -z "$pct" ] && return
-  reset=$(echo "$input" | jq -r ".rate_limits.$1.resets_at // empty")
-  name="$2"; left_txt=""
+  reset=$(int "$2")
+  name="$3"; left_txt=""
   if [ -n "$reset" ]; then
-    left=$((reset - $(date +%s)))
-    if [ "$4" = short ]; then
+    left=$((reset - NOW))
+    if [ "$5" = short ]; then
       if [ "$left" -ge 3600 ]; then left_txt=" ($((left / 3600))h left)"
       elif [ "$left" -gt 0 ]; then left_txt=" ($((left / 60))m left)"; fi
     else
-      name=$(date -r "$reset" +"%b %-d" 2>/dev/null || echo "$2")
+      name=$(day_label "$reset"); [ -z "$name" ] && name="$3"
       if [ "$left" -ge 86400 ]; then left_txt=" ($(((left + 43200) / 86400))d left)"
       elif [ "$left" -gt 0 ]; then left_txt=" ($((left / 3600))h left)"; fi
     fi
   fi
   filled=$((pct / 10)); [ "$filled" -gt 10 ] && filled=10
-  printf '%b' "${3}[${name}]${left_txt} $(dots_bar "$filled" 10) ${pct}%${RESET}  "
+  printf '%b' "${4}[${name}]${left_txt} $(dots_bar "$filled" 10) ${pct}%${RESET}  "
 }
-LIMITS="$(usage_window five_hour 5h "$BLUE" short)$(usage_window seven_day 7d "$PURPLE")"
+LIMITS="$(usage_window "$FIVE_PCT" "$FIVE_RESET" 5h "$BLUE" short)$(usage_window "$WEEK_PCT" "$WEEK_RESET" 7d "$PURPLE")"
 
 echo -e "${LIMITS}${BAR_COLOR}[ctx] ${BAR} ${PCT}%${RESET}"

@@ -1,6 +1,7 @@
 // Skill hints: skill-catalog.mjs (installed skills), skill-hint.mjs (picks) and their use in plan-check.mjs, run as a
 // hook in a throwaway project. Every catalog here comes from temp roots (a temp CLAUDE_CONFIG_DIR or ORCH_SKILL_ROOTS),
 // never the real HOME.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -9,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { skillCatalog, skillRoots, frontmatter } from "../.claude/hooks/skill-catalog.mjs";
-import { skillHints, hintBlock, sameFamily, safeName, preferenceRules, HINT_INTRO } from "../.claude/hooks/skill-hint.mjs";
+import { skillHints, hintBlock, sameFamily, safeName, preferenceRules, maxPicks, HINT_INTRO } from "../.claude/hooks/skill-hint.mjs";
 import { parseHeader, parseReply } from "../.claude/hooks/brief.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -332,7 +333,7 @@ test("format picks: a skill whose description sends the format to another skill 
 
 // ---------------------------------------------------------------------------------------------------- plan-check
 
-const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "file-profile.mjs", "skill-catalog.mjs", "skill-hint.mjs"];
+const HOOKS = ["state.mjs", "brief.mjs", "run.mjs", "plan-check.mjs", "builtin-agents.mjs", "file-profile.mjs", "skill-catalog.mjs", "skill-hint.mjs"];
 /** A throwaway project with the hooks, a haiku researcher agent file, a fixture text file and a temp skills root. */
 function project({ hooks = HOOKS, reviewed = false } = {}) {
   const dir = temp("skills-e2e-");
@@ -359,7 +360,8 @@ function hook(dir, payload, env = {}) {
   for (const k of Object.keys(base)) if (k.startsWith("CLAUDE_PLUGIN_OPTION_")) delete base[k];
   return spawnSync(process.execPath, [join(dir, ".claude", "hooks", "plan-check.mjs")], {
     input: typeof payload === "string" ? payload : JSON.stringify(payload),
-    env: { ...base, CLAUDE_PROJECT_DIR: dir, CLAUDE_CONFIG_DIR: join(dir, "no-config"), ORCH_SKILL_ROOTS: join(dir, "skills-root"), ...env },
+    // ORCH_ALLOW_HAIKU: the project's researcher file says haiku, and these tests are about hints and the router, not the haiku rule.
+    env: { ...base, CLAUDE_PROJECT_DIR: dir, CLAUDE_CONFIG_DIR: join(dir, "no-config"), ORCH_SKILL_ROOTS: join(dir, "skills-root"), ORCH_ALLOW_HAIKU: "1", ...env },
     encoding: "utf8",
   });
 }
@@ -570,6 +572,61 @@ test("plan check: skills.jsonl holds parsed fields only", () => {
     assert.deepEqual([log[0].picks, log[0].catalog, log[0].explicit, log[0].not_found], [3, 3, 1, 1]);
     const raw = readFileSync(join(dir, ".claude", "state", "skills.jsonl"), "utf8");
     assert.ok(!raw.includes("UNIQUE-BRIEF-WORDS") && !raw.includes("SECRET-DESCRIPTION") && !raw.includes("Office files"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------------- reviewer limit by model rank
+
+test("picks: a reviewer on opus or above gets up to 2 picks; an unranked or lower model keeps 1; other roles unchanged", () => {
+  const brief = "SLICE: a\nSOURCES: report.docx\nReview it.";
+  /** @param {unknown} rank @param {string} [role] */
+  const p = (rank, role = "reviewer") => skillHints({ role, modelRank: /** @type {any} */ (rank), header: parseHeader(brief), brief, catalog: CATALOG });
+  assert.equal(p(2).length, 2, "opus");
+  assert.equal(p(3).length, 2, "fable");
+  assert.equal(p(2, "orchestration:reviewer").length, 2, "namespaced reviewer");
+  for (const r of [1, 0, null, undefined, NaN, "2", Infinity * -1]) assert.equal(p(r).length, 1, `rank ${String(r)} keeps 1`);
+  assert.deepEqual(p(2).map((x) => x.reason), ["ext_docx", "ext_docx"]);
+  const two = skillHints({ role: "reviewer", modelRank: 2, header: parseHeader("SLICE: a\nSKILLS: tdd, documents, ghost\nReview."), brief: "Review.", catalog: CATALOG });
+  assert.deepEqual(two, [{ name: "tdd", reason: "explicit" }, { name: "documents", reason: "explicit" }], "explicit names fill the 2 first");
+  assert.deepEqual([maxPicks("reviewer", 2), maxPicks("reviewer", 1), maxPicks("reviewer", null), maxPicks("implementer", 3), maxPicks("researcher", 0), maxPicks("integrator", 3), maxPicks("constructor", 2), maxPicks(undefined)], [2, 1, 1, 3, 3, 0, 0, 0]);
+});
+
+test("plan check: a reviewer's limit follows the call's model, else the agent file's; an unrankable model keeps 1", () => {
+  const dir = project();
+  try {
+    const brief = "SLICE: a\nSOURCES: out/report.docx\nReview it.";
+    const promptOf = (/** @type {Record<string, unknown>} */ more) => out(launch(dir, "reviewer", brief, {}, more)).updatedInput.prompt;
+    assert.equal(promptOf({ model: "opus" }), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)\n- documents (ext_docx)`, "opus call: 2");
+    assert.equal(promptOf({ model: "claude-fable-5" }), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)\n- documents (ext_docx)`, "fable call: 2");
+    assert.equal(promptOf({ model: "sonnet" }), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)`, "sonnet call: 1");
+    assert.equal(promptOf({ model: "inherit" }), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)`, "unrankable: 1");
+    assert.equal(promptOf({}), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)`, "no model anywhere: 1");
+    writeFileSync(join(dir, ".claude", "agents", "reviewer.md"), "---\nname: reviewer\nmodel: opus\n---\nbody\n");
+    assert.equal(promptOf({}), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)\n- documents (ext_docx)`, "agent file on opus: 2");
+    assert.equal(promptOf({ model: "sonnet" }), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)`, "the call's model wins over the agent file's");
+    writeFileSync(join(dir, ".claude", "agents", "reviewer.md"), "---\nname: reviewer\nmodel: sonnet\n---\nbody\n");
+    assert.equal(promptOf({}), `${brief}\n\n${HINT_INTRO}\n- docx (ext_docx)`, "agent file on sonnet: 1");
+    const log = logOf(dir, "skills.jsonl");
+    const allowed = ["ts", "session_id", "agent_type", "role", "slice", "decision", "reason", "names", "reasons", "picks", "catalog", "explicit", "not_found"];
+    for (const e of log) for (const k of Object.keys(e)) assert.ok(allowed.includes(k), `no new log field: ${k}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plan check: in a PLAN REVIEW brief only a SKILLS line before the first slice is the reviewer's", () => {
+  const dir = project();
+  try {
+    const plan = "PLAN REVIEW\nCONSTRAINTS:\nC1: keep it\nSLICE: a\nFILES: src/a.ts\nDEPENDS: none\nGOAL: parser\nRISKY: yes\nSKILLS: ghost-skill\nSLICE: b\nFILES: src/b.ts\nDEPENDS: a\nGOAL: cli\nSKILLS: none";
+    assert.equal(launch(dir, "reviewer", plan).stdout, "", "slice SKILLS lines are not suggestions for the plan reviewer");
+    assert.deepEqual(logOf(dir, "skills.jsonl").at(-1).explicit, 0);
+    const top = `PLAN REVIEW\nSKILLS: tdd\n${plan.slice("PLAN REVIEW\n".length)}`;
+    assert.equal(out(launch(dir, "reviewer", top)).updatedInput.prompt, `${top}\n\n${HINT_INTRO}\n- tdd (explicit)`);
+    // Outside a PLAN REVIEW the first SKILLS line counts as before.
+    const plain = "SLICE: a\nFILES: src/a.ts\nSKILLS: ghost-skill\nReview it.";
+    assert.match(out(launch(dir, "reviewer", plain)).updatedInput.prompt, /- ghost-skill \(explicit_not_found\)$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -2,6 +2,9 @@
 import { judgeEnabled } from "./judge.js";
 // Read-router thresholds live with the zero-model file profiler (a hook, so it runs without tsx).
 export { READ_TIERS } from "../.claude/hooks/file-profile.mjs";
+// The built-in agent names live with the plan check (a hook, so it runs without tsx).
+import { BUILTIN_AGENTS, FORK } from "../.claude/hooks/builtin-agents.mjs";
+export { BUILTIN_AGENTS };
 
 export type Role = "planner" | "explorer" | "writer" | "verifier" | "triager" | "solo";
 
@@ -25,30 +28,31 @@ export const UNSAFE_BASH = [
   ...PUSH_BASH, "Bash(git remote*)", "Bash(git * remote*)",
   "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
 ];
-// Claude Code's six built-in subagents (general-purpose, claude, Explore, Plan, claude-code-guide, statusline-setup)
-// plus fork subagents (`Agent(fork)`: on by default since Claude Code v2.1.302, a fork inherits the whole conversation
-// and every tool). This repo ships its own researcher, implementer, reviewer and integrator, so these are blocked: they
-// are in permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and scripts/orchestrate.sh sets
+// Claude Code's built-in subagents (BUILTIN_AGENTS in .claude/hooks/builtin-agents.mjs, the one list: general-purpose,
+// claude, Explore, Plan, claude-code-guide, statusline-setup and, since Claude Code 2.1.325, web-fetch) plus fork
+// subagents (`Agent(fork)`: on by default since Claude Code v2.1.302, a fork inherits the whole conversation and every
+// tool). This repo ships its own researcher, implementer, reviewer and integrator, so these are blocked: they are in
+// permissions.deny in .claude/settings.json (policy.test.ts fails on drift), and scripts/orchestrate.sh sets
 // CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 and CLAUDE_CODE_FORK_SUBAGENT=0 for headless runs. SDK workers have no Agent
-// tool.
-export const DENIED_AGENTS = [
-  "Agent(general-purpose)", "Agent(claude)", "Agent(Explore)", "Agent(Plan)",
-  "Agent(claude-code-guide)", "Agent(statusline-setup)", "Agent(fork)",
-];
+// tool. A Claude Code update can add a built-in: `npm run claude-update` finds it (see scripts/claude-update.mjs).
+export const DENIED_AGENTS = [...BUILTIN_AGENTS.map((a) => `Agent(${a})`), `Agent(${FORK})`];
 
 // Tool policy of the native agents: the `tools:` and `disallowedTools:` frontmatter lines of .claude/agents/<name>.md,
 // kept in step by src/sync-agents.ts (`npm run check-agents` fails on drift, `npm run sync-agents` fixes it). A key left
 // out here means the agent file must not have that line. The implementer inherits every tool except Agent, so it cannot
 // nest subagents (Claude Code already removes the Workflow tool from every subagent). These are the role boundaries:
 // never loosen a list without a reason. The researcher and the reviewer have `Skill` so they can load the skills a brief
-// names (SKILLS line or the plan check's suggestions); the integrator does not.
+// names (SKILLS line or the plan check's suggestions); the integrator does not. The orchestrator has `Skill` so it can
+// load, before planning, at most two installed skills that shape the plan itself (domain rules, architecture, a threat
+// model); every other fitting skill goes to the workers by name. A main-thread agent whose tools name Skill sees the
+// installed skills and can load one (checked live on Claude Code 2.1.325).
 export interface ToolPolicy {
   tools?: string[];
   disallowedTools?: string[];
 }
 export type NativeAgent = "orchestrator" | "researcher" | "implementer" | "reviewer" | "integrator";
 export const NATIVE_TOOLS: Record<NativeAgent, ToolPolicy> = {
-  orchestrator: { tools: ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob"] },
+  orchestrator: { tools: ["Agent(researcher, implementer, integrator, reviewer)", "SendMessage", "Read", "Grep", "Glob", "Skill"] },
   researcher: {
     tools: [
       "Read", "Grep", "Glob",
@@ -97,7 +101,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "You only read the folder; you never edit it and never plan the work. Answer with the requested JSON and nothing else.",
     },
     solo: {
-      model: model("ORCH_MODEL_SOLO", "claude-sonnet-5-5"),
+      model: model("ORCH_MODEL_SOLO", "claude-opus-5-5"),
       effort: "medium",
       maxTurns: 60,
       tools: [...READ_ONLY, "Edit", "Write", "Bash"],
@@ -109,7 +113,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "When finished, reply with a short summary and the command you ran to check the work.",
     },
     planner: {
-      model: model("ORCH_MODEL_PLANNER", "claude-opus-5-5"),
+      model: model("ORCH_MODEL_PLANNER", "claude-fable-5-2"),
       effort: "high",
       maxTurns: 20,
       tools: READ_ONLY,
@@ -119,7 +123,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "Answer with the requested JSON and nothing else.",
     },
     explorer: {
-      model: model("ORCH_MODEL_EXPLORER", "claude-haiku-5-5"),
+      model: model("ORCH_MODEL_EXPLORER", "claude-sonnet-5-5"),
       effort: "low",
       maxTurns: 15,
       tools: READ_ONLY,
@@ -129,7 +133,7 @@ export function rolesFor(env: NodeJS.ProcessEnv = process.env): Record<Role, Rol
         "Reply in at most 250 words. Do not paste large code blocks.",
     },
     writer: {
-      model: model("ORCH_MODEL_WRITER", "claude-sonnet-5-5"),
+      model: model("ORCH_MODEL_WRITER", "claude-opus-5-5"),
       effort: "medium",
       maxTurns: 80,
       tools: [...READ_ONLY, "Edit", "Write", "Bash"],

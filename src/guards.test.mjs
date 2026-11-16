@@ -1,5 +1,6 @@
 // Slice e-guards: the researcher Bash guard, the reviewer egress guard and the compact-context hook, run as child
 // processes with fixture state and transcripts (no model call), plus their pure parts imported directly.
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -9,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchRecord, stopRecord } from "../.claude/hooks/brief.mjs";
 import { researcherViolation } from "../.claude/hooks/researcher-guard.mjs";
-import { agentTranscript, egressDecision, hostOf } from "../.claude/hooks/egress-guard.mjs";
+import { agentTranscript, allowedHosts, egressDecision, hostOf } from "../.claude/hooks/egress-guard.mjs";
 import { MAX_CONTEXT, runContext } from "../.claude/hooks/compact-context.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,6 +59,10 @@ const ALLOWED = [
   "tail --lines=5 a.txt",
   "head --bytes=100 a.txt | wc -c",
   "cat a.txt /dev/null",
+  "grep --file=/dev/null x .",
+  "rg -f/dev/null x .",
+  "grep -rn foo . --include=*.ts --exclude-dir=node_*", // a glob in an option's value, not its name
+  "ls src/*.ts README*",
   "rg -n --glob '*.mjs' tokenize .claude/hooks",
   "find . -name '*.md' -type f",
   "find src -maxdepth 2 -newer package.json | wc -l",
@@ -122,6 +127,20 @@ const DENIED = [
   ["head /dev/urandom", /device that may never end/],
   ["grep x /dev/zero", /device that may never end/],
   ["tail /dev/zero", /device that may never end/],
+  // A device attached to an option is read all the same.
+  ["grep --file=/dev/zero x", /device that may never end/],
+  ["rg -f/dev/urandom x", /device that may never end/],
+  ["grep -rf/dev/urandom x .", /device that may never end/],
+  ["tail --lines=5 --verbose=/dev/zero", /device that may never end/],
+  // A glob in an option's name expands to whatever option a file of that name spells (`-?` to `-f`, `-delet[e]` to -delete).
+  ["tail -? log.txt", /glob in an option/],
+  ["find . -delet[e]", /glob in an option/],
+  ["find . -de*", /glob in an option/],
+  ["rg --glob* x .", /glob in an option/],
+  ["git log -?", /glob in an option/],
+  // The denial says how to write it instead: quote the glob or use the long form.
+  ["rg -g*.md x", /quote the glob \(`rg -g '\*\.md' x`\) or use the long form \(`--glob=\*\.md`\)/],
+  ["grep -e -* f", /quote the glob/],
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],
@@ -139,6 +158,177 @@ test("researcher guard: everything else is denied with a reason", () => {
     assert.match(v.reason, /** @type {RegExp} */ (re), String(c));
   }
 });
+
+// The decision the guard gave each command at commit 525e464, before its denial messages gained hints. Literal values,
+// so a change to the messages (or to the lists above) cannot move what is allowed or denied without failing here.
+// Every command the tests in this file use, plus forms researchers were refused in real use.
+const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
+  ["git log --oneline -5", "allow"],
+  ["git log --format=\"%h <%ae>\" -3", "allow"],
+  ["git -C /some/repo status --short", "allow"],
+  ["git -C ../other show HEAD:README.md", "allow"],
+  ["git branch --show-current", "allow"],
+  ["git ls-files | wc -l", "allow"],
+  ["git rev-parse HEAD && git rev-list --count HEAD", "allow"],
+  ["ls -la src; du -sh .", "allow"],
+  ["wc -l src/*.ts", "allow"],
+  ["grep -rn \"foo bar\" src --include='*.ts'", "allow"],
+  ["grep -rnE 'a|b' . --exclude-dir=node_modules -A 3 | head -20", "allow"],
+  ["git ls-files | grep -c test", "allow"],
+  ["grep -rl SubagentHandback .claude/hooks/", "allow"],
+  ["tail --lines=5 a.txt", "allow"],
+  ["head --bytes=100 a.txt | wc -c", "allow"],
+  ["cat a.txt /dev/null", "allow"],
+  ["grep --file=/dev/null x .", "allow"],
+  ["rg -f/dev/null x .", "allow"],
+  ["grep -rn foo . --include=*.ts --exclude-dir=node_*", "allow"],
+  ["ls src/*.ts README*", "allow"],
+  ["rg -n --glob '*.mjs' tokenize .claude/hooks", "allow"],
+  ["find . -name '*.md' -type f", "allow"],
+  ["find src -maxdepth 2 -newer package.json | wc -l", "allow"],
+  ["head -50 README.md", "allow"],
+  ["tail -n 20 CHANGELOG.md", "allow"],
+  ["cat package.json", "allow"],
+  ["cat > notes.md <<'EOF'\nhello\nEOF", "deny"],
+  ["python3 -c 'print(1)'", "deny"],
+  ["cd /tmp && ls", "deny"],
+  ["git log | python3", "deny"],
+  ["git ls-files | xargs cat", "deny"],
+  ["ls > out.txt", "deny"],
+  ["git log >> log.txt", "deny"],
+  ["wc -l < f", "deny"],
+  ["ls $(pwd)", "deny"],
+  ["ls `pwd`", "deny"],
+  ["wc -l <(git ls-files)", "deny"],
+  ["X=1 ls", "deny"],
+  ["ls $HOME", "deny"],
+  ["git log --output=out.txt", "deny"],
+  ["git branch -D main", "deny"],
+  ["git -c core.pager=sh log", "deny"],
+  ["git push origin main", "deny"],
+  ["f() { ls; }; f", "deny"],
+  ["ls 'unterminated", "deny"],
+  ["git log\nrm -r src", "deny"],
+  ["ls \\'<<X\n${x:=y}'\nX", "deny"],
+  ["ls <<<'text'", "deny"],
+  ["git log | wc -l <<X\nx\nX", "deny"],
+  ["ls \\'<f \\'", "deny"],
+  ["find . -name '*.tmp' -delete", "deny"],
+  ["find . -type f -exec rm {} +", "deny"],
+  ["find . -fprint out.txt", "deny"],
+  ["grep --filter='gz:zcat' foo .", "deny"],
+  ["grep --pager=less foo .", "deny"],
+  ["grep ---myconf foo .", "deny"],
+  ["rg --pre cat foo", "deny"],
+  ["tail -f log.txt", "deny"],
+  ["tail --follow=name log.txt", "deny"],
+  ["rg -e -- --pre=/bin/sh foo .", "deny"],
+  ["rg --regexp -- --pre=sh x .", "deny"],
+  ["grep -e -- --filter=sh foo .", "deny"],
+  ["grep -c -- --filter notes.md", "deny"],
+  ["rg -z foo .", "deny"],
+  ["rg -nz foo .", "deny"],
+  ["rg --search-zip foo .", "deny"],
+  ["grep -Q foo", "deny"],
+  ["tail -5f a.txt", "deny"],
+  ["tail -F a.txt", "deny"],
+  ["tail --fol a.txt", "deny"],
+  ["tail --retry a.txt", "deny"],
+  ["find . -name '*.tmp' -rm", "deny"],
+  ["cat /dev/zero", "deny"],
+  ["head /dev/urandom", "deny"],
+  ["grep x /dev/zero", "deny"],
+  ["tail /dev/zero", "deny"],
+  ["grep --file=/dev/zero x", "deny"],
+  ["rg -f/dev/urandom x", "deny"],
+  ["grep -rf/dev/urandom x .", "deny"],
+  ["tail --lines=5 --verbose=/dev/zero", "deny"],
+  ["tail -? log.txt", "deny"],
+  ["find . -delet[e]", "deny"],
+  ["find . -de*", "deny"],
+  ["rg --glob* x .", "deny"],
+  ["git log -?", "deny"],
+  ["rg -g*.md x", "deny"],
+  ["grep -e -* f", "deny"],
+  ["grep foo . > out.txt", "deny"],
+  ["cat a.txt | sh", "deny"],
+  ["/usr/bin/grep foo .", "deny"],
+  ["sed -n 1,5p a.txt", "deny"],
+  ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
+  ["python3 x.py", "deny"],
+  ["cd src && ls", "deny"],
+  ["git log --oneline | wc -l", "allow"],
+  ["cd /x && grep -n foo a.txt", "deny"],
+  ["grep foo a.txt | sort", "deny"],
+  ["echo hi", "deny"],
+  ["x=0; grep foo a.txt", "deny"],
+  // b4: exactly `2>/dev/null` and `2>&1`, each a word of its own, are the only redirections allowed.
+  ["grep foo a.txt 2>/dev/null", "allow"],
+  ["ls -la /x 2>/dev/null", "allow"],
+  ["grep -rn foo src 2>&1 | head -5", "allow"],
+  ["ls /x 2>/dev/null && wc -l a.txt 2>/dev/null", "allow"],
+  ["ls /x >/dev/null", "deny"],
+  ["ls /x 1>/dev/null", "deny"],
+  ["ls /x &>/dev/null", "deny"],
+  ["ls /x 2>/dev/nullx", "deny"],
+  ["ls /x 2>/dev/null.txt", "deny"],
+  ["ls /x 2> /dev/null", "deny"],
+  ["ls /x 2>file", "deny"],
+  ["ls /x 2>>file", "deny"],
+  ["ls /x >&2", "deny"],
+  ["wc -l <file", "deny"],
+  ["cat <<EOF\nx\nEOF", "deny"],
+  ["cat <<<x", "deny"],
+  ["ls /x 2>&1 >out", "deny"],
+  ["ls /x 2>/dev/null>out", "deny"],
+  ["ls /x 2>/dev/null;2>/dev/null ls", "deny"],
+  ["2>/dev/null ls /x", "deny"],
+  ["ls a\\ 2>/dev/null", "deny"],
+  ["ls /x # 2>/dev/null", "deny"],
+  ["ls $'\\' 2>/dev/null '", "deny"],
+  ["ls '/x' 2>/dev/null \"a\" 2>&1", "allow"],
+  ["ls $(ls 2>/dev/null)", "deny"],
+  ["ls `ls 2>&1`", "deny"],
+  ["ls /x 2>/dev/null; python3 x.py", "deny"],
+  ["ls /x 2>&1 | sh", "deny"],
+  ["wc -l /x/a.txt /x/b.txt", "allow"],
+  ["wc -l /x/{a,b}.txt", "deny"],
+]);
+
+test("researcher guard: every recorded command keeps its allow or deny decision", () => {
+  for (const [c, want] of DECISIONS) {
+    /** @type {string | undefined} */
+    let got;
+    assert.doesNotThrow(() => {
+      got = researcherViolation(c) ? "deny" : "allow";
+    }, c);
+    assert.equal(got, want, c);
+  }
+});
+
+// A denial says what to use instead, and keeps its first words so the gate records still group.
+const HINTS = [
+  ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
+  ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
+  ["sed -n 1,5p a.txt", /^`sed` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  ["awk 'NR<5' a.txt", /^`awk` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  ["grep foo a.txt | sort", /^`sort` is not an allowed command; .*grep, rg, find, head, tail, cat, ls, wc, du.*in the report/],
+  ["uniq a.txt", /^`uniq` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["echo hi", /^`echo` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["printf hi", /^`printf` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["python3 x.py", /^`python3` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["x=0; grep foo a.txt", /^a variable assignment; .*grep, rg, find.*in the report/],
+];
+
+test("researcher guard: a refused command's reason says what to use instead, in one or two short sentences", () => {
+  for (const [c, re] of HINTS) {
+    const v = researcherViolation(/** @type {string} */ (c));
+    assert.ok(v, String(c));
+    assert.match(v.reason, /** @type {RegExp} */ (re), String(c));
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+});
+
 
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
@@ -215,6 +405,22 @@ test("egress guard: transcript location for foreground and workflow agents", () 
   assert.equal(hostOf("not a url"), null);
 });
 
+test("egress guard: the port counts, the scheme's default port is normalised (b4)", () => {
+  assert.equal(hostOf("https://a.example:443/x"), hostOf("https://a.example/"));
+  assert.equal(hostOf("http://a.example:80/x"), hostOf("http://a.example/"));
+  assert.notEqual(hostOf("https://a.example:8443/x"), hostOf("https://a.example/"));
+  assert.equal(hostOf("https://WWW.A.example:8443/x"), "a.example:8443");
+  const allowed = allowedHosts("see https://cited.example and http://alt.example:8080/doc", [], project);
+  assert.ok(allowed.has(String(hostOf("https://cited.example:443/z"))));
+  assert.ok(!allowed.has(String(hostOf("https://cited.example:8443/z"))));
+  assert.ok(allowed.has(String(hostOf("http://alt.example:8080/other"))));
+  assert.ok(!allowed.has(String(hostOf("http://alt.example/other"))));
+  const o = { dir: stateDir, env: env() };
+  assert.equal(egressDecision(fetchInput("https://cited.example:8443/x", "afg1"), o).decision, "deny");
+  assert.equal(egressDecision(fetchInput("https://cited.example:443/x", "afg1"), o).decision, "allow");
+  assert.equal(egressDecision(fetchInput("https://files.example:444/x", "afg1"), o).decision, "deny");
+});
+
 test("egress guard: hosts from the brief allow, others deny (foreground reviewer)", () => {
   const o = { dir: stateDir, env: env() };
   assert.equal(egressDecision(fetchInput("https://cited.example/other/page", "afg1"), o).decision, "allow");
@@ -238,6 +444,42 @@ test("egress guard: workflow-style reviewer brief, unverified brief, other agent
   assert.equal(egressDecision(fetchInput("https://any.example/", "agone"), o).decision, "unverified");
   assert.equal(egressDecision(fetchInput("https://any.example/", "afg1", "researcher"), o).decision, "skip");
   assert.equal(egressDecision(fetchInput("https://any.example/", "afg1"), { dir: stateDir, env: env({ ORCH_GUARDS: "off" }) }).decision, "skip");
+});
+
+// A reviewer resumed by a message (SendMessage). Shape copied from real subagent transcripts (Claude Code 2.1.3xx): the
+// coordinator's message is a user record with isMeta true, origin {kind: "coordinator"} and string content. Every other
+// later user record (tool results, fetched pages, system reminders, skill bodies, task notifications, hook feedback)
+// must never widen the allowlist.
+const later = (/** @type {Record<string, unknown>} */ rec) => `${JSON.stringify({ isSidechain: true, agentId: "ares1", type: "user", ...rec })}\n`;
+writeFileSync(
+  join(transcripts, SID, "subagents", "agent-ares1.jsonl"),
+  userLine("SLICE: s9\nReview the change against https://first.example/spec.", "ares1") +
+    `${JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "WebFetch", input: { url: "https://first.example/spec" } }] } })}\n` +
+    later({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "Also see https://toolresult.example/x" }] } }) +
+    later({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: [{ type: "text", text: "page text https://fetched.example/y" }] }] } }) +
+    later({ isMeta: true, message: { role: "user", content: "<system-reminder>\nsee https://reminder.example/z\n</system-reminder>" } }) +
+    later({ isMeta: true, message: { role: "user", content: [{ type: "text", text: "Base directory for this skill: /x\nDocs at https://skill.example/doc" }] } }) +
+    later({ isMeta: true, origin: { kind: "task-notification", producer: "session-task" }, message: { role: "user", content: "[SYSTEM NOTIFICATION - NOT USER INPUT]\noutput https://notify.example/n" } }) +
+    later({ isMeta: true, message: { role: "user", content: "Stop hook feedback:\nhttps://hookfeedback.example/h" } }) +
+    later({ message: { role: "user", content: [{ type: "text", text: "Plain later text: https://plain.example/t" }] } }) +
+    later({ message: { role: "user", content: "Plain later string: https://plainstr.example/t" } }) +
+    later({ isCompactSummary: true, isVisibleInTranscriptOnly: true, message: { role: "user", content: "This session is being continued. Summary: fetched https://compact.example/collect" } }) +
+    later({ isVisibleInTranscriptOnly: true, message: { role: "user", content: "shown only: https://visible.example/v" } }) +
+    later({ isSidechain: true, message: { role: "user", content: "sidechain text: https://sidechain.example/s" } }) +
+    later({ isMeta: true, origin: { kind: "coordinator" }, isCompactSummary: true, message: { role: "user", content: "summary dressed as coordinator https://dressed.example/d" } }) +
+    later({ isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: [{ type: "text", text: "coordinator with parts https://parts.example/p" }] } }) +
+    later({ isMeta: true, origin: { kind: "coordinator" }, message: { role: "user", content: "The coordinator sent a message while you were working:\nSLICE: s9\nAlso check https://resumed.example/new-spec." } }),
+);
+
+test("egress guard: a reviewer resumed by a message may fetch the URL that message names, and nothing else that came later", () => {
+  const o = { dir: stateDir, env: env() };
+  assert.equal(egressDecision(fetchInput("https://first.example/a", "ares1"), o).decision, "allow");
+  assert.equal(egressDecision(fetchInput("https://resumed.example/new-spec", "ares1"), o).decision, "allow");
+  // An allowlist of one shape: plain later records, compaction summaries (written by the agent's model from all it
+  // read), transcript-only records and anything but a coordinator message with string content are refused.
+  for (const h of ["toolresult", "fetched", "reminder", "skill", "notify", "hookfeedback", "plain", "plainstr", "compact", "visible", "sidechain", "dressed", "parts"]) {
+    assert.equal(egressDecision(fetchInput(`https://${h}.example/x`, "ares1"), o).decision, "deny", h);
+  }
 });
 
 test("egress guard hook: exit codes, gates.jsonl holds the host only, no decisions printed", () => {
@@ -322,11 +564,98 @@ test("compact-context: no state at all → silent; the context is capped", () =>
   );
   const ctx = runContext({ id: 1, kind: "planned", planned: Object.keys(slices), slices, constraints: { C1: "x".repeat(300) }, planReviewed: true });
   assert.ok(ctx.length <= MAX_CONTEXT, String(ctx.length));
-  assert.match(ctx, /truncated/);
+  assert.match(ctx, /- slice-0: pending/);
+  assert.match(ctx, /\+\d+ more slices/);
+  assert.ok(ctx.includes(`C1: ${"x".repeat(200)}\n`));
+  assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
+});
+
+// The runContext of commit b13b2ca (before b4), kept to compare against: it cut the whole text from the end.
+const REMINDER = "Every slice still needs a passing review before the final report.";
+/** @param {any} run */
+function oldRunContext(run) {
+  const state = (/** @type {any} */ s) => (s.passed ? "passed" : s.gaveUp ? "failed for good" : "pending");
+  const ids = run.kind === "planned" && run.planned.length ? run.planned : Object.keys(run.slices);
+  const lines = [`Orchestration run ${run.id} is still open in this session (${run.kind}${run.planReviewed ? ", plan reviewed" : ""}). Slices:`];
+  for (const id of ids) {
+    const s = run.slices[id];
+    if (!s) {
+      lines.push(`- ${id}: pending`);
+      continue;
+    }
+    const files = s.files.length ? ` FILES: ${s.files.slice(0, 8).join(", ")}${s.files.length > 8 ? ", ..." : ""}` : "";
+    lines.push(`- ${id}: ${state(s)}${s.risky ? ", RISKY" : ""}${files}`);
+  }
+  const constraints = Object.entries(run.constraints ?? {});
+  if (constraints.length) {
+    lines.push("Constraints:");
+    for (const [id, text] of constraints) lines.push(`${id}: ${String(text).slice(0, 200)}`);
+  }
+  lines.push(REMINDER);
+  const text = lines.join("\n");
+  return text.length <= MAX_CONTEXT ? text : `${text.slice(0, MAX_CONTEXT - 16).trimEnd()}\n[... truncated]`;
+}
+
+test("compact-context: sweep against the old output; constraints cut only when they alone do not fit (b4)", () => {
+  let cases = 0;
+  let fitted = 0;
+  let cut = 0;
+  for (let n = 0; n <= 60; n++) {
+    const slices = Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [`s${i}`, { files: i % 3 ? [`src/a/file-${i}.ts`, `src/b/${i}.ts`] : [], passed: i % 4 === 0, gaveUp: i % 7 === 1, attempts: 0, launches: 0, reviews: [], lastImplAt: null, risky: i % 5 === 2 }]),
+    );
+    for (let k = 0; k <= 8; k++) {
+      for (const size of [12, 150, 200, 260]) {
+        const constraints = Object.fromEntries(Array.from({ length: k }, (_, i) => [`C${i + 1}`, `${String.fromCharCode(97 + i)}`.repeat(size)]));
+        const run = { id: 3, kind: "planned", planned: Object.keys(slices), slices, constraints, planReviewed: true };
+        const got = runContext(run);
+        const old = oldRunContext(run);
+        const label = `${n} slices, ${k} constraints of ${size}`;
+        cases++;
+        if (!old.endsWith("[... truncated]")) {
+          fitted++;
+          assert.equal(got, old, label);
+        }
+        assert.ok(got.length <= MAX_CONTEXT, `${label}: ${got.length}`);
+        assert.ok(got.endsWith(REMINDER), label);
+        const block = k ? `Constraints:\n${Object.entries(constraints).map(([id, t]) => `${id}: ${t.slice(0, 200)}`).join("\n")}\n` : "";
+        const head = got.split("\n")[0] ?? "";
+        const minimal = `${head}\n${n ? `- +${n} more slices\n` : ""}${block}${REMINDER}`;
+        if (!got.includes(block)) {
+          cut++;
+          assert.ok(minimal.length > MAX_CONTEXT, `${label}: a constraint was cut although constraints and reminder fit`);
+        }
+        const shown = (got.match(/^- s\d+:/gm) ?? []).length;
+        const more = Number(/^- \+(\d+) more slices$/m.exec(got)?.[1] ?? 0);
+        assert.equal(shown + more, n, label);
+      }
+    }
+  }
+  assert.ok(fitted > 0 && cut > 0 && cases > fitted, `${cases} ${fitted} ${cut}`);
+});
+
+test("compact-context: with many slices the constraints and the final reminder survive the cap (b4)", () => {
+  const slices = Object.fromEntries(
+    Array.from({ length: 40 }, (_, i) => [`slice-${i}`, { files: [`src/some/long/path/file-${i}.ts`, `src/other/${i}.ts`], passed: i < 3, gaveUp: false, attempts: 0, launches: 0, reviews: [], lastImplAt: null, risky: false }]),
+  );
+  const constraints = Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`C${i + 1}`, `${i}`.repeat(250)]));
+  const ctx = runContext({ id: 7, kind: "planned", planned: Object.keys(slices), slices, constraints, planReviewed: true });
+  assert.ok(ctx.length <= MAX_CONTEXT, String(ctx.length));
+  assert.match(ctx, /^Orchestration run 7 is still open/);
+  for (let i = 0; i < 5; i++) assert.ok(ctx.includes(`C${i + 1}: ${`${i}`.repeat(200)}\n`), `C${i + 1}`);
+  assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
+  const shown = (ctx.match(/^- slice-\d+/gm) ?? []).length;
+  const more = Number(/\+(\d+) more slices/.exec(ctx)?.[1]);
+  assert.ok(shown >= 1, String(shown));
+  assert.equal(shown + more, 40);
+  // a run that fits keeps every slice line whole, with no marker
+  const small = runContext({ id: 8, kind: "planned", planned: ["a"], slices: { a: slices["slice-0"] }, constraints: { C1: "short" }, planReviewed: true });
+  assert.match(small, /- a: passed FILES: src\/some\/long\/path\/file-0\.ts, src\/other\/0\.ts/);
+  assert.doesNotMatch(small, /more slices|truncated/);
 });
 
 test("no hook source prints an allow or ask permission decision (C6)", () => {
-  for (const f of ["researcher-guard.mjs", "egress-guard.mjs", "compact-context.mjs", "worktree-head.mjs"]) {
+  for (const f of ["researcher-guard.mjs", "egress-guard.mjs", "compact-context.mjs", "worktree-head.mjs", "skill-gate.mjs", "skill-seal.mjs"]) {
     if (!existsSync(hook(f))) continue;
     const src = readFileSync(hook(f), "utf8");
     assert.doesNotMatch(src, /permissionDecision|"ask"|decision:\s*"approve"/, f);

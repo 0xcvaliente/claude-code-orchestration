@@ -1,3 +1,4 @@
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -201,6 +202,22 @@ test("test gate: the project and plugin matchers never fire for the same agent; 
   assert.ok(matcher(plugin).test("orchestration:implementer") && !matcher(plugin).test("implementer"));
   const commands = Object.values(plugin.hooks).flatMap((list) => list.flatMap((e) => e.hooks.map((h) => h.command)));
   assert.ok(commands.length > 0 && commands.every((c) => c.endsWith(" --plugin")), commands.join("\n"));
+});
+
+test("turn budget: a temp build registers it with --plugin last in PostToolUse, and the plugin copy steps aside where the project registers it", () => {
+  const out = mkdtempSync(join(tmpdir(), "orch-build-"));
+  const b = spawnSync("node", [new URL("../scripts/build-plugin.mjs", import.meta.url).pathname, "--out", out], { cwd: new URL("..", import.meta.url).pathname, encoding: "utf8" });
+  assert.equal(b.status, 0, b.stderr);
+  const built: HookFile = JSON.parse(readFileSync(join(out, "plugin", "hooks", "hooks.json"), "utf8"));
+  const commands = Object.values(built.hooks).flatMap((list) => list.flatMap((e) => e.hooks.map((h) => h.command)));
+  assert.ok(commands.every((c) => c.endsWith(" --plugin")), commands.join("\n"));
+  const post = built.hooks.PostToolUse ?? [];
+  assert.ok(post.at(-1)?.hooks[0]?.command.includes("/hooks/turn-budget.mjs"), "turn-budget.mjs is the last PostToolUse hook");
+  assert.equal(post.at(-1)?.matcher, undefined);
+  const project: HookFile = JSON.parse(readFileSync(new URL("../.claude/settings.json", import.meta.url), "utf8"));
+  assert.ok(project.hooks.PostToolUse?.at(-1)?.hooks[0]?.command.includes(".claude/hooks/turn-budget.mjs"), "the project registers its own copy");
+  const turnBudget = readFileSync(hook("turn-budget.mjs"), "utf8");
+  assert.ok(turnBudget.includes('if (duplicate("turn-budget.mjs")) process.exit(0);'), "the plugin copy steps aside");
 });
 
 test("plugin hooks keep state in a per-user dir keyed by the project path, never in the repo", () => {

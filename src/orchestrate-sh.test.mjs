@@ -1,5 +1,6 @@
 // scripts/orchestrate.sh dry run: --no-session-persistence by default, omitted with ORCH_SESSION_PERSISTENCE=1
 // (so headless runs can keep subagent transcripts for telemetry v2's per-agent tokens, turns and models).
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

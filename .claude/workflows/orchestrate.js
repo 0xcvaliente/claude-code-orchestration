@@ -63,6 +63,10 @@ const QUESTIONS = {
   properties: { questions: { type: 'array', items: { type: 'string' }, maxItems: 4 } },
   required: ['questions'],
 }
+// A slice's optional skills: names of installed skills its implementer and reviewers load, passed through as written.
+const MAX_SKILLS = 5
+const MAX_SUITE = 300
+const SKILL_NAME = /^[A-Za-z0-9_.:-]+$/
 const SLICES = {
   type: 'object',
   properties: {
@@ -84,10 +88,12 @@ const SLICES = {
           risky: { type: 'boolean' },
           checks: { type: 'array', items: { type: 'string' } },
           kind: { type: 'string', enum: KINDS },
+          skills: { type: 'array', items: { type: 'string' }, maxItems: MAX_SKILLS },
         },
         required: ['id', 'goal', 'files', 'acceptance', 'dependsOn', 'risky', 'checks', 'kind'],
       },
     },
+    suite: { type: 'string' },
   },
   required: ['constraints', 'slices'],
 }
@@ -109,6 +115,16 @@ const CHECKPOINT = {
     open: { type: 'string' },
   },
   required: ['status', 'commit', 'open'],
+}
+// The integrator's merge result: the branches it merged (a slice whose branch is missing fails before review).
+const MERGE = {
+  type: 'object',
+  properties: {
+    status: { type: 'string', enum: ['pass', 'fail'] },
+    merged: { type: 'array', items: { type: 'string' } },
+    open: { type: 'string' },
+  },
+  required: ['status', 'merged', 'open'],
 }
 // A gap with the reviewer's confidence (0-100) that it is a real problem.
 const GAP = {
@@ -159,9 +175,10 @@ const VERDICT = {
   required: ['pass', 'gaps', 'evidence', 'answers', 'open'],
 }
 
+const SKILL_RULE = `A slice may add skills: at most ${MAX_SKILLS} names of installed skills, exactly as the Skill tool lists them, that the slice clearly needs; leave it out otherwise.`
 const PLAN_RULES = CODE
-  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command, dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none.`
-  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (a runnable command if the slice runs code, otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none.`
+  ? `Each slice needs a kebab-case id, goal, files, a runnable acceptance command (the narrowest command that proves the slice, the tests of the files it owns; the test gate already runs the project's whole suite when each implementer stops, so never name the whole suite here), dependsOn ids, risky=true for security-sensitive or cross-module work, checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other; bugfix when the slice fixes a defect, so its implementer writes a failing reproduction test first). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. Suite: the command that runs the project's whole test suite, or empty when there is none; it runs once after the merge. ${SKILL_RULE}`
+  : `Each slice needs a kebab-case id, goal, files (the output files it creates or changes), an acceptance check (the narrowest command that proves the slice if it runs code: the test gate already runs the project's whole suite when each implementer stops, so never name the whole suite; otherwise a checklist a reviewer can verify by reading the output and its cited sources), dependsOn ids, risky=true when a wrong result is costly (security, payments, data deletion, production operations, content sent or published outside the team), checks: the ids of the constraints it must satisfy, and kind (feature, bugfix, refactor, docs or other). Constraints are task-wide rules a reviewer can verify (id C1, C2, ... and a one-line text); return an empty list if there are none. ${SKILL_RULE}`
 
 // Plan check (args.planCheck). Paths lose a leading ./ and a trailing /; '.' is the whole folder.
 const normPath = (p) => {
@@ -270,7 +287,7 @@ async function checkedPlan(p, external, label, ask, keep = () => true) {
       { label: `${label}:recheck`, phase: 'Plan', effort: 'high', schema: SLICES },
     )
     if (slicesOf(again).length) {
-      p = { constraints: [...((p && p.constraints) || []), ...((again && again.constraints) || [])], slices: again.slices }
+      p = { constraints: [...((p && p.constraints) || []), ...((again && again.constraints) || [])], slices: again.slices, suite: again.suite !== undefined ? again.suite : p && p.suite }
       r = checkPlan(slicesOf(p), external)
       if (!r.problems.length) log(`${label}: the planner fixed the plan`)
     } else log(`${label}: the planner returned no plan; fixing in code`)
@@ -278,7 +295,13 @@ async function checkedPlan(p, external, label, ask, keep = () => true) {
   for (const x of r.problems) log(`${label}: plan fix: ${x.problem}: ${x.fix}`)
   return { ...p, slices: r.slices }
 }
-const withKind = (s) => (KINDS.includes(s.kind) ? s : { ...s, kind: 'other' })
+// Shapes a planned slice: a known kind (else 'other'), and files and dependsOn as arrays whether or not the plan check ran.
+const withKind = (s) => ({
+  ...s,
+  kind: KINDS.includes(s.kind) ? s.kind : 'other',
+  files: Array.isArray(s.files) ? s.files : [],
+  dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn : [],
+})
 const gapOf = (g) =>
   typeof g === 'string'
     ? { text: g, confidence: 100 }
@@ -333,7 +356,7 @@ if (!plan) {
         { label: 'plan:revise', phase: 'Plan', effort: 'high', schema: SLICES },
       )
       if (revised && ((revised.slices || []).filter(Boolean)).length) {
-        plan = { constraints: (revised.constraints || []).length ? revised.constraints : (plan && plan.constraints) || [], slices: revised.slices }
+        plan = { constraints: (revised.constraints || []).length ? revised.constraints : (plan && plan.constraints) || [], slices: revised.slices, suite: revised.suite !== undefined ? revised.suite : plan && plan.suite }
         if (PLAN_CHECK) plan = await checkedPlan(plan, [], 'plan:revise', true)
       } else log('plan review: the planner returned no revised plan; keeping the plan')
     }
@@ -352,10 +375,22 @@ const addConstraints = (list) => {
 }
 addConstraints(plan && plan.constraints)
 const slices = ((plan && plan.slices) || []).filter(Boolean).map(withKind)
+// The project's whole-suite command (optional plan field): a trimmed single line of at most MAX_SUITE characters,
+// otherwise empty. The integrator runs it once after the merge; empty leaves the integrator brief as it was.
+const rawSuite = typeof (plan && plan.suite) === 'string' ? plan.suite.trim() : ''
+const SUITE = rawSuite && rawSuite.length <= MAX_SUITE && !/[\r\n]/.test(rawSuite) ? rawSuite : ''
+if (rawSuite && !SUITE) log('plan: suite command dropped (more than one line or too long)')
 log(`${slices.length} slice(s): ${slices.map((s) => s.id).join(', ') || 'none'}`)
 if (slices.length === 0) return { task, slices: [], note: 'planner returned no slices' }
 log(`plan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices })}`)
 
+// The SKILLS line (docs/brief-grammar.md) for a slice's implementer and reviewer briefs: valid names only, deduplicated,
+// at most MAX_SKILLS; '' for a slice without skills, so its briefs stay as they were.
+const skillsOf = (s) => [...new Set((Array.isArray(s.skills) ? s.skills : []).filter((n) => typeof n === 'string').map((n) => n.trim()).filter((n) => n && n.length <= 100 && SKILL_NAME.test(n)))].slice(0, MAX_SKILLS)
+const skillLine = (s) => {
+  const names = skillsOf(s)
+  return names.length ? `SKILLS: ${names.join(', ')}\n` : ''
+}
 const checksOf = (s) => [...new Set((Array.isArray(s.checks) ? s.checks : []).map(upper).filter(Boolean))]
 // The CHECKS line and the constraint texts in the brief grammar (docs/brief-grammar.md): `CHECKS: C1, C2` then `C1: <text>`.
 const checkLines = (s) => {
@@ -369,8 +404,9 @@ const OPEN_RULE = 'Put anything unresolved in open (empty when nothing is).\n'
 const isOpen = (o) => !/^\s*(none|n\/a|nothing|-)?\.?\s*$/i.test(String(o || ''))
 
 // One reviewer verdict. A failing verdict's gaps count at confidence GAP_MIN or above (a gap without a confidence counts
-// as 100); the rest are returned as low and ignored. Every checked id it failed or left unanswered is a hard gap, which
-// always counts and is never refuted.
+// as 100); the rest are returned as low and ignored. A failing verdict that names no gap counts as one hard gap, so it
+// never passes the slice. Every checked id it failed or left unanswered is a hard gap, which always counts and is never
+// refuted.
 const judge = (r, ids) => {
   if (!r) return { gaps: [{ text: 'reviewer failed to return', confidence: 100, hard: true }], low: [], doubt: false }
   const byId = new Map()
@@ -380,6 +416,7 @@ const judge = (r, ids) => {
   }
   const all = r.pass ? [] : (Array.isArray(r.gaps) ? r.gaps : []).map(gapOf)
   const gaps = all.filter((g) => g.confidence >= GAP_MIN)
+  if (!r.pass && !all.length) gaps.push({ text: 'the reviewer failed the slice without naming a gap', confidence: 100, hard: true })
   const low = all.filter((g) => g.confidence < GAP_MIN)
   for (const id of ids) {
     const a = byId.get(id)
@@ -400,7 +437,7 @@ async function review(s, body, label, phaseName, retry) {
     s.kind === 'bugfix'
       ? 'KIND: bugfix. Check that the reproduction test fails without the fix and passes with it: run it now, and run it against the code before the fix without discarding the changes (for example in a temporary copy), or compare the failing output the implementer recorded.\n'
       : ''
-  const prompt = checkLines(s) + bugfix + body + (ids.length ? ANSWER_RULE : '') + OPEN_RULE
+  const prompt = checkLines(s) + skillLine(s) + bugfix + body + (ids.length ? ANSWER_RULE : '') + OPEN_RULE
   const ask = (model) =>
     agent(prompt, { label: `${label}${model ? ':' + model : ''}`, phase: phaseName, agentType: 'reviewer', model, schema: VERDICT })
   const logLow = (low) => {
@@ -466,134 +503,164 @@ for (const s of slices) if (SKIP.has(s.id)) results.push({ slice: s, status: 'sk
 
 // Runs a list of slices in dependency waves. `done` holds ids that count as finished before the first wave.
 async function runSlices(list, done) {
-  // Group into waves: a slice runs after everything it depends on. With planCheck on, the plan has no cycles or unknown
-  // ids; with it off, a cycle (or an unknown id) is broken by running what remains.
-  const waves = []
+  // Waves are decided from the results: a slice runs once everything it depends on passed (or was skipped). A slice
+  // with a failed dependency is not built and is reported failed, and so is every slice that depends on it. With
+  // planCheck on, the plan has no cycles or unknown ids; with it off, a cycle (or an unknown id) is broken by running
+  // what remains.
+  const failed = new Set()
   let left = list.slice()
   while (left.length) {
-    let ready = left.filter((s) => (s.dependsOn || []).every((d) => done.has(d)))
-    if (!ready.length) {
+    for (let changed = true; changed; ) {
+      changed = false
+      for (const s of left) {
+        const d = s.dependsOn.find((x) => failed.has(x))
+        if (d === undefined) continue
+        log(`${s.id}: not run, depends on failed ${d}`)
+        results.push({ slice: s, status: 'failed', attempts: 0, branch: '', gaps: [`depends on failed ${d}`] })
+        failed.add(s.id)
+        left = left.filter((x) => x !== s)
+        changed = true
+      }
+    }
+    if (!left.length) break
+    let wave = left.filter((s) => s.dependsOn.every((d) => done.has(d)))
+    if (!wave.length) {
       log(`dependency cycle among ${left.map((s) => s.id).join(', ')}; running them together`)
-      ready = left
+      wave = left
     }
-    waves.push(ready)
-    ready.forEach((s) => done.add(s.id))
-    left = left.filter((s) => !done.has(s.id))
+    left = left.filter((s) => !wave.includes(s))
+    const outcome = await runWave(wave)
+    for (const r of outcome) (r.status === 'passed' ? done : failed).add(r.slice.id)
   }
+}
 
-  for (const wave of waves) {
-    // Isolate only parallel slices of code, and only with baseRefHead (callers pass it for a git repository whose
-    // worktree.baseRef is "head"): worktrees see only committed work, and only from the local HEAD then. Otherwise a code
-    // wave runs in the shared tree, one slice at a time. A task that changes no code has no worktrees, checkpoint or
-    // integrator: its wave runs in the shared folder (below).
-    let isolated = CODE && wave.length > 1 && BASE_REF_HEAD
-    if (CODE && wave.length > 1 && !BASE_REF_HEAD) {
-      log(`wave ${wave.map((s) => s.id).join(', ')}: baseRefHead is not set (worktree.baseRef is not "head", so worktrees would branch from the remote default branch, or this is not a git repository); running one after another in the shared tree`)
+// Runs one wave and returns its results (also pushed to results).
+async function runWave(wave) {
+  // Isolate only parallel slices of code, and only with baseRefHead (callers pass it for a git repository whose
+  // worktree.baseRef is "head"): worktrees see only committed work, and only from the local HEAD then. Otherwise a code
+  // wave runs in the shared tree, one slice at a time. A task that changes no code has no worktrees, checkpoint or
+  // integrator: its wave runs in the shared folder (below).
+  let isolated = CODE && wave.length > 1 && BASE_REF_HEAD
+  if (CODE && wave.length > 1 && !BASE_REF_HEAD) {
+    log(`wave ${wave.map((s) => s.id).join(', ')}: baseRefHead is not set (worktree.baseRef is not "head", so worktrees would branch from the remote default branch, or this is not a git repository); running one after another in the shared tree`)
+  }
+  if (isolated) {
+    // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
+    const cp = await agent(
+      `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash (or "none" if nothing was committed).`,
+      { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator', schema: CHECKPOINT },
+    )
+    const hasCommit = !!(cp && cp.status === 'pass' && cp.commit && !/^none$/i.test(cp.commit.trim()))
+    if (sharedFiles.length && !hasCommit) {
+      // Worktrees branch from HEAD, so without the commit they would not contain the earlier slices' work.
+      isolated = false
+      log(`wave ${wave.map((s) => s.id).join(', ')}: checkpoint ${cp ? `failed or committed nothing (${cp.open || cp.status})` : 'returned nothing'} while shared-tree files were pending (${sharedFiles.join(', ')}); running one after another in the shared tree`)
     }
-    if (isolated) {
-      // Checkpoint the shared-tree slices' files (no-op when nothing is staged) so worktrees see them from the local HEAD.
-      const cp = await agent(
-        `CHECKPOINT after-earlier-waves\nFiles owned by finished shared-tree slices: ${sharedFiles.join(', ') || '(none)'}\nStage only these paths, commit, run no merges and report the commit hash (or "none" if nothing was committed).`,
-        { label: 'checkpoint', phase: 'Integrate', agentType: 'integrator', schema: CHECKPOINT },
+  }
+  phase('Build')
+  const runSlice = async (s) => {
+    let feedback = ''
+    let work = null
+    let failedReview = false
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      // escalateLast: the final attempt goes to a fresh opus implementer with the standing gaps.
+      const last = ESCALATE_LAST && attempt > 1 && attempt === MAX_RETRIES + 1
+      if (last) log(`${s.id}: last attempt ${attempt} runs on opus`)
+      work = await agent(
+        `ORCHESTRATION: workflow\n${s.kind === 'bugfix' ? 'KIND: bugfix\n' : ''}Slice ${s.id}\n${checkLines(s)}${skillLine(s)}Goal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
+          (checksOf(s).length ? 'Meet every constraint in CHECKS and say in evidence how each is met.\n' : '') +
+          (s.kind === 'bugfix'
+            ? 'This slice fixes a bug. First write a test that reproduces it, run it and record its failing output in evidence; then fix the bug; then run the test again and show it passing.\n'
+            : '') +
+          `Overall task: ${task}\nFindings:\n${findings || '(none)'}\n` +
+          (isolated
+            ? 'You are in an isolated worktree: commit all changes on the current branch and report its name.\n'
+            : CODE
+              ? 'Do not commit.\n'
+              : 'You work in the shared folder; other slices may be writing their own files at the same time, so touch only yours. Do not commit.\n') +
+          (last ? 'This is the last attempt, given to you as a fresh agent after earlier attempts were rejected.\n' : '') +
+          (feedback ? `A previous attempt was rejected. Fix:\n${feedback}\n` : ''),
+        { label: `build:${s.id}#${attempt}`, phase: 'Build', agentType: 'implementer', model: last ? 'opus' : undefined, isolation: isolated ? 'worktree' : undefined, schema: WORK },
       )
-      const hasCommit = !!(cp && cp.status === 'pass' && cp.commit && !/^none$/i.test(cp.commit.trim()))
-      if (sharedFiles.length && !hasCommit) {
-        // Worktrees branch from HEAD, so without the commit they would not contain the earlier slices' work.
-        isolated = false
-        log(`wave ${wave.map((s) => s.id).join(', ')}: checkpoint ${cp ? `failed or committed nothing (${cp.open || cp.status})` : 'returned nothing'} while shared-tree files were pending (${sharedFiles.join(', ')}); running one after another in the shared tree`)
+      if (!work || work.status !== 'pass') {
+        feedback = work ? `${work.evidence}\n${work.open}` : 'the implementer failed to return'
+        continue
       }
+      // Isolated work is reviewed after integration, so review here only when it is in the shared tree.
+      if (isolated) return { slice: s, status: 'built', attempts: attempt, branch: work.branch, gaps: [] }
+      const gaps = await review(
+        s,
+        CODE
+          ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped. Return a verdict.\n`
+          : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.\n`,
+        `review:${s.id}#${attempt}`,
+        'Build',
+        failedReview,
+      )
+      if (gaps.length === 0) return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
+      const standing = await refute(s, gaps, `refute:${s.id}#${attempt}`)
+      if (standing.length === 0) {
+        log(`${s.id}: no reviewer gap stands after the refute pass; passing`)
+        return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
+      }
+      failedReview = true
+      feedback = texts(standing).join('\n')
     }
-    phase('Build')
-    const runSlice = async (s) => {
-      let feedback = ''
-      let work = null
-      let failedReview = false
-      for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
-        // escalateLast: the final attempt goes to a fresh opus implementer with the standing gaps.
-        const last = ESCALATE_LAST && attempt > 1 && attempt === MAX_RETRIES + 1
-        if (last) log(`${s.id}: last attempt ${attempt} runs on opus`)
-        work = await agent(
-          `ORCHESTRATION: workflow\n${s.kind === 'bugfix' ? 'KIND: bugfix\n' : ''}Slice ${s.id}\n${checkLines(s)}Goal: ${s.goal}\nFiles you own: ${s.files.join(', ') || 'unspecified'}\nAcceptance check: ${s.acceptance}\n` +
-            (checksOf(s).length ? 'Meet every constraint in CHECKS and say in evidence how each is met.\n' : '') +
-            (s.kind === 'bugfix'
-              ? 'This slice fixes a bug. First write a test that reproduces it, run it and record its failing output in evidence; then fix the bug; then run the test again and show it passing.\n'
-              : '') +
-            `Overall task: ${task}\nFindings:\n${findings || '(none)'}\n` +
-            (isolated
-              ? 'You are in an isolated worktree: commit all changes on the current branch and report its name.\n'
-              : CODE
-                ? 'Do not commit.\n'
-                : 'You work in the shared folder; other slices may be writing their own files at the same time, so touch only yours. Do not commit.\n') +
-            (last ? 'This is the last attempt, given to you as a fresh agent after earlier attempts were rejected.\n' : '') +
-            (feedback ? `A previous attempt was rejected. Fix:\n${feedback}\n` : ''),
-          { label: `build:${s.id}#${attempt}`, phase: 'Build', agentType: 'implementer', model: last ? 'opus' : undefined, isolation: isolated ? 'worktree' : undefined, schema: WORK },
+    return { slice: s, status: 'failed', attempts: MAX_RETRIES + 1, branch: (work && work.branch) || '', gaps: feedback ? [feedback] : [] }
+  }
+  // Isolated slices run at the same time in their own worktrees. Without code the output files of a wave are disjoint
+  // and none is code, so its slices share the folder and also run at the same time. Code in the shared tree goes one
+  // at a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
+  let out
+  if (isolated || wave.length === 1 || !CODE) {
+    out = await pipeline(wave, runSlice)
+  } else {
+    out = []
+    for (const s of wave) out.push(await runSlice(s))
+  }
+  const built = out.filter(Boolean)
+  if (CODE && !isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
+  results.push(...built)
+
+  if (isolated) {
+    phase('Integrate')
+    const branches = built.filter((b) => b.status === 'built' && b.branch).map((b) => b.branch)
+    const merged = branches.length
+      ? await agent(
+          `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${built.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}\n${SUITE ? `Then run the project's whole test suite once: ${SUITE}\n` : ''}Return status, merged (the branches you merged) and open (what stayed unmerged or failed).`,
+          { label: 'integrate', phase: 'Integrate', agentType: 'integrator', schema: MERGE },
         )
-        if (!work || work.status !== 'pass') {
-          feedback = work ? `${work.evidence}\n${work.open}` : 'the implementer failed to return'
-          continue
-        }
-        // Isolated work is reviewed after integration, so review here only when it is in the shared tree.
-        if (isolated) return { slice: s, status: 'built', attempts: attempt, branch: work.branch, gaps: [] }
+      : null
+    // Only a branch the integrator names as merged is reviewed; a null or malformed result merged nothing.
+    const mergedList = merged && typeof merged === 'object' && Array.isArray(merged.merged) ? merged.merged.map((x) => String(x).trim()) : []
+    const why = !branches.length
+      ? 'nothing to merge'
+      : !merged || typeof merged !== 'object'
+        ? 'the integrator returned no merge result'
+        : `integrator status ${merged.status || 'unknown'}${isOpen(merged.open) ? `: ${merged.open}` : ''}`
+    log(`integrator: ${branches.length ? `merged ${mergedList.length} of ${branches.length} branch(es) (${why})` : why}`)
+    for (const b of built.filter((x) => x.status === 'built')) {
+      if (b.branch && (mergedList.includes(b.branch) || mergedList.includes(b.slice.id))) continue
+      b.status = 'failed'
+      b.gaps = [`branch ${b.branch || '(none)'} not merged by the integrator (${why})`]
+      log(`${b.slice.id}: ${b.gaps[0]}; not reviewed`)
+    }
+    // Review the merged result once per slice, in the shared tree.
+    await parallel(
+      built.filter((b) => b.status === 'built').map((b) => async () => {
         const gaps = await review(
-          s,
-          CODE
-            ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check and return a verdict.\n`
-            : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.\n`,
-          `review:${s.id}#${attempt}`,
-          'Build',
-          failedReview,
+          b.slice,
+          `Goal: ${b.slice.goal}\nAcceptance: ${b.slice.acceptance}\nThe work is merged into the current branch. Review it, run the check, and return a verdict.\n`,
+          `review:${b.slice.id}`,
+          'Integrate',
+          false,
         )
-        if (gaps.length === 0) return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
-        const standing = await refute(s, gaps, `refute:${s.id}#${attempt}`)
-        if (standing.length === 0) {
-          log(`${s.id}: no reviewer gap stands after the refute pass; passing`)
-          return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
-        }
-        failedReview = true
-        feedback = texts(standing).join('\n')
-      }
-      return { slice: s, status: 'failed', attempts: MAX_RETRIES + 1, branch: (work && work.branch) || '', gaps: feedback ? [feedback] : [] }
-    }
-    // Isolated slices run at the same time in their own worktrees. Without code the output files of a wave are disjoint
-    // and none is code, so its slices share the folder and also run at the same time. Code in the shared tree goes one
-    // at a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
-    let out
-    if (isolated || wave.length === 1 || !CODE) {
-      out = await pipeline(wave, runSlice)
-    } else {
-      out = []
-      for (const s of wave) out.push(await runSlice(s))
-    }
-    const built = out.filter(Boolean)
-    if (CODE && !isolated) built.forEach((r) => sharedFiles.push(...r.slice.files))
-    results.push(...built)
-
-    if (isolated) {
-      phase('Integrate')
-      const branches = built.filter((b) => b.status === 'built' && b.branch).map((b) => b.branch)
-      const merged = branches.length
-        ? await agent(
-            `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${built.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}`,
-            { label: 'integrate', phase: 'Integrate', agentType: 'integrator' },
-          )
-        : null
-      log(`integrator: ${merged ? 'done' : 'nothing to merge'}`)
-      // Review the merged result once per slice, in the shared tree.
-      await parallel(
-        built.filter((b) => b.status === 'built').map((b) => async () => {
-          const gaps = await review(
-            b.slice,
-            `Goal: ${b.slice.goal}\nAcceptance: ${b.slice.acceptance}\nThe work is merged into the current branch. Review it, run the check, and return a verdict.\n`,
-            `review:${b.slice.id}`,
-            'Integrate',
-            false,
-          )
-          b.status = gaps.length ? 'failed' : 'passed'
-          b.gaps = texts(gaps)
-        }),
-      )
-    }
+        b.status = gaps.length ? 'failed' : 'passed'
+        b.gaps = texts(gaps)
+      }),
+    )
   }
+  return built
 }
 
 await runSlices(slices.filter((s) => !SKIP.has(s.id)), new Set(finished))

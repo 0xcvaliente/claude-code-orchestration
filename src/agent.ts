@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query as sdkQuery, type HookCallbackMatcher, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { LIMITS, rolesFor, type Role } from "./config.js";
-import { askOpus, bashGuard, HOOK_TIMEOUT_S, judgeEnabled, runGit, statPath, type JudgeDeps } from "./judge.js";
+import { askOpus, bashGuard, HOOK_TIMEOUT_S, judgeEnabled, runGit, statPath, workerEnv, type JudgeDeps } from "./judge.js";
 import { totalTokens, usageFromResult, type TokenUsage } from "./tokens.js";
 
 export interface AgentRequest {
@@ -120,6 +120,7 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
         // agent's tools instead of cfg.tools: a writer with no Edit or Bash. An empty `agent` in the flag settings,
         // which rank above the project's, gives the default agent back (probed on Claude Code 2.1.322).
         settings: { agent: "" },
+        env: workerEnv(), // no Claude Code auto memory in a worker (see workerEnv)
         systemPrompt: { type: "preset", preset: "claude_code", append: cfg.system },
         abortController: abort,
         ...(hooks && { hooks }),

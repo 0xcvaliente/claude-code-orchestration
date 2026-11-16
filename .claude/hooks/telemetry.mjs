@@ -8,16 +8,8 @@ import { join } from "node:path";
 import { parseStatus } from "./brief.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
-const chunks = [];
-for await (const c of process.stdin) chunks.push(c);
-if (duplicate("telemetry.mjs")) process.exit(0); // the project's own copy logs this event
-/** @type {any} */
-let payload = {};
-try {
-  payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-} catch {
-  process.exit(0);
-}
+// Imported by turn-budget.mjs for usageFromTranscript (its turn count) and maxTurnsOf: the hook code below runs only
+// when this file is the entry script (argv[1], which keeps a symlinked plugin path working).
 
 // Status comes only from the worker's final report, never from the whole payload (it may echo the brief).
 // brief.mjs parseStatus: any STATUS: fail line fails, else the first STATUS line decides; blockquoted lines and the
@@ -51,21 +43,13 @@ function reportFromTranscript(path) {
   return undefined;
 }
 
-let status;
-if (payload.hook_event_name === "SubagentStop") {
-  // A reviewer may write a preamble and then call SubagentHandback, so fall back to the transcript whenever the last message has no status.
-  const last = payload.last_assistant_message;
-  status = typeof last === "string" ? statusOf(last) : undefined;
-  if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
-}
-
 /**
  * maxTurns of a role from its agent file's frontmatter: the project's .claude/agents/<role>.md, then the plugin
  * root's agents/<role>.md. null when neither has a maxTurns line.
  * @param {string} role bare agent type
  * @returns {number | null}
  */
-function maxTurnsOf(role) {
+export function maxTurnsOf(role) {
   if (!/^[A-Za-z0-9_-]+$/.test(role)) return null;
   const dirs = [join(process.env.CLAUDE_PROJECT_DIR || process.cwd(), ".claude", "agents"), process.env.CLAUDE_PLUGIN_ROOT ? join(process.env.CLAUDE_PLUGIN_ROOT, "agents") : ""];
   for (const d of dirs) {
@@ -88,12 +72,17 @@ const REWRITE_MIN = 20000; // a cache write this large after the first request, 
  * Claude Code writes one transcript line per content block, each carrying the message's usage, so each usage field
  * is the maximum over the lines of one message id (a partial usage on an early line cannot undercount), then summed
  * over messages. "<synthetic>" messages (harness-made, no API call) are skipped.
- * max_turns_hit (seen in 2.1.316 transcripts): a maxTurns stop ends the transcript on the tool_result of the last
- * turn's tool call, with no assistant message after it. A killed agent can end the same way, so when the role's
- * maxTurns is known (maxTurnsOf) such an ending counts as a hit only when turns >= maxTurns, and is null below it;
- * without a known maxTurns the ending alone decides. A normal finish ends on an assistant message with stop_reason
- * end_turn, or on the tool_result of a tool that ends the turn (SubagentHandback, toolEndsTurn: true). Anything else
- * (no messages, a user text message last, a max_tokens stop) is null: it cannot tell.
+ * max_turns_hit: how the transcript ends when the SubagentStop hook reads it (turn-budget.mjs uses only turns). A
+ * maxTurns stop ends the transcript on the tool_result of the last turn's tool call, with no assistant message after
+ * it (seen in 2.1.316 transcripts), but such a stop fires no SubagentStop (docs/research-2026-11-10.md, Check A;
+ * .claude/rules/agents.md, implementer_unfinished), so this field never records one: those agents show as started
+ * and never stopped (the review gate's implementer_unfinished, the report). What it does record: true when an agent
+ * that did stop has a transcript ending that way at or past its maxTurns (maxTurnsOf; without a known maxTurns the
+ * ending alone decides), which is rare (a transcript not yet flushed at the stop, or a stop record replayed from a
+ * saved transcript); null for that ending below maxTurns (a killed agent ends the same way); false for a normal
+ * finish, an assistant message with stop_reason end_turn or stop_sequence, or the tool_result of a tool that ends the
+ * turn (SubagentHandback, toolEndsTurn: true). Anything else (no messages, a user text message last, a max_tokens
+ * stop) is null: it cannot tell. So false means "finished normally", and true is not a count of turn-limit stops.
  * 1.2.0 adds two cost fields. tokens.cache_write_1h: the part of cache_write written at the one-hour lifetime
  * (usage.cache_creation.ephemeral_1h_input_tokens), which the API bills at 2x input instead of 1.25x.
  * cache_rewrites: requests after the agent's first that wrote at least REWRITE_MIN tokens to the cache while reading
@@ -103,7 +92,7 @@ const REWRITE_MIN = 20000; // a cache write this large after the first request, 
  * @param {string} path
  * @param {string} role bare agent type
  */
-function usageFromTranscript(path, role) {
+export function usageFromTranscript(path, role) {
   try {
     const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
     /** @type {Map<string, { input: number, output: number, cache_read: number, cache_write: number, cache_write_1h: number }>} */
@@ -171,16 +160,37 @@ function usageFromTranscript(path, role) {
   }
 }
 
-/** @param {unknown} v */
-const clip =(v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
-const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
+if (process.argv[1]?.endsWith("telemetry.mjs")) {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  if (duplicate("telemetry.mjs")) process.exit(0); // the project's own copy logs this event
+  /** @type {any} */
+  let payload = {};
+  try {
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  } catch {
+    process.exit(0);
+  }
 
-const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path, String(payload.agent_type ?? "").split(":").pop() ?? "") : undefined;
+  let status;
+  if (payload.hook_event_name === "SubagentStop") {
+    // A reviewer may write a preamble and then call SubagentHandback, so fall back to the transcript whenever the last message has no status.
+    const last = payload.last_assistant_message;
+    status = typeof last === "string" ? statusOf(last) : undefined;
+    if (status === undefined && typeof payload.agent_transcript_path === "string") status = statusOf(reportFromTranscript(payload.agent_transcript_path));
+  }
 
-try {
-  ensureStateDir();
-  appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim, ...usage })}\n`);
-} catch {
-  // the log must never fail the agent
+  /** @param {unknown} v */
+  const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
+  const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
+
+  const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path, String(payload.agent_type ?? "").split(":").pop() ?? "") : undefined;
+
+  try {
+    ensureStateDir();
+    appendFileSync(join(stateDir, "telemetry.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), status, ...slim, ...usage })}\n`);
+  } catch {
+    // the log must never fail the agent
+  }
+  process.exit(0);
 }
-process.exit(0);

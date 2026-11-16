@@ -64,9 +64,14 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
 function requests() {
   const file = join(stateDir, "prompts.jsonl");
   if (!sessionId || !existsSync(file)) return [];
+  // The file holds every session's prompts, so a line that cannot hold this session's id is skipped before parsing.
+  // prompt-capture.mjs writes each record with JSON.stringify, so a record of this session holds the id as
+  // JSON.stringify writes it; parsing and the session check below still decide.
+  const id = JSON.stringify(sessionId);
   return readFileSync(file, "utf8")
     .split("\n")
     .flatMap((line) => {
+      if (!line.includes(id)) return [];
       try {
         const r = JSON.parse(line);
         return r && r.session_id === sessionId && typeof r.text === "string" && r.text.trim() ? [r.text] : [];
@@ -103,6 +108,8 @@ function askClaude(prompt) {
     const model = process.env.ORCH_JUDGE_MODEL || "opus";
     // --setting-sources project from an empty dir: no user, project or local settings, so no plugins and no hooks.
     // --tools "" and --strict-mcp-config: no built-in tools and no MCP servers.
+    // CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 (below): without it Claude Code adds its auto-memory instructions to the judge's
+    // prompt and leaves an empty projects/<temp folder>/memory folder behind after every call (seen on 2.1.325).
     const args = ["-p", "--model", model, "--max-turns", "1", "--output-format", "json", "--setting-sources", "project", "--tools", "", "--strict-mcp-config", "--no-session-persistence"];
     /** @type {string} */
     let dir;
@@ -136,7 +143,7 @@ function askClaude(prompt) {
       done(result);
     };
     try {
-      child = spawn(bin, args, { cwd: dir, env: { ...process.env, ORCH_JUDGE_INNER: "1" }, stdio: ["pipe", "pipe", "ignore"] });
+      child = spawn(bin, args, { cwd: dir, env: { ...process.env, ORCH_JUDGE_INNER: "1", CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1" }, stdio: ["pipe", "pipe", "ignore"] });
     } catch (err) {
       finish({ error: `could not start ${bin} (${err instanceof Error ? err.message : String(err)})` });
       return;

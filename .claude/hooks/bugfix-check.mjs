@@ -17,7 +17,8 @@
 //             and the base run with those files copied in must show at least one new qualified failing test that
 //             lives in a copied file, compared with the base run without them. Blocks say what is missing; after two
 //             such blocks for the agent it allows with bugfix_unverified_gave_up.
-// Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed; each base run first
+// Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
+// SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
 // a branch. node_modules is symlinked from the main worktree only, and only when the base's lock files match the main
 // worktree's; otherwise there is no base run. A base run runs in its own process group, limited to
@@ -164,7 +165,7 @@ export function parseFailures(text, root = "") {
       else add(jsFile, n);
     } else if ((m = /^\s*[✕×]\s+(.+?)(?:\s+\d[\d.]*\s*m?s|\s+\(\d[\d.]*\s*m?s\))?$/.exec(line))) {
       add(jsFile, m[1]);
-    } else if ((m = /^(FAILED|ERROR)\s+(\S+)(?:\s+-\s.*)?$/.exec(line))) {
+    } else if ((m = /^(FAILED|ERROR)\s+(\S+?\[.*?\]|\S+)(?:\s+-\s.*)?$/.exec(line))) { // a parametrized id may hold spaces
       const id = m[2] ?? "";
       if (id.startsWith("(")) continue; // unittest's "FAILED (failures=1)"
       const k = id.indexOf("::");
@@ -295,6 +296,8 @@ export function runGroup(cmd, cwd, ms) {
     /** @type {NodeJS.Timeout | undefined} */
     let grace;
     const child = spawn("bash", ["-c", cmd], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const pid = child.pid;
+    if (pid) liveGroups.add(pid);
     const take = (/** @type {Buffer} */ b) => {
       if (out.length < 16 * 1024 * 1024) out += b.toString("utf8");
     };
@@ -304,6 +307,7 @@ export function runGroup(cmd, cwd, ms) {
     const finish = (rc) => {
       if (done) return;
       done = true;
+      if (pid) liveGroups.delete(pid);
       clearTimeout(timer);
       if (grace) clearTimeout(grace);
       child.stdout?.destroy();
@@ -327,11 +331,12 @@ export function runGroup(cmd, cwd, ms) {
 /**
  * Run `cmd` in a fresh detached worktree of `base` (OS temp dir). node_modules comes from the main worktree only, and
  * only when the base's lock files match the main worktree's (otherwise the base would run against other dependencies,
- * so there is no base run: null). `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S, run in its own
- * process group; the worktree is always removed.
+ * so there is no base run: cause "lock_mismatch", with the lock file). A failed `git worktree add` is cause
+ * "worktree_add_failed". `prepare` may copy files in first. Limited to ORCH_BASE_TIMEOUT_S, run in its own process
+ * group; the worktree is always removed.
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd
  * @param {(wt: string) => void} [prepare]
- * @returns {Promise<{ rc: number, timedOut: boolean, failures: Failures } | null>}
+ * @returns {Promise<{ rc: number, timedOut: boolean, failures: Failures } | { cause: string, file?: string }>}
  */
 export async function runInBase(info, cwd, cmd, prepare) {
   const sub = subdirOf(info.top, cwd);
@@ -342,26 +347,66 @@ export async function runInBase(info, cwd, cmd, prepare) {
       // Compare blob ids: the base's lock file against the main worktree's file on disk (missing on one side differs).
       const onBase = git(info.top, ["rev-parse", "--verify", "-q", `${info.base}:${rel}`])?.trim() ?? null;
       const inMain = existsSync(join(info.main, rel)) ? (git(info.main, ["hash-object", "--no-filters", "--", rel])?.trim() ?? "?") : null;
-      if (onBase !== inMain) return null;
+      if (onBase !== inMain) return { cause: "lock_mismatch", file: rel };
     }
   }
   pruneStale(info.top);
   const dir = mkdtempSync(join(tmpdir(), BASE_PREFIX));
   const wt = join(dir, "wt");
+  const entry = { top: info.top, dir, wt };
+  liveBases.add(entry); // before `worktree add`, so a signal during or after it still removes the worktree
   try {
-    if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return null;
+    if (git(info.top, ["worktree", "add", "--detach", "--quiet", wt, info.base]) === null) return { cause: "worktree_add_failed" };
     for (const d of nmDirs) {
       const target = join(wt, d, "node_modules");
-      if (existsSync(join(wt, d)) && !existsSync(target)) symlinkSync(join(info.main, d, "node_modules"), target);
+      if (existsSync(join(wt, d)) && !existsSync(target)) symlinkSync(join(info.main, d, "node_modules"), target, "junction"); // a folder link on Windows; ignored elsewhere
     }
     if (prepare) prepare(wt);
     const runDir = sub && existsSync(join(wt, sub)) ? join(wt, sub) : wt;
     const r = await runGroup(cmd, runDir, baseTimeoutMs());
     return { rc: r.rc, timedOut: r.timedOut, failures: parseFailures(r.out, wt) };
   } finally {
-    git(info.top, ["worktree", "remove", "--force", wt]);
-    rmSync(dir, { recursive: true, force: true });
-    git(info.top, ["worktree", "prune"]);
+    liveBases.delete(entry);
+    removeBase(entry);
+  }
+}
+
+// What a signal must clean up: the process groups of running base runs and the base worktrees that exist now.
+/** @type {Set<number>} */
+const liveGroups = new Set();
+/** @type {Set<{ top: string, dir: string, wt: string }>} */
+const liveBases = new Set();
+
+/** @param {{ top: string, dir: string, wt: string }} b */
+function removeBase(b) {
+  git(b.top, ["worktree", "remove", "--force", b.wt]);
+  try {
+    rmSync(b.dir, { recursive: true, force: true });
+  } catch {
+    // a file still held open: the stale sweep of a later run removes it
+  }
+  git(b.top, ["worktree", "prune"]);
+}
+
+/**
+ * verify.sh stops the helper with SIGTERM when its time budget runs out (SIGKILL only 5 s later); a `finally` does not
+ * run when a signal ends the process, so the base worktree stayed registered (pinning the base commit) and its folder
+ * stayed in TMPDIR. On SIGTERM, SIGINT or SIGHUP: kill the base runs' groups, remove every base worktree, its record
+ * and its folder, and exit with no answer (verify.sh then treats the check as not done in time).
+ */
+export function installSignalCleanup() {
+  for (const [sig, code] of /** @type {const} */ ([["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]])) {
+    process.on(sig, () => {
+      for (const pid of liveGroups) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+      for (const b of liveBases) removeBase(b);
+      process.exit(code);
+    });
   }
 }
 
@@ -399,16 +444,18 @@ function writeCache(state, key, value) {
 
 /**
  * The plain base run (cached): usable only when it finished in time and passed, or failed with complete names.
+ * Otherwise why not: runInBase's cause, "base_timeout" or "no_test_names".
  * @param {{ top: string, main: string, base: string }} info @param {string} cwd @param {string} cmd @param {string} state
- * @returns {Promise<{ rc: number, names: string[] } | null>}
+ * @returns {Promise<{ rc: number, names: string[] } | { cause: string, file?: string }>}
  */
 async function plainBase(info, cwd, cmd, state) {
   const key = cacheKey(info.base, cmd, subdirOf(info.top, cwd));
   const hit = readCache(state)[key];
-  if (hit && typeof hit.rc === "number" && Array.isArray(hit.names)) return hit;
+  if (hit && typeof hit.rc === "number" && Array.isArray(hit.names)) return { rc: hit.rc, names: hit.names };
   const run = await runInBase(info, cwd, cmd);
-  if (!run || run.timedOut) return null;
-  if (run.rc !== 0 && !complete(run.failures)) return null;
+  if ("cause" in run) return run;
+  if (run.timedOut) return { cause: "base_timeout" };
+  if (run.rc !== 0 && !complete(run.failures)) return { cause: "no_test_names" };
   const res = { rc: run.rc, names: run.rc === 0 ? [] : run.failures.names };
   writeCache(state, key, res);
   return res;
@@ -430,7 +477,7 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
   const base = await plainBase(info, cwd, cmd, state);
-  if (!base) return null;
+  if ("cause" in base) return null;
   const onBase = new Set(base.names);
   const shared = cur.names.filter((n) => onBase.has(n));
   if (allow && shared.length === cur.names.length) {
@@ -532,18 +579,38 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
       `KIND: bugfix needs a test that reproduces the bug: no test file is changed or added against ${short}. Add a test that fails without the fix and passes with it.`,
     );
   }
-  const unusable = (/** @type {string} */ what) =>
-    block("bugfix_base_unusable", `KIND: bugfix: unverified. The test run on ${short} ${what}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`);
+  // Each cause has its own text for the agent and a snake_case "cause" for the gate record (verify.sh keeps only
+  // [a-z_0-9,:"] of the extra line).
+  const why = (/** @type {{ cause: string, file?: string }} */ c, how = "") => {
+    switch (c.cause) {
+      case "lock_mismatch":
+        return `could not run: the lock file ${c.file ?? ""} of ${short} differs from the one in the main checkout, so the main checkout's dependencies (node_modules) could not be linked into the base worktree`;
+      case "worktree_add_failed":
+        return `could not run: \`git worktree add\` of ${short} failed, so there was no base worktree to run it in`;
+      case "base_timeout":
+        return `${how}timed out`;
+      default:
+        return `${how}failed without parsable test names`;
+    }
+  };
+  const unusable = (/** @type {{ cause: string, file?: string }} */ c, how = "") =>
+    block(
+      "bugfix_base_unusable",
+      `KIND: bugfix: unverified. The test run on ${short} ${why(c, how)}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`,
+      `"cause":"${c.cause}"`,
+    );
   const plain = await plainBase(info, cwd, cmd, state);
-  if (!plain) return unusable("timed out or failed without parsable test names");
+  if ("cause" in plain) return unusable(plain);
   const withTests = await runInBase(info, cwd, cmd, (wt) => {
     for (const t of tests) {
       mkdirSync(dirname(join(wt, t)), { recursive: true });
       copyFileSync(join(info.top, t), join(wt, t));
     }
   });
-  if (!withTests) return block("bugfix_no_base", `KIND: bugfix: the gate could not create a worktree of ${short} to run the reproduction test.`);
-  if (withTests.timedOut) return unusable("with the changed test files timed out");
+  if ("cause" in withTests) {
+    return block("bugfix_no_base", `KIND: bugfix: the gate could not run the reproduction test on ${short}: the test run there ${why(withTests)}.`, `"cause":"${withTests.cause}"`);
+  }
+  if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
   const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
@@ -593,6 +660,7 @@ async function main() {
 }
 
 if (process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url))) {
+  installSignalCleanup();
   main().then(
     () => process.exit(0),
     () => process.exit(0),

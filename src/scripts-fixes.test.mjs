@@ -1,4 +1,5 @@
 // Regression tests for scripts/auto.sh (relative repo path) and scripts/report.mjs (legacy runs row).
+import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

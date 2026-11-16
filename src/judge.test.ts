@@ -1,8 +1,10 @@
+import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { spawnSync } from "node:child_process";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
   bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
@@ -75,6 +77,7 @@ const CASES: Array<[string, BashClass]> = [
   ["cd x && rm -rf y", "deny"],
   ["find . -exec rm -rf {} +", "deny"],
   ["find . -name x.o -delete", "deny"],
+  ["find . -name '*.ts' -rm", "deny"], // bfs's name for -delete
   ["rm -rf build > log.txt", "deny"],
   ["rm -rf build\nls", "deny"],
   ["echo rm -rf x", "deny"], // an unquoted rm word is read as a command: over-blocked on purpose
@@ -279,6 +282,73 @@ const CASES: Array<[string, BashClass]> = [
   ["PAGER=x git log", "deny"],
   ["EDITOR=x git commit", "deny"],
   ["export GIT_PAGER=x && git log", "deny"],
+  // The exec-env rule reads a word's static prefix: its literal pieces joined, quoted or not, up to the first dynamic or
+  // glob piece. A prefix that starts with an exec-env name and `=` or `+=` counts, wherever the word is: nothing about
+  // env, launchers or declaring builtins is modelled.
+  ["export \"GIT_SSH_COMMAND=sh -c id\"; git fetch", "deny"],
+  ["export 'PATH=/tmp/x'; git status", "deny"],
+  ["export \"PATH\"=/tmp/x; git status", "deny"],
+  ["export PA\"TH=/x\"; git status", "deny"],
+  ["declare -x 'GIT_PAGER=x'; git log", "deny"],
+  ["typeset 'EDITOR=x'; git commit", "deny"],
+  ["env 'PAGER=x' git log", "deny"],
+  ["command export 'PATH=/tmp/x'; git status", "deny"],
+  ["env \"PATH=/x\" git status", "deny"],
+  ["env PA\"TH=/x\" git status", "deny"],
+  ["env \"\"PATH=/x git status", "deny"],
+  ["env \\PATH=/x git status", "deny"],
+  ["env \"PATH\"=/x git status", "deny"],
+  ["env $'PATH'=/x git status", "deny"],
+  ["env PATH=\"/x\" git status", "deny"],
+  ["env -u HOME env \"PATH=/x\" git status", "deny"],
+  ["timeout -s KILL 5 env \"PATH=/x\" git status", "deny"],
+  ["taskset 1 env \"PATH=/x\" git status", "deny"],
+  ["find . -exec env \"PATH=/x\" git status \;", "deny"],
+  ["nice ${E}nv \"PATH=/x\" git status", "deny"],
+  ["./e \"GIT_SSH_COMMAND=sh x\" git status", "deny"],
+  ["GIT_SSH_COMMAND+=\"sh -c id\" git fetch", "deny"],
+  ["export LD_PRELOAD+=/tmp/x.so; git status", "deny"],
+  ["PAGER+=evil git log", "deny"],
+  ["env -iu HOME \"PATH=/x\" git status", "deny"],
+  ["env -iC /tmp \"PATH=/x\" git status", "deny"],
+  ["env -vi0u HOME \"PATH=/x\" git status", "deny"],
+  ["env -iu HOME \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+  ["env 'A B=1' \"PATH=/x\" git status", "deny"],
+  ["env 1A=1 \"PATH=/x\" git status", "deny"],
+  ["env -i \"$X\" \"PATH=/x\" git status", "deny"],
+  ["env -S '' \"PATH=/x\" git status", "deny"],
+  ["env -P /x \"PATH=/x\" git status", "deny"],
+  ["env -L 1 \"PATH=/x\" git status", "deny"],
+  ["env -U user \"PATH=/x\" git status", "deny"],
+  ["env PATH=x git log", "deny"],
+  ["env \"GIT_SSH_COMMAND=sh -c id\" git fetch", "deny"],
+  ["env -i \"PATH=/tmp/x\" git status", "deny"],
+  ["env -u HOME 'PAGER=x' git log", "deny"],
+  ["env -C /tmp \"PATH=/x\" git status", "deny"],
+  ["env A=1 \"PATH=/x\" git status", "deny"],
+  ["env -- \"PATH=/x\" git status", "deny"],
+  ["env -u \"$X\" HOME \"PATH=/x\" git status", "deny"],
+  ["env \"$X\" HOME \"PATH=/x\" git status", "deny"],
+  // The accepted cost: such a word is denied on a line that runs git, rm or a shell even when it is only an argument,
+  // as the unquoted form is on 1.4.0. Run the search or echo as its own command.
+  ["git log --grep 'PATH='", "deny"],
+  ["git log --grep 'PAGER=x'", "deny"],
+  ["grep 'PATH=' f && git status", "deny"],
+  ["grep 'PATH=' .envrc && git status", "deny"],
+  ["echo \"PATH=$PATH\"; git status", "deny"],
+  ["git commit -m 'EDITOR=vim is the default'", "deny"],
+  ["env LC_ALL=C git log --grep 'PATH='", "deny"],
+  ["env -u HOME git log --grep 'PATH='", "deny"],
+  // Text that does not start with an exec-env name and `=`, or a line with no git, rm or shell, still passes.
+  ["grep -rn 'PATH=' src", "pass"],
+  ["echo \"PATH=x\"", "pass"],
+  ["git log --grep 'XPATH='", "pass"],
+  ["git commit -m \"fix PATH= handling\"", "pass"],
+  ["git log --grep=PATH=x", "pass"],
+  ["env PATHX=1 git status", "pass"],
+  // Out of reach, as on 1.4.0: a dynamic name part, and assignments never spelled NAME=.
+  ["env ${P}ATH=/x git status", "pass"],
+  ["env \"$V\" git status", "pass"],
   ["PATH=/tmp/evil:$PATH git status", "deny"],
   ["LD_PRELOAD=/x.so rm file", "deny"],
   ["BASH_ENV=/x bash run.sh", "deny"],
@@ -442,12 +512,48 @@ test("classify: floor, judged and pass cases", () => {
   assert.deepEqual(wrong, []);
 });
 
+// A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
+// expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
+// heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.
+const LONG_COMMANDS = `const many = (w) => Array(20000).fill(w).join(" ");
+const commands = [
+  ...["a", "-n", "find", "sh", "git", "git rm", "export", "xargs", "env", "PATH=x", "su", "shopt", "trap", "eval", "watch", "$a"].map((w) => "echo " + many(w)),
+  many("A=1") + " ls",
+  "echo x" + "$a".repeat(20000),
+];
+for (const cmd of commands) {
+  const t = performance.now();
+  classifyDetail(cmd, "/w");
+  const ms = performance.now() - t;
+  if (ms > 8000) {
+    console.log(cmd.slice(0, 30) + "...: " + Math.round(ms) + " ms");
+    process.exit(1);
+  }
+}`;
+
+test("classify: a command of 20,000 words is analysed in linear time (the hook decides before its timeout)", () => {
+  const code = `const { classifyDetail } = await import(${JSON.stringify(new URL("./judge.ts", import.meta.url).href)});\n${LONG_COMMANDS}`;
+  const r = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { encoding: "utf8", timeout: 30000 });
+  assert.equal(r.signal, null, "timed out after 30 s");
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+});
+
 test("tokenize: words carry their literal text and whether the shell decides them", () => {
   const [cmd] = tokenize(`r""m -rf "a b" $X *.ts`).commands;
   assert.deepEqual(cmd?.words.map((w) => [w.text, w.dynamic, w.quoted]), [["rm", false, true], ["-rf", false, false], ["a b", false, true], ["", true, false], [".ts", true, false]]);
   assert.equal(tokenize("a; b | c && d").commands.length, 4);
   assert.equal(tokenize('echo "a; b | c"').commands.length, 1, "separators inside quotes do not split");
   assert.throws(() => tokenize("echo 'x"));
+});
+
+test("classify: the exec-env deny names the variable and says to run a search or echo as its own command", () => {
+  const rows: Array<[string, string]> = [["git log --grep 'PATH='", "PATH"], ["GIT_SSH_COMMAND+=\"sh -c id\" git fetch", "GIT_SSH_COMMAND"], ["PAGER+=evil git log", "PAGER"]];
+  for (const [cmd, name] of rows) {
+    const r = classifyDetail(cmd, CWD);
+    assert.equal(r.cls, "deny", cmd);
+    assert.match(r.reason ?? "", new RegExp(`^setting ${name} on a command line that runs git, rm or a shell`), cmd);
+    assert.match(r.reason ?? "", /as its own command/, cmd);
+  }
 });
 
 test("classify: an absolute rm -rf target is denied when the working folder is unknown", () => {
