@@ -2,7 +2,8 @@
 // SessionStart hook (matcher "compact"): after a compaction, puts the session's open orchestration run back in context
 // (PostCompact cannot add context; SessionStart with source "compact" can). Prints
 // { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } } with the run's planned slices, their
-// FILES and states (passed, failed for good, retry due, reviewing, pending; attempts) and the constraint texts, capped
+// FILES and states (passed, passed with the opus review due, failed for good, retry due, replan required, reviewing,
+// pending; attempts) and the constraint texts, capped
 // at about 1,500 characters. Over the cap the slice lines give way first (FILES dropped, then a "+N more slices"
 // marker), so the constraint texts and the final reminder stay. No open run (none, closed or stale), another SessionStart source or
 // malformed input: exit 0 with no output. Read-only: it writes nothing.
@@ -15,12 +16,15 @@ export const MAX_CONTEXT = 1500;
 
 /** @param {any} s slice state from foldRuns */
 function sliceState(s) {
-  if (s.passed) return "passed";
+  // A counted pass is final only once the escalation rule is met; until then the opus review is what is due.
+  if (s.passed) return s.final === false ? "passed, opus review due" : "passed";
   if (s.gaveUp) return "failed for good";
   const n = s.attempts || s.launches;
   if (!n) return "pending";
   const latest = currentReviews(s).at(-1);
   const tries = `${n} attempt${n === 1 ? "" : "s"}`;
+  // A stalled slice's next implementer launch is blocked until a REPLAN plan review runs.
+  if (s.stalled === true) return `review failed, replan required (${tries})`;
   return latest?.status === "fail" ? `review failed, retry due (${tries})` : `building or reviewing (${tries})`;
 }
 
