@@ -552,6 +552,25 @@ test("classify (J2): a brace expansion is seen whole across $(...), backticks an
   ]), []);
 });
 
+test("classify (J3): a NUL decoded in $'...' is denied (the shell cuts the word there)", () => {
+  assert.deepEqual(misread([
+    ["$'sudo\\x00' id", "deny"],
+    ["$'rm\\x00' -rf .git", "deny"],
+    ["$'sudo\\0' id", "deny"],
+    ["$'sudo\\000' id", "deny"],
+    ["$'sudo\\u0000' id", "deny"],
+    ["$'sudo\\U00000000' id", "deny"],
+    ["$'sudo\\c@' id", "deny"],
+    ["git $'push\\x00x' origin main", "deny"],
+    // guards: other escapes decode as before
+    ["printf $'\\n'", "pass"],
+    ["printf $'a\\tb\\n'", "pass"],
+    ["echo $'\\x41'", "pass"],
+    ["echo $'\\101'", "pass"],
+    ["$'\\x73udo' id", "deny"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.

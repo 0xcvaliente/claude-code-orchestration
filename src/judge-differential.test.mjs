@@ -61,6 +61,7 @@ function generated() {
 const HARDENING_REASONS = [
   /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
   /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
+  /\(a NUL in \$'\.\.\.'\)/, // J3
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -74,6 +75,14 @@ const HARDENED = [
   ["env {rm,`echo x y`-rf,.git}", ["deny"]],
   ["env {rm,${X:- }-rf,.git}", ["deny"]],
   ["env {s,$(:)udo,id}", ["deny"]],
+  ["$'sudo\\x00' id", ["deny"]],
+  ["$'rm\\x00' -rf .git", ["deny"]],
+  ["$'sudo\\0' id", ["deny"]],
+  ["$'sudo\\000' id", ["deny"]],
+  ["$'sudo\\u0000' id", ["deny"]],
+  ["$'sudo\\U00000000' id", ["deny"]],
+  ["$'sudo\\c@' id", ["deny"]],
+  ["git $'push\\x00x' origin main", ["deny"]],
 ];
 
 /** @param {{ cls: string, reason?: string }} r */

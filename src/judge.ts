@@ -139,7 +139,11 @@ function ansiC(src: string, open: number): { text: string; end: number } {
   let text = "";
   for (let j = open + 1; j < src.length; j++) {
     const c = src.charAt(j);
-    if (c === "'") return { text, end: j };
+    if (c === "'") {
+      // The shell cuts the word at a NUL (`$'sudo\x00'` runs sudo): the decoded text would not be what runs.
+      if (text.includes("\0")) throw new Doubt("a NUL in $'...'");
+      return { text, end: j };
+    }
     if (c !== "\\") {
       text += c;
       continue;
