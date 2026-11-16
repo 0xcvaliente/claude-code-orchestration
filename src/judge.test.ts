@@ -512,6 +512,120 @@ test("classify: floor, judged and pass cases", () => {
   assert.deepEqual(wrong, []);
 });
 
+/** Rows of [command, expected class] that classify wrongly, as readable lines. */
+const misread = (rows: Array<[string, BashClass]>) =>
+  rows.filter(([cmd, want]) => classify(cmd, CWD) !== want).map(([cmd, want]) => `${JSON.stringify(cmd)}: want ${want}, got ${classify(cmd, CWD)}`);
+
+// Audit items J1 to J5: each row of a hardening test was a way past the judge (the shell runs what the guard did not
+// read), and each guard row is an ordinary form that must classify as it did before the fix.
+test("classify (J1): << inside ((...)) or $((...)) is a left shift, not a here document, and is denied", () => {
+  assert.deepEqual(misread([
+    ["((1<<EOF))\nrm -rf .git\nEOF", "deny"],
+    ["((1<<EOF))\nsudo id\nEOF", "deny"],
+    ["((1<<EOF))\ngit push origin main\nEOF", "deny"],
+    ["for ((i=0; i<<EOF; i++)); do :; done\nrm -rf .git\nEOF", "deny"],
+    ["echo $((1<<'EOF'\n$(sudo id)\nEOF\n))", "deny"],
+    // guards: real here documents and arithmetic without a shift
+    ["cat <<EOF\nhi\nEOF", "pass"],
+    ["cat <<-EOF\n\thi\n\tEOF", "pass"],
+    ["python3 - <<'EOF'\nprint(1 << 2)\nEOF", "pass"],
+    ["for ((i=0; i<3; i++)); do echo $i; done", "pass"],
+    ["((n++))", "pass"],
+    ["echo $((1 + 2))", "pass"],
+  ]), []);
+});
+
+test("classify (J2): a brace expansion is seen whole across $(...), backticks and ${...}", () => {
+  assert.deepEqual(misread([
+    ["env {rm,$(:)-rf,.git}", "deny"],
+    ["env {git,$(:)push}", "deny"],
+    ["env {rm,`echo x y`-rf,.git}", "deny"],
+    ["env {rm,${X:- }-rf,.git}", "deny"],
+    ["env {s,$(:)udo,id}", "deny"],
+    // guards: braces with no expansion in them, and a plain brace expansion as before
+    ["echo {}", "pass"],
+    ["echo {$(date)}", "pass"],
+    ["echo ${HOME}/{}", "pass"],
+    ["awk '{print $1}' f", "pass"],
+    ["find . -name x -exec wc -l {} +", "pass"],
+    ["echo {a,b}", "deny"],
+  ]), []);
+});
+
+test("classify (J3): a NUL decoded in $'...' is denied (the shell cuts the word there)", () => {
+  assert.deepEqual(misread([
+    ["$'sudo\\x00' id", "deny"],
+    ["$'rm\\x00' -rf .git", "deny"],
+    ["$'sudo\\0' id", "deny"],
+    ["$'sudo\\000' id", "deny"],
+    ["$'sudo\\u0000' id", "deny"],
+    ["$'sudo\\U00000000' id", "deny"],
+    ["$'sudo\\c@' id", "deny"],
+    ["git $'push\\x00x' origin main", "deny"],
+    // guards: other escapes decode as before
+    ["printf $'\\n'", "pass"],
+    ["printf $'a\\tb\\n'", "pass"],
+    ["echo $'\\x41'", "pass"],
+    ["echo $'\\101'", "pass"],
+    ["$'\\x73udo' id", "deny"],
+  ]), []);
+});
+
+test("classify (J4): a git argument that git runs as a shell command is read as a script", () => {
+  assert.deepEqual(misread([
+    ["git submodule foreach 'git push origin HEAD'", "judge"],
+    ["git submodule foreach 'sudo id'", "deny"],
+    ["git submodule --quiet foreach --recursive 'rm -rf .git'", "deny"],
+    ["git submodule foreach 'rm -rf .git;' x", "deny"],
+    ["git submodule foreach \"$CMD\"", "deny"],
+    ["git rebase -x 'rm -rf .git' main", "deny"],
+    ["git rebase --exec 'rm -rf .git' main", "deny"],
+    ["git rebase --exec='rm -rf .git' main", "deny"],
+    ["git rebase --exe 'rm -rf .git' main", "deny"],
+    ["git rebase -x'rm -rf .git' main", "deny"],
+    ["git rebase -ix 'rm -rf .git' main", "deny"],
+    ["git rebase -x 'git push origin HEAD' main", "judge"],
+    ["git rebase -x \"$CMD\" main", "deny"],
+    ["git -C . rebase -x 'sudo id' main", "deny"],
+    ["git bisect run 'rm -rf .git'", "deny"],
+    ["git bisect run 'sudo id'", "deny"],
+    // guards: the same subcommands without an exec argument, or with a harmless one
+    ["git rebase main", "pass"],
+    ["git rebase -i HEAD~3", "pass"],
+    ["git rebase -X ours main", "pass"],
+    ["git rebase -s ours main", "pass"],
+    ["git rebase --onto main topic", "pass"],
+    ["git rebase -x 'npm test' main", "pass"],
+    ["git submodule update --init --recursive", "pass"],
+    ["git submodule status", "pass"],
+    ["git submodule foreach git status", "pass"],
+    ["git submodule foreach 'git status'", "pass"],
+    ["git bisect run make test", "pass"],
+    ["git bisect run ./test.sh", "pass"],
+    ["git log --grep 'rebase -x'", "pass"],
+  ]), []);
+});
+
+test("classify (J5): git config keys that run a program (trailer, submodule update, tool paths) are denied", () => {
+  assert.deepEqual(misread([
+    ["git -c 'trailer.x.cmd=rm -rf .git' interpret-trailers --trailer x=1 f", "deny"],
+    ["git -c 'trailer.x.command=rm -rf .git' interpret-trailers --trailer x=1 f", "deny"],
+    ["git -c 'submodule.x.update=!rm -rf .git' submodule update", "deny"],
+    ["git -c 'difftool.x.path=/tmp/evil' difftool --tool x", "deny"],
+    ["git -c 'mergetool.x.path=/tmp/evil' mergetool --tool x", "deny"],
+    ["git -c Trailer.X.Cmd=id interpret-trailers f", "deny"],
+    ["git config trailer.x.cmd 'rm -rf .git'", "deny"],
+    ["git config submodule.x.update '!rm -rf .git'", "deny"],
+    ["git config difftool.x.path /tmp/evil", "deny"],
+    // guards: other keys of the same sections
+    ["git -c difftool.prompt=false difftool", "pass"],
+    ["git -c trailer.sign.key=Signed-off-by interpret-trailers f", "pass"],
+    ["git -c submodule.recurse=true pull", "pass"],
+    ["git config submodule.x.url u", "pass"],
+    ["git submodule update --init", "pass"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.
