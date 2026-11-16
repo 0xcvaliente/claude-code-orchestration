@@ -451,6 +451,11 @@ if [ "$timed_out" = 1 ]; then
 elif [ "${ORCH_BASELINE:-}" != off ]; then
   check baseline "$out" 1
   if [ "$chk_decision" = warn ] && [ "${ORCH_BASELINE:-}" = allow ]; then
+    # An isolated failure keeps its own reason (a doubt signal), with the baseline's counts as extra fields.
+    if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+      log_gate warn tests_failed_isolated "$chk_extra"
+      exit 0
+    fi
     log_gate warn "$chk_reason" "$chk_extra"
     exit 0
   fi
