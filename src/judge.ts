@@ -1021,8 +1021,11 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  * deny, the hard floor, never judged:
  * - a command line the tokenizer cannot read with confidence: unterminated quotes or substitutions, brace expansion
  *   (quote-aware: `{rm,-rf,.git,' '}`), an unclosed heredoc, control characters, zsh-only expansions (`=rm`, `=(..)`,
- *   `$~X`, `${=X}`, glob qualifiers `*(e:..:)`), nesting deeper than 3;
- * - function and alias definitions, `shopt -s expand_aliases`, `at`/`batch`;
+ *   `$~X`, `${=X}`, glob qualifiers `*(e:..:)`), nesting deeper than 3, `<<` after an unclosed `[` (`$[1<<E]`, `a[1<<E]`),
+ *   a here-document delimiter with `$` or a backtick (`<<$'E'`);
+ * - function and alias definitions, `shopt -s expand_aliases`, `at`/`batch`, `hash -p`, `hash name=path`, `enable -f`,
+ *   a word assigning zsh's `functions`, `aliases`, `galiases`, `saliases` or `dis_functions` table, quoted text with
+ *   `$(` or a backtick inside an array subscript (`'a[$(cmd)]'`), and PS0/PS1/PS4 set on a line that turns on tracing;
  * - a word that is `sudo` or `doas` (after unquoting: `"sudo"`, `\sudo`, `/usr/bin/sudo`, `$'\x73udo'`), anywhere;
  *   `su`, `pkexec` or `runuser` as the command word, followed by an su-style option (`x su -c ...`), or after a
  *   wrapper prefix (`timeout 5 su`, `env su`, `xargs su`); as a bare argument (`grep su file`) they pass;
@@ -1043,7 +1046,9 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  *   PATH, LD_PRELOAD, BASH_ENV, IFS, ...) on a command line that also runs git, rm or a shell: any word whose static
  *   prefix (literal pieces joined, quoted or not, up to the first dynamic or glob piece) starts with such a name and
  *   `=` or `+=`, wherever it stands (`env "PATH=/x" git status`, `export PA"TH=/x"`, `PAGER+=x git log`); an argument
- *   such as `git log --grep 'PATH='` is denied too (the accepted cost: run the search on its own);
+ *   such as `git log --grep 'PATH='` is denied too (the accepted cost: run the search on its own); PS0/PS1/PS4,
+ *   `BASH_FUNC_<name>` and ZDOTDIR count; the static no-ops `GIT_EDITOR=true`, `GIT_EDITOR=:`, an empty `IFS=` and
+ *   `git -c core.editor=true` (or `=:`) do not (noopSetting);
  * Every substitution (`$(..)`, backticks, `<(..)`), every `sh -c`-style payload, `eval`, `trap` action, `env -S`
  * string and `watch` command is read as a script of its own with the same rules (a dynamic one is denied).
  * An rm, git or sudo that appears only inside a quoted argument (`git commit -m "fix rm -rf docs"`, `echo "git push"`)
