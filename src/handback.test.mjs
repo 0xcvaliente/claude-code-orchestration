@@ -183,3 +183,154 @@ test("handback checks: when the refusal cannot be recorded, nothing is refused",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- 2026-11-16: the stop records carry the report just handed back (journal.mjs, telemetry.mjs). ----
+// In auto mode a worker delivers its report through SubagentHandback. The SubagentStop payload then has no
+// last_assistant_message, and the subagent transcript does not yet hold the report just handed back (it holds the
+// previous one, or none). handback-check.mjs captures the report's parsed fields at the hand-back; at the stop the
+// journal and telemetry prefer that capture.
+
+const BRIEF_SLICE = "hb";
+/** A transcript holding the brief, a preamble without STATUS and, optionally, earlier hand-backs. @param {string} dir @param {string[]} [reports] */
+function staleTranscript(dir, reports = []) {
+  const path = join(dir, `t-${Math.random().toString(36).slice(2)}.jsonl`);
+  const lines = [
+    { type: "user", message: { role: "user", content: [{ type: "text", text: `SLICE: ${BRIEF_SLICE}\nFILES: a.txt\nDEPENDS: none\nCHECKS: C1, C2` }] } },
+    { type: "assistant", message: { content: [{ type: "text", text: "Done reading, sending my report." }] } },
+    ...reports.map((m) => ({ type: "assistant", message: { content: [{ type: "tool_use", name: "SubagentHandback", input: { message: m } }] } })),
+  ];
+  writeFileSync(path, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  return path;
+}
+/** @param {string} dir @param {string} name */
+const stateLog = (dir, name) => {
+  const f = join(dir, ".claude", "state", name);
+  return existsSync(f) ? readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+};
+/** A stop payload with no last_assistant_message. @param {string} transcript @param {{ agent?: string | null, type?: string }} [o] */
+const stopOf = (transcript, o = {}) => ({
+  session_id: "s1",
+  hook_event_name: "SubagentStop",
+  agent_type: o.type ?? "orchestration:reviewer",
+  agent_transcript_path: transcript,
+  ...(o.agent === null ? {} : { agent_id: o.agent ?? "a1" }),
+});
+/** Journal and telemetry at one stop, in either order (they may run at the same time). @param {string} dir @param {any} payload @param {Record<string, string>} [env] @param {boolean} [telemetryFirst] */
+function stopHooks(dir, payload, env = {}, telemetryFirst = false) {
+  const order = telemetryFirst ? ["telemetry.mjs", "journal.mjs"] : ["journal.mjs", "telemetry.mjs"];
+  for (const h of order) assert.equal(run(dir, h, payload, env).code, 0, h);
+}
+/** The latest stop record of an agent in journal.jsonl and its telemetry stop record. @param {string} dir @param {string} agent */
+const lastStop = (dir, agent) => ({
+  journal: stateLog(dir, "journal.jsonl").filter((r) => r.agent_id === agent).at(-1),
+  telemetry: stateLog(dir, "telemetry.jsonl").filter((r) => r.agent_id === agent && r.hook_event_name === "SubagentStop").at(-1),
+});
+
+const REVIEW_PASS = "STATUS: pass\nC1: pass (cmd) npm test -> 12 pass\nC2: pass (read) src/a.ts:3\nC3: pass (cmd) git diff -> clean\nOPEN: none";
+const REVIEW_FAIL = "STATUS: fail\nC1: fail breaks the parser\nGAP: 90 the parser throws on empty input\nOPEN:\n- the parser";
+
+test("handback capture (a): the first stop after one hand-back records that report, not none", () => {
+  const dir = project();
+  try {
+    assert.equal(run(dir, "handback-check.mjs", handback(REVIEW_PASS)).code, 0);
+    stopHooks(dir, stopOf(staleTranscript(dir)));
+    const { journal, telemetry } = lastStop(dir, "a1");
+    assert.equal(journal?.status, "pass");
+    assert.deepEqual(Object.keys(journal?.answers ?? {}).sort(), ["C1", "C2", "C3"]);
+    assert.equal(journal?.answers?.C2?.mode, "read");
+    assert.deepEqual(journal?.open, []);
+    assert.equal(journal?.slice, BRIEF_SLICE);
+    assert.equal(telemetry?.status, "pass");
+    // Parsed fields only: no report text in the capture or the records.
+    for (const f of ["handbacks.jsonl", "journal.jsonl"]) assert.ok(!readFileSync(join(dir, ".claude", "state", f), "utf8").includes("STATUS:"), f);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const off of [false, true]) {
+  /** @type {Record<string, string>} */
+  const env = off ? { ORCH_HANDBACK_CHECK: "off" } : {};
+  test(`handback capture (${off ? "c" : "b"}): each stop records its own report, not an earlier one${off ? ", with the hand-back check off" : ""}`, () => {
+    const dir = project();
+    try {
+      // Reviewer: fail, then (resumed) pass. At each stop the transcript lags one report behind.
+      run(dir, "handback-check.mjs", handback(REVIEW_FAIL), env);
+      stopHooks(dir, stopOf(staleTranscript(dir)), env);
+      let s = lastStop(dir, "a1");
+      assert.deepEqual([s.journal?.status, s.journal?.answers?.C1?.verdict, s.journal?.gaps?.length, s.journal?.open?.length, s.telemetry?.status], ["fail", "fail", 1, 1, "fail"]);
+      run(dir, "handback-check.mjs", handback(REVIEW_PASS), env);
+      stopHooks(dir, stopOf(staleTranscript(dir, [REVIEW_FAIL])), env, true);
+      s = lastStop(dir, "a1");
+      assert.deepEqual([s.journal?.status, s.journal?.answers?.C1?.verdict, s.journal?.gaps?.length, s.journal?.open?.length, s.telemetry?.status], ["pass", "pass", 0, 0, "pass"]);
+      // Implementer: four reports fail, pass, fail, pass are recorded as such.
+      const reports = ["STATUS: fail\nOPEN: tests", "STATUS: pass\nOPEN: none", "STATUS: fail\nOPEN: lint", "STATUS: pass\nOPEN: none"];
+      const impl = { agent: "i1", type: "orchestration:implementer" };
+      reports.forEach((r, k) => {
+        run(dir, "handback-check.mjs", handback(r, impl), env);
+        stopHooks(dir, stopOf(staleTranscript(dir, reports.slice(0, k)), impl), env, k % 2 === 1);
+      });
+      const recorded = stateLog(dir, "journal.jsonl").filter((r) => r.agent_id === "i1").map((r) => r.status);
+      const tele = stateLog(dir, "telemetry.jsonl").filter((r) => r.agent_id === "i1" && r.hook_event_name === "SubagentStop").map((r) => r.status);
+      assert.deepEqual(recorded, ["fail", "pass", "fail", "pass"]);
+      assert.deepEqual(tele, ["fail", "pass", "fail", "pass"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("handback capture: a report sent back once and corrected is recorded as the corrected one", () => {
+  const dir = project();
+  try {
+    const launch = launchRecord({ subagent_type: "orchestration:reviewer", prompt: "SLICE: hb\nCHECKS: C1, C2\nC1: x\nC2: y" }, { ts: new Date().toISOString(), sessionId: "s1", agentId: "r9" });
+    writeFileSync(join(dir, ".claude", "state", "journal-launches.jsonl"), `${JSON.stringify(launch)}\n`);
+    const who = { agent: "r9" };
+    assert.equal(run(dir, "handback-check.mjs", handback("STATUS: pass\nC1: pass (cmd) a -> ok", who)).code, 2, "sent back: C2 unanswered");
+    assert.equal(run(dir, "handback-check.mjs", handback("STATUS: fail\nC1: pass (cmd) a -> ok\nC2: fail adds a dependency", who)).code, 0);
+    stopHooks(dir, stopOf(staleTranscript(dir), who));
+    const s = lastStop(dir, "r9");
+    assert.deepEqual([s.journal?.status, s.journal?.answers?.C2?.verdict, s.telemetry?.status], ["fail", "fail", "fail"]);
+    // The same for a researcher whose quote check refused the first report (telemetry records researchers).
+    writeFileSync(join(dir, "notes.md"), "The parser never throws.\n");
+    const res = { agent: "q9", type: "orchestration:researcher" };
+    const wrong = 'STATUS: fail\nQUOTE: notes.md:1 | "The parser always throws."';
+    const right = 'STATUS: pass\nQUOTE: notes.md:1 | "The parser never throws."';
+    run(dir, "handback-check.mjs", handback(wrong, res));
+    assert.equal(run(dir, "quote-check.mjs", handback(wrong, res)).code, 2);
+    run(dir, "handback-check.mjs", handback(right, res));
+    assert.equal(run(dir, "quote-check.mjs", handback(right, res)).code, 0);
+    assert.equal(run(dir, "telemetry.mjs", stopOf(staleTranscript(dir), res)).code, 0);
+    assert.equal(lastStop(dir, "q9").telemetry?.status, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("handback capture (d, e): no agent id, no hand-back, or only an earlier stop's hand-back: the record is today's", () => {
+  const dir = project();
+  try {
+    // (d) No agent id: nothing captured, and the stop reads the transcript as before.
+    run(dir, "handback-check.mjs", handback(REVIEW_PASS, { agent: null }));
+    assert.equal(stateLog(dir, "handbacks.jsonl").length, 0, "nothing captured without an agent id");
+    stopHooks(dir, stopOf(staleTranscript(dir, [REVIEW_FAIL]), { agent: null }));
+    const noId = stateLog(dir, "journal.jsonl").at(-1);
+    assert.deepEqual([noId?.agent_id, noId?.status, noId?.slice], [null, "fail", BRIEF_SLICE]);
+    assert.equal(stateLog(dir, "telemetry.jsonl").at(-1)?.status, "fail");
+    // (e) Headless: no hand-back at all; the report is the last message, as today.
+    const headless = { ...stopOf(join(dir, "missing.jsonl"), { agent: "h1" }), last_assistant_message: "STATUS: pass\nC1: pass (cmd) t -> ok\nOPEN: none" };
+    stopHooks(dir, headless);
+    const h = stateLog(dir, "journal-pending.jsonl").filter((r) => r.agent_id === "h1").at(-1);
+    assert.deepEqual([h?.status, Object.keys(h?.answers ?? {}), h?.open], ["pass", ["C1"], []]);
+    assert.equal(lastStop(dir, "h1").telemetry?.status, "pass");
+    assert.ok(!("skills_used" in (h ?? {})) && !("draft" in (h ?? {})), "the record shape is unchanged");
+    // A resumed agent whose second run ends without a hand-back: the first run's capture is not reused.
+    run(dir, "handback-check.mjs", handback(REVIEW_PASS, { agent: "e1" }));
+    stopHooks(dir, stopOf(staleTranscript(dir), { agent: "e1" }));
+    stopHooks(dir, { ...stopOf(staleTranscript(dir), { agent: "e1" }), last_assistant_message: "STATUS: fail\nOPEN: none" });
+    const e = lastStop(dir, "e1");
+    assert.deepEqual([e.journal?.status, e.telemetry?.status], ["fail", "fail"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
