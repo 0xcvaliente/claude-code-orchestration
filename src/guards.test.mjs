@@ -4,7 +4,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,7 +73,7 @@ const ALLOWED = [
 const DENIED = [
   ["cat > notes.md <<'EOF'\nhello\nEOF", /heredoc|redirection/],
   ["python3 -c 'print(1)'", /python3/],
-  ["cd /tmp /x && ls", /`cd`/], // T-11: `cd /tmp && ls` passes now; two arguments do not
+  ["cd /tmp && ls", /`cd`/],
   ["git log | python3", /python3/],
   ["git ls-files | xargs cat", /xargs/],
   ["ls > out.txt", /redirection/],
@@ -191,8 +191,7 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["cat package.json", "allow"],
   ["cat > notes.md <<'EOF'\nhello\nEOF", "deny"],
   ["python3 -c 'print(1)'", "deny"],
-  ["cd /tmp && ls", "allow"], // T-11 (owner-approved change): was deny
-  ["cd /tmp /x && ls", "deny"],
+  ["cd /tmp && ls", "deny"],
   ["git log | python3", "deny"],
   ["git ls-files | xargs cat", "deny"],
   ["ls > out.txt", "deny"],
@@ -258,11 +257,9 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["sed -i 1,5p a.txt", "deny"],
   ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
   ["python3 x.py", "deny"],
-  ["cd src && ls", "allow"], // T-11: was deny
-  ["cd src docs && ls", "deny"],
+  ["cd src && ls", "deny"],
   ["git log --oneline | wc -l", "allow"],
-  ["cd /x && grep -n foo a.txt", "allow"], // T-11: was deny
-  ["cd /x && rm -r a.txt", "deny"],
+  ["cd /x && grep -n foo a.txt", "deny"],
   ["grep foo a.txt | sort", "deny"],
   ["echo hi", "allow"], // T-11: was deny
   ["echo hi > a.txt", "deny"],
@@ -313,9 +310,9 @@ test("researcher guard: every recorded command keeps its allow or deny decision"
 
 // A denial says what to use instead, and keeps its first words so the gate records still group.
 const HINTS = [
-  // T-11: `cd` and `sed` pass in their narrow forms; the refusal of any other form names the allowed one.
-  ["cd /x /y && grep -n foo a.txt", /^`cd` is allowed only with one literal path and nothing else.*`cd \/repo && git log -1`/],
-  ["cd src docs && ls", /^`cd` is allowed only with one literal path/],
+  ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
+  ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
+  // T-11: `sed` passes in its narrow form; the refusal of any other form names the allowed one.
   ["sed -i 1,5p a.txt", /^`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>`/],
   ["cut -z a.txt", /^cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
   ["stat --bogus a.txt", /^stat --bogus is not an allowed option/],
@@ -363,48 +360,85 @@ test("researcher guard (T-5): a device reached by another spelling of its path, 
   }
 });
 
-// Review of fix-guards: a value joined to a short-option cluster (`-rfdev/zero`) can start after any letter, so every
-// suffix of an option word, like a long option's value, is judged as a path from each folder a `cd` before it reached.
-test("researcher guard (T-5 with T-11): a relative device path joined to an option after a cd is refused", () => {
+// Third review of fix-guards: a symlink to `/` followed by `..` reaches /dev by a path whose text-normalised form does
+// not exist, so the device rule also asks the system for the real path of the unnormalised string.
+test("researcher guard (T-5): a device reached through a symlink and `..` is refused", () => {
+  const links = join(scratch, "device-links");
+  mkdirSync(links, { recursive: true });
+  const link = join(links, "root-link");
+  if (!existsSync(link)) symlinkSync("/", link);
   for (const c of [
-    "cd / && grep -fdev/zero x",
-    "cd / && grep -rfdev/zero x",
-    "cd / && grep -A3fdev/zero x",
-    "cd / && rg -fdev/zero x",
-    "cd / && rg -nfdev/urandom x",
-    "cd / && grep --file=dev/zero x",
-    "cd / && rg --file=dev/urandom x",
-    "cd / && grep -f dev/zero x",
-    "cd / && head -n5 dev/zero",
-    "cd / && head -c8dev/zero",
-    "cd / && tail -n5 dev/zero",
-    "cd / && wc -l dev/zero",
-    "cd / && wc -ldev/zero",
-    "cd / && sed -n 1p dev/zero",
-    "cd / && cut -f1 dev/zero",
-    "cd / && cut -sfdev/zero",
-    "cd /x && cd / && grep -rfdev/zero x",
-    "cd /dev && grep -fzero x",
-    "cd /dev && grep -rfzero x",
+    `cat ${link}/../dev/zero`,
+    `wc ${link}/../dev/zero`,
+    `grep -f${link}/../dev/zero x`,
+    `grep --file=${link}/../dev/zero x`,
+    `head -c 8 '${link}/../dev/urandom'`,
+    `cut -f1 ${link}/../dev/zero`,
   ]) {
     const v = researcherViolation(c, "/a/b");
     assert.ok(v, `expected a denial for ${c}`);
-    assert.match(v.reason, /device|enters \/dev/, c);
+    assert.match(v.reason, /device that may never end/, c);
   }
-  // Ordinary option words that are no paths still pass, also after `cd /`.
-  for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt", "cd / && grep -rn dev x", "cd / && grep -rdev x", "cd / && head -n5 a.txt", "cd / && cut -d, -f1 a.csv", "cd / && rg -f/dev/null x", "cd / && wc -c dev.txt"]) {
-    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  // Relative to the folder the command runs in.
+  for (const c of ["cat root-link/../dev/zero", "wc -c root-link/../dev/zero", "grep -froot-link/../dev/zero x"]) {
+    const v = researcherViolation(c, links);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // `cd` stays refused, so a relative path after it never reaches a device the check cannot follow.
+  const v = researcherViolation(`cd ${link} && cat ../dev/zero`, "/a/b");
+  assert.ok(v);
+  assert.match(v.reason, /^`cd` is not an allowed command; .*absolute paths/);
+  // /dev/null through the link, and ordinary files, still pass.
+  for (const c of [`cat ${link}/../dev/null`, `cat ${link}/../etc/hosts`, "cat root-link/../a.txt"]) {
+    assert.equal(researcherViolation(c, links), null, c);
   }
 });
 
-// Audit 2026-11-16 T-11 (approved by the owner): narrow forms of cd, sed -n, cut, stat and echo, which cannot write a
-// file or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
-test("researcher guard (T-11): cd, sed -n, cut, stat and echo in their narrow forms pass", () => {
+// Review of fix-guards: a value joined to a short-option cluster (`-rfdev/zero`) can start after any letter, so every
+// suffix of an option word, like a long option's value, is judged as a path from the folder the command runs in.
+test("researcher guard (T-5): a relative device path joined to an option is refused", () => {
   for (const c of [
-    "cd /repo && git log -1",
-    "cd src && ls",
-    "cd /x && grep -n foo a.txt",
-    "cd '/a dir' && ls",
+    "grep -fdev/zero x",
+    "grep -rfdev/zero x",
+    "grep -A3fdev/zero x",
+    "rg -fdev/zero x",
+    "rg -nfdev/urandom x",
+    "grep --file=dev/zero x",
+    "rg --file=dev/urandom x",
+    "grep -f dev/zero x",
+    "head -n5 dev/zero",
+    "head -c8dev/zero",
+    "tail -n5 dev/zero",
+    "wc -l dev/zero",
+    "wc -ldev/zero",
+    "sed -n 1p dev/zero",
+    "cut -f1 dev/zero",
+    "cut -sfdev/zero",
+  ]) {
+    const v = researcherViolation(c, "/");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["grep -fzero x", "grep -rfzero x"]) {
+    const v = researcherViolation(c, "/dev");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Ordinary option words that are no paths still pass, also from `/`.
+  for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+  for (const c of ["grep -rn dev x", "grep -rdev x", "head -n5 a.txt", "cut -d, -f1 a.csv", "rg -f/dev/null x", "wc -c dev.txt"]) {
+    assert.equal(researcherViolation(c, "/"), null, c);
+  }
+});
+
+// Audit 2026-11-16 T-11 (approved by the owner): narrow forms of sed -n, cut, stat and echo, which cannot write a file
+// or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
+// `cd` stays refused as before (the pinned decisions above).
+test("researcher guard (T-11): sed -n, cut, stat and echo in their narrow forms pass", () => {
+  for (const c of [
     "sed -n '10p' a.md",
     "sed -n '10,40p' a.md b.md",
     "sed -n 1,5p a.txt",
@@ -432,21 +466,6 @@ test("researcher guard (T-11): cd, sed -n, cut, stat and echo in their narrow fo
 
 test("researcher guard (T-11): the neighbours of the new forms that could write, run or read for ever stay refused", () => {
   for (const [c, re] of /** @type {[string, RegExp][]} */ ([
-    // cd: exactly one literal path, as a command of its own; never into /dev.
-    ["cd", /`cd` is allowed only with one literal path/],
-    ["cd /x /y && ls", /`cd` is allowed only with one literal path/],
-    ["cd -P /x", /`cd` is allowed only with one literal path/],
-    ["cd -", /`cd` is allowed only with one literal path/],
-    ["cd ~ && ls", /`cd` is allowed only with one literal path/],
-    ["cd ~/x && ls", /`cd` is allowed only with one literal path/],
-    ["cd $HOME && ls", /`cd` is allowed only with one literal path/],
-    ["cd src* && ls", /`cd` is allowed only with one literal path/],
-    ["cd /x; python3 x.py", /`python3`/],
-    ["cd /dev && cat zero", /device/],
-    ["cd /./dev && head -c 9 zero", /device/],
-    ["cd / && cat dev/zero", /device/],
-    ["cd /x && cd ../../dev && cat zero", /device/],
-    ["cd x/../../dev && cat zero", /`cd` is allowed only with one literal path/],
     // sed: only -n with one line or one range and p.
     ["sed -i 's/a/b/' a.txt", /`sed` is allowed only as `sed -n '10p' <file>`/],
     ["sed -i 1,5p a.txt", /`sed` is allowed only as/],
@@ -496,7 +515,7 @@ const bash = (/** @type {string} */ command, /** @type {string | null} */ agentT
 });
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
-  for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src docs && ls"]) { // T-11: `cd src && ls` passes now
+  for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src && ls"]) {
     for (const t of ["researcher", "orchestration:researcher"]) {
       const r = run(RESEARCHER, bash(c, t));
       assert.equal(r.code, 2, c);
