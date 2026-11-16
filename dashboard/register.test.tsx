@@ -2068,3 +2068,18 @@ test('prompt.submit: a failing ui.open with the pane on still hands the prompt o
   expect(out.text).toBe(PROMPT)
   expect(timers.length).toBeGreaterThan(0)
 })
+
+test('run: a VALIDATE: gaps review with a verdict supersedes the earlier reviews of its attempt, so no retry signal (brief.mjs fold)', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: fx', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 x')
+  await spawnWith($, 'v1', 'SLICE: fx\nVALIDATE: gaps', REVQ)
+  await finish($, 'v1', PASS)
+  expect((await texts($, 100, 200)).some(x => /fx/.test(x) && x.includes('⇧opus?'))).toBe(false) // the superseded fail is no retry signal
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'new thing' }) // the slice is final, so the run is closed and the prompt starts clean
+  expect((await texts($)).some(x => /fx/.test(x))).toBe(false)
+})
