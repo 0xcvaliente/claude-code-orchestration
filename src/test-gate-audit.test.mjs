@@ -344,7 +344,8 @@ test("T-12: a hook budget above 870 s is cut to 870, so the base run's share sta
   write(dir, { "app.js": "y\n" });
   const seen = join(mkdtempSync(join(tmpdir(), "orch-tga-seen-")), "seen");
   const cmd = `printf '%s\\n' "$ORCH_BASE_TIMEOUT_S" >> '${seen}'; ${TAP_CMD}`;
-  gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_HOOK_BUDGET_S: "5000", ORCH_BASE_TIMEOUT_S: "5000", ORCH_BUGFIX_CHECK: "off" } });
+  // A stall limit of an hour lets the budget reach its absolute maximum (the default, 540 s, is pinned in test-gate-load).
+  gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_HOOK_BUDGET_S: "5000", ORCH_BASE_TIMEOUT_S: "5000", ORCH_BUGFIX_CHECK: "off", CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS: "3600000" } });
   const share = Number(readFileSync(seen, "utf8").trim().split("\n").pop());
   assert.ok(share > 0 && share <= 860, `the base run got ${share} s`);
 });
