@@ -438,9 +438,10 @@ const GIT_PUSHY = ["push", "remote", "send-pack", "receive-pack", "config", "ali
 const MAX_DEPTH = 3;
 /** Script paths that are really stdin or another process: `bash /dev/stdin`, `source /dev/fd/3`. */
 const STDIN_PATH = /^\/(dev\/(stdin|fd\/)|proc\/)/;
-/** git config keys whose value runs a program (or pulls in config that may). */
+/** git config keys whose value runs a program (or pulls in config that may). `submodule.<name>.update` counts whatever
+ * its value: only a `!command` value runs one, and the value is not read. */
 const GIT_EXEC_KEY =
-  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.cmd|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
+  /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir)$/i;
 /** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
  * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
 const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|ENV|PROMPT_COMMAND|IFS|PATH|SHELLOPTS)\+?=/;

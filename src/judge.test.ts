@@ -606,6 +606,26 @@ test("classify (J4): a git argument that git runs as a shell command is read as 
   ]), []);
 });
 
+test("classify (J5): git config keys that run a program (trailer, submodule update, tool paths) are denied", () => {
+  assert.deepEqual(misread([
+    ["git -c 'trailer.x.cmd=rm -rf .git' interpret-trailers --trailer x=1 f", "deny"],
+    ["git -c 'trailer.x.command=rm -rf .git' interpret-trailers --trailer x=1 f", "deny"],
+    ["git -c 'submodule.x.update=!rm -rf .git' submodule update", "deny"],
+    ["git -c 'difftool.x.path=/tmp/evil' difftool --tool x", "deny"],
+    ["git -c 'mergetool.x.path=/tmp/evil' mergetool --tool x", "deny"],
+    ["git -c Trailer.X.Cmd=id interpret-trailers f", "deny"],
+    ["git config trailer.x.cmd 'rm -rf .git'", "deny"],
+    ["git config submodule.x.update '!rm -rf .git'", "deny"],
+    ["git config difftool.x.path /tmp/evil", "deny"],
+    // guards: other keys of the same sections
+    ["git -c difftool.prompt=false difftool", "pass"],
+    ["git -c trailer.sign.key=Signed-off-by interpret-trailers f", "pass"],
+    ["git -c submodule.recurse=true pull", "pass"],
+    ["git config submodule.x.url u", "pass"],
+    ["git submodule update --init", "pass"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.

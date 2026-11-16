@@ -99,6 +99,15 @@ const HARDENED = [
   ["git -C . rebase -x 'sudo id' main", ["deny"]],
   ["git bisect run 'rm -rf .git'", ["deny"]],
   ["git bisect run 'sudo id'", ["deny"]],
+  ["git -c 'trailer.x.cmd=rm -rf .git' interpret-trailers --trailer x=1 f", ["deny"]],
+  ["git -c 'trailer.x.command=rm -rf .git' interpret-trailers --trailer x=1 f", ["deny"]],
+  ["git -c 'submodule.x.update=!rm -rf .git' submodule update", ["deny"]],
+  ["git -c 'difftool.x.path=/tmp/evil' difftool --tool x", ["deny"]],
+  ["git -c 'mergetool.x.path=/tmp/evil' mergetool --tool x", ["deny"]],
+  ["git -c Trailer.X.Cmd=id interpret-trailers f", ["deny"]],
+  ["git config trailer.x.cmd 'rm -rf .git'", ["deny"]],
+  ["git config submodule.x.update '!rm -rf .git'", ["deny"]],
+  ["git config difftool.x.path /tmp/evil", ["deny"]],
 ];
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
