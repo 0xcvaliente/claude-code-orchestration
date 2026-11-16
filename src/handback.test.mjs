@@ -373,7 +373,7 @@ test("handback capture (G-14): a hand-back the report check refused is not the s
   try {
     const who = { agent: "i7", type: "orchestration:implementer" };
     // With a tool_use_id and without one (the refusal of the same hook follows its own capture).
-    for (const [agent, id] of [["i7", "toolu_i7"], ["i8", null]]) {
+    for (const [agent, id] of /** @type {[string, string | null][]} */ ([["i7", "toolu_i7"], ["i8", null]])) {
       const p = { ...handback("All done, tests pass.", { ...who, agent }), ...(id ? { tool_use_id: id } : {}) };
       assert.equal(run(dir, "handback-check.mjs", p).code, 2);
       stopHooks(dir, textStop(dir, agent, who.type, "STATUS: fail\nOPEN: lint"));
@@ -407,7 +407,7 @@ test("quote check (T-7): a made-up quote that cites a page beyond the PDF is unv
     copyFileSync(join(root, "src", "fixtures", "files", "text.pdf"), join(dir, "report.pdf")); // 3 pages
     const stopFor = (/** @type {string} */ agent, /** @type {string} */ page) =>
       run(dir, "quote-check.mjs", { session_id: "s1", hook_event_name: "SubagentStop", agent_id: agent, agent_type: "researcher", agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: `STATUS: pass\nQUOTE: report.pdf p. ${page} | The board approved a merger with Initech.\nOPEN: none` });
-    for (const [agent, page] of [["p1", "1"], ["p4", "4"], ["p999", "999"], ["p0", "0"]]) {
+    for (const [agent, page] of /** @type {[string, string][]} */ ([["p1", "1"], ["p4", "4"], ["p999", "999"], ["p0", "0"]])) {
       const r = stopFor(agent, page);
       assert.equal(r.code, 2, `page ${page}: ${r.stderr}`);
       assert.match(r.stderr, /1 of your QUOTE lines was not found/);

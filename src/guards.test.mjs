@@ -652,7 +652,7 @@ test("egress guard (T-6): no transcript, so the launch record's hosts and the sl
   add("ahl3", "SLICE: s1\nReview the change against https://other-session.example/x.", "another-session");
   const o = { dir: stateDir, env: env() };
   for (const id of ["ahl1", "ahl2", "ahl3"]) assert.equal(agentTranscript(mainTranscript, id), null, "no subagent transcript");
-  for (const [url, id, want] of [
+  for (const [url, id, want] of /** @type {[string, string, string][]} */ ([
     ["https://launch.example/other", "ahl1", "allow"],
     ["https://src.example:8443/b", "ahl1", "allow"],
     ["https://files.example/x", "ahl1", "allow"], // s1's planned files
@@ -661,7 +661,7 @@ test("egress guard (T-6): no transcript, so the launch record's hosts and the sl
     ["https://src.example/b", "ahl1", "deny"], // another port
     ["https://evil.example/?q=secret", "ahl2", "deny"], // a launch record that names no host: nothing is allowed
     ["https://other-session.example/x", "ahl3", "unverified"], // its launch record is another session's
-  ]) {
+  ])) {
     assert.equal(egressDecision(fetchInput(url, id), o).decision, want, `${id} ${url}`);
   }
   const d = egressDecision(fetchInput("https://evil.example/?q=secret", "ahl1"), o);
