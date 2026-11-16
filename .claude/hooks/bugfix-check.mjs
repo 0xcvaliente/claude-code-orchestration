@@ -126,10 +126,15 @@ export function parseFailures(text, root = "") {
     let m;
     if (hint) {
       // "--lib" is src/lib.rs, "--test x" tests/x.rs (cargo's default layout); any other target keeps the hint's words.
-      // A workspace's "-p <package>" is left out.
-      const t = (hint[1] ?? "").split(/\s+/).filter((w, k, all) => w && !/^(-p|--package)$/.test(w) && !/^(-p|--package)$/.test(all[k - 1] ?? ""));
+      // A workspace's "-p <package>" becomes a leading folder ("<package>/tests/x.rs"), which inFiles matches as the
+      // tail of the member's path (crates/<package>/tests/x.rs), so another member's file of the same name never matches.
+      const all = (hint[1] ?? "").split(/\s+/).filter(Boolean);
+      const pk = all.findIndex((w) => /^(-p|--package)$/.test(w));
+      const pkg = pk >= 0 ? all[pk + 1] : undefined;
+      const t = pk >= 0 ? all.filter((w, k) => k !== pk && k !== pk + 1) : all;
       const test = t.indexOf("--test") >= 0 ? t[t.indexOf("--test") + 1] : undefined;
-      const target = t.includes("--lib") ? "src/lib.rs" : test ? `tests/${test}.rs` : t.join(" ").replace(/^--/, "");
+      const file = t.includes("--lib") ? "src/lib.rs" : test ? `tests/${test}.rs` : "";
+      const target = file ? (pkg ? `${pkg}/${file}` : file) : t.join(" ").replace(/^--/, "");
       for (const n of cargoPending) add(target || null, n);
       cargoPending = [];
     } else if ((m = /^(\S+) --- FAILED$/.exec(line))) {
@@ -246,7 +251,8 @@ export function inFiles(name, files) {
   const q = name.slice(0, k).replace(/\\/g, "/");
   return files.some((t) => {
     if (q === t || q.endsWith(`/${t}`)) return true;
-    if (/\.py$/.test(q) && t.endsWith(`/${q}`)) return true; // unittest: a module path relative to discover's start folder
+    // unittest: a module path relative to discover's start folder; cargo: a workspace member's "<package>/tests/x.rs".
+    if (/\.(py|rs)$/.test(q) && t.endsWith(`/${q}`)) return true;
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });

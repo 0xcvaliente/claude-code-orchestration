@@ -190,6 +190,17 @@ test("T-13: the terse form of cargo test --quiet is parsed, qualified by cargo's
   assert.equal(parseFailures("error: test failed, to rerun pass `--lib`\n").crash, true, "the hint with no failed name is still a crash");
 });
 
+test("T-13: a workspace member's quiet cargo failure matches the member's changed test file, not another member's", () => {
+  const integ = parseFailures("it_works --- FAILED\n\nerror: test failed, to rerun pass `-p mycrate --test foo`\n").names[0] ?? "";
+  assert.ok(inFiles(integ, ["crates/mycrate/tests/foo.rs"]), `${integ} in crates/mycrate/tests/foo.rs`);
+  assert.ok(!inFiles(integ, ["crates/other/tests/foo.rs"]), `${integ} is not in another member`);
+  const lib = parseFailures("tests::adds --- FAILED\n\nerror: test failed, to rerun pass `-p mycrate --lib`\n").names[0] ?? "";
+  assert.ok(inFiles(lib, ["crates/mycrate/src/lib.rs"]), `${lib} in crates/mycrate/src/lib.rs`);
+  assert.ok(!inFiles(lib, ["crates/other/src/lib.rs"]));
+  // A single crate keeps its root-relative qualifier.
+  assert.ok(inFiles(parseFailures("adds --- FAILED\nerror: test failed, to rerun pass `--test add_test`\n").names[0] ?? "", ["tests/add_test.rs"]));
+});
+
 // ---- T-9: the block caps restart when the agent is started again (a SendMessage resume) ----
 
 /** @param {string} project @param {string} id */

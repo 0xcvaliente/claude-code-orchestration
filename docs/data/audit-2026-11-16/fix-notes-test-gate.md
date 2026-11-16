@@ -19,14 +19,14 @@ each seen failing before its fix). dist/ is not rebuilt here: `npm run build-plu
 - Docs: README.md:168 and docs/native-mode.md (Bugfix check) should say a whole-file failure (import or syntax error) does not count.
 
 ## T-4: unittest output
-- Changed: `bugfix-check.mjs` `parseFailures` (`FAIL:`/`ERROR: name (module.Class.name)`, qualified as `module/path.py::Class.name`; `unittest.loader._FailedTest` is a crash) and `inFiles` (a `.py`/`.rs` qualifier may be the tail of the test file's path).
+- Changed: `bugfix-check.mjs` `parseFailures` (`FAIL:`/`ERROR: name (module.Class.name)`, qualified as `module/path.py::Class.name`; `unittest.loader._FailedTest` is a crash) and `inFiles` (a qualifier ending in `.py` or `.rs` also matches when it is the tail of the changed test file's path: a unittest module relative to discover's start folder, or a cargo workspace member's `<package>/tests/x.rs`).
 - Effect: a unittest reproduction test is `bugfix_verified` at the first stop; the baseline note works for unittest.
 - Docs: docs/native-mode.md:212 runner list should name unittest (and say cargo `--quiet`).
 
 ## T-13: cargo test --quiet
 - Changed: `bugfix-check.mjs` `parseFailures`: `name --- FAILED` qualified by the following `error: test failed, to rerun pass` hint (`--lib` as src/lib.rs, `--test x` as tests/x.rs); that hint is no crash when it qualifies names. The detected command is unchanged.
 - Effect: cargo bugfix slices verify (audit r13 now logs `bugfix_verified`); the baseline note works for cargo.
-- Docs: bugfix-check.mjs header updated; docs/native-mode.md:212 as above. Limit: a workspace's `-p <pkg>` is dropped, so the qualifier is the member-relative path.
+- Docs: bugfix-check.mjs header updated; docs/native-mode.md:212 as above. Workspaces: the hint's `-p <package>` becomes a leading folder (`<package>/tests/x.rs`, `<package>/src/lib.rs`), matched as the tail of the member's path (`crates/<package>/tests/x.rs`), never another member's file. Limit: a member whose folder name differs from its package name does not match, so its bugfix slice still blocks.
 
 ## T-9: caps per attempt (gate side)
 - Changed: `bugfix-check.mjs` (`countBlocks`), `verify.sh` (`count_blocks`, used for the tests_failed cap and the bugfix_timeout/tmp_lost cap): blocks count only since the agent's latest SubagentStart in telemetry.jsonl; none recorded counts as before; grep fallback when node fails.
