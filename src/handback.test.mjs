@@ -2,8 +2,8 @@
 // answers) and quote-check.mjs on the same event, run as child processes with fixture state (no model call).
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -330,6 +330,91 @@ test("handback capture (d, e): no agent id, no hand-back, or only an earlier sto
     stopHooks(dir, { ...stopOf(staleTranscript(dir), { agent: "e1" }), last_assistant_message: "STATUS: fail\nOPEN: none" });
     const e = lastStop(dir, "e1");
     assert.deepEqual([e.journal?.status, e.telemetry?.status], ["fail", "fail"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Audit 2026-11-16 G-14: a capture that a check refused is never preferred at the stop. ----
+
+/** Journal (either log) and telemetry status of an agent's latest stop. @param {string} dir @param {string} agent */
+const stopStatus = (dir, agent) => [
+  [...stateLog(dir, "journal.jsonl"), ...stateLog(dir, "journal-pending.jsonl")].filter((r) => r.agent_id === agent).at(-1)?.status,
+  stateLog(dir, "telemetry.jsonl").filter((r) => r.agent_id === agent && r.hook_event_name === "SubagentStop").at(-1)?.status,
+];
+/** A stop whose transcript is gone and whose last message is `text`. @param {string} dir @param {string} agent @param {string} type @param {string} text */
+const textStop = (dir, agent, type, text) => ({ ...stopOf(join(dir, "missing.jsonl"), { agent, type }), last_assistant_message: text });
+
+test("handback capture (G-14): a hand-back the quote check refused is not the stop's report, in either hook order", () => {
+  const dir = project();
+  try {
+    writeFileSync(join(dir, "notes.md"), "The parser never throws.\n");
+    const refused = 'STATUS: pass\nQUOTE: notes.md:1 | "The parser always throws."\nOPEN: none';
+    const text = "STATUS: fail\nOPEN: the quote could not be found";
+    for (const [agent, quoteFirst] of /** @type {[string, boolean][]} */ ([["res1", false], ["res2", true]])) {
+      const payload = { ...handback(refused, { agent, type: "orchestration:researcher" }), tool_use_id: `toolu_${agent}` };
+      // The two hooks run beside each other on one PreToolUse: the refusal may be written before the capture.
+      const order = quoteFirst ? ["quote-check.mjs", "handback-check.mjs"] : ["handback-check.mjs", "quote-check.mjs"];
+      const codes = order.map((h) => run(dir, h, payload).code);
+      assert.deepEqual(codes, quoteFirst ? [2, 0] : [0, 2], agent);
+      // The researcher ends with a text report and no new hand-back.
+      stopHooks(dir, textStop(dir, agent, "orchestration:researcher", text));
+      // The journal keeps no researcher stops; telemetry does.
+      assert.deepEqual(stopStatus(dir, agent), [undefined, "fail"], `${agent}: the refused capture said pass`);
+    }
+    assert.ok(!readFileSync(join(dir, ".claude", "state", "handback-refusals.jsonl"), "utf8").includes("parser"), "the refusal record holds no report text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("handback capture (G-14): a hand-back the report check refused is not the stop's report; a later delivered one is", () => {
+  const dir = project();
+  try {
+    const who = { agent: "i7", type: "orchestration:implementer" };
+    // With a tool_use_id and without one (the refusal of the same hook follows its own capture).
+    for (const [agent, id] of /** @type {[string, string | null][]} */ ([["i7", "toolu_i7"], ["i8", null]])) {
+      const p = { ...handback("All done, tests pass.", { ...who, agent }), ...(id ? { tool_use_id: id } : {}) };
+      assert.equal(run(dir, "handback-check.mjs", p).code, 2);
+      stopHooks(dir, textStop(dir, agent, who.type, "STATUS: fail\nOPEN: lint"));
+      assert.deepEqual(stopStatus(dir, agent), ["fail", "fail"], agent);
+    }
+    // Refused once, then delivered: the delivered capture is the stop's report.
+    const r9 = { ...who, agent: "i9" };
+    assert.equal(run(dir, "handback-check.mjs", { ...handback("no status", r9), tool_use_id: "toolu_a" }).code, 2);
+    assert.equal(run(dir, "handback-check.mjs", { ...handback("STATUS: pass\nOPEN: none", r9), tool_use_id: "toolu_b" }).code, 0);
+    stopHooks(dir, stopOf(join(dir, "missing.jsonl"), r9));
+    assert.deepEqual(stopStatus(dir, "i9"), ["pass", "pass"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---- Audit 2026-11-16 T-7: a page the PDF does not have is not "a page with no text". ----
+
+const hasPoppler = (() => {
+  try {
+    for (const t of ["pdfinfo", "pdftotext", "pdfimages"]) execFileSync(t, ["-v"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("quote check (T-7): a made-up quote that cites a page beyond the PDF is unverified and sent back once", { skip: hasPoppler ? false : "poppler is not installed" }, () => {
+  const dir = project();
+  try {
+    copyFileSync(join(root, "src", "fixtures", "files", "text.pdf"), join(dir, "report.pdf")); // 3 pages
+    const stopFor = (/** @type {string} */ agent, /** @type {string} */ page) =>
+      run(dir, "quote-check.mjs", { session_id: "s1", hook_event_name: "SubagentStop", agent_id: agent, agent_type: "researcher", agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: `STATUS: pass\nQUOTE: report.pdf p. ${page} | The board approved a merger with Initech.\nOPEN: none` });
+    for (const [agent, page] of /** @type {[string, string][]} */ ([["p1", "1"], ["p4", "4"], ["p999", "999"], ["p0", "0"]])) {
+      const r = stopFor(agent, page);
+      assert.equal(r.code, 2, `page ${page}: ${r.stderr}`);
+      assert.match(r.stderr, /1 of your QUOTE lines was not found/);
+      const e = stateLog(dir, "quotes.jsonl").at(-1);
+      assert.deepEqual([e.agent_id, e.unverified, e.unverifiable, e.blocked], [agent, 1, 0, true], `page ${page}`);
+      assert.equal(stopFor(agent, page).code, 0, `page ${page}: the second stop passes`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

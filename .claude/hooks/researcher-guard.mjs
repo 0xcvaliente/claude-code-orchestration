@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // PreToolUse hook (matcher Bash): holds the researcher to its read-only Bash allowlist. The researcher's tools line
 // allows only git log/ls-files/rev-list/rev-parse/status/show, git branch --show-current (each also as git -C <dir> ...),
-// wc, ls and du, and (1.2.0) read-only search and paging: grep, rg, find, head, tail and cat. A researcher once wrote a
+// wc, ls and du, (1.2.0) read-only search and paging: grep, rg, find, head, tail and cat, and (audit 2026-11-16 T-11)
+// `sed -n '<N>p'`/`'<N>,<M>p'`, cut, stat and echo in narrow forms. `cd` stays refused: a relative path after it could
+// reach a device in ways a check of the command text cannot follow. A researcher once wrote a
 // file with a heredoc and ran python3 regardless (docs/research-2026-10-31.md, section 6.5). This hook enforces the same
 // list on every segment of the command.
 // Why search runs through Bash: on macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose
@@ -9,8 +11,10 @@
 // "Glob tool behavior"). Without them the researcher could only Read whole files (docs/research-2026-11-10.md). Each is
 // held to forms that cannot write a file or start a program: `find` without its exec, ok, delete and fprint actions,
 // `grep` and `rg` with long options from SEARCH_LONG only (so no --filter, --pager, --pre or config file) and
-// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them on a /dev/ device (also as an
-// option's value); no command may hold a glob in an option's name (`tail -?`, `find . -delet[e]`). A lone `--`
+// without rg -z or grep -Q, `tail` without follow in any spelling, and none of them (nor wc) on a /dev/ device other
+// than /dev/null (also as an option's value; judged on the text-normalised path and on the path the system resolves
+// the written string to, not on its text); no command may hold a glob in an option's name (`tail -?`,
+// `find . -delet[e]`). Not judged: a glob that the shell expands to a device path (`cat /dev/zer?`). A lone `--`
 // never ends the check (review of 2026-11-10: `rg -e -- --pre=sh x` used it to hide an option).
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output (the session's own permission rules then
 // decide). It never prints an allow or ask decision. Acts only when the bare agent_type is `researcher`; any other
@@ -21,17 +25,26 @@
 // exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
 // allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
-import { appendFileSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, readFileSync, realpathSync } from "node:fs";
+import { join, posix } from "node:path";
 import { tokenize } from "./judge-core.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 export const ALLOWED_PREFIXES = [
   "git log", "git ls-files", "git rev-list", "git rev-parse", "git status", "git show", "git branch --show-current",
   "git -C <dir> <one of those>", "wc", "ls", "du", "grep", "rg", "find (no -exec, -ok, -delete or -fprint)", "head", "tail (no -f)", "cat",
+  "sed -n '<N>p' or '<N>,<M>p'", "cut (-b, -c, -f, -d, -s, --complement, --output-delimiter)", "stat", "echo",
 ];
 const GIT_SUBS = new Set(["log", "ls-files", "rev-list", "rev-parse", "status", "show"]);
-const PLAIN = new Set(["wc", "ls", "du"]);
+// Audit 2026-11-16 T-11 (approved by the owner): five more read-only forms, each held to what cannot write a file or
+// start a program. stat reads metadata only (its long options from STAT_LONG); echo only prints (redirection stays
+// refused); cut has no write or exec option, and only -b, -c, -f, -d, -s, --complement and --output-delimiter pass;
+// sed only as `sed -n '<N>p'` or `sed -n '<N>,<M>p'` (no -i, no w, e or s///w script, no glob operand that could expand
+// into an option).
+const PLAIN = new Set(["wc", "ls", "du", "stat", "echo", "cut", "sed"]);
+const STAT_LONG = new Set(["dereference", "file-system", "format", "printf", "terse", "cached", "help", "version"]);
+const SED_FORM = "`sed` is allowed only as `sed -n '10p' <file>` or `sed -n '10,40p' <file>` (one line or one line range, no other option or script)";
+const CUT_FORM = "use only -b, -c, -f, -d, -s, --complement and --output-delimiter";
 const SEARCH = new Set(["grep", "egrep", "fgrep", "rg"]);
 // find and bfs actions that run a program or write a file.
 // `-rm` is bfs's own name for -delete.
@@ -40,9 +53,12 @@ const FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|rm|fprint|fprint0|fprintf|
 // tail's --follow and --retry and every shortened spelling GNU tail accepts for them (--fol, --f).
 const PAGE_LONG = new Set(["lines", "bytes", "quiet", "silent", "verbose", "zero-terminated", "help", "version"]);
 const PAGERS = new Set(["head", "tail", "cat"]);
-// A /dev/ path as a whole argument, as a long option's value (`--file=/dev/zero`) or attached to short options
-// (`-f/dev/zero`, `-rf/dev/zero`): group 1 is the path.
-const DEVICE = /^(?:--[^=]+=|-[A-Za-z0-9]+=?)?(\/dev\/.*)$/;
+// Audit 2026-11-16 T-5: a device path is judged after normalising it, never by its text: `/./dev/zero`, `//dev/zero`,
+// `/private/../dev/zero` and a relative `../../dev/zero` (resolved against the command's folder) all name /dev/zero,
+// and so does a path whose real path the system resolves to a device: a symlink to it, or a symlink to `/` followed by
+// `..` (`<link>/../dev/zero`, whose text-normalised form does not exist). The commands that read their operands are
+// under the rule: the search and paging commands, wc, and the narrow sed and cut forms.
+const READERS = new Set(["wc", "sed", "cut"]);
 // Long options of grep, ugrep and ripgrep that only change what is searched or how matches print. Anything else is
 // denied by name, which covers the ones that run a program or write a file (ugrep --filter, --pager, --view,
 // --save-config, --config and ---FILE; ripgrep --pre, --hostname-bin) without listing them.
@@ -62,21 +78,22 @@ const SEARCH_LONG = new Set([
 
 // What a refused researcher should do instead (gate records showed refusals with no way forward). Appended after the
 // reason's first words, which stay the same so the records still group by them.
-const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du and read-only git, and work the result out in the report";
+const USE_ALLOWED = "use only grep, rg, find, head, tail, cat, ls, wc, du, cut, stat, echo, `sed -n` line ranges and read-only git, and work the result out in the report";
 
 /** @param {string} word @returns {string} */
 function insteadOf(word) {
   if (word === "cd") return "put absolute paths in the command itself (`grep -n foo /repo/a.txt`, `git -C /repo log`)";
-  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, or `head` and `tail`";
+  if (word === "sed" || word === "awk") return "to print a line range use the Read tool with offset and limit, `head` and `tail`, or `sed -n '10,40p' <file>`";
   return USE_ALLOWED;
 }
 
 /**
  * Why `command` is outside the researcher's allowlist, or null when it is inside.
- * @param {string} command @returns {{ reason: string, word?: string } | null}
+ * @param {string} command @param {string} [cwd] the folder the command runs in (relative paths resolve against it)
+ * @returns {{ reason: string, word?: string } | null}
  */
-export function researcherViolation(command) {
-  return violation(withoutStderrNull(command));
+export function researcherViolation(command, cwd = process.cwd()) {
+  return violation(withoutStderrNull(command), cwd);
 }
 
 // The two stderr forms a researcher may write, each a word of its own: `2>/dev/null` and `2>&1`.
@@ -132,8 +149,8 @@ function withoutStderrNull(command) {
   return out;
 }
 
-/** @param {string} command @returns {{ reason: string, word?: string } | null} */
-function violation(command) {
+/** @param {string} command @param {string} cwd @returns {{ reason: string, word?: string } | null} */
+function violation(command, cwd) {
   /** @type {any} */
   let t;
   try {
@@ -167,7 +184,8 @@ function violation(command) {
     }
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
-    const option = optionViolation(w);
+    if (w[0] === "sed" && !sedForm(words)) return { reason: SED_FORM, word: "sed" };
+    const option = optionViolation(w, cwd);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -189,6 +207,19 @@ function globInOptionName(w) {
   return false;
 }
 
+/** A word with literal text only: no expansion and no glob. @param {any} w */
+const literal = (w) => Array.isArray(w?.pieces) && w.pieces.every((/** @type {any} */ p) => "lit" in p);
+
+/**
+ * `sed -n '<N>p'` or `sed -n '<N>,<M>p'` and file operands that are literal and not options, nothing else.
+ * @param {any[]} words
+ */
+function sedForm(words) {
+  if (words.length < 3 || !words.every(literal)) return false;
+  if (words[1].text !== "-n" || !/^[0-9]+(?:,[0-9]+)?p$/.test(String(words[2].text))) return false;
+  return words.slice(3).every((w) => typeof w.text === "string" && w.text !== "" && !w.text.startsWith("-"));
+}
+
 /** @param {string[]} w */
 function allowedWords(w) {
   const first = w[0] ?? "";
@@ -205,23 +236,27 @@ function allowedWords(w) {
  * it can be the value of one (`rg -e -- --pre=sh x` reads `--` as the pattern and `--pre` as an option). So a word
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
- * @param {string[]} w @returns {string | null}
+ * @param {string[]} w @param {string} cwd the folder the command runs in @returns {string | null}
  */
-function optionViolation(w) {
+function optionViolation(w, cwd) {
   const first = w[0] ?? "";
   const args = w.slice(1);
   if (first === "find") {
     const action = args.find((x) => FIND_ACTIONS.test(x));
     return action ? `find ${action} runs a program or writes a file` : null;
   }
-  if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
-  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail or a search reading for ever, also
-  // as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
-  const device = args.find((a) => {
-    const path = DEVICE.exec(a)?.[1];
-    return path !== undefined && path !== "/dev/null";
-  });
+  if (first === "stat") {
+    // stat reads metadata only; its long options still pass by name only (and a lone `--` is not one of them).
+    const bad = args.find((a) => a.startsWith("--") && !STAT_LONG.has(a.slice(2).split("=")[0] ?? ""));
+    return bad ? `stat --${bad.slice(2).split("=")[0]} is not an allowed option (it may run a program, write a file or never end)` : null;
+  }
+  if (!SEARCH.has(first) && !PAGERS.has(first) && !READERS.has(first)) return null;
+  // A device that never ends (/dev/zero, /dev/urandom) would keep cat, head, tail, wc or a search reading for ever,
+  // also as an option's value (`--file=/dev/zero`, `-f/dev/zero`). /dev/null is allowed in each of those places.
+  const device = args.find((a) => readsDevice(a, cwd));
   if (device) return `${first} ${device} reads a device that may never end`;
+  if (first === "cut") return cutViolation(args);
+  if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
   for (const a of args) {
     if (a.startsWith("--")) {
       if (a === "--") continue;
@@ -235,6 +270,70 @@ function optionViolation(w) {
     }
   }
   return null;
+}
+
+/**
+ * Why a cut command is refused, or null: only -b, -c, -f, -d (each with its value attached or as the next word), -s,
+ * --complement and --output-delimiter (with `=` or the next word). Every other word that starts with a dash is refused,
+ * a lone `--` included, so it never ends the check.
+ * @param {string[]} args @returns {string | null}
+ */
+function cutViolation(args) {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === "--complement" || a.startsWith("--output-delimiter=")) continue;
+    if (a === "--output-delimiter") {
+      i++;
+      continue;
+    }
+    if (a.startsWith("--")) return `cut ${a.split("=")[0]} is not an allowed option; ${CUT_FORM}`;
+    if (a.length < 2 || !a.startsWith("-")) continue; // a file operand, or `-` for standard input
+    for (let j = 1; j < a.length; j++) {
+      const ch = a[j] ?? "";
+      if (ch === "s") continue;
+      if (!"bcfd".includes(ch)) return `cut -${ch} is not an allowed option; ${CUT_FORM}`;
+      if (j === a.length - 1) i++; // the value is the next word
+      break;
+    }
+  }
+  return null;
+}
+
+/**
+ * Does an argument name a device other than /dev/null: as a whole word, as a long option's value (`--file=/dev/zero`)
+ * or attached to short options (`-f/dev/zero`, `-rf../dev/zero`)? Each candidate path is judged three ways: resolved
+ * against `cwd` as text (which normalises `.`, `..` and repeated slashes), and, when it exists, the system's real path
+ * of that normalised path and of the string as written (joined to `cwd` when relative). The last one matters: the
+ * system follows a symlink before it applies the `..` after it, so `<link to />/../dev/zero` is /dev/zero although its
+ * text-normalised form names a file that does not exist. `realpathSync.native` asks the system; Node's own
+ * `realpathSync` normalises the text first and would miss it.
+ * @param {string} arg @param {string} cwd
+ */
+function readsDevice(arg, cwd) {
+  const candidates = [arg];
+  const long = /^--[^=]+=(.*)$/.exec(arg);
+  if (long) candidates.push(long[1] ?? "");
+  // A value joined to a short-option cluster may start after any of its letters (`-rfdev/zero` is -r, then -f with
+  // `dev/zero`), so every suffix after the first letter is a candidate, with or without a leading `=`.
+  if (arg.startsWith("-") && !arg.startsWith("--")) {
+    for (let j = 2; j < arg.length; j++) {
+      const rest = arg.slice(j);
+      candidates.push(rest.startsWith("=") ? rest.slice(1) : rest);
+    }
+  }
+  return candidates.some((p) => {
+    if (!p) return false;
+    const normalised = posix.resolve(cwd, p);
+    const paths = [normalised];
+    for (const q of [normalised, p.startsWith("/") ? p : `${cwd}/${p}`]) {
+      try {
+        paths.push(realpathSync.native(q));
+      } catch {
+        // no such file: the other paths decide
+      }
+    }
+    return paths.some((x) => x.startsWith("/dev/") && x !== "/dev/null");
+  });
 }
 
 // Run as a hook only when executed directly (the tests import researcherViolation).
@@ -251,7 +350,8 @@ if (process.argv[1]?.endsWith("researcher-guard.mjs")) {
   const type = typeof input?.agent_type === "string" ? input.agent_type.replace(/^orchestration:/, "") : "";
   const command = input?.tool_input?.command;
   if (type !== "researcher" || (input.tool_name !== undefined && input.tool_name !== "Bash") || typeof command !== "string" || !command.trim()) process.exit(0);
-  const v = researcherViolation(command);
+  // Relative paths resolve against the folder the command runs in: the payload's cwd, else the project folder.
+  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : process.env.CLAUDE_PROJECT_DIR || process.cwd());
   if (!v) process.exit(0);
   try {
     ensureStateDir();
