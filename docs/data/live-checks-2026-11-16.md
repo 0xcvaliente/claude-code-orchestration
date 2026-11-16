@@ -101,6 +101,27 @@ Without `settings`, the SDK session is the orchestrator too (the same six tools 
 
 **Confirmed.**
 
+## Check 5: a dash-led prompt after `--`, and the Concise output style in the flag settings
+
+Added later the same day for the audit fixes W-4 (a task that starts with `-`) and O-5 (plain sessions in the Concise style). Claude Code 2.1.325, run once from an empty folder outside any repository (no project settings, so no `agent` setting to clear), cheapest model, one turn. The `--allowedTools` list comes right before `--`, as in `scripts/orchestrate.sh`, so the probe also shows that `--` ends that variadic option.
+
+```bash
+claude -p --model haiku --max-turns 1 --no-session-persistence --output-format stream-json --verbose \
+  --permission-mode dontAsk --settings '{"agent":"","outputStyle":"Concise"}' --allowedTools Read Grep \
+  -- "-x Reply with the single word ok."
+```
+
+**Output.** Exit code 0, nothing on stderr.
+
+```
+init:   {"claude_code_version":"2.1.325","model":"claude-haiku-5-5","output_style":"Concise", 596 tools}
+result: {"subtype":"success","is_error":false,"num_turns":1,"result":"ok"}
+```
+
+The prompt `-x Reply ...` was taken as the prompt, not as an unknown option `-x` and not as a third `--allowedTools` rule (the session answered it). The init event reports `output_style: "Concise"`, so `outputStyle` in the `--settings` JSON selects the built-in style (the name is case-sensitive: https://code.claude.com/docs/en/output-styles).
+
+**Confirmed.** Not probed: a prompt of `-` alone, and whether `outputStyle` applies to a session started with `--agent`.
+
 ## Limits
 
 Each claim was probed once, headless (`-p` or the SDK), on 2.1.325 and macOS; an interactive session was not started, and neither `scripts/orchestrate.sh` nor the npm script `plain` was run end to end (the flag they pass was). No init event names the agent, so the conclusions rest on the tool lists and models. Not probed: the comment's claim that the empty `agent` "changes no other setting" (only the tool list and model were compared, not permissions, hooks or other keys); whether `--agent` also wins over `--settings '{"agent":""}'` when both are passed; and whether `--agent` with an agent the setting does not name changes anything besides tools and model (system prompt, effort, maxTurns).

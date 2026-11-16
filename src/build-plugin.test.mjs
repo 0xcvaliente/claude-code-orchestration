@@ -118,6 +118,40 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
   }
 });
 
+test("--check skips only dist/plugin/evals/results: a stale source named results anywhere else fails it", () => {
+  const dir = project({ evals: true });
+  try {
+    const notes = join(dir, ".claude", "skills", "route", "results", "notes.md");
+    mkdirSync(dirname(notes), { recursive: true });
+    writeFileSync(notes, "v1\n");
+    mkdirSync(join(dir, "evals", "cases", "results"), { recursive: true });
+    writeFileSync(join(dir, "evals", "cases", "results", "r.json"), "1\n");
+    const run = () => spawnSync("node", [script, "--check"], { cwd: dir, encoding: "utf8" });
+    assert.equal(spawnSync("node", [script], { cwd: dir, encoding: "utf8" }).status, 0);
+    assert.equal(run().status, 0, "fresh build");
+    // What `claude plugin eval` writes is not part of the build: still up to date.
+    mkdirSync(join(dir, "dist", "plugin", "evals", "results", "run-1"), { recursive: true });
+    writeFileSync(join(dir, "dist", "plugin", "evals", "results", "run-1", "report.json"), "{}\n");
+    assert.equal(run().status, 0, run().stderr);
+    // A changed skill file under a results/ folder: stale.
+    writeFileSync(notes, "v2\n");
+    const stale = run();
+    assert.equal(stale.status, 1, "a changed skills/route/results/notes.md must fail the check");
+    assert.match(stale.stderr, /skills\/route\/results\/notes\.md/);
+    writeFileSync(notes, "v1\n");
+    assert.equal(run().status, 0);
+    // A changed eval case under evals/cases/results: stale too.
+    writeFileSync(join(dir, "evals", "cases", "results", "r.json"), "2\n");
+    assert.equal(run().status, 1, "evals/cases/results is source");
+    writeFileSync(join(dir, "evals", "cases", "results", "r.json"), "1\n");
+    // A file only on one side fails as well.
+    writeFileSync(join(dir, "dist", "plugin", "stray.txt"), "x\n");
+    assert.equal(run().status, 1, "an extra file in dist/plugin");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The committed plugin (dist/plugin) next to the project settings: the 0.4.0 hooks, timeouts, the judge's onFailure,
 // and userConfig for every switch state.mjs bridges.
 /** @param {string} p */
