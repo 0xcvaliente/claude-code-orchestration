@@ -278,7 +278,7 @@ function raiseHaiku() {
     if (String(process.env.ORCH_ALLOW_HAIKU ?? "").trim() === "1") return false;
     const explicit = typeof tool.model === "string" && tool.model.trim() ? tool.model.trim() : null;
     const model = explicit ?? agentFileModel();
-    if (modelRank(model) !== 0) return false;
+    if (modelRank(model) !== 0 && !haikuFamily(model)) return false;
     tool.model = FLOOR_MODEL;
     try {
       ensureStateDir();
@@ -571,6 +571,15 @@ function modelRank(m) {
   const s = String(m ?? "").trim().toLowerCase();
   const family = s.match(/^(?:claude-)?(haiku|sonnet|opus|fable)(?:$|-)/)?.[1];
   return family === undefined ? null : ({ haiku: 0, sonnet: 1, opus: 2, fable: 3 })[family] ?? null;
+}
+
+/**
+ * The haiku rule's own test, wider than modelRank (which stays strict for the read router): the word haiku anywhere in
+ * the id, between non-letters, so dated and provider-prefixed ids (claude-3-5-haiku-20241022,
+ * us.anthropic.claude-haiku-4-5-20251001-v1:0) count. @param {unknown} m
+ */
+function haikuFamily(m) {
+  return /(?:^|[^a-z])haiku(?:$|[^a-z])/.test(String(m ?? "").trim().toLowerCase());
 }
 
 /** Short reason codes from a profile (never file text). @param {any} r @param {import("./brief.mjs").Header} hd */
