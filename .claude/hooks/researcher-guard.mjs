@@ -402,7 +402,8 @@ function judged(q) {
  * The physical path of the absolute path `p`, walked one name at a time with lstat and readlink, the way the kernel
  * reads it: a symlink is followed before the `..` after it. "missing" when a name does not exist or a non-folder has
  * names after it, "unknown" for a loop (over 40 links) or any other error, "device" when the walk passes through /dev's
- * file system and does not end at /dev/null, "budget" past the lstat budget of this decision.
+ * file system and does not end at /dev/null (also when a later name is missing: `<link to /dev>/fd/63` names a
+ * descriptor this process lacks but the command's shell may hold), "budget" past the lstat budget of this decision.
  * @param {string} p @returns {string}
  */
 function resolve(p) {
@@ -428,6 +429,7 @@ function resolve(p) {
       st = lstatSync(next);
     } catch (err) {
       const code = /** @type {any} */ (err)?.code;
+      if (throughDev) return "device";
       return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
     }
     if (st.isSymbolicLink()) {
@@ -443,11 +445,11 @@ function resolve(p) {
       continue;
     }
     if (DEV_ID && st.dev === DEV_ID.dev) throughDev = true;
-    if (rest.length && !st.isDirectory()) return "missing";
+    if (rest.length && !st.isDirectory()) return throughDev ? "device" : "missing";
     cur = next;
     last = st;
   }
-  if (wantsFolder && last && !last.isDirectory()) return "missing";
+  if (wantsFolder && last && !last.isDirectory()) return throughDev ? "device" : "missing";
   if (last && sameId(last, NULL_ID)) return cur;
   if (throughDev) return "device";
   return cur;

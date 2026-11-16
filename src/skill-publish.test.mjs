@@ -360,3 +360,30 @@ test("W-1 push address: a push URL that is the fetch URL, and an origin with non
     });
   }
 });
+
+// fix-guards-2 item 3: with push.followTags set, a plain push also sends the annotated tags that point into the pushed
+// commits, and tag messages are never scanned. The publish push names --no-follow-tags, and the dry run says so.
+// Dry run only; the printed push options are tried against scratch bare remotes of their own, never origin.
+test("guards-2 item 3: the push never follows tags, even with push.followTags set, and the dry run reports it", () => {
+  withSetup((s) => {
+    git(s.repo, ["config", "push.followTags", "true"], s.base);
+    git(s.draft, ["tag", "-a", "v-demo", "-m", "a tag message the scan never reads"], s.base);
+    const r = publish(s, ["--dry-run"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const shown = /would run: .*?; git -C \S+ push (.*?) -u origin (\S+)$/m.exec(r.stdout);
+    assert.ok(shown, `the dry run shows the push:\n${r.stdout}`);
+    const opts = String(shown[1]).split(" ");
+    const refspec = String(shown[2]);
+    assert.ok(opts.includes("--no-follow-tags"), `the push names --no-follow-tags: ${shown[0]}`);
+    const tagAt = (/** @type {string} */ remote) => spawnSync("git", ["-C", remote, "rev-parse", "--verify", "--quiet", "refs/tags/v-demo"]).status === 0;
+    assert.equal(tagAt(s.origin), false, "nothing pushed");
+    assert.deepEqual(ghCalls(s), []);
+    // The options as shown keep the tag back; without --no-follow-tags git sends it (the setting is live here).
+    const shownRemote = bare(s, "shown");
+    git(s.draft, ["push", "-q", ...opts, shownRemote, refspec], s.base);
+    assert.equal(tagAt(shownRemote), false, "the shown push sent no tag");
+    const plainRemote = bare(s, "plain");
+    git(s.draft, ["push", "-q", ...opts.filter((o) => o !== "--no-follow-tags"), plainRemote, refspec], s.base);
+    assert.equal(tagAt(plainRemote), true, "control: push.followTags sends the tag without the option");
+  });
+});

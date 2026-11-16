@@ -20,7 +20,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "./judge-core.mjs";
+import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput, tokenize } from "./judge-core.mjs";
 import { PROMPT_STORE_NAME, duplicate, ensureStateDir, promptStore, stateDir } from "./state.mjs";
 
 if ((process.env.ORCH_JUDGE ?? "").trim().toLowerCase() !== "native") process.exit(0);
@@ -66,9 +66,39 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
 
 // The judge's authority must stay out of the judged worker's reach: a command that names the record's folder (its
 // absolute path, `~/...`, `$HOME/...`, or the bare folder name, all of which hold the name) is refused, even one that
-// only reads. Quotes and backslashes are dropped and case is ignored first, so `judge'-'prompts`, `judge\-prompts` and
-// another case (a case-insensitive file system) count too.
-if (command.replace(/[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) deny("always blocked: the command names the judge's record of the user's requests");
+// only reads. Case is ignored (a case-insensitive file system). Two looks, either one refuses:
+// - the raw text with quotes and backslashes dropped, so `judge'-'prompts` and `judge\-prompts` count, also where the
+//   tokenizer cannot read the line;
+// - each word as the judge's tokenizer decodes it (`tokenize` in judge-core.mjs), in every command of the line and of
+//   the `$(...)`, backtick and process substitutions it records: each run of literal text in a word, with its quoting
+//   removed and `$'...'` escapes decoded, so `judge-$'prompts'`, `judge-$"prompts"` and `$'judge\x2dprompts'` count.
+//   A run ends at an expansion or a glob character, so a name joined to a value known only at run time is not seen.
+// Out of reach (best-effort, not a sandbox): a glob (`judge-*`), a name built at run time from variables or command
+// output, a `cd` into the parent then a relative glob, and a line the tokenizer cannot read (the judge's floor denies
+// that one anyway).
+/** @param {string} text @param {number} [depth] @returns {boolean} */
+function namesPromptStore(text, depth = 0) {
+  if (text.replace(/[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) return true;
+  /** @type {{ commands: { words: { pieces: ({ lit: string } | object)[] }[] }[], substitutions: string[] }} */
+  let t;
+  try {
+    t = tokenize(text);
+  } catch {
+    return false; // unreadable: the raw-text look above is all this check can do
+  }
+  for (const { words } of t.commands)
+    for (const { pieces } of words) {
+      let run = "";
+      for (const p of [...pieces, {}]) {
+        if ("lit" in p) run += p.lit;
+        else if (run.toLowerCase().includes(PROMPT_STORE_NAME)) return true;
+        else run = "";
+      }
+    }
+  return depth < 8 && t.substitutions.some((s) => namesPromptStore(s, depth + 1));
+}
+
+if (namesPromptStore(command)) deny("always blocked: the command names the judge's record of the user's requests");
 
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {

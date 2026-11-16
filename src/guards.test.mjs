@@ -676,6 +676,32 @@ test("researcher guard (cd item 2): after an allowed cd, later segments are judg
   }
 });
 
+// fix-guards-2 item 2: the walk returned "missing" at the first name that did not exist, before it looked at whether it
+// had passed through /dev, so a file descriptor the hook lacks but the command's shell may have (`/dev/fd/63`, a
+// process substitution's) passed through a link to /dev.
+test("researcher guard (guards-2 item 2): a path through /dev is refused when its last part is missing; /dev/null still passes", () => {
+  const fdProj = join(scratch, "fd-missing", "proj");
+  mkdirSync(join(fdProj, "sub"), { recursive: true });
+  writeFileSync(join(fdProj, "file.txt"), "x\n");
+  const ld = join(fdProj, "ld");
+  if (!existsSync(ld)) symlinkSync("/dev", ld);
+  // A descriptor number this process does not hold, so the last part is missing here.
+  const fd = [63, 99, 987, 4093].find((n) => !existsSync(`/dev/fd/${n}`));
+  assert.ok(fd, "a free descriptor number");
+  for (const c of [
+    `cd ./sub && grep -rn x ../ld/fd/${fd}`, `cd ./sub && cat ../ld/fd/${fd}`, `grep -rn x ${ld}/fd/${fd}`, `cat ./ld/fd/${fd}`,
+    `grep -f./ld/fd/${fd} x .`, `cat ./ld/no-such-device`, `cat /dev/fd/${fd}`, `cat ./ld/null/x`,
+  ]) {
+    const v = researcherViolation(c, fdProj, fdProj);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  // /dev/null through the link, and a missing path that never touches /dev, pass as before.
+  for (const c of ["cd ./sub && cat ../ld/null", `cat ${ld}/null`, "cat ./ld/null", "grep --file=./ld/null x .", "cd ./sub && cat ../no-such-file", "cat ./missing/deeper.txt", "cat ./file.txt/x"]) {
+    assert.equal(researcherViolation(c, fdProj, fdProj), null, c);
+  }
+});
+
 test("researcher guard hook (cd item 2): the project folder comes from the hook, the folder from the payload", () => {
   const pay = (/** @type {string} */ command, /** @type {string} */ cwd) => ({ ...bash(command), cwd });
   const extra = { CLAUDE_PROJECT_DIR: proj, HOME: home };

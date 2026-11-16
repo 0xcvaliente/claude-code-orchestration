@@ -26,9 +26,10 @@
 //                 the pull request would carry them. Refused as unclear: an address that cannot be read, one git
 //                 would rewrite again when reading it, no address, and origin set up as a mirror.
 //   5. push       refused when skill/<name> exists at any push address and is neither that head nor an ancestor of it
-//                 (commits the seal never covered); else git push --recurse-submodules=no -u origin
+//                 (commits the seal never covered); else git push --recurse-submodules=no --no-follow-tags -u origin
 //                 skill/<name>:skill/<name> (never a force push; remote and refspec named, so remote.pushDefault,
-//                 branch.<name>.pushRemote and remote.origin.push cannot redirect it).
+//                 branch.<name>.pushRemote and remote.origin.push cannot redirect it; no tag is sent, whatever
+//                 push.followTags says, since tag messages are never scanned).
 //   6. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
 //                 created it and a person must review it; an open PR for the branch is reused. Prints the URL.
 // With --merge, after those:
@@ -336,7 +337,7 @@ step(
 );
 
 // 5. push
-step("Push the branch", `git ls-remote <each push address of origin> refs/heads/${branch}; git -C ${sh(draft)} push --recurse-submodules=no -u origin ${branch}:${branch}`, () => {
+step("Push the branch", `git ls-remote <each push address of origin> refs/heads/${branch}; git -C ${sh(draft)} push --recurse-submodules=no --no-follow-tags -u origin ${branch}:${branch}`, () => {
   // Origin's branch may only be the checked head or behind it, at every address the push goes to: anything else holds
   // commits the seal never covered.
   for (const t of pushTargets()) {
@@ -346,8 +347,9 @@ step("Push the branch", `git ls-remote <each push address of origin> refs/heads/
     }
   }
   // The remote and the refspec are named, so no push default, push remote or push refspec of origin changes where it
-  // goes; submodules are never pushed with it.
-  const r = git(draft, ["push", "--recurse-submodules=no", "-u", "origin", `${branch}:${branch}`]);
+  // goes; submodules are never pushed with it, and no tag either (push.followTags would send the annotated tags that
+  // point into the pushed commits, and tag messages are never scanned).
+  const r = git(draft, ["push", "--recurse-submodules=no", "--no-follow-tags", "-u", "origin", `${branch}:${branch}`]);
   if (!r.ok) fail(`git push failed:\n${tail(r)}\nThe push never forces: if ${branch} exists on origin with other commits, look at it and resolve that by hand, then rerun.`);
   console.log("   ok");
 });
