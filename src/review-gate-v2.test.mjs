@@ -673,6 +673,49 @@ test("G-1 Stop gate: a slice built before a second PLAN REVIEW and passed after 
   assert.equal(s.last().reason, "reviewer_passed");
 });
 
+// fix-run-pane item 1: a counted failing review of a carried-final slice in the new run ends its carried state, the way
+// implementer work does; a passing review, a fail that counts as a pass and a reply with no STATUS leave it final.
+test("G-1 fold: a counted failing review of a carried-final slice, with no implementer between, ends its final state", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const now = T0 + 20 * 60000;
+  const only = "PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a";
+  // Slice b of the first plan is never built, so the first run is still open when the second plan closes it.
+  const head = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3, only), planStop(3.5, "plan3")];
+  let { runs, open } = foldRuns(R(...head, ...review(4, "a", "STATUS: fail\nGAP: 90 broken")), { now, env });
+  let a = runs[1]?.slices.a;
+  assert.deepEqual([a?.carriedFinal, a?.final, a?.passed, a?.countedFails], [false, false, false, 1], "judged like any slice of the run");
+  assert.deepEqual([runs[1]?.closed, open?.id], [false, 2], "the run stays open");
+  // A retry that passes makes it final again and closes the run.
+  ({ runs, open } = foldRuns(R(...head, ...review(4, "a", "STATUS: fail\nGAP: 90 broken"), ...implAttempt(5, "a"), ...review(6, "a", "STATUS: pass")), { now, env }));
+  a = runs[1]?.slices.a;
+  assert.deepEqual([a?.final, a?.passed, a?.attempts, runs[1]?.closed, open], [true, true, 1, true, null]);
+  // Reviews that are not a counted fail leave it final: a pass, a fail whose gaps are all below the cutoff, no STATUS.
+  for (const reply of ["STATUS: pass", "STATUS: fail\nGAP: 50 maybe", "I ran out of turns"]) {
+    ({ runs, open } = foldRuns(R(...head, ...review(4, "a", reply)), { now, env }));
+    a = runs[1]?.slices.a;
+    assert.deepEqual([a?.carriedFinal, a?.final, a?.passed, runs[1]?.closed, open], [true, true, true, true, null], reply);
+  }
+});
+
+test("G-1 hooks: a failing review of a carried-final slice keeps the new run open; the Stop gate does not gate it (no attempt in the run)", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  const only = "PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a";
+  s.plan(); // slices a and b: b is never built, so this run is open when the second plan closes it
+  s.impl("a");
+  s.review("a", "STATUS: pass");
+  s.plan(only);
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  // The run is open: an implementer of a slice the plan does not name is blocked.
+  assert.equal(s.check("c").status, 2);
+  assert.equal(s.lastCheck().reason, "not_in_plan");
+  // The review gate gates the slices of the latest run that have an implementer attempt there, and the last implementer's
+  // slice in the run where it has one (run 1, whose latest review of a passed): it allows. Pinned as it is today; the
+  // slice's retry is due, but the gate would need a change to ask for it (fix notes, fix-run-pane item 1).
+  const r = s.gate();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
 test("G-1 Stop gate: a slice built before a second PLAN REVIEW and failed after it blocks, though a later slice passed", () => {
   const s = session({ ORCH_ESCALATION: "off" });
   s.plan();
