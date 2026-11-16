@@ -258,6 +258,20 @@ test("plain xlsx: haiku, read as CSV", { skip: UNZIP }, () => {
   assert.equal(csv[2], "Widget,6");
 });
 
+test("sheetToCsv: an empty row, self-closing or left out, keeps the later rows on their own line numbers", () => {
+  const A = (/** @type {number} */ r, /** @type {string} */ v) => `<row r="${r}"><c r="A${r}"><v>${v}</v></c></row>`;
+  // a self-closing empty row (Excel writes one for a row with only a height)
+  assert.equal(sheetToCsv(`${A(1, "one")}<row r="2" ht="30" customHeight="1"/>${A(3, "three")}${A(4, "four")}`, []), "one\n\nthree\nfour");
+  assert.equal(sheetToCsv(`${A(1, "one")}<row r="2"/><row r="3" spans="1:2" />${A(4, "four")}`, []), "one\n\n\nfour");
+  assert.equal(sheetToCsv(`<row r="1"/>${A(2, "two")}`, []), "\ntwo");
+  assert.equal(sheetToCsv(`${A(1, "one")}<row r="2"></row>${A(3, "three")}`, []), "one\n\nthree", "an empty row written open and closed");
+  // a row left out of the XML (Excel omits empty rows): the numbering still holds
+  assert.equal(sheetToCsv(`${A(1, "one")}${A(4, "four")}`, []), "one\n\n\nfour");
+  assert.equal(sheetToCsv(`${A(2, "two")}`, []), "\ntwo");
+  // rows without r follow on from the previous row
+  assert.equal(sheetToCsv(`<row><c><v>1</v></c></row><row/><row><c><v>3</v></c></row>`, []), "1\n\n3");
+});
+
 test("sheetToCsv: shared, inline, boolean and gap cells", () => {
   const xml = '<row r="1"><c r="A1" t="s"><v>1</v></c><c r="C1" t="b"><v>1</v></c></row><row r="2"><c r="B2" t="inlineStr"><is><t>a &amp; "b"</t></is></c></row>';
   assert.equal(sheetToCsv(xml, ["zero", "one"]), 'one,,TRUE\n,"a & ""b"""');
