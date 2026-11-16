@@ -18,7 +18,10 @@
 //   4. scan       the skill gate's branch scan (.claude/hooks/skill-scan.mjs): every line any commit between the
 //                 branch's merge base with the base and its tip adds, on every path, has no secret or personal detail
 //                 (a finding only in an earlier commit is named with that commit: the push carries the history), and
-//                 those commits change only skills/<name>/ and README.md. A branch with no merge base is refused.
+//                 those commits change only skills/<name>/ and README.md. A branch with no merge base is refused. It
+//                 reads origin's refs (git ls-remote origin): the commits a push would send below the merge base (base
+//                 commits origin lacks, on whatever local branch) are scanned too, and refused, since the pull
+//                 request would carry them; origin unreadable is refused too.
 //   5. push       refused when origin's skill/<name> exists and is neither that head nor an ancestor of it (commits the
 //                 seal never covered); else git push -u origin skill/<name> (never a force push).
 //   6. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
@@ -38,7 +41,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isSkillName } from "../.claude/hooks/brief.mjs";
-import { findingLine, historyAdvice, outsideText, scanBranch } from "../.claude/hooks/skill-scan.mjs";
+import { findingLine, historyAdvice, outsideText, scanBranch, unpushedText } from "../.claude/hooks/skill-scan.mjs";
 import { verify } from "../.claude/hooks/skill-seal.mjs";
 
 const TARGETS = /** @type {const} */ (["private", "public"]);
@@ -266,15 +269,21 @@ step(
   "Scan the branch for secrets and paths outside the skill",
   `every line the commits of ${branch} add since its merge base with ${baseBranch}, and the paths they change`,
   () => {
-    const scan = scanBranch(draft, { base: baseBranch, branch, name });
+    // What origin has now: the push sends every commit of the branch that none of these reaches, whichever local
+    // branch it sits on.
+    const ls = git(draft, ["ls-remote", "origin"]);
+    if (!ls.ok) fail(`cannot read origin's branches (git ls-remote failed), so what a push would send cannot be checked. Nothing was pushed.\n${tail(ls)}`);
+    const remoteHas = [...new Set(ls.out.split("\n").map((l) => l.split(/\s+/)[0] ?? "").filter((c) => /^[0-9a-f]{40,64}$/.test(c)))];
+    const scan = scanBranch(draft, { base: baseBranch, branch, name, remote: remoteHas });
     /** @type {string[]} */
     const lines = [];
     if (scan.problems.length) lines.push(`What the branch would push cannot be checked: ${scan.problems.join("; ")}. Pass the right base with --base <branch>, or recreate the draft from its base branch.`);
+    if (scan.unpushed.length) lines.push(unpushedText(scan.unpushed, "origin", `Push the base branch first (after checking those commits) or recreate the draft on origin's copy of the base, then rerun.`));
     if (scan.findings.length) {
       lines.push(`Possible secrets or personal details (${scan.findings.length}); remove each, or replace it with a placeholder such as <token>, user@example.com or ~/:`);
       for (const f of scan.findings.slice(0, 50)) lines.push(`  ${findingLine(f)}`);
       if (scan.findings.length > 50) lines.push(`  and ${scan.findings.length - 50} more`);
-      if (scan.findings.some((f) => f.commit)) lines.push(historyAdvice(scan.mergeBase));
+      if (scan.findings.some((f) => f.commit && !f.base)) lines.push(historyAdvice(scan.mergeBase));
     }
     if (scan.outside.length) lines.push(outsideText(scan.outside, name, scan.mergeBase));
     if (lines.length) fail(`the branch ${branch} cannot be published as it is. Nothing was pushed.\n  - ${lines.join("\n  - ")}\nFix the draft in ${draft}, have it reviewed and sealed again, then rerun.`);

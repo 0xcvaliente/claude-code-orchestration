@@ -215,6 +215,33 @@ test("W-1: an extra file outside the allowed paths with no secret stops the publ
   );
 });
 
+test("W-1 retry: a draft made from a local base commit that origin lacks is refused, naming that commit", () => {
+  for (const viaBase of [false, true]) {
+    const s = setup();
+    try {
+      // Rebuild the draft on a local commit with a token that origin never got (on main, or on a branch passed as --base).
+      git(s.repo, ["worktree", "remove", "--force", s.draft], s.base);
+      git(s.repo, ["branch", "-q", "-D", BRANCH], s.base);
+      if (viaBase) git(s.repo, ["checkout", "-q", "-b", "local-base"], s.base);
+      writeFileSync(join(s.repo, "notes.txt"), `token ${TOKEN}\n`);
+      git(s.repo, ["add", "-A"], s.base);
+      git(s.repo, ["commit", "-q", "-m", "local only"], s.base);
+      const leak = git(s.repo, ["rev-parse", "HEAD"], s.base);
+      if (viaBase) git(s.repo, ["checkout", "-q", "main"], s.base);
+      git(s.repo, ["worktree", "add", "-q", "-b", BRANCH, s.draft, viaBase ? "local-base" : "main"], s.base);
+      const sd = join(s.draft, "skills", NAME);
+      mkdirSync(sd, { recursive: true });
+      writeFileSync(join(sd, "SKILL.md"), `---\nname: ${NAME}\ndescription: A demo skill.\n---\n# Demo\n`);
+      commitAll(s, "skill");
+      const msg = refused(s, viaBase ? ["--dry-run", "--base", "local-base"] : ["--dry-run"]);
+      assert.match(msg, new RegExp(`notes\\.txt, in commit ${leak.slice(0, 12)}, which is not part of the draft: GitHub token`));
+      assert.match(msg, new RegExp(`1 commit of the base that origin lacks \\(${leak.slice(0, 12)}\\)`));
+    } finally {
+      rmSync(s.base, { recursive: true, force: true });
+    }
+  }
+});
+
 test("W-1: a clean branch passes the scan in the dry run, which still pushes nothing", () => {
   withSetup((s) => {
     const r = publish(s, ["--dry-run"]);

@@ -31,8 +31,12 @@
 //                  skill/<name>, merges against each parent, binary files as text). A hit that only an earlier commit
 //                  holds is named with that commit, with the advice to recreate the branch's commits without it. The
 //                  message gives file, line or commit, and kind, never the matched text.
-//   paths          the branch's commits change only skills/<name>/... and README.md (renames count as both paths), and
-//                  the branch has a merge base with its base; otherwise what it would push cannot be checked.
+//   paths          the branch's commits change only skills/<name>/... and README.md (renames count as both paths; names
+//                  are judged exactly as git gives them, and one with a control character is never allowed), the
+//                  branch has a merge base with its base (otherwise what it would push cannot be checked), and, when
+//                  origin's copy of the base is known (refs/remotes/origin/<base>), the branch does not sit on base
+//                  commits that origin lacks: a push would send them, so those commits are scanned too and named.
+//                  Without that remote-tracking ref the scan keeps the merge-base range.
 //   seal           provenance.json exists and skill-seal.mjs verify() passes.
 //   git_state      the draft worktree is clean, is on branch skill/<name> (a failing branch lookup fails too), that
 //                  branch has at least one commit its base does not, and every file under skills/<name> is in the
@@ -50,7 +54,7 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { isSkillName, parseHeader, sliceOfBrief } from "./brief.mjs";
 import { readJsonl } from "./run.mjs";
-import { findingLine, historyAdvice, MAX_SCAN_BYTES, mask, outsideText, scanBranch, scanText } from "./skill-scan.mjs";
+import { findingLine, historyAdvice, MAX_SCAN_BYTES, mask, outsideText, scanBranch, scanText, unpushedText } from "./skill-scan.mjs";
 import { verify } from "./skill-seal.mjs";
 import { ensureStateDir, stateDir } from "./state.mjs";
 
@@ -212,10 +216,11 @@ function filesNotOnBranch(draft, skillDir, skillRel, branch) {
 
 /**
  * Run the gate's checks on a draft.
- * @param {{ draft: string, name: string, base: string | null }} o
+ * @param {{ draft: string, name: string, base: string | null, baseName?: string | null }} o `baseName`: the base
+ *   branch's name when `base` is a pinned commit
  * @returns {{ code: string, text: string }[]} the failures, empty when the draft passes
  */
-function checkDraft({ draft, name, base }) {
+function checkDraft({ draft, name, base, baseName = null }) {
   /** @type {{ code: string, text: string }[]} */
   const fail = [];
   const skillRel = `skills/${name}`;
@@ -322,7 +327,11 @@ function checkDraft({ draft, name, base }) {
   // The branch as the publish step pushes it: every line any of its commits adds, on every path, and the paths they
   // touch (skill-scan.mjs). A finding the checks above already named is not repeated.
   const hasBranch = git(draft, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).status === 0;
-  const scan = hasBranch ? scanBranch(draft, { base: baseRef, branch, name }) : null;
+  // When origin's copy of the base is known (a remote-tracking ref), the commits below the merge base that origin
+  // lacks are covered too: a push of the branch sends them. Without one the scan keeps the merge-base range.
+  const bn = baseRef && !/^[0-9a-f]{40,64}$/.test(baseRef) ? baseRef : baseName;
+  const tracked = !!bn && git(draft, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${bn}^{commit}`]).status === 0;
+  const scan = hasBranch ? scanBranch(draft, { base: baseRef, branch, name, remote: tracked ? ["--remotes=origin"] : null }) : null;
   if (scan) {
     const named = new Set(findings.map((f) => `${f.file}\n${f.line}\n${f.kind}`));
     for (const f of scan.findings) {
@@ -334,7 +343,7 @@ function checkDraft({ draft, name, base }) {
   if (findings.length) {
     const shown = findings.slice(0, MAX_FINDINGS_SHOWN).map((f) => `   - ${findingLine(f)}`);
     const more = findings.length > MAX_FINDINGS_SHOWN ? [`   - and ${findings.length - MAX_FINDINGS_SHOWN} more`] : [];
-    const history = findings.some((f) => "commit" in f && f.commit) ? [`   ${historyAdvice(scan?.mergeBase ?? null)}`] : [];
+    const history = findings.some((f) => "commit" in f && f.commit && !("base" in f && f.base)) ? [`   ${historyAdvice(scan?.mergeBase ?? null)}`] : [];
     fail.push({
       code: "secrets",
       text: [`Possible secrets or personal details, or files the scan could not read (${findings.length}). Remove each secret, or replace it with a placeholder such as <token>, user@example.com or ~/; never put a real key, address or home path in a skill:`, ...shown, ...more, ...history].join("\n"),
@@ -343,8 +352,12 @@ function checkDraft({ draft, name, base }) {
   // Only skills/<name>/ and README.md: whatever else the branch carries is pushed unsealed.
   if (scan && scan.problems.length) {
     fail.push({ code: "paths", text: `What the branch would push cannot be checked: ${scan.problems.join("; ")}. The draft worktree must come from the command in your brief, on a branch made from the base branch.` });
-  } else if (scan && scan.outside.length) {
-    fail.push({ code: "paths", text: outsideText(scan.outside, name, scan.mergeBase) });
+  } else if (scan && (scan.outside.length || scan.unpushed.length)) {
+    /** @type {string[]} */
+    const texts = [];
+    if (scan.outside.length) texts.push(outsideText(scan.outside, name, scan.mergeBase));
+    if (scan.unpushed.length) texts.push(unpushedText(scan.unpushed, "origin", `Recreate the draft on origin's copy of the base (in the draft worktree: git rebase --onto origin/${bn} ${scan.mergeBase ? scan.mergeBase.slice(0, 12) : "<merge base>"}, then seal again and commit), or name these commits under OPEN in your report so a person deals with them before publishing.`));
+    fail.push({ code: "paths", text: texts.join(" ") });
   }
 
   // d. The seal.
@@ -482,7 +495,7 @@ async function run() {
     const allows = readJsonl(stateDir, "skill-create.jsonl").filter((e) => e.session_id === sessionId && e.decision === "allow" && e.skill === name);
     const pinned = allows.find((e) => typeof e.base_sha === "string" && /^[0-9a-f]{40,64}$/.test(e.base_sha));
     const made = allows.findLast((e) => typeof e.base === "string" && e.base);
-    failures = checkDraft({ draft, name, base: pinned ? String(pinned.base_sha) : made ? String(made.base) : null });
+    failures = checkDraft({ draft, name, base: pinned ? String(pinned.base_sha) : made ? String(made.base) : null, baseName: made ? String(made.base) : null });
   }
   const failed = failures.map((f) => f.code);
   if (!failures.length) {

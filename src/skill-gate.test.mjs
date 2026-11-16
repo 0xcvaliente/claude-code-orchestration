@@ -689,6 +689,61 @@ test("W-1 variants: a file added then deleted, a rename out of the skill folder,
   });
 });
 
+test("W-1 retry: a committed name that starts with a newline is judged as it is, outside the allowed paths, and shown escaped", () => {
+  withSetup((s) => {
+    worktree(s);
+    writeSkill(s, {
+      edit: (sd, wt) => {
+        writeFileSync(join(wt, "\nREADME.md"), "plain\n");
+        mkdirSync(join(wt, "\nskills", NAME), { recursive: true });
+        writeFileSync(join(wt, "\nskills", NAME, "y.md"), "plain\n");
+        mkdirSync(join(wt, "\nscripts"));
+        writeFileSync(join(wt, "\nscripts", "run.sh"), "echo plain\n");
+        writeFileSync(join(sd, "references", "ok.md"), "An ordinary name inside the folder.\n");
+      },
+    });
+    launch(s);
+    const msg = blocked(s, ["paths"]);
+    const line = msg.split("\n").find((l) => l.includes("[paths]")) ?? "";
+    assert.ok(line.includes('"\\nREADME.md"'), line);
+    assert.ok(line.includes(`"\\nskills/${NAME}/y.md"`), line);
+    assert.ok(line.includes('"\\nscripts/run.sh"'), line);
+    assert.doesNotMatch(line, /references\/ok\.md|: README\.md|, README\.md/, "ordinary allowed names are not listed");
+  });
+});
+
+test("W-1 retry: commits of the base that origin lacks are covered when origin's base is known", () => {
+  withSetup((s) => {
+    const origin = join(s.base, "origin.git");
+    git(s.base, ["init", "-q", "--bare", "-b", "main", origin], s.base);
+    git(s.repo, ["remote", "add", "origin", origin], s.base);
+    git(s.repo, ["push", "-q", "origin", "main"], s.base);
+    // A commit on the local main only, then the draft made from it.
+    writeFileSync(join(s.repo, "notes.txt"), `token ${TOKEN}\n`);
+    git(s.repo, ["add", "-A"], s.base);
+    git(s.repo, ["commit", "-q", "-m", "local only"], s.base);
+    const leak = git(s.repo, ["rev-parse", "HEAD"], s.base);
+    worktree(s);
+    writeSkill(s);
+    launch(s);
+    const msg = blocked(s, ["secrets", "paths"]);
+    assert.match(msg, new RegExp(`notes\\.txt, in commit ${leak.slice(0, 12)}, which is not part of the draft: GitHub token`));
+    assert.match(msg, new RegExp(`1 commit of the base that origin lacks \\(${leak.slice(0, 12)}\\)`));
+    assert.ok(!msg.includes(TOKEN));
+  });
+  // The same draft on a base origin already has passes.
+  withSetup((s) => {
+    const origin = join(s.base, "origin.git");
+    git(s.base, ["init", "-q", "--bare", "-b", "main", origin], s.base);
+    git(s.repo, ["remote", "add", "origin", origin], s.base);
+    git(s.repo, ["push", "-q", "origin", "main"], s.base);
+    worktree(s);
+    writeSkill(s);
+    launch(s);
+    assert.equal(stop(s).status, 0);
+  });
+});
+
 // ---- W-9: a home path that ends the word, and the Windows form.
 
 test("W-9: home paths without a trailing slash and Windows profile paths are found; shared folders are not", () => {

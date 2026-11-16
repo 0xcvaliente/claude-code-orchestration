@@ -100,16 +100,26 @@ export const mask = (text) =>
     return excuse && excuse(m) ? String(a[0]) : "[masked]";
   }), text);
 
-/** Whether a repository path is one a skill branch may change. @param {string} path @param {string} name */
-export const allowedPath = (path, name) => path === "README.md" || path.startsWith(`skills/${name}/`);
+// A control character (C0, DEL, C1) in a name: such a name is never an allowed path and is shown escaped.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * Whether a repository path, exactly as git names it, is one a skill branch may change: README.md, or a file under
+ * skills/<name>/ whose name has no control character.
+ * @param {string} path @param {string} name
+ */
+export const allowedPath = (path, name) => !CONTROL.test(path) && (path === "README.md" || path.startsWith(`skills/${name}/`));
+
+/** A repository path for a message: as it is, or JSON-quoted when it holds a control character or a quote. @param {string} p */
+export const shownPath = (p) => (CONTROL.test(p) || p.includes('"') ? JSON.stringify(p) : p);
 
 /**
  * git -C dir for reading: optional locks, replace refs, hooks and fsmonitor off; quoting and diff prefixes fixed so
  * repository config cannot change what is parsed. { status, out, big }: status null on a spawn error or timeout, big
- * when the output passed `MAX_HISTORY_BYTES`.
- * @param {string} dir @param {string[]} args
+ * when the output passed `MAX_HISTORY_BYTES`. `input` goes to git's stdin (for --stdin).
+ * @param {string} dir @param {string[]} args @param {string} [input]
  */
-function git(dir, args) {
+function git(dir, args, input) {
   const r = spawnSync(
     "git",
     ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=true", "-C", dir, ...args],
@@ -117,7 +127,8 @@ function git(dir, args) {
       encoding: "utf8",
       timeout: 60_000,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1", GIT_EXTERNAL_DIFF: "" },
-      stdio: ["ignore", "pipe", "pipe"],
+      input: input ?? "",
+      stdio: ["pipe", "pipe", "pipe"],
       maxBuffer: MAX_HISTORY_BYTES,
     },
   );
@@ -197,22 +208,28 @@ function eachAdded(out, each) {
 }
 
 /**
- * @typedef {{ file: string, line: number | null, kind: string, commit?: string }} Finding
- * A finding: `line` in the branch's last version, or `commit` (and no line) when only an earlier commit holds it.
+ * @typedef {{ file: string, line: number | null, kind: string, commit?: string, base?: boolean }} Finding
+ * A finding: `line` in the branch's last version, or `commit` (and no line) when only an earlier commit holds it;
+ * `base` when that commit is one of the base's that the remote lacks (not part of the draft, but pushed with it).
  */
 
 /**
- * What a push of the branch would carry beyond its merge base with `base`.
+ * What a push of the branch would carry: the draft's own commits (merge base with `base` to the tip) and, when
+ * `remote` is given, the commits below the merge base that the remote lacks (`unpushed`): a push sends those too.
  * @param {string} dir a work tree of the repository
- * @param {{ base: string | null, branch: string, name: string }} o
- * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], problems: string[] }}
+ * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null }} o `remote`: revision
+ *   arguments naming what the target remote has (commit ids from git ls-remote, or --remotes=origin); ids this
+ *   repository lacks are ignored.
+ * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[] }}
  */
-export function scanBranch(dir, { base, branch, name }) {
+export function scanBranch(dir, { base, branch, name, remote = null }) {
   /** @type {Finding[]} */
   const findings = [];
   /** @type {string[]} */
   const problems = [];
-  const none = () => ({ mergeBase: null, findings, outside: [], problems });
+  /** @type {string[]} */
+  let unpushed = [];
+  const none = () => ({ mergeBase: null, findings, outside: [], unpushed, problems });
   try {
     const tip = git(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
     if (tip.status !== 0 || !tip.out.trim()) {
@@ -238,19 +255,41 @@ export function scanBranch(dir, { base, branch, name }) {
     const net = git(dir, ["diff", "--name-only", "-z", "--no-renames", "--no-relative", mergeBase, head]);
     if (names.status !== 0 || net.status !== 0) {
       problems.push(names.big ? tooBig : "git cannot list the paths its commits change");
-      return { mergeBase, findings, outside: [], problems };
+      return { mergeBase, findings, outside: [], unpushed, problems };
     }
-    const outside = [...new Set(`${names.out}\0${net.out}`.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))]
+    // Names exactly as git gives them (NUL-separated, never trimmed or rewritten): a name with a control character is
+    // never allowed.
+    const outside = [...new Set(`${names.out}\0${net.out}`.split("\0").filter((p) => p !== ""))]
       .filter((p) => !allowedPath(p, name))
       .sort();
+
+    // The commits below the merge base that the remote lacks: a push of the branch sends them too.
+    if (remote) {
+      const rl = git(dir, ["rev-list", "--ignore-missing", mergeBase, "--not", ...remote]);
+      if (rl.status !== 0) {
+        problems.push("git cannot tell which commits of its base the remote lacks");
+        return { mergeBase, findings, outside, unpushed, problems };
+      }
+      unpushed = rl.out.split("\n").filter((l) => /^[0-9a-f]{40,64}$/.test(l));
+    }
 
     // The branch's last version against the merge base: the lines it adds, by path.
     const netDiff = git(dir, ["diff", ...DIFF_OPTS, mergeBase, head]);
     const hist = git(dir, ["log", ...DIFF_OPTS, "-p", "--diff-merges=separate", "--format=commit %H", range]);
-    if (netDiff.status !== 0 || hist.status !== 0) {
-      problems.push(netDiff.big || hist.big ? tooBig : "git cannot show the lines its commits add");
-      return { mergeBase, findings, outside, problems };
+    const baseHist = unpushed.length ? git(dir, ["log", ...DIFF_OPTS, "-p", "--diff-merges=separate", "--format=commit %H", "--no-walk=unsorted", ...unpushed]) : { status: 0, out: "", big: false };
+    if (netDiff.status !== 0 || hist.status !== 0 || baseHist.status !== 0) {
+      problems.push(netDiff.big || hist.big || baseHist.big ? tooBig : "git cannot show the lines its commits add");
+      return { mergeBase, findings, outside, unpushed, problems };
     }
+    // Every line an unpushed base commit adds (whether or not the draft still has it): pushed with the branch.
+    const bseen = new Set();
+    eachAdded(baseHist.out, ({ commit, file, text }) => {
+      for (const kind of lineKinds(text)) {
+        const key = `${file}\n${kind}\n${commit}`;
+        if (!bseen.has(key)) findings.push({ file, line: null, kind, commit: commit ?? "unknown", base: true });
+        bseen.add(key);
+      }
+    });
     /** @type {Map<string, Set<string>>} */
     const last = new Map();
     const seen = new Set();
@@ -277,7 +316,7 @@ export function scanBranch(dir, { base, branch, name }) {
       if (!hseen.has(key)) findings.push(f);
       hseen.add(key);
     }
-    return { mergeBase, findings, outside, problems };
+    return { mergeBase, findings, outside, unpushed, problems };
   } catch {
     problems.push("the scan failed");
     return none();
@@ -285,7 +324,20 @@ export function scanBranch(dir, { base, branch, name }) {
 }
 
 /** One finding as the gate and the publish script print it (never the matched text). @param {Finding} f */
-export const findingLine = (f) => `${f.file}${f.commit ? `, only in earlier commit ${f.commit.slice(0, 12)}` : f.line === null ? "" : ` line ${f.line}`}: ${f.kind}`;
+export const findingLine = (f) => {
+  const at = f.base && f.commit ? `, in commit ${f.commit.slice(0, 12)}, which is not part of the draft` : f.commit ? `, only in earlier commit ${f.commit.slice(0, 12)}` : f.line === null ? "" : ` line ${f.line}`;
+  return `${shownPath(f.file)}${at}: ${f.kind}`;
+};
+
+/**
+ * The text for base commits a push of the branch would send although the remote lacks them.
+ * @param {string[]} unpushed @param {string} remoteName @param {string} advice what to do, for the reader
+ */
+export const unpushedText = (unpushed, remoteName, advice) => {
+  const n = unpushed.length;
+  const shown = unpushed.slice(0, 10).map((c) => c.slice(0, 12)).join(", ");
+  return `The branch sits on ${n} commit${n === 1 ? "" : "s"} of the base that ${remoteName} lacks (${shown}${n > 10 ? ` and ${n - 10} more` : ""}): a push of the branch sends ${n === 1 ? "it" : "them"} and its pull request would carry ${n === 1 ? "it" : "them"}, though ${n === 1 ? "it is" : "they are"} not part of the draft and the seal never covered ${n === 1 ? "it" : "them"}. ${advice}`;
+};
 
 /** What to do about a finding that only an earlier commit holds. @param {string | null} mergeBase */
 export const historyAdvice = (mergeBase) =>
@@ -293,7 +345,7 @@ export const historyAdvice = (mergeBase) =>
 
 /** The text for paths outside the skill folder and README.md. @param {string[]} outside @param {string} name @param {string | null} mergeBase */
 export const outsideText = (outside, name, mergeBase) => {
-  const shown = outside.slice(0, 20).join(", ");
+  const shown = outside.slice(0, 20).map(shownPath).join(", ");
   const more = outside.length > 20 ? ` and ${outside.length - 20} more` : "";
   return `The branch changes paths outside skills/${name}/ and README.md: ${shown}${more}. A skill branch changes only its skill folder and README.md, and every commit of it is pushed, so a later commit that undoes the change does not help. Recreate the branch's commits without these paths: in the draft worktree run git reset --soft ${mergeBase ? mergeBase.slice(0, 12) : "<merge base>"}, restore or delete them, seal again and commit once.`;
 };
