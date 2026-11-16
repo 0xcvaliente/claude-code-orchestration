@@ -18,13 +18,19 @@ const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"])
 
 /** @param {unknown} t */
 const bare = (t) => String(t ?? "").split(":").pop() ?? "";
-/** "941", "12.3k", "128k", "1.2M". @param {number} n */
+/**
+ * "941", "12.3k", "128k", "1.2M". Each tier is chosen by the value as it would print, so 99,950 prints "100k" (not
+ * "100.0k") and 999,500 prints "1.0M" (not "1000k").
+ * @param {number} n
+ */
 export function shortTokens(n) {
   if (!(n >= 0)) return "0";
-  if (n < 1000) return String(Math.round(n));
-  if (n < 100_000) return `${(n / 1000).toFixed(1)}k`;
-  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  if (Math.round(n) < 1000) return String(Math.round(n));
+  const tenthsK = Math.round(n / 100);
+  if (tenthsK < 1000) return `${(tenthsK / 10).toFixed(1)}k`;
+  const k = Math.round(n / 1000);
+  if (k < 1000) return `${k}k`;
+  return `${(Math.round(n / 100_000) / 10).toFixed(1)}M`;
 }
 /** @param {unknown} model */
 const family = (model) => String(model ?? "").toLowerCase().match(/fable|mythos|opus|sonnet|haiku/)?.[0] ?? "";
