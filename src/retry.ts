@@ -4,11 +4,12 @@ import type { TokenUsage } from "./tokens.js";
 
 /**
  * A worker that failed because of the service, not the task: rate limit, overload, a 5xx, a dropped connection.
- * Never a turn cap, our own timeout or a refusal: retrying those only repeats the failure.
+ * Never a turn cap, our own timeout or a refusal: retrying those only repeats the failure. A status code counts only
+ * in a status context (`HTTP 429`, `API Error: 529`), so a line number such as `index.js:429:12` is not one.
  */
 export function isTransient(r: AgentResult): boolean {
   if (r.ok || r.subtype === "timeout" || r.subtype === "error_max_turns") return false;
-  return /rate.?limit|too many requests|\b429\b|overloaded|\b529\b|(?:http|status|code|error)\W{0,3}50[0234]\b|\b50[0234]\s+(?:internal server error|bad gateway|service unavailable|gateway time-?out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|stream (ended|closed)|temporarily unavailable/i.test(
+  return /rate.?limit|too many requests|overloaded|(?:http|status|code|error)\W{0,3}(?:50[0234]|429|529)\b|\b50[0234]\s+(?:internal server error|bad gateway|service unavailable|gateway time-?out)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|stream (ended|closed)|temporarily unavailable/i.test(
     `${r.subtype} ${r.text}`,
   );
 }
