@@ -84,6 +84,7 @@ Tests and comments:
 - On a Claude Code without `background_tasks` in the Stop input, an agent still fixing after a test-gate block can be gated before it stops again. A carried slice that was final and passed, then fails a review in the new run, keeps the review gate allowing with `reviewer_passed`.
 - A suggestion from goal words can still name a skill that does not fit the slice; the worker skips it.
 - The `routed` and `reader-routed` benchmark arms compare a sonnet researcher with the haiku arms, not the 0.4.0 comparison; the owner decides whether to give them the haiku researcher.
+- Seen in the live checks of the finished system (docs/data/live-checks-2026-11-16.md, Checks 8 and 9) and left as it is: the triage call of `npm run auto` runs before the capped session, so `ORCH_BUDGET_TOKENS` does not cover it, and in the check it cost more than the session it chose (about 0.69 against 0.42 USD); the triage session also wrote a transcript under `~/.claude/projects/`, although the launcher passes `--no-session-persistence` to its own sessions. Through `npm run`, npm's two banner lines come before the JSON document on stdout; `scripts/auto.sh` run alone prints only the document. The agent worktrees of an orchestrated run and their branches stay after the merge. Not probed: a session that reaches its cap, the reviewed route, an escalation, a failing slice and a retry.
 - docs/research-2026-11-16.md lists the leads the audit could not prove or rule out, and the decisions against O-4 (the orchestrator's effort) and O-6 (the nudge's length).
 
 ## [1.4.5] - 2026-11-16
@@ -386,6 +387,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[1.5.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.0
 [1.4.5]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.5
 [1.4.4]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.4
 [1.4.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.4.3
