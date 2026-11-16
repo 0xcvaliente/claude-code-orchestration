@@ -122,6 +122,29 @@ The prompt `-x Reply ...` was taken as the prompt, not as an unknown option `-x`
 
 **Confirmed.** Not probed: a prompt of `-` alone, and whether `outputStyle` applies to a session started with `--agent`.
 
+## Check 6: a researcher's `cd` after the merge of the researcher guard fix
+
+Added later the same day, from live use in this repository after the merge at commit d401009, which carries the researcher guard's `cd` rule (audit fix `fix-researcher-cd`, item 2). A researcher of a run ran four Bash calls, in this order:
+
+| Call | Result |
+|---|---|
+| `cd ./src && ls \| head -3` | ran; listed `src` |
+| `ls \| head -3` | ran; listed the project folder again: a subagent's working folder is reset between calls |
+| `cd ../docs && ls \| head -3` | refused by the researcher guard with its `cd` message (`CD_FORM` in `.claude/hooks/researcher-guard.mjs`) |
+| `cd ./docs && ls \| head -3` | ran |
+
+**Confirmed.** A `cd` into the project with a `./` path runs, a `cd` that leads out of the project is refused, and the folder does not carry over to the next call. Not probed: an interactive session, and a `cd` path that starts with `/`.
+
+## Check 7: four isolated implementers stopping together
+
+Added later the same day, from live use in this repository (source: `docs/data/audit-2026-11-16/fix-notes-gate-load.md`, "Live observation"). Four isolated implementers of one wave stopped within two minutes, between 11:16:08 and 11:17:52 UTC. At each stop the test gate ran the whole suite, then a base run, at the same time as the other three.
+
+- Three test-gate records came at 11:26:47 to 11:27:06 UTC, 554 to 590 s after their stops; about 120 s is usual. Each is `tests_failed_isolated` (`.claude/state/gates.jsonl` lines 419 to 421).
+- The records of 11:27:05 and 11:27:06 carry `failing: 1, on_base: 1`: one failing test, which also failed on the base under that load. The record of 11:26:47 has the reason only, with no counts.
+- Claude Code ended the fourth agent as stalled ("Agent stalled: no progress for 600s (stream watchdog did not recover)") while its stop hook still ran. No test-gate record exists for it.
+
+**Confirmed.** Whole-suite runs of parallel gates slow each other down, and a stop hook that runs longer than Claude Code's stall limit (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, default 600000 ms) ends the agent with no gate record. The audit fix `fix-gate-load` followed from this check. Not probed: the same wave on an idle machine, and a stall limit other than the default.
+
 ## Limits
 
 Each claim was probed once, headless (`-p` or the SDK), on 2.1.325 and macOS; an interactive session was not started, and neither `scripts/orchestrate.sh` nor the npm script `plain` was run end to end (the flag they pass was). No init event names the agent, so the conclusions rest on the tool lists and models. Not probed: the comment's claim that the empty `agent` "changes no other setting" (only the tool list and model were compared, not permissions, hooks or other keys); whether `--agent` also wins over `--settings '{"agent":""}'` when both are passed; and whether `--agent` with an agent the setting does not name changes anything besides tools and model (system prompt, effort, maxTurns).
