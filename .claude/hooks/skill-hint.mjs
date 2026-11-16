@@ -164,13 +164,19 @@ export function preferenceRules(a) {
   /** @type {Record<string, boolean>} */
   const fires = {
     security: a.risky && any(SECURITY_WORDS),
-    bugfix: a.kind === "bugfix" || any(BUG_WORDS),
+    // Bug words count only in a brief with no KIND that changes something besides prose: an audit or a notes slice
+    // talks about bugs and fixes nothing.
+    bugfix: a.kind === "bugfix" || (a.kind === null && !proseOnly(a.files) && any(BUG_WORDS)),
     tdd: words.has("tdd") || /\btest[- ]first\b/.test(lower),
     ui_work: ui && any(UI_WORDS),
     motion: ui && any(MOTION_WORDS),
   };
   return RULES.filter((r) => r.roles.includes(a.role) && fires[r.reason]).map((r) => ({ reason: r.reason, skills: r.skills }));
 }
+
+const PROSE_EXTS = new Set(["md", "markdown", "rst", "adoc", "txt"]);
+/** FILES that are all prose outputs (none: false). @param {string[]} files */
+const proseOnly = (files) => files.length > 0 && files.every((f) => PROSE_EXTS.has(extOf(f)));
 
 /** The lower-case extension of a path or glob ("" when none). @param {string} p */
 const extOf = (p) => (p.replace(/[?#].*$/, "").match(/\.([A-Za-z0-9]+)$/)?.[1] ?? "").toLowerCase();
@@ -253,9 +259,12 @@ export function skillHints(args) {
           const nameToks = [...new Set(tokens(bareName(s.name)))].filter((t) => !STOP.has(t) && !GENERIC.has(t));
           const nameHits = nameToks.filter((t) => words.has(t)).length;
           const descHits = [...new Set(tokens(s.description))].filter((t) => t.length >= 4 && !STOP.has(t) && !nameToks.includes(t) && words.has(t)).length;
-          return { s, nameHits, descHits, score: 3 * nameHits + descHits };
+          return { s, nameHits, nameToks: nameToks.length, descHits, score: 3 * nameHits + descHits };
         })
-        .filter((x) => x.nameHits >= 1 && x.descHits >= 2 && x.score >= 5)
+        // Every word of the name, two at least: one shared word ("rules", "built", "context", "documents", "payload")
+        // matched unrelated skills in this project's own runs (W-10). Single-word names come through FILES, the
+        // preference table or SKILLS instead.
+        .filter((x) => x.nameHits >= 2 && x.nameHits === x.nameToks && x.descHits >= 2 && x.score >= 5)
         .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
       goal = scored.map((x) => x.s);
     }

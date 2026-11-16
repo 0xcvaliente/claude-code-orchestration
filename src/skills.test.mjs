@@ -333,6 +333,46 @@ test("preference table: ui_work, motion, bugfix, tdd and security pick the first
   assert.deepEqual(preferenceRules({ role: "implementer", files: ["a.html"], kind: null, risky: false, text: "style the screen" }).map((r) => r.reason), ["ui_work"]);
 });
 
+test("goal picks: a goal match needs every word of the skill's name, two at least, so one shared word no longer suggests an unrelated skill", () => {
+  // Descriptions shaped like the installed skills the project's own audit and fix runs were offered (W-10).
+  const catalog = [
+    { name: "konnected-product-rules", description: "Product rules: who can see what, the approval workflow, project and application statuses, login, agreements and the version scope." },
+    { name: "anthropic-skills:built-in-browser", description: "The browser pane: persistent sign-ins, tabs, reading pages as text, site approvals, what the pane cannot open." },
+    { name: "documents", description: "Create, read, review and check documents and office files: Word, spreadsheets (.xlsx), slide decks, PDFs, reports and specs." },
+    { name: "payload", description: "Build, review or troubleshoot Payload CMS collections, fields, access control, hooks and migrations." },
+    { name: "repo-context", description: "Navigate a code repository using compact architecture notes, check notes against current source evidence." },
+    { name: "gsap-scrolltrigger", description: "GSAP ScrollTrigger scroll animation: scrubbing, pinning, trigger geometry." },
+  ];
+  const p = (/** @type {string} */ role, /** @type {string} */ brief) => skillHints({ role, header: parseHeader(brief), brief, catalog });
+  const audit = [
+    "SLICE: audit-hooks", "FILES: docs/data/audit/hooks.md", "DEPENDS: none",
+    "GOAL: audit the hook rules: the built-in agents block, the status line rows, the payload of each hook, the source documents",
+    "the read router converts (office files, xlsx spreadsheets, reports), the approval of a launch, the review statuses in the",
+    "compact context, and the scope and version of each record. Check every finding against current source evidence.",
+  ].join("\n");
+  assert.deepEqual(p("implementer", audit), [], "one shared name word (rules, built, documents, payload, context) is not a goal match");
+  assert.deepEqual(p("reviewer", audit.replace("FILES: docs/data/audit/hooks.md\n", "")), []);
+  // The whole name still matches, as before.
+  const hero = "SLICE: hero\nFILES: src/hero.ts\nDEPENDS: none\nGOAL: add a GSAP ScrollTrigger pinned scroll animation with scrubbing";
+  assert.deepEqual(p("implementer", hero), [{ name: "gsap-scrolltrigger", reason: "goal_match" }]);
+  const repo = "SLICE: map\nFILES: src/map.ts\nDEPENDS: none\nGOAL: a repo map that keeps compact architecture notes checked against current source evidence, for context";
+  assert.deepEqual(p("implementer", repo), [{ name: "repo-context", reason: "goal_match" }]);
+});
+
+test("preference table: the bugfix rule needs KIND: bugfix, or no KIND and a FILES entry that is not prose", () => {
+  const catalog = [{ name: "diagnosing-bugs", description: "Diagnosis loop for hard bugs." }, { name: "tdd", description: "Test-driven development." }];
+  const p = (/** @type {string} */ brief) => skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog });
+  const words = "GOAL: find the bugs, crashes and regressions in the hooks and write each finding with a reproduction of the failing case";
+  // an audit that writes findings fixes nothing, though its brief is full of bug words
+  assert.deepEqual(p(`SLICE: audit\nFILES: docs/data/audit/gates.md\nDEPENDS: none\n${words}`), []);
+  assert.deepEqual(p(`SLICE: notes\nFILES: notes/a.md, notes/b.txt\nDEPENDS: none\n${words}`), []);
+  // a brief whose kind is not bugfix
+  assert.deepEqual(p(`SLICE: skill\nFILES: src/x.py\nDEPENDS: none\nKIND: skill\n${words}`), []);
+  // still fires: KIND: bugfix (even on prose files), or no KIND with code in FILES
+  assert.deepEqual(p(`SLICE: fix\nFILES: docs/a.md\nDEPENDS: none\nKIND: bugfix\nGOAL: the wrong example`), [{ name: "diagnosing-bugs", reason: "bugfix" }]);
+  assert.deepEqual(p(`SLICE: fix\nFILES: docs/a.md, src/a.py\nDEPENDS: none\n${words}`), [{ name: "diagnosing-bugs", reason: "bugfix" }]);
+});
+
 test("format picks: a skill whose description sends the format to another skill is skipped", () => {
   const p = (/** @type {string} */ brief) => skillHints({ role: "implementer", header: parseHeader(brief), brief, catalog: PREF });
   assert.equal(PREF.find((s) => s.name === "anthropic-skills:docs")?.description.includes("that format's skill"), true);
