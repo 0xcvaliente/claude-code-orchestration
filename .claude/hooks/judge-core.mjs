@@ -702,18 +702,13 @@ const ZSH_TABLE_VALUE = new RegExp(`=(${ZSH_TABLES})$`);
 /** Builtins whose arguments are assignments or the names of variables they assign. `set` counts with an `-A`/`+A`
  * cluster, `printf` and `print` with a `-v` cluster. */
 const ASSIGNERS = new Set(["typeset", "declare", "local", "export", "readonly", "integer", "float", "set", "read", "printf", "print", "getopts", "vared", "zparseopts", "let"]);
-/** A word shaped like an assignment (`NAME=`, `NAME+=`, `NAME[`), or a subscripted name (`a[1]=x`, read as a glob). */
-const ASSIGN_SHAPE = /^[A-Za-z_][A-Za-z0-9_]*(\[|\+?=)/;
-function assignShaped(w) {
-  const p = staticPrefix(w);
-  if (w.assign || ASSIGN_SHAPE.test(p)) return true;
-  const next = w.pieces[1];
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) && !!next && "glob" in next && next.glob === "[]";
-}
+/** Commands that cannot assign a shell variable: a table word is text to them (`grep functions= f`), but only when
+ * one of them is the command word with nothing in front of it but redirections. */
+const TEXT_ONLY = new Set(["grep", "egrep", "fgrep", "rg", "ag", "ack", "git", "cat", "echo", "ls", "wc", "head", "tail", "less", "diff"]);
 /**
- * The table a word writes, or undefined. `bare`: the word follows an assigning builtin, where the bare name counts
- * (`set -A functions f body`, `read -A functions`) and so does a value naming a table. Otherwise the word must assign:
- * `NAME=`, `NAME+=` or a subscript.
+ * The table a word writes, or undefined. `bare`: an assigning builtin stands earlier in the command, where the bare
+ * name counts (`set -A functions f body`, `read -A functions`) and so does a value naming a table. Otherwise the word
+ * must assign: `NAME=`, `NAME+=` or a subscript.
  */
 function zshTable(w, bare) {
   const p = staticPrefix(w);
@@ -780,14 +775,14 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const remapFrom = once(() => suffixAny(nr, (x) => x.text.includes("=") || /^-[A-Za-z]*p/.test(x.text)));
   const loadFrom = once(() => suffixAny(nr, (x) => /^-[A-Za-z]*f/.test(x.text)));
   const traceFrom = once(() => suffixAny(nr, (x) => !x.dynamic && (/^-[A-Za-z]*x/.test(x.text) || x.text.toLowerCase().replace(/_/g, "") === "xtrace")));
-  // Where a word assigns (J-9): before the command word (every earlier word shaped like an assignment), after a
-  // wrapper (`env 'functions[f]=..' zsh`), or after an assigning builtin (ASSIGNERS) as the command word or after a
-  // wrapper. `grep functions= f` assigns nothing.
-  const assignEnd = once(() => {
-    let i = 0;
-    while (i < ws.length && (ws[i].redirect || assignShaped(ws[i]))) i++;
-    return i;
+  // A table word (J-9, J-8) is denied wherever it stands, behind any keyword, modifier or wrapper, except as an
+  // argument of a TEXT_ONLY command word that has nothing but redirections in front of it (`grep functions= f`).
+  const textOnly = once(() => {
+    if (at < 0 || ws[at].dynamic || !TEXT_ONLY.has(base(ws[at].text))) return false;
+    for (let i = 0; i < at; i++) if (!ws[i].redirect) return false;
+    return true;
   });
+  // The first assigning builtin (ASSIGNERS) anywhere in the command: after it a bare table name counts too.
   const assigner = once(() => {
     const aFrom = suffixAny(ws, (x) => !x.redirect && !x.dynamic && /^[-+][A-Za-z]*A/.test(x.text));
     const vFrom = suffixAny(ws, (x) => !x.redirect && !x.dynamic && /^-[A-Za-z]*v/.test(x.text));
@@ -795,7 +790,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       const x = ws[i];
       if (x.redirect || x.dynamic) continue;
       const n = base(x.text);
-      if (!ASSIGNERS.has(n) || !(i === at || afterWrapper(ws, i))) continue;
+      if (!ASSIGNERS.has(n)) continue;
       if (n === "set" ? aFrom[i + 1] : n === "printf" || n === "print" ? vFrom[i + 1] : true) return i;
     }
     return ws.length;
@@ -817,7 +812,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       if (/^PS[014]$/.test(env[1])) ctx.prompt ??= env[1];
     }
     const table = w.redirect ? undefined : zshTable(w, k > assigner());
-    if (table && (k > assigner() || k < assignEnd() || afterWrapper(ws, k))) {
+    if (table && !(k > at && textOnly())) {
       push(deny(table === "commands"
         ? "assigning zsh's commands table points a command name at another program, like hash -p: always blocked"
         : "assigning zsh's functions, aliases, galiases, saliases or dis_functions table defines a function or alias: always blocked"));

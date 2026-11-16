@@ -1,7 +1,7 @@
 # Fix notes: slice fix-judge-2 (audit 2026-11-16, second pass)
 
 Both judge copies (`src/judge.ts`, `.claude/hooks/judge-core.mjs`) change together; the parity test passes unchanged.
-Rows: `AUDIT_1116_2_DENY` (56 deny rows, also read by `judge-differential.test.mjs`) and 35 neighbour rows in `src/judge.test.ts`.
+Rows: `AUDIT_1116_2_DENY` (86 deny rows, also read by `judge-differential.test.mjs`) and 41 neighbour rows in `src/judge.test.ts`.
 
 **J-9 set -A and assigning `${...}` (item 1).** `set` with an `-A`/`+A` cluster joins the assigning builtins; a `${...}` whose inside starts with a table name and holds `=` is a Doubt.
 - Refused: `set -A functions f '..'`, `set +A`/`-sA`, behind `builtin`/`command`; `: ${functions[f]::=..}`, `:=`, `=`, in double quotes; also `dis_aliases`, `dis_galiases`, `dis_saliases`.
@@ -10,7 +10,7 @@ Rows: `AUDIT_1116_2_DENY` (56 deny rows, also read by `judge-differential.test.m
 
 **J-8 commands table (item 1).** `commands` joins the table list with its own reason ("points a command name at another program, like hash -p").
 - Refused: `commands+=(ls /usr/bin/git)`, `commands[ls]=..`, `commands=(..)`, `typeset`/`export`/`set -A`/`${commands[ls]::=..}`.
-- Legitimate loss: a variable named `commands` given to an assigning builtin or before a command (`read -r commands`, `local commands`, `commands=x make`); use another name.
+- Legitimate loss: a variable named `commands` (`read -r commands`, `local commands`, `commands=x make`); use another name.
 - Docs elsewhere: README.md Limits (hash line) could name the `commands` table.
 
 **J-4 hook.<name>.command (item 1).** `hook\..+\.command` joins `GIT_EXEC_KEY`.
@@ -23,8 +23,9 @@ Rows: `AUDIT_1116_2_DENY` (56 deny rows, also read by `judge-differential.test.m
 - Legitimate loss: a filter that is refused as a command of its own (`--tree-filter 'rm -rf build'`; use `--index-filter 'git rm -r --cached ..'`).
 - Docs elsewhere: README.md "Bash judge (SDK workers)" if it lists the git options read as scripts.
 
-**J-9 position (item 2).** A table word counts only where it assigns: before the command word (all earlier words assignment-shaped), after a wrapper (`afterWrapper`), or after an assigning builtin (typeset, declare, local, export, readonly, integer, float, read, getopts, vared, zparseopts, let, `set -A`, `printf -v`, `print -v`) that is the command word or after a wrapper; there the bare name and a `=<table>` value count too (safe side: `read -A functions`, `zparseopts f:=functions`).
-- Passed again: `grep functions= f`, `grep -e 'functions+=' f`, `git log --grep 'functions='`, `echo 'aliases[p]=x'`. Every assignment row of the first pass stays refused. `noglob functions[f]=x` passes (zsh reads it as a command name, not an assignment).
+**J-9 rule turned around (item 2, after review).** A table word (the name with `=`, `+=` or a subscript; after an assigning builtin anywhere earlier in the command, the bare name or `=<table>` too) is denied wherever it stands, behind any keyword, `!`, modifier (`noglob`, `nocorrect`, `-`, `repeat`, `coproc`) or wrapper. It passes only as an argument of a `TEXT_ONLY` command word (grep, egrep, fgrep, rg, ag, ack, git, cat, echo, ls, wc, head, tail, less, diff) with nothing but redirections in front.
+- Passed again: `grep functions= f`, `git grep 'functions\[' -- src`, `git log --grep 'functions='`, `echo 'aliases[p]=x'`, `cat a | grep commands=`. Refused: the first pass's rows and the review's forms (`if typeset 'functions[f]=..'`, `! functions[f]=..`, `noglob set -A functions ..`, `! commands+=(..)`).
+- Known over-block: such a word behind a keyword or wrapper even in a search (`if grep -q functions= f; then ..`, `xargs grep ..`; write the search as its own command), or given to a command off the list (`printf 'functions=%s' x`; write it so the word does not start with the name, as `sed 's/functions=/x/'`).
 - Docs elsewhere: none.
 
 **J-10 arithmetic (item 2).** Inside a subscript, a `$((...))` that closes at the first `))` and holds no `(`, `)` or backtick is stepped over; anything else is a substitution.
