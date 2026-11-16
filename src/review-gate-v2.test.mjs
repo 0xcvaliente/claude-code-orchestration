@@ -4,7 +4,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -514,4 +514,174 @@ test("Stop gate: an unfinished implementer next to another open problem is named
   assert.equal(gaveUp.status, 0);
   assert.match(JSON.parse(gaveUp.stdout).systemMessage, /gave up after 2 blocks \(implementer_unfinished, last_reviewer_failed\)/);
   assert.deepEqual(s.last().unfinished, [orphan]);
+});
+
+// ---- T-9 (audit 2026-11-16, fold side): a test gate that gave up for the slice's latest attempt is a doubt signal. ----
+test("T-9 fold: max_blocks_reached (gate test) or bugfix_unverified_gave_up of the latest attempt adds test_gate_gave_up", () => {
+  const items = [...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass")];
+  /** @param {string} reason @param {number} min @param {string} [gate] */
+  const fold = (reason, min, gate = "test") => {
+    const recs = { ...R(planLaunch(0), ...items), gates: [{ ts: at(min), gate, decision: "allow", reason, session_id: "s1", agent_id: "impl-a-1" }] };
+    return foldRuns(recs, { now: T0 + 30 * 60000, env: {} }).runs[0]?.slices.a;
+  };
+  for (const reason of ["max_blocks_reached", "bugfix_unverified_gave_up"]) {
+    const s = fold(reason, 1.6);
+    assert.deepEqual([s?.signals, s?.passed, s?.final], [["test_gate_gave_up"], true, false], reason);
+  }
+  assert.deepEqual(fold("max_blocks_reached", 1.6, "review")?.signals, [], "only the test gate's give-up");
+  assert.deepEqual(fold("tests_passed", 1.6)?.signals, []);
+  assert.deepEqual(foldRuns({ ...R(planLaunch(0), ...items), gates: [{ ts: at(1.6), gate: "test", reason: "max_blocks_reached", session_id: "s1", agent_id: "impl-a-1" }] }, { now: T0, env: { ORCH_ESCALATION: "off" } }).runs[0]?.slices.a?.signals, []);
+});
+
+// ---- G-8 (audit 2026-11-16): a reviewer stop marked `continues` (journal.mjs: stop_hook_active true after an earlier
+// stop of the same agent, the stop after a forced hand-back) replaces that reviewer's previous review of the slice. ----
+/** A second stop record of the reviewer that stopped at `min` in review(min, ...). @param {number} min @param {string} slice @param {string} reply @param {boolean} continues @returns {Item} */
+const again = (min, slice, reply, continues) => {
+  const first = `rev-${slice}-${min}`;
+  const rec = stopRecord({ ts: at(min + 0.1), sessionId: "s1", agentId: first, role: "reviewer", reply });
+  return { stop: continues ? { ...rec, continues: true } : rec };
+};
+test("G-8 fold: a continued reviewer stop is the same review; an unmarked second stop (a resume) is another review", () => {
+  const env = { ORCH_ESCALATION: "" };
+  const one = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), again(2, "a", "STATUS: fail\nGAP: 90 broken", true)], "a", env);
+  assert.deepEqual([one.reviews.length, one.countedFails], [1, 1]);
+  // The later record replaces the earlier: the delivered report decides.
+  const replaced = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass\nOPEN: none"), again(2, "a", "STATUS: pass\nOPEN: the edge case", true)], "a", env);
+  assert.deepEqual([replaced.reviews.length, replaced.signals], [1, ["open_items"]]);
+  // A resume of the same reviewer that turns a fail into a pass is two reviews: the fail still counts (retry).
+  const resumed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), again(2, "a", "STATUS: pass", false)], "a", env);
+  assert.deepEqual([resumed.reviews.length, resumed.signals], [2, ["retry"]]);
+  // A continued stop after an implementer attempt of the slice is a review of its own.
+  const later = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), ...implAttempt(2.05, "a"), again(2, "a", "STATUS: pass", true)], "a", env);
+  assert.equal(later.reviews.length, 2);
+});
+
+// ---- G-2 (audit 2026-11-16): the test gate runs beside the journal at an implementer's stop and decides minutes later,
+// so it can block after a reviewer already passed the slice. An implementer whose latest test-gate record is a block
+// with no later SubagentStop is gated like an unfinished one. ----
+/** @param {{ dir: string }} s @param {string} agentId @param {string} decision @param {string} reason */
+const testGate = (s, agentId, decision, reason) =>
+  appendFileSync(join(s.dir, ".claude", "state", "gates.jsonl"), `${JSON.stringify({ ts: new Date(Date.now() + 5).toISOString(), gate: "test", decision, reason, session_id: "s1", agent_id: agentId })}\n`);
+
+test("G-2 Stop gate: a test-gate block after a passing review, with no later stop, blocks as implementer_unfinished, then gives up", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "tests_failed");
+  const stop = () => s.run("review-gate.mjs", { background_tasks: [] });
+  let r = stop();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.match(r.stderr, new RegExp(`test gate.*SendMessage \\(to: ${id}\\)`));
+  assert.equal(stop().status, 2);
+  r = stop();
+  assert.equal(r.status, 0);
+  assert.equal(s.last().reason, "implementer_unfinished_gave_up");
+});
+
+test("G-2 Stop gate: a test-gate block followed by a stop of the same implementer is answered; an allow record never gates", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  testGate(s, id, "block", "tests_failed");
+  // The agent fixed the tests and stopped again; then the review passed.
+  s.stop(id, IMPL, "STATUS: pass");
+  s.review("a", "STATUS: pass");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(s.last().reason, "reviewer_passed");
+  const t = session({ ORCH_ESCALATION: "off" });
+  t.plan();
+  const other = t.impl("a");
+  t.review("a", "STATUS: pass");
+  testGate(t, other, "allow", "tests_passed");
+  assert.equal(t.run("review-gate.mjs", { background_tasks: [] }).status, 0);
+  assert.equal(t.last().reason, "reviewer_passed");
+});
+
+// ---- G-1 (audit 2026-11-16): a second plain PLAN REVIEW while slices are in flight. The run it closes hands an
+// unreviewed attempt of a slice the new plan names again to the new run, and a slice that was final and passed there
+// counts as final in the new run until it is launched again. Spec: docs/brief-grammar.md, "Run model". ----
+test("G-1 fold: an unreviewed attempt of a re-planned slice moves into the new run with its launches", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const { runs } = foldRuns(R(planLaunch(0), ...implAttempt(1, "a"), planLaunch(2), ...review(3, "a", "STATUS: pass")), { now: T0 + 10 * 60000, env });
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0]?.closed, true);
+  assert.equal(runs[0]?.slices.a, undefined, "the attempt left the closed run");
+  const a = runs[1]?.slices.a;
+  assert.deepEqual([a?.launches, a?.attempts, a?.reviews.length, a?.passed, a?.final], [1, 1, 1, true, true]);
+});
+
+test("G-1 fold: a re-planned slice whose attempt was reviewed and failed starts clean in the new run", () => {
+  const { runs } = foldRuns(R(planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), planLaunch(3)), { now: T0 + 10 * 60000, env: { ORCH_ESCALATION: "off" } });
+  assert.deepEqual([runs[0]?.slices.a?.attempts, runs[0]?.slices.a?.countedFails], [1, 1], "the failed attempt stays in the closed run");
+  assert.deepEqual([runs[1]?.slices.a?.attempts, runs[1]?.slices.a?.reviews.length, runs[1]?.slices.a?.final], [0, 0, false]);
+});
+
+test("G-1 fold: a slice final and passed in the closed run counts as final in the new run until it is launched again", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const now = T0 + 20 * 60000;
+  const base = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3), ...implAttempt(4, "b"), ...review(5, "b", "STATUS: pass")];
+  let { runs, open } = foldRuns(R(...base), { now, env });
+  assert.equal(runs[0]?.closed, true);
+  assert.deepEqual([runs[1]?.slices.a?.final, runs[1]?.slices.a?.attempts], [true, 0]);
+  assert.deepEqual([runs[1]?.closed, open], [true, null], "the new run closes once its other slices are final");
+  // Launched again in the new run, the slice is open work of that run.
+  const head = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3)];
+  ({ runs, open } = foldRuns(R(...head, ...implAttempt(4, "a"), ...implAttempt(5, "b"), ...review(6, "b", "STATUS: pass")), { now, env }));
+  assert.equal(open?.id, 2);
+  assert.deepEqual([runs[1]?.closed, runs[1]?.slices.a?.final, runs[1]?.slices.a?.attempts], [false, false, 1]);
+});
+
+test("G-1 fold: a resume of the carried-final slice's implementer (a stop, no launch) ends its final state; a failing review then holds it", () => {
+  const env = { ORCH_ESCALATION: "off" };
+  const now = T0 + 20 * 60000;
+  const only = "PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a";
+  const head = [planLaunch(0), ...implAttempt(1, "a"), ...review(2, "a", "STATUS: pass"), planLaunch(3, only)];
+  // The SendMessage resume of impl-a-1: a new stop record of the same agent, no launch record.
+  const resume = { stop: stopRecord({ ts: at(4), sessionId: "s1", agentId: "impl-a-1", role: "implementer", reply: "STATUS: pass" }) };
+  let { runs } = foldRuns(R(...head, resume), { now, env });
+  let a = runs[1]?.slices.a;
+  assert.deepEqual([runs[1]?.closed, a?.final, a?.passed, a?.attempts], [false, false, false, 1], "the resumed slice is open work of the new run");
+  ({ runs } = foldRuns(R(...head, resume, ...review(5, "a", "STATUS: fail\nGAP: 90 broken")), { now, env }));
+  a = runs[1]?.slices.a;
+  assert.deepEqual([runs[1]?.closed, a?.final, a?.passed, a?.reviews.at(-1)?.counted], [false, false, false, "fail"]);
+});
+
+test("G-1 Stop gate: a resume of a carried-final slice that a reviewer then fails blocks", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  s.plan("PLAN REVIEW\nSLICE: a\nFILES: a.py\nDEPENDS: none\nGOAL: a");
+  s.run("telemetry.mjs", { hook_event_name: "SubagentStart", agent_id: id, agent_type: IMPL });
+  s.stop(id, IMPL, "STATUS: pass");
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  const r = s.gate();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["last_reviewer_failed", "a"]);
+});
+
+test("G-1 Stop gate: a slice built before a second PLAN REVIEW and passed after it is allowed", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.impl("a");
+  s.plan();
+  s.review("a", "STATUS: pass");
+  const r = s.gate();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(s.last().reason, "reviewer_passed");
+});
+
+test("G-1 Stop gate: a slice built before a second PLAN REVIEW and failed after it blocks, though a later slice passed", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  s.impl("a");
+  s.plan();
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  s.impl("b");
+  s.review("b", "STATUS: pass");
+  const r = s.gate();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["last_reviewer_failed", "a"]);
 });
