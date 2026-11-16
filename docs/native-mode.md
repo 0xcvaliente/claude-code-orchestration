@@ -183,7 +183,7 @@ npm run auto   -- "task description" /path/to/folder    # triage first: plain, r
 - An explicit tool allowlist. `ORCH_ALLOWED_TOOLS` replaces it and `ORCH_EXTRA_ALLOWED_TOOLS` appends to it, one permission rule per line (for example `ORCH_ALLOWED_TOOLS=$'Read\nBash(npm test*)'`). The default list includes `Agent` and `SendMessage`, so a retry can resume the same implementer.
 - No web tools by default. For research, add `WebSearch` and `WebFetch` through `ORCH_EXTRA_ALLOWED_TOOLS`. `npm run auto` adds them itself when it counts the task as not code.
 - The test command's permission rules (pytest, cargo, go, swift, make) are added from `ORCH_TEST_CMD` or the detected runner. In the reviewed route, the read-only reviewer gets the same rules, so it can run the tests and nothing broader. Benchmark tasks declare their test command in `bench/tasks/<id>/meta.json` (`test_cmd`), which `bench/run.mjs` exports as `ORCH_TEST_CMD`.
-- An optional token cap, `ORCH_BUDGET_TOKENS`, off by default. It is approximate: it is converted at 1M tokens per list-price dollar. `ORCH_BUDGET_USD` is rejected.
+- An optional token cap, `ORCH_BUDGET_TOKENS`, off by default. It is approximate: it is converted at 1M tokens per list-price dollar. It caps each session on its own, so a run of several sessions (`npm run auto`) can spend more than the cap in total. `ORCH_BUDGET_USD` is rejected.
 - `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`, so only the agents from the folder or the plugin can start.
 - One sentence through `--append-system-prompt`: nobody can answer a question, so the run decides and goes on.
 
@@ -212,7 +212,7 @@ Every headless variable, with its default: [Environment variables](settings.md#e
 
 A folder with agents of its own but no `orchestrator.md` or `reviewer.md` gets the plugin's for the missing ones. `ORCH_AGENT_PREFIX=orchestration:` skips both checks and always runs the plugin's agents (for CI, or a plugin that `claude plugin list` does not show). An `ORCH_AGENT` that already has a namespace, such as `orchestration:reviewer`, is used as it is. The plugin's agents are the installed version, which can be older than your checkout (`claude plugin update orchestration`). Their hooks log to the plugin's per-user state dir, while `runs.jsonl` and `routes.jsonl` stay in the folder's `.claude/state/` ([Where logs go](logs.md#where-logs-go)).
 
-**`npm run auto` for any task.** It triages first (`src/route.ts`, one read-only model call), then runs the cheapest route that fits, in any folder. Two facts shape the run:
+**`npm run auto` for any task.** It triages first (`src/route.ts`, one read-only model call), then runs the cheapest route that fits, in any folder. The triage call takes no MCP server and no account connector, and writes no transcript unless `ORCH_SESSION_PERSISTENCE=1`. With `ORCH_BUDGET_TOKENS` set, it gets the cap too (as `--budget`); a triage stopped by the cap falls back to the orchestrate route, whose session gets the same cap again. Two facts shape the run:
 - **Git**: in a git work tree, the reviewed route's reviewer reads the diff ([The reviewed route](#the-reviewed-route)).
 - **Code**: the triager's `code` fact. With no facts (a forced `ORCH_MODE`, a failed triage), it counts as code when the folder is a git work tree or has a detected test runner. The route line on stderr ends in `(code: yes|no)`.
 
@@ -221,7 +221,7 @@ With `(code: no)`, the session, the orchestrator and the reviewer also get `WebS
 **Other notes.**
 - The target can be any folder. A git repository is needed only for code work that uses worktrees. In a git repository, put `.claude/state/` and `.claude/worktrees/` in its `.gitignore`.
 - `ORCH_DRY_RUN=1` prints the exact `claude` arguments and exits.
-- `ORCH_SESSION_PERSISTENCE=1` keeps session and subagent transcripts (the default passes `--no-session-persistence`), so [telemetry](logs.md#telemetry) records per-worker tokens in headless runs.
+- `ORCH_SESSION_PERSISTENCE=1` keeps session and subagent transcripts (the default passes `--no-session-persistence`), so [telemetry](logs.md#telemetry) records per-worker tokens in headless runs. It also keeps the triage call's transcript.
 - `npm run report` renders the run log, the worker events and the triage and gate decisions as a local `report.html` ([Run report](logs.md#run-report)). Nothing is published.
 - For a session that keeps going until a condition holds, use `/goal` with your acceptance check.
 

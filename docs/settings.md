@@ -80,11 +80,11 @@ Read by `scripts/orchestrate.sh` (so by `npm run native`) and by `scripts/auto.s
 | `ORCH_AGENT_PREFIX` | unset | For example `orchestration:`: always runs the plugin's agents, without checking the folder or the installed plugins. A missing trailing colon is added. An `ORCH_AGENT` that already has a namespace is used as it is. |
 | `ORCH_OUTPUT_STYLE` | Concise | The plain session's [output style](glossary.md#o) (`ORCH_AGENT=none` only, so also `npm run auto`'s plain session). Unset: Concise. `default` or empty: no style. A word of letters, digits, `_` and `-`: that style. Anything else exits 1 before any model call. |
 | `ORCH_MODEL` | unset | Passes `--model`. `npm run auto` runs its plain session on `opus` unless this names another model; `npm run native` passes it only when set. |
-| `ORCH_BUDGET_TOKENS` | unset: no cap | A token cap for the run (`500k`, `2M`; at least 10k). Approximate: converted at 1M tokens per list-price dollar into `--max-budget-usd`. |
+| `ORCH_BUDGET_TOKENS` | unset: no cap | A token cap for each session of the run (`500k`, `2M`; at least 10k). Approximate: converted at 1M tokens per list-price dollar into `--max-budget-usd`. `npm run auto` also passes it to the triage call (`src/route.ts --budget`), so the triage call and each session after it get the whole cap, and a run can spend more than the cap in total. A triage stopped by the cap falls back to the orchestrate route. |
 | `ORCH_BUDGET_USD` | — | Rejected: the script exits 1 and says to use `ORCH_BUDGET_TOKENS`. |
 | `ORCH_ALLOWED_TOOLS` | the default allowlist | Replaces the tool allowlist, one permission rule per line. |
 | `ORCH_EXTRA_ALLOWED_TOOLS` | unset | Appends rules to the default allowlist, one per line. The default list has no web tools; `auto.sh` adds `WebSearch` and `WebFetch` itself when the task changes no code. |
-| `ORCH_SESSION_PERSISTENCE` | unset | `1` drops `--no-session-persistence`, so session and subagent transcripts are written and [telemetry](logs.md#telemetry) records per-agent tokens, turns and models. Any other value keeps the flag. |
+| `ORCH_SESSION_PERSISTENCE` | unset | `1` drops `--no-session-persistence`, so session and subagent transcripts are written and [telemetry](logs.md#telemetry) records per-agent tokens, turns and models. Any other value keeps the flag. The triage call of `npm run auto` and `npm run route` writes a transcript only with `1` too. |
 | `ORCH_ADD_DIR` | unset | One extra folder the agents may read. |
 | `ORCH_ADVISOR` | unset | Passes `--advisor` (an experimental advisor model). |
 | `ORCH_DRY_RUN` | unset | Prints the exact `claude` arguments, one per line, and exits. |
