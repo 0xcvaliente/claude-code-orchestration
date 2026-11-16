@@ -3,6 +3,8 @@
 // tokens = input + output + cache read + cache write over every model (null when the output is unparsed); usage = that breakdown.
 // turns and duration_ms are the whole run's: orch_totals from scripts/run-result.mjs (turns summed over every result of the
 // session, wall time measured by orchestrate.sh). A document without orch_totals gives its own num_turns and duration_ms.
+// A run that ended with no result record is logged from run-result.mjs's no_result document: its wall time, the turns
+// seen and terminal_reason "no_result".
 // exit_code is claude's (orch_totals.exit_code, else the second argument; null when neither gives it) and complete is
 // orch_totals.complete, else whether exit_code is 0: false marks a run cut short, whose result is an interim one.
 // Usage: <the document scripts/orchestrate.sh prints> | node scripts/log-run.mjs "task" [claude's exit code]   (run from the target repo)

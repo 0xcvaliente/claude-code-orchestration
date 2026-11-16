@@ -17,6 +17,10 @@
 // Every other field is the last result's, as before: `result` is the final answer, and `modelUsage` and
 // `total_cost_usd` already cover the whole session.
 // Output that is not an event stream (an error text, or one JSON document without a `type`) is printed unchanged.
+// An event stream with no result record (claude crashed or was killed after start-up) gets a document of its own:
+// type "result", subtype and terminal_reason "no_result", is_error true, `result` the stream's plain-text lines (often
+// empty), and orch_totals with results 0, turns the assistant messages seen, wall_ms, exit_code when given, and
+// complete false whatever the exit code.
 import { createReadStream, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -37,6 +41,9 @@ export async function reduce(lines, wallMs = null, exitCode = null) {
   let last = null;
   let results = 0;
   let turns = 0;
+  let records = 0;
+  /** Assistant messages seen (one message can come in several records with one id). @type {Set<unknown>} */
+  const messages = new Set();
   /** @type {string[]} */
   const other = [];
   for await (const line of lines) {
@@ -53,12 +60,24 @@ export async function reduce(lines, wallMs = null, exitCode = null) {
       continue;
     }
     const r = /** @type {Record<string, unknown>} */ (rec);
+    records++;
+    if (r.type === "assistant") {
+      const id = /** @type {any} */ (r.message)?.id;
+      messages.add(typeof id === "string" && id ? id : Symbol("message"));
+    }
     if (r.type !== "result") continue;
     last = r;
     results++;
     if (isCount(r.num_turns)) turns += r.num_turns;
   }
-  if (!last) return other.join("\n");
+  if (!last && records === 0) return other.join("\n");
+  if (!last) {
+    /** @type {Record<string, unknown>} */
+    const none = { results: 0, turns: messages.size, wall_ms: isCount(wallMs) ? Math.round(wallMs) : null };
+    if (Number.isInteger(exitCode)) none.exit_code = exitCode;
+    none.complete = false;
+    return JSON.stringify({ type: "result", subtype: "no_result", is_error: true, terminal_reason: "no_result", result: other.join("\n"), orch_totals: none });
+  }
   /** @type {Record<string, unknown>} */
   const totals = { results, turns, wall_ms: isCount(wallMs) ? Math.round(wallMs) : null };
   if (Number.isInteger(exitCode)) Object.assign(totals, { exit_code: exitCode, complete: exitCode === 0 });
