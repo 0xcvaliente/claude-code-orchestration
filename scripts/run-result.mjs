@@ -17,9 +17,9 @@
 // Every other field is the last result's, as before: `result` is the final answer, and `modelUsage` and
 // `total_cost_usd` already cover the whole session.
 // Output that is not an event stream (an error text, or one JSON document without a `type`) is printed unchanged.
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const STARTED = Date.now();
 
@@ -65,7 +65,15 @@ export async function reduce(lines, wallMs = null, exitCode = null) {
   return JSON.stringify({ ...last, orch_totals: totals });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const file = process.argv[2];
   if (!file) {
     console.error("usage: run-result.mjs <file> [start epoch ms] [exit code]");

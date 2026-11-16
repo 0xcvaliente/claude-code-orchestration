@@ -4,9 +4,9 @@
 // the hypotheses. Cost is measured in tokens only; dollar fields in the inputs are ignored.
 // Usage: node bench/analyze.mjs <campaign dir> [<campaign dir> ...] [--out <summary.json>]
 //        (default out: <first campaign>/summary.json)
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { usageOf } from "../scripts/tokens.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, max, mean, median, medianDiff, medianRatio, min } from "./lib/stats.mjs";
@@ -868,7 +868,15 @@ export function analyze(dirs, opts = {}) {
   };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
+const isEntry = () => {
+  try {
+    return realpathSync(process.argv[1] ?? "") === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+};
+if (isEntry()) {
   const args = process.argv.slice(2);
   const dirs = [];
   let out = null;
