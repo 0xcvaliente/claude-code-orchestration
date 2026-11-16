@@ -825,6 +825,137 @@ function subscriptSubstitution(text: string): boolean {
   return false;
 }
 
+const TABLE_NAMES = new Set(ZSH_TABLES.split("|"));
+/** Every leading part of a table's name (`f`, `fu`, ... `functions`), for reading a name one character at a time. */
+const TABLE_STARTS = new Set([...TABLE_NAMES].flatMap((t) => [...t].map((_, i) => t.slice(0, i + 1))));
+/** The characters zsh (and bash) allow between `${` and the name: `#`, `+`, `^`, `=`, `~`, `!`, blanks. */
+const NAME_PREFIX = new Set(["#", "+", "^", "=", "~", "!", " ", "\t", "\n"]);
+const NO_NAMES: ReadonlyMap<string, number> = new Map();
+
+/**
+ * An assigning `${...}` of a zsh table (`${functions[f]::=body}` defines f), decided on the widest reading, never on
+ * where the expansion ends: after removing backslash-newline pairs as the shell does, a `${` followed (past prefix
+ * characters, other characters that are not a name, and `(...)` flag groups) by a table's name, or by a quote or a
+ * backslash in the name position, with an `=` anywhere later in the text, to its very end. So `${functions[x\}]::=..}`,
+ * `${func\<newline>tions[h]::=..}` and a reading expansion followed by any `=` (`[[ ${#functions} == 0 ]]`) all count.
+ * Text inside single quotes (and `$'...'`) at the top level, or inside `$(...)` and `(...)`, is skipped, as the
+ * tokenizer skips it; from the first construct whose quoting is not certain (a quote, backslash, `(` or `{` inside
+ * `${...}`, a `$(` or backtick in double quotes, a backtick, `((`, `$[`, `<<`, a comment) nothing more is skipped. One
+ * pass: a reading of `${` is a small set of states (prefix, flag group, a name being read), each holding its earliest `$`.
+ */
+function tableExpansion(src: string): boolean {
+  const last = src.lastIndexOf("=");
+  if (last < 0 || !src.includes("$")) return false;
+  const n = src.length;
+  /** The index of the character after i, past any backslash-newline pairs. */
+  const after = (i: number): number => {
+    let j = i + 1;
+    while (src.charAt(j) === "\\" && src.charAt(j + 1) === "\n") j += 2;
+    return j;
+  };
+  /** The closing quote of `$'...'` whose opening quote is at q, or -1. */
+  const ansiEnd = (q: number): number => {
+    for (let j = q + 1; j < n; j++) {
+      const d = src.charAt(j);
+      if (d === "\\") j++;
+      else if (d === "'") return j;
+    }
+    return -1;
+  };
+  const min = (a: number, b: number) => (a < 0 ? b : b < 0 ? a : Math.min(a, b));
+  let dollar = -1; // a `$` was the last character read (its index)
+  let real = -1; // after `${` and only NAME_PREFIX characters or flag groups: the name position
+  let other = -1; // after `${` and other characters that are not a name (`${:-functions=x}`): a table's name still counts
+  let flag = -1; // inside a `(...)` flag group
+  let names: ReadonlyMap<string, number> = NO_NAMES; // a name being read: "r" (in the name position) or "o", then the name so far, "*" for no table's
+  let found = false;
+  const step = (c: string, i: number, escaped: boolean): void => {
+    const word = /[A-Za-z0-9_]/.test(c);
+    const quote = c === "'" || c === '"' || c === "\\" || c === "`";
+    let r = -1, o = -1, f = -1, hit = -1;
+    let read: Map<string, number> | undefined;
+    const name = (key: string, start: number) => {
+      const k = TABLE_STARTS.has(key.slice(1)) ? key : `${key.charAt(0)}*`;
+      if (k === "o*") return; // another name outside the name position can never count
+      (read ??= new Map()).set(k, min(read.get(k) ?? -1, start));
+    };
+    if (flag >= 0) {
+      if (c === ")") r = flag;
+      else f = flag;
+    }
+    for (const [start, inPosition] of [[real, true], [other, false]] as const) {
+      if (start < 0) continue;
+      if (c === "(") f = min(f, start);
+      else if (word) name((inPosition ? "r" : "o") + c, start);
+      else if (quote) {
+        if (inPosition) hit = min(hit, start);
+      } else if (c === "}" || c === "$") continue;
+      else if (inPosition && NAME_PREFIX.has(c)) r = min(r, start);
+      else o = min(o, start);
+    }
+    for (const [key, start] of names) {
+      if (word) name(key + c, start);
+      else if (TABLE_NAMES.has(key.slice(1)) || (quote && key.charAt(0) === "r")) hit = min(hit, start);
+    }
+    if (dollar >= 0 && c === "{") r = min(r, dollar);
+    dollar = c === "$" && !escaped ? i : -1;
+    real = r;
+    other = o;
+    flag = f;
+    names = read ?? NO_NAMES;
+    if (hit >= 0 && hit < last) found = true;
+  };
+  let raw = false; // the quoting is no longer certain: nothing more is skipped
+  const stack: string[] = []; // '"' double quotes, "{" a ${...}, "(" a $(...) or (...)
+  for (let i = 0; i < n && !found; i++) {
+    const c = src.charAt(i);
+    if (c === "\\" && src.charAt(i + 1) === "\n") {
+      i++;
+      continue;
+    }
+    if (!raw) {
+      const top = stack[stack.length - 1];
+      if (top === "{") {
+        if (c === "}") stack.pop();
+        else if (c === "{" && dollar >= 0) stack.push("{");
+        else if (/['"`\\({]/.test(c)) raw = true;
+      } else if (top === '"') {
+        if (c === '"') stack.pop();
+        else if (c === "{" && dollar >= 0) stack.push("{");
+        else if (c === "`" || (c === "(" && dollar >= 0)) raw = true;
+        else if (c === "\\") {
+          step(c, i, false);
+          if (++i < n) step(src.charAt(i), i, true);
+          continue;
+        }
+      } else if (c === "'" || (c === "$" && src.charAt(after(i)) === "'")) {
+        // Unquoted (the top level, or inside $(...) or (...), where quotes read as at the top level): skip '...'.
+        const end = c === "'" ? src.indexOf("'", i + 1) : ansiEnd(after(i));
+        if (end < 0) raw = true;
+        else {
+          step("'", i, false);
+          i = end;
+          continue;
+        }
+      } else if (c === "\\") {
+        step(c, i, false);
+        if (++i < n) step(src.charAt(i), i, true);
+        continue;
+      } else if (c === '"') stack.push('"');
+      else if (c === "(") {
+        if (src.charAt(after(i)) === "(") raw = true; // `((` or `$((`: arithmetic
+        else stack.push("(");
+      } else if (c === ")") {
+        if (top === "(") stack.pop();
+      } else if (c === "{" && dollar >= 0) stack.push("{");
+      else if (c === "`" || (c === "#" && (i === 0 || /[\s;&|()<>]/.test(src.charAt(i - 1))))) raw = true; // a backtick, a comment
+      else if ((c === "<" && src.charAt(after(i)) === "<") || (c === "$" && src.charAt(after(i)) === "[")) raw = true; // a here document, $[...]
+    }
+    step(c, i, false);
+  }
+  return found;
+}
+
 function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: boolean): Classification[] {
   const ws = cmd.words;
   const out: Classification[] = [];
@@ -1052,6 +1183,7 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
     return deny(`the guard cannot tell what runs (${err instanceof Error ? err.message : String(err)}): always blocked`);
   }
   if (script.defines) return deny("function definitions are always blocked: a later word could run anything");
+  if (tableExpansion(src)) return deny("an assigning ${...} of zsh's functions, aliases or commands table defines a function, alias or command path (a table name after ${ with an = anywhere later in the command): always blocked");
   // The first deny decides, so nothing after it is read (a long command stays fast once it is denied).
   const results: Classification[] = [];
   for (const sub of script.substitutions) {

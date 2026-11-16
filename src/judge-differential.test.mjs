@@ -72,6 +72,8 @@ const HARDENING_REASONS = [
   // Audit 2026-11-16, second pass (fix-judge-2)
   /^assigning zsh's commands table/,
   /\(an assigning \$\{\.\.\.\} of a zsh function, alias or commands table\)/,
+  // fix-judge-3: the same rule on the widest reading of the whole command text
+  /^an assigning \$\{\.\.\.\} of zsh's functions, aliases or commands table/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -136,6 +138,9 @@ for (const c of AUDIT_1116_2) HARDENED.push([c, ["deny"]]);
 // fix-judge-2, third attempt: an assigning ${...} into a zsh table with a prefix, flag or nesting before the name.
 const AUDIT_1116_2_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_2_TABLE_EXPANSION_DENY");
 for (const c of AUDIT_1116_2_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
+// fix-judge-3: the same rule on the widest reading (an escaped }, a backslash-newline, a quoted }, a nested expansion).
+const AUDIT_1116_3_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_3_TABLE_EXPANSION_DENY");
+for (const c of AUDIT_1116_3_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
 
@@ -230,6 +235,66 @@ test("zsh table expansion (fix-judge-2): every prefix, flag, operator and subscr
             }
   assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} of ${n} forms`);
   for (const line of ["echo ${#functions}", "echo ${functions[f]}", "echo ${+commands[git]}", "echo ${x:=default}", "echo ${count::=0}", "echo ${#x:=functions}"]) {
+    assert.equal(next(line, CWD).cls, "pass", line);
+    assert.equal(sdk(line, CWD).cls, "pass", line);
+  }
+});
+
+test("zsh table expansion (fix-judge-3): an escaped }, a backslash-newline anywhere, a quoted }, a nested expansion, a newline or spaces, wherever the expansion stands, is denied by both copies", () => {
+  const tables = ["functions", "aliases", "galiases", "saliases", "dis_functions", "dis_aliases", "dis_galiases", "dis_saliases", "commands"];
+  const expansions = (/** @type {string} */ t) => {
+    const out = [
+      `\${${t}[x\\}]::=echo MARK two words}`,
+      `\${${t}[f]::=echo a\\}b MARK}`,
+      `\${#${t}[x\\}]:=echo MARK}`,
+      `\${+${t}[x\\}]=echo MARK}`,
+      `\${${t}['}']::=echo MARK}`,
+      `\${${t}["}"]::=echo MARK}`,
+      `\${${t}[\${x:-g}]::=echo MARK}`,
+      `\${${t}[\${x:-\\}}]::=echo MARK}`,
+      `\${${t}[a\nb]::=echo MARK}`,
+      `\${${t}[f]::=echo MARK\necho MARK}`,
+      `\${${t}[a b]::=echo MARK}`,
+      `\${${t}[a b]=echo MARK}`,
+    ];
+    // A backslash-newline at every place from just after the `$` to just before the `=`, with and without a prefix.
+    for (const pre of ["", "#", "+"])
+      for (const op of ["=", ":=", "::="]) {
+        const s = `\${${pre}${t}[f]${op}echo MARK}`;
+        for (let k = 1; k <= s.indexOf("="); k++) out.push(`${s.slice(0, k)}\\\n${s.slice(k)}`);
+      }
+    return out;
+  };
+  const sq = (/** @type {string} */ s) => `'${s.replaceAll("'", "'\\''")}'`;
+  const dq = (/** @type {string} */ s) => `"${s.replace(/[\\"$`]/g, "\\$&")}"`;
+  /** @type {Array<(e: string) => string>} */
+  const placements = [
+    (e) => `: ${e}; f`,
+    (e) => `: "${e}"; f`,
+    (e) => `if : ${e}; then f; fi`,
+    (e) => `builtin : ${e}; f`,
+    (e) => `! noglob : ${e}`,
+    (e) => `env echo ${e}`,
+    (e) => `echo ok; : ${e}`,
+    (e) => `zsh -c ${sq(`: ${e}; f`)}`,
+    (e) => `bash -c ${dq(`: ${e}; f`)}`,
+    (e) => `eval ${sq(`: ${e}`)}`,
+    (e) => `zsh -fc ${sq(`if : "${e}"; then f; fi`)}`,
+  ];
+  const wrong = [];
+  let n = 0;
+  for (const t of tables)
+    for (const e of expansions(t))
+      for (const place of placements) {
+        const line = place(e);
+        n++;
+        const a = next(line, CWD);
+        const b = sdk(line, CWD);
+        if (a.cls !== "deny" || JSON.stringify(a) !== JSON.stringify(b)) wrong.push(`${JSON.stringify(line)}: judge-core ${a.cls}, judge.ts ${b.cls}`);
+      }
+  assert.deepEqual(wrong.slice(0, 20), [], `${wrong.length} of ${n} forms`);
+  assert.ok(n > 5000, `only ${n} forms`);
+  for (const line of ["echo ${#functions}", "echo ${functions[f]}", "echo ${+commands[git]}", "n=${#functions}; echo $n", "echo ${functions_dir:=x}", "echo ${my_commands:=y}", "echo '${functions[x\\}]::=echo MARK}'"]) {
     assert.equal(next(line, CWD).cls, "pass", line);
     assert.equal(sdk(line, CWD).cls, "pass", line);
   }

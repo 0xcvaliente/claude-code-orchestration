@@ -1010,6 +1010,94 @@ test("classify (audit 2026-11-16, fix-judge-2): an assigning ${...} into a zsh t
   ]), []);
 });
 
+// fix-judge-3: the same rule, decided on the widest reading instead of where the tokenizer thinks the expansion ends.
+// The escaped-brace and backslash-newline forms got past the judge and took effect in zsh -f 5.9 (a body that echoes a
+// marker); so did the quoted }, the nested expansion, the newline and the spaces in the subscript or the body.
+// judge-differential.test.mjs reads this list too.
+const AUDIT_1116_3_TABLE_EXPANSION_DENY: string[] = [
+  ": ${functions[x\\}]::=echo MARK two words}; 'x}'",
+  ": ${aliases[y\\}]::=echo MARK two words}; alias",
+  ": ${galiases[Y\\}]::=echo MARK}; alias -g",
+  ": ${commands[w\\}]::=/bin/echo}; 'w}' MARK two words",
+  ": ${dis_functions[x\\}]::=echo MARK}",
+  ": ${functions[f]::=echo a\\}b MARK}; f",
+  ": ${#functions[x\\}]:=echo MARK}; 'x}'",
+  ": ${func\\\ntions[h]::=echo MARK}; h",
+  ": ${#func\\\ntions[r]::=echo MARK}; r",
+  ": ${#\\\nfunctions[r]::=echo MARK}; r",
+  ": ${\\\nfunctions[r]::=echo MARK}; r",
+  ": ${functions[f]:\\\n:=echo MARK}; f",
+  ": ${functions[f]::\\\n=echo MARK}; f",
+  ": $\\\n{functions[f]::=echo MARK}; f",
+  ": ${functions\\\n[f]::=echo MARK}; f",
+  ": ${commands[q]:\\\n:=/bin/echo}; q MARK",
+  ": ${ali\\\nases[p]::=echo MARK}; alias",
+  ": ${functions['}']::=echo MARK}; f",
+  ": ${functions[\"}\"]::=echo MARK}; f",
+  ": ${aliases['}']::=echo MARK}; alias",
+  ": ${functions[${x:-g}]::=echo MARK}; g",
+  ": ${functions[${x:-\\}}]::=echo MARK}; '}'",
+  ": ${functions[a\nb]::=echo MARK}; $'a\\nb'",
+  ": ${functions[f]::=echo MARK\necho MARK}; f",
+  ": ${functions[a b]::=echo MARK}; 'a b'",
+  ": ${commands[a b]::=/bin/echo}; 'a b' MARK",
+  "if : ${functions[x\\}]::=echo MARK}; then 'x}'; fi",
+  "builtin : ${func\\\ntions[h]::=echo MARK}; h",
+  "env echo ${commands[w\\}]::=/bin/echo}",
+  ": \"${functions[x\\}]::=echo MARK}\"; 'x}'",
+  ": \"${func\\\ntions[h]::=echo MARK}\"; h",
+  ": \"${functions[a\nb]::=echo MARK}\"",
+  "zsh -c ': ${functions[x\\}]::=echo MARK}; f'",
+  "zsh -c ': ${func\\\ntions[h]::=echo MARK}; h'",
+  "bash -c \": \\${functions[x\\\\}]::=echo MARK}; 'x}'\"",
+  "eval ': ${functions[a b]::=echo MARK}; f'",
+  "zsh -fc 'if : \"${functions[x\\}]::=echo MARK}\"; then :; fi'",
+  "x=$(: ${functions[x\\}]::=echo MARK}); echo $x",
+];
+
+test("classify (audit 2026-11-16, fix-judge-3): a table name after ${ with any = later is denied, however the expansion is spelled", () => {
+  assert.deepEqual(misread(AUDIT_1116_3_TABLE_EXPANSION_DENY.map((c): [string, BashClass] => [c, "deny"])), []);
+  assert.deepEqual(misread([
+    // reading a table with no = later, or an = only before the expansion
+    ["echo ${#functions}", "pass"],
+    ["echo ${functions[f]}", "pass"],
+    ["echo ${+commands[git]}", "pass"],
+    ["n=${#functions}; echo $n", "pass"],
+    // assigning expansions of other names, also names that only contain a table's name
+    ["echo ${x:=default}", "pass"],
+    ["echo ${count::=0}", "pass"],
+    ["echo ${functions_dir:=x}", "pass"],
+    ["echo ${my_commands:=y}", "pass"],
+    // text inside single quotes at the top level stays text
+    ["echo '${functions[x\\}]::=echo MARK}'", "pass"],
+    ["git commit -m 'doc: ${functions[f]::=body} defines f'", "pass"],
+    ["grep -n '${func\\\ntions[h]::=' src/a.zsh", "pass"],
+    // the accepted over-block: a reading expansion of a table followed by any = (write the read as its own command)
+    ["[[ ${#functions} == 0 ]]", "deny"],
+    ["(( ${+commands[git]} )) && x=1", "deny"],
+    ["echo ${#aliases}; y=1", "deny"],
+  ]), []);
+});
+
+test("classify (fix-judge-3): the table-expansion scan is linear: 400,000 characters classify well under a second", () => {
+  const n = 100000;
+  const shapes = [
+    `: ${"${#}".repeat(n)} x=1`,
+    `echo ${"'${functions'".repeat(n / 3)}; x=1`,
+    `echo "${"${#x}".repeat(n)}"; y=1`,
+    `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
+    `echo ${"${functions_x}".repeat(n / 4)} z=1`,
+    `echo ${"${#\\\n".repeat(n / 2)}`,
+    `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
+  ];
+  for (const cmd of shapes) {
+    const t = performance.now();
+    classifyDetail(cmd, CWD);
+    const ms = performance.now() - t;
+    assert.ok(ms < 1000, `${cmd.slice(0, 20)}... (${cmd.length} characters): ${Math.round(ms)} ms`);
+  }
+});
+
 test("classify (audit 2026-11-16, J-15): a no-op editor and an empty IFS pass; any other value stays denied", () => {
   assert.deepEqual(misread([
     ["GIT_EDITOR=true git rebase --continue", "pass"],
