@@ -58,7 +58,9 @@ const real = (p) => {
 //   jest: "FAIL <file>" header, then "●"/"✕" names; vitest: "FAIL  <file> > name", or "❯ <file>" then "×" names;
 //   pytest: "FAILED/ERROR path::name"; unittest: "FAIL:/ERROR: name (module.Class.name)", the module as its .py path;
 //   go: "--- FAIL: TestX" qualified by the "FAIL <pkg>" line that follows;
-//   cargo: "test name ... FAILED" qualified by the preceding "Running <target>".
+//   cargo: "test name ... FAILED" qualified by the preceding "Running <target>"; under --quiet (the detected command)
+//     "name --- FAILED" qualified by the "error: test failed, to rerun pass `--lib`" (src/lib.rs) or
+//     "`--test x`" (tests/x.rs) hint that follows.
 // A failure with no file or package goes to `unqualified`; a suite-level crash sets `crash`.
 // Absolute paths under `root` (the run's tree) are made relative so two trees compare.
 // ---------------------------------------------------------------------------------------------------------------
@@ -114,11 +116,25 @@ export function parseFailures(text, root = "") {
   let goPending = [];
   /** @type {string | null} */
   let cargoTarget = null;
+  /** @type {string[]} */
+  let cargoPending = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    if (CRASH_RE.some((re) => re.test(line))) res.crash = true;
+    // cargo --quiet: the rerun hint qualifies the names listed before it, so with names pending it is no crash.
+    const hint = /^error: test failed, to rerun pass `([^`]*)`/.exec(line);
+    if (CRASH_RE.some((re) => re.test(line)) && !(hint && cargoPending.length)) res.crash = true;
     let m;
-    if ((m = /^\s*not ok\s+\d+\s*(?:-\s*)?(.*)$/.exec(line))) {
+    if (hint) {
+      // "--lib" is src/lib.rs, "--test x" tests/x.rs (cargo's default layout); any other target keeps the hint's words.
+      // A workspace's "-p <package>" is left out.
+      const t = (hint[1] ?? "").split(/\s+/).filter((w, k, all) => w && !/^(-p|--package)$/.test(w) && !/^(-p|--package)$/.test(all[k - 1] ?? ""));
+      const test = t.indexOf("--test") >= 0 ? t[t.indexOf("--test") + 1] : undefined;
+      const target = t.includes("--lib") ? "src/lib.rs" : test ? `tests/${test}.rs` : t.join(" ").replace(/^--/, "");
+      for (const n of cargoPending) add(target || null, n);
+      cargoPending = [];
+    } else if ((m = /^(\S+) --- FAILED$/.exec(line))) {
+      cargoPending.push(m[1] ?? "");
+    } else if ((m = /^\s*not ok\s+\d+\s*(?:-\s*)?(.*)$/.exec(line))) {
       if (/#\s*(?:SKIP|TODO)\b/i.test(m[1] ?? "")) continue;
       /** @type {string | null} */
       let loc = null;
@@ -196,6 +212,7 @@ export function parseFailures(text, root = "") {
     }
   }
   for (const n of goPending) add(null, n);
+  for (const n of cargoPending) add(null, n);
   res.names = [...names].sort();
   res.unqualified = [...unq].sort();
   return res;
