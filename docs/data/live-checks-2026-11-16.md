@@ -145,6 +145,68 @@ Added later the same day, from live use in this repository (source: `docs/data/a
 
 **Confirmed.** Whole-suite runs of parallel gates slow each other down, and a stop hook that runs longer than Claude Code's stall limit (`CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, default 600000 ms) ends the agent with no gate record. The audit fix `fix-gate-load` followed from this check. Not probed: the same wave on an idle machine, and a stall limit other than the default.
 
+## Check 8: `npm run auto` on a small task (plain route)
+
+Added later the same day, before the 1.5.0 release: one capped live run of the finished launchers. Claude Code 2.1.325. The target `<scratch>/repo-a` is a new git repository with no remote: `package.json` (`"test": "node --test"`), `src/add.js`, one passing test, one commit, and a copy of this checkout's `.claude/` (agents, hooks, rules, skills, workflows, `settings.json`), because the orchestration plugin is disabled on this machine.
+
+**The cap.** `ORCH_BUDGET_USD` is gone: both launchers exit 1 on it before any model call ("ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS"). The cap is `ORCH_BUDGET_TOKENS`, converted at 1M tokens per dollar: a dry run (`ORCH_DRY_RUN=1`) shows `--max-budget-usd 1.5` for `1.5M`. It caps each `scripts/orchestrate.sh` session on its own; the triage call in `src/route.ts` runs before that, with no cap.
+
+```bash
+ORCH_BUDGET_TOKENS=1.5M npm run auto -- "Add a function clamp(n, lo, hi) in src/math.js that returns n limited to the range lo..hi, with two tests in test/math.test.js, and run the tests with npm test." <scratch>/repo-a
+```
+
+**Output.** Exit code 0. Stderr has one line: `route: plain - small or sequential change (2 file(s), 1 slice(s)): a plain session is cheaper and as correct (code: yes)`.
+
+- Triage: sonnet, 437,331 tokens (`routes.jsonl`), about 0.69 USD at list price. The cost was worked out from the token counts in the triage session's transcript, using the prices in `scripts/prices.mjs`. Most of it is 165,004 tokens of one-hour cache writes. The triage cost more than the session it chose.
+- Plain session: opus, Concise style. Its result document says `subtype: success`, `num_turns: 5` and `total_cost_usd: 0.4217`, with `orch_totals` `{results: 1, turns: 5, wall_ms: 16931, exit_code: 0, complete: true}`. No subagents ran and nothing was denied.
+- The whole run took 33 s and cost about 1.11 USD.
+- Final report: 6 lines. It starts with a sentence on what changed and the check (`npm test` passes, 3 of 3), then two bold-label bullets, then "Nothing is committed." It has no explicit open line. The headless plain session is not given the route skill's report rule; only the Concise style shapes it.
+- Logs in `<repo>/.claude/state/`: `routes.jsonl` and `runs.jsonl` have one line each, `reads.jsonl` one read, and `gates.jsonl` two review-gate records (`allow`, `no_telemetry`). One of those is for the triage session: the SDK triager loads the folder's hooks. There is no test-gate record, because no implementer ran. Nothing is on stderr from hooks.
+- Afterwards: `src/math.js` and `test/math.test.js` are untracked, and `npm test` passes 3 of 3.
+- Surprises:
+  - Stdout starts with npm's two banner lines, which repeat the task and the folder's absolute path, before the JSON document. Piped `npm run auto` output is therefore not one JSON document, though `scripts/auto.sh` run alone prints only that document.
+  - The triage SDK session wrote a transcript under `~/.claude/projects/`, although the launcher passes `--no-session-persistence` to its own sessions.
+
+**Confirmed.** The token cap reaches `claude` as `--max-budget-usd`, triage picks the plain route for this task, and the plain session finishes with the tests passing. Not probed: what happens when a session reaches the cap, and the reviewed and escalated routes.
+
+## Check 9: `npm run native` on two independent slices
+
+Same day, Claude Code 2.1.325, the same kind of scratch repository (`<scratch>/repo-b`, no remote, a copy of `.claude/` with `worktree.baseRef: "head"`).
+
+```bash
+ORCH_BUDGET_TOKENS=4M npm run native -- "Add two independent functions, each in its own files: slugify(text) in src/slugify.js with its tests in test/slugify.test.js, and capitalize(text) in src/capitalize.js with its tests in test/capitalize.test.js. Run the tests with npm test." <scratch>/repo-b
+```
+
+The launcher passed `--max-budget-usd 4` (dry run).
+
+**Output.** Exit code 0, stderr empty.
+
+- Result document: `subtype: success` and `total_cost_usd: 2.3174`. By model: fable 1.497, opus 0.531, sonnet 0.290. `orch_totals` is `{results: 7, turns: 19, wall_ms: 110799, exit_code: 0, complete: true}`. `subagent_stats` shows 7 agents spawned, all in the background, 7 completed, none failed: 4 `reviewer`, 2 `implementer`, 1 `integrator`. `permission_denials` is empty.
+- Worker launches in `journal-launches.jsonl`, in order:
+  1. a plan review (sonnet; one gap at confidence 10, pass);
+  2. `s1` and `s2` implementers on opus, isolated, with `CHECKS: C1, C3` and `C2, C3` (`plan-check.jsonl`: `allow`, `ok` for both);
+  3. one reviewer per slice (sonnet, pass);
+  4. the integrator (sonnet);
+  5. a reviewer of the merge (sonnet, pass, with C1 to C3 answered).
+- No opus review ran, because no slice reported a doubt.
+- Gates (`gates.jsonl`, 9 records): the test gate allowed both implementer stops with `tests_passed`, 23 s and 25 s after launch. The review gate allowed six times with `agents_running` (`source: background_tasks`), then once with `reviewer_passed` at the end. Nothing was blocked. The skill hints picked no skill for any of the six briefed agents (catalog of 102). `telemetry.jsonl` has 14 records with no tokens, as expected without `ORCH_SESSION_PERSISTENCE=1`.
+- Final report: 5 lines, in the final-report form of "Output to the person":
+
+  ```
+  Result: 2 passed, 0 failed
+  - s1: pass - `node --test test/slugify.test.js` 5/5 on its branch; `slugify` exported from `src/slugify.js`
+  - s2: pass - `node --test test/capitalize.test.js` 5/5 on its branch; `capitalize` exported from `src/capitalize.js`
+  - merged: pass - `npm test` 11/11 after the merge, commits `d18a2d4..e4d2448`, no conflicts; final review passed
+  - Open: none
+  ```
+
+  The slice lines and `Open:` carry a `- ` bullet. `merged:` is a line the prompt's list does not name.
+- The `Path:` line could not be checked. It belongs to an earlier answer, and the launcher keeps only the last result; without session persistence no transcript holds it.
+- Afterwards: `main` has `s1` and `s2` commits and two merge commits, and `npm test` passes 11 of 11. The two agent worktrees (`<repo>/.claude/worktrees/agent-*`) and their branches are still there.
+- Surprise: as in Check 8, npm's banner lines come before the JSON document on stdout.
+
+**Confirmed.** The orchestrator ran the full path for two independent slices, with a plan review, two parallel worktree implementers, the test gate at each stop, one review per slice, the integrator and a final review. Its final report kept the short form. Spend stayed under the cap at 2.32 of 4 USD. Not probed: a failing slice, a retry, the opus escalation, and the cap being reached.
+
 ## Limits
 
-Each claim was probed once, headless (`-p` or the SDK), on 2.1.325 and macOS; an interactive session was not started, and neither `scripts/orchestrate.sh` nor the npm script `plain` was run end to end (the flag they pass was). No init event names the agent, so the conclusions rest on the tool lists and models. Not probed: the comment's claim that the empty `agent` "changes no other setting" (only the tool list and model were compared, not permissions, hooks or other keys); whether `--agent` also wins over `--settings '{"agent":""}'` when both are passed; and whether `--agent` with an agent the setting does not name changes anything besides tools and model (system prompt, effort, maxTurns).
+Checks 1 to 5, 8 and 9 are headless runs (`-p` or the SDK; checks 8 and 9 end to end through `npm run auto` and `npm run native`), each run once on 2.1.325 and macOS; checks 6 and 7 came from a live session in this repository. The npm script `plain` was not run end to end (the flag it passes was). No init event names the agent, so the conclusions rest on the tool lists and models. Not probed: the comment's claim that the empty `agent` "changes no other setting" (only the tool list and model were compared, not permissions, hooks or other keys); whether `--agent` also wins over `--settings '{"agent":""}'` when both are passed; and whether `--agent` with an agent the setting does not name changes anything besides tools and model (system prompt, effort, maxTurns).
