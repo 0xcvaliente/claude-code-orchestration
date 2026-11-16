@@ -535,6 +535,23 @@ test("classify (J1): << inside ((...)) or $((...)) is a left shift, not a here d
   ]), []);
 });
 
+test("classify (J2): a brace expansion is seen whole across $(...), backticks and ${...}", () => {
+  assert.deepEqual(misread([
+    ["env {rm,$(:)-rf,.git}", "deny"],
+    ["env {git,$(:)push}", "deny"],
+    ["env {rm,`echo x y`-rf,.git}", "deny"],
+    ["env {rm,${X:- }-rf,.git}", "deny"],
+    ["env {s,$(:)udo,id}", "deny"],
+    // guards: braces with no expansion in them, and a plain brace expansion as before
+    ["echo {}", "pass"],
+    ["echo {$(date)}", "pass"],
+    ["echo ${HOME}/{}", "pass"],
+    ["awk '{print $1}' f", "pass"],
+    ["find . -name x -exec wc -l {} +", "pass"],
+    ["echo {a,b}", "deny"],
+  ]), []);
+});
+
 // A command of 20,000 words (every one a name some rule looks at), every word an assignment, and one word of 20,000
 // expansions, each classified within 8 s (about 0.2 s on an idle machine; the limit was 2 s and was missed at 2.1 s under
 // heavy load, while the code before the fix needed 27 s for the slowest). Run in a child process with a deadline.

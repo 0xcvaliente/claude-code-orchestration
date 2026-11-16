@@ -335,7 +335,8 @@ export function tokenize(src: string): Script {
       plain = false;
     } else if (c === "{") {
       // Brace expansion turns one word into several (`{rm,-rf,.git}`): we cannot tell what runs.
-      // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole.
+      // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole, and steps over substitutions and `${...}`, which
+      // stay inside the word whatever they hold, so `{rm,$(:)-rf,.git}` and `{rm,`x y`-rf,.git}` are seen whole too.
       let unquoted = "";
       let k = i + 1, depth = 1;
       for (; k < src.length; k++) {
@@ -345,7 +346,12 @@ export function tokenize(src: string): Script {
           k = src.indexOf("'", k + 1);
           if (k < 0) throw new Doubt("unterminated quote");
         } else if (d === '"') k = closeDouble(src, k);
-        else if (d === "{") depth++;
+        else if (d === "`") k = closeBacktick(src, k);
+        else if (d === "$" && src.charAt(k + 1) === "(") k = closeParen(src, k + 1);
+        else if (d === "$" && src.charAt(k + 1) === "{") {
+          k = src.indexOf("}", k + 2);
+          if (k < 0) throw new Doubt("unterminated ${...}");
+        } else if (d === "{") depth++;
         else if (d === "}" && --depth === 0) break;
         else if (ENDS_WORD.has(d)) break;
         else unquoted += d;

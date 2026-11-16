@@ -58,7 +58,10 @@ function generated() {
 
 // Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
 // denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
-const HARDENING_REASONS = [/\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/];
+const HARDENING_REASONS = [
+  /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
+  /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
+];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
   ["((1<<EOF))\nrm -rf .git\nEOF", ["deny"]],
@@ -66,6 +69,11 @@ const HARDENED = [
   ["((1<<EOF))\ngit push origin main\nEOF", ["deny"]],
   ["for ((i=0; i<<EOF; i++)); do :; done\nrm -rf .git\nEOF", ["deny"]],
   ["echo $((1<<'EOF'\n$(sudo id)\nEOF\n))", ["deny"]],
+  ["env {rm,$(:)-rf,.git}", ["deny"]],
+  ["env {git,$(:)push}", ["deny", "judge"]],
+  ["env {rm,`echo x y`-rf,.git}", ["deny"]],
+  ["env {rm,${X:- }-rf,.git}", ["deny"]],
+  ["env {s,$(:)udo,id}", ["deny"]],
 ];
 
 /** @param {{ cls: string, reason?: string }} r */
