@@ -123,3 +123,48 @@ test("W-3: the git denies are on every headless run, also with a replaced allow 
   assert.deepEqual(replaced, def);
   assert.equal(permitted(dryRun({ ORCH_ALLOWED_TOOLS: "Read\nBash(git -C *)" }), `git -C ${R} reset --hard`), false);
 });
+
+test("W-4: a task that starts with a dash goes after `--` at the end, never as the word after -p", () => {
+  for (const task of ["-x leading dash task", "--help", "-"]) {
+    const args = dryRun({}, task);
+    assert.deepEqual(args.slice(-2), ["--", task], args.join(" | "));
+    assert.equal(args[0], "-p");
+    assert.notEqual(args[1], task, "the task is not the word after -p");
+    assert.equal(args.filter((a) => a === task).length, 1);
+    assert.ok(args.indexOf("--") > args.indexOf("--allowedTools"), "`--` also ends the variadic --allowedTools");
+  }
+  // Any other task keeps its place after -p, so the arguments of an ordinary run do not change.
+  const plain = dryRun({}, "fix the bug");
+  assert.deepEqual(plain.slice(0, 2), ["-p", "fix the bug"]);
+  assert.ok(!plain.includes("--"));
+});
+
+for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
+  test(`W-4: bench/lib/${launcher} carries a dash-led prompt through as the positional prompt after --`, () => {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-fix-launch-"));
+    try {
+      const repo = join(tmp, "repo");
+      const plugin = join(tmp, "plugin");
+      mkdirSync(repo);
+      mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+      writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), "{}");
+      /** @type {Record<string, string>} */
+      const env = {};
+      for (const [k, v] of Object.entries({ ...process.env, ...BASE_ENV, ORCH_DRY_RUN: "", ORCH_AGENT_PREFIX: "orchestration:", BENCH_LAUNCH_DRY_RUN: "1" })) if (v !== undefined) env[k] = v;
+      for (const prompt of ["-x dash prompt\nsecond line", "plain prompt"]) {
+        const extra = launcher === "plugin-launch.sh" ? [plugin] : [];
+        const r = spawnSync("bash", [join(root, "bench", "lib", launcher), root, prompt, repo, ...extra], { env, encoding: "utf8" });
+        assert.equal(r.status, 0, r.stderr);
+        const out = r.stdout;
+        if (prompt.startsWith("-")) {
+          assert.ok(out.endsWith(`\n--\n${prompt}\n`), out);
+          assert.ok(!out.includes("__BENCH_PROMPT_PLACEHOLDER__"), out);
+        } else {
+          assert.match(out, /(^|\n)-p\nplain prompt\n/);
+        }
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+}

@@ -138,7 +138,11 @@ export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
 # Fork subagents (on by default since v2.1.302) inherit the whole conversation and every tool; Agent(fork) is denied too.
 export CLAUDE_CODE_FORK_SUBAGENT=0
 
-args=(-p "$task")
+# The task is claude's positional prompt. A task that starts with a dash would be read as an option after -p, so it goes
+# after `--` at the very end instead (see the end of this list; probed on Claude Code 2.1.325:
+# docs/data/live-checks-2026-11-16.md, Check 5). Any other task keeps its place after -p.
+args=(-p)
+case "$task" in -*) ;; *) args+=("$task") ;; esac
 if [ "$agent" != none ]; then
   args+=(--agent "$agent") # the flag wins over an `agent` setting in the folder
 else
@@ -173,7 +177,9 @@ args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*
   "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)" "Bash(git config*)" "Bash(git * config*)"
   "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean*)"
   "Bash(git checkout*)" "Bash(git * checkout*)" "Bash(git restore*)" "Bash(git * restore*)" "Bash(git * rm *)")
-args+=(--allowedTools "${tools[@]}") # variadic: keep it last
+args+=(--allowedTools "${tools[@]}") # variadic: keep it last, or end it with `--`
+# `--` ends both the variadic --allowedTools and option parsing, so a dash-led task is the prompt.
+case "$task" in -*) args+=(-- "$task") ;; esac
 
 if [ -n "${ORCH_DRY_RUN:-}" ]; then
   printf '%s\n' "${args[@]}"
