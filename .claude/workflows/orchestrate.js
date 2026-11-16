@@ -1,7 +1,8 @@
 // Verification status.
 // TESTED with a stubbed runtime (src/workflow.test.mjs: fake agent(), parallel(), pipeline(), phase(), log()): the meta
 //   block is a pure literal whose phases match the phase() titles; the stage order (plan, explore, build, review, then
-//   integrate for isolated waves); the slice cap; retries with reviewer gaps and the failed result; and that every
+//   integrate for isolated waves); the slice cap; retries with reviewer gaps and the failed result, in the shared tree
+//   and after a failed merged review of an isolated slice; the short plan log line and the result's plan and summary; and that every
 //   implementer brief starts with `ORCHESTRATION: workflow`, which plan-check.mjs skips (run against the real hook).
 // VERIFIED live on Claude Code 2.1.314 (docs/data/live-checks-2026-10-31.md): SubagentStart and SubagentStop fire for
 //   this script's agent() launches, with agent_type equal to the agentType given, so the test gate (verify.sh) and the
@@ -29,7 +30,8 @@ export const meta = {
 //     false = the task changes no code (research, writing, analysis, operations): no worktrees, checkpoint or
 //     integrator, nobody commits, and the slices of a wave run at the same time in the shared folder (their output
 //     files are disjoint and none of them is code, so no slice can break the code another slice's test gate might run).
-//   plan: a plan object as logged by an earlier run ({ constraints, slices }): skips the Plan and Explore phases.
+//   plan: a plan object as returned by an earlier run (its result's plan: { constraints, slices }): skips the Plan and
+//     Explore phases.
 //   skip: ids of slices that already passed (in an earlier session): they are not run and count as finished.
 //   gapMin (default 80): a reviewer gap fails a slice (or a plan review) only at this confidence (0-100) or above; 0
 //     makes every gap count. A failed constraint answer always fails. Gaps below it are logged and ignored.
@@ -40,8 +42,12 @@ export const meta = {
 //   refute (default true): before a retry a reviewer tries to refute the gaps against the changes; only standing gaps go
 //     to the implementer, and a slice whose gaps are all refuted passes.
 //   escalateLast (default true): the last implementer attempt (attempt maxRetries+1) runs on opus.
-// The plan is logged once as `plan: <JSON>` (and again as `plan after replan: <JSON>` if a replan happens), so a new
-// session can resume with args.plan and args.skip.
+//   maxRetries, refute and escalateLast hold for every slice. An isolated slice whose merged review fails gets the refute
+//   pass, then, while attempts remain, is rebuilt with the standing gaps in a new worktree from the current HEAD (which
+//   holds its earlier attempt), merged and reviewed again; such retries run one slice at a time.
+// The log names the plan in one line, `plan: <n> slice(s), constraints <ids or none>` (and `plan after replan: ...`
+// after a replan). The result returns the whole plan as `plan` (the replanned one after a replan) and a `summary`, one
+// line per slice; a new session resumes with args.plan (that plan) and args.skip (the ids that passed).
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
 const MAX_SLICES = args && typeof args.maxSlices === 'number' && args.maxSlices > 0 ? args.maxSlices : 6
@@ -388,7 +394,11 @@ const SUITE = rawSuite && rawSuite.length <= MAX_SUITE && !/[\r\n]/.test(rawSuit
 if (rawSuite && !SUITE) log('plan: suite command dropped (more than one line or too long)')
 log(`${slices.length} slice(s): ${slices.map((s) => s.id).join(', ') || 'none'}`)
 if (slices.length === 0) return { task, slices: [], note: 'planner returned no slices' }
-log(`plan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices })}`)
+// The whole plan goes to the result (resume from it with args.plan); the log gets one short line.
+const planOf = (list) => ({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices: list })
+const planLine = (p) => `${p.slices.length} slice(s), constraints ${p.constraints.map((c) => c.id).join(', ') || 'none'}`
+let finalPlan = planOf(slices)
+log(`plan: ${planLine(finalPlan)}`)
 
 // The SKILLS line (docs/brief-grammar.md) for a slice's implementer and reviewer briefs: valid names only, deduplicated,
 // at most MAX_SKILLS; '' for a slice without skills, so its briefs stay as they were.
@@ -461,14 +471,17 @@ async function review(s, body, label, phaseName, retry) {
 
 // Refute pass (args.refute): a reviewer tries to disprove each refutable gap against the slice's changes and returns the
 // gaps that still stand. Hard gaps (failed constraint answers, a reviewer that returned nothing) always stand.
-async function refute(s, gaps, label) {
+// `merged`: the slice's work is merged into the current branch (an isolated slice), so it is not in git diff HEAD.
+async function refute(s, gaps, label, merged = false) {
   const soft = gaps.filter((g) => !g.hard)
   if (!REFUTE || !soft.length) return gaps
   const r = await agent(
     `Slice ${s.id}\nGoal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${(s.files || []).join(', ') || 'unspecified'}\nA reviewer rejected this slice with these gaps:\n${soft.map((g, i) => `${i + 1}. ${g.text} (confidence ${g.confidence})`).join('\n')}\n` +
-      (CODE
-        ? 'Look at the changes (git diff HEAD and git status if this folder is a git work tree, otherwise the files above)'
-        : "Read the slice's files") +
+      (merged
+        ? "The slice's work is merged into the current branch: look at its changes there (git log and git show of its merge, and the files above)"
+        : CODE
+          ? 'Look at the changes (git diff HEAD and git status if this folder is a git work tree, otherwise the files above)'
+          : "Read the slice's files") +
       ' and try to refute each gap: a gap stands only when the changes really show the problem. Return one entry per gap: n (its number), stands, and the reason.\n',
     // A risky slice's gaps include the opus reviewer's, so only an opus verdict may refute them.
     { label, phase: 'Build', agentType: 'reviewer', model: s.risky ? 'opus' : undefined, schema: REFUTED },
@@ -564,11 +577,12 @@ async function runWave(wave) {
     }
   }
   phase('Build')
-  const runSlice = async (s) => {
-    let feedback = ''
+  // `from` and `prior`: an isolated slice whose merged review failed is rebuilt from that attempt with the standing gaps.
+  const runSlice = async (s, from = 1, prior = '') => {
+    let feedback = prior
     let work = null
     let failedReview = false
-    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    for (let attempt = from; attempt <= MAX_RETRIES + 1; attempt++) {
       // escalateLast: the final attempt goes to a fresh opus implementer with the standing gaps.
       const last = ESCALATE_LAST && attempt > 1 && attempt === MAX_RETRIES + 1
       if (last) log(`${s.id}: last attempt ${attempt} runs on opus`)
@@ -584,6 +598,7 @@ async function runWave(wave) {
             : CODE
               ? 'Do not commit.\n'
               : 'You work in the shared folder; other slices may be writing their own files at the same time, so touch only yours. Do not commit.\n') +
+          (isolated && from > 1 ? 'Your earlier attempt is already merged into the HEAD this worktree starts from; fix it there.\n' : '') +
           (last ? 'This is the last attempt, given to you as a fresh agent after earlier attempts were rejected.\n' : '') +
           (feedback ? `A previous attempt was rejected. Fix:\n${feedback}\n` : ''),
         { label: `build:${s.id}#${attempt}`, phase: 'Build', agentType: 'implementer', model: last ? 'opus' : undefined, isolation: isolated ? 'worktree' : undefined, schema: WORK },
@@ -619,7 +634,7 @@ async function runWave(wave) {
   // at a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
   let out
   if (isolated || wave.length === 1 || !CODE) {
-    out = await pipeline(wave, runSlice)
+    out = await pipeline(wave, (s) => runSlice(s))
   } else {
     out = []
     for (const s of wave) out.push(await runSlice(s))
@@ -630,41 +645,83 @@ async function runWave(wave) {
 
   if (isolated) {
     phase('Integrate')
-    const branches = built.filter((b) => b.status === 'built' && b.branch).map((b) => b.branch)
-    const merged = branches.length
-      ? await agent(
-          `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${built.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}\n${SUITE ? `Then run the project's whole test suite once: ${SUITE}\n` : ''}Return status, merged (the branches you merged) and open (what stayed unmerged or failed).`,
-          { label: 'integrate', phase: 'Integrate', agentType: 'integrator', schema: MERGE },
-        )
-      : null
-    // Only a branch the integrator names as merged is reviewed; a null or malformed result merged nothing.
-    const mergedList = merged && typeof merged === 'object' && Array.isArray(merged.merged) ? merged.merged.map((x) => String(x).trim()) : []
-    const why = !branches.length
-      ? 'nothing to merge'
-      : !merged || typeof merged !== 'object'
-        ? 'the integrator returned no merge result'
-        : `integrator status ${merged.status || 'unknown'}${isOpen(merged.open) ? `: ${merged.open}` : ''}`
-    log(`integrator: ${branches.length ? `merged ${mergedList.length} of ${branches.length} branch(es) (${why})` : why}`)
-    for (const b of built.filter((x) => x.status === 'built')) {
-      if (b.branch && (mergedList.includes(b.branch) || mergedList.includes(b.slice.id))) continue
-      b.status = 'failed'
-      b.gaps = [`branch ${b.branch || '(none)'} not merged by the integrator (${why})`]
-      log(`${b.slice.id}: ${b.gaps[0]}; not reviewed`)
+    // Merges the built slices' branches into the current branch; a slice whose branch the integrator does not name as
+    // merged fails unreviewed. Used for the wave and for each retry of a slice whose merged review failed.
+    const integrate = async (list, label) => {
+      const branches = list.filter((b) => b.status === 'built' && b.branch).map((b) => b.branch)
+      const merged = branches.length
+        ? await agent(
+            `Merge these branches in order and run the checks:\n${branches.join('\n')}\nChecks:\n${list.map((b) => `${b.slice.id}: ${b.slice.acceptance}`).join('\n')}\n${SUITE ? `Then run the project's whole test suite once: ${SUITE}\n` : ''}Return status, merged (the branches you merged) and open (what stayed unmerged or failed).`,
+            { label, phase: 'Integrate', agentType: 'integrator', schema: MERGE },
+          )
+        : null
+      // Only a branch the integrator names as merged is reviewed; a null or malformed result merged nothing.
+      const mergedList = merged && typeof merged === 'object' && Array.isArray(merged.merged) ? merged.merged.map((x) => String(x).trim()) : []
+      const why = !branches.length
+        ? 'nothing to merge'
+        : !merged || typeof merged !== 'object'
+          ? 'the integrator returned no merge result'
+          : `integrator status ${merged.status || 'unknown'}${isOpen(merged.open) ? `: ${merged.open}` : ''}`
+      log(`integrator: ${branches.length ? `merged ${mergedList.length} of ${branches.length} branch(es) (${why})` : why}`)
+      for (const b of list.filter((x) => x.status === 'built')) {
+        if (b.branch && (mergedList.includes(b.branch) || mergedList.includes(b.slice.id))) continue
+        b.status = 'failed'
+        b.gaps = [`branch ${b.branch || '(none)'} not merged by the integrator (${why})`]
+        log(`${b.slice.id}: ${b.gaps[0]}; not reviewed`)
+      }
     }
+    const reviewMerged = (b, label, retry) =>
+      review(
+        b.slice,
+        `Goal: ${b.slice.goal}\nAcceptance: ${b.slice.acceptance}\nThe work is merged into the current branch. Review it, run the check, and return a verdict.\n`,
+        label,
+        'Integrate',
+        retry,
+      )
+    await integrate(built, 'integrate')
     // Review the merged result once per slice, in the shared tree.
+    const firstGaps = new Map()
     await parallel(
       built.filter((b) => b.status === 'built').map((b) => async () => {
-        const gaps = await review(
-          b.slice,
-          `Goal: ${b.slice.goal}\nAcceptance: ${b.slice.acceptance}\nThe work is merged into the current branch. Review it, run the check, and return a verdict.\n`,
-          `review:${b.slice.id}`,
-          'Integrate',
-          false,
-        )
+        const gaps = await reviewMerged(b, `review:${b.slice.id}`, false)
         b.status = gaps.length ? 'failed' : 'passed'
         b.gaps = texts(gaps)
+        if (gaps.length) firstGaps.set(b, gaps)
       }),
     )
+    // A failed merged review gets the refute pass and, while attempts remain, a rebuild with the standing gaps in a new
+    // worktree from the current HEAD (which holds the earlier attempt), a merge and another review, the last attempt
+    // escalated as in the shared tree. One slice at a time: each retry's merge changes the shared tree.
+    for (const [b, first] of firstGaps) {
+      let gaps = first
+      for (;;) {
+        const standing = await refute(b.slice, gaps, `refute:${b.slice.id}#${b.attempts}`, true)
+        if (standing.length === 0) {
+          log(`${b.slice.id}: no reviewer gap stands after the refute pass; passing`)
+          b.status = 'passed'
+          b.gaps = []
+          break
+        }
+        b.status = 'failed'
+        b.gaps = texts(standing)
+        if (b.attempts >= MAX_RETRIES + 1) break
+        log(`${b.slice.id}: merged review failed; attempt ${b.attempts + 1} rebuilds it in a new worktree from the current HEAD`)
+        const r = await runSlice(b.slice, b.attempts + 1, texts(standing).join('\n'))
+        b.attempts = r.attempts
+        b.branch = r.branch
+        if (r.status !== 'built') {
+          b.gaps = r.gaps
+          break
+        }
+        b.status = 'built'
+        await integrate([b], `integrate:${b.slice.id}#${b.attempts}`)
+        if (b.status !== 'built') break
+        gaps = await reviewMerged(b, `review:${b.slice.id}#${b.attempts}`, true)
+        b.status = gaps.length ? 'failed' : 'passed'
+        b.gaps = texts(gaps)
+        if (!gaps.length) break
+      }
+    }
   }
   return built
 }
@@ -716,7 +773,8 @@ if (failedForGood.length) {
   }
   if (runnable.length) {
     for (const r of failedForGood) r.status = 'replanned'
-    log(`plan after replan: ${JSON.stringify({ constraints: [...constraints].map(([id, text]) => ({ id, text })), slices: [...slices.filter((s) => !failedForGood.some((r) => r.slice.id === s.id)), ...runnable] })}`)
+    finalPlan = planOf([...slices.filter((s) => !failedForGood.some((r) => r.slice.id === s.id)), ...runnable])
+    log(`plan after replan: ${planLine(finalPlan)}`)
     await runSlices(runnable, doneIds)
   }
 }
@@ -726,4 +784,6 @@ return {
   slices: results.map((r) => ({ id: r.slice.id, status: r.status, attempts: r.attempts, gaps: r.gaps })),
   passed: results.filter((r) => r.status === 'passed' || r.status === 'skipped').length,
   failed: results.filter((r) => r.status === 'failed').length,
+  summary: results.map((r) => `${r.slice.id}: ${r.status} (${r.attempts} attempt${r.attempts === 1 ? '' : 's'})`).join('\n'),
+  plan: finalPlan,
 }
