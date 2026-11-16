@@ -148,6 +148,15 @@ test("T-3: a bugfix test whose only failure on the base is a load error of its f
   assert.equal(r.status, 2, "the test body never ran on the base");
   assert.equal(last(dir).reason, "bugfix_test_passes_on_base");
   assert.equal(last(dir).new_failing, 0);
+
+  // A real node reproduction (its body fails on the base) is still verified.
+  write(dir, {
+    "src/add.mjs": "export const add = (a, b) => a + b;\n",
+    "test/add.test.mjs": 'import test from "node:test";\nimport assert from "node:assert";\nimport { add } from "../src/add.mjs";\ntest("add adds", () => assert.equal(add(2, 2), 4));\n',
+  });
+  const ok = gate(dir, { transcript: bugfixTranscript(), id: "a2" });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.deepEqual([last(dir).reason, last(dir).new_failing], ["bugfix_verified", 1]);
 });
 
 // ---- T-4: unittest output ----

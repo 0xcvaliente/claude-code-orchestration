@@ -15,7 +15,8 @@
 //   bugfix    (stdin: the SubagentStop event; ORCH_BUGFIX_CHECK=off skips it) -- for an implementer whose brief says
 //             KIND: bugfix, after the tests passed: at least one test file must be changed or added against the base,
 //             and the base run with those files copied in must show at least one new qualified failing test that
-//             lives in a copied file, compared with the base run without them. Blocks say what is missing; after two
+//             lives in a copied file, compared with the base run without them (a failure of the whole file, such as
+//             an import error, does not count: the test body has to run and fail). Blocks say what is missing; after two
 //             such blocks for the agent it allows with bugfix_unverified_gave_up.
 // Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
 // SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
@@ -217,6 +218,19 @@ export function inFiles(name, files) {
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });
+}
+
+/**
+ * A failure of a whole test file, not of a test in it: node's runner names a file that fails to load (an import or
+ * syntax error) after the file itself. Such a failure never shows that a test body ran.
+ * @param {string} name
+ */
+export function fileLevel(name) {
+  const k = name.indexOf("::");
+  if (k <= 0) return false;
+  const file = name.slice(0, k).replace(/\\/g, "/");
+  const n = name.slice(k + 2).trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  return n === file || file.endsWith(`/${n}`) || n.endsWith(`/${file}`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -612,12 +626,12 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
   }
   if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
-  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests));
+  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests) && !fileLevel(n));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
   if (fresh.length > 0) return { decision: "allow", reason: "bugfix_verified", extra, message: "" };
   return block(
     "bugfix_test_passes_on_base",
-    `KIND: bugfix: the changed test files (${tests.slice(0, 5).join(", ")}${tests.length > 5 ? ", ..." : ""}) add no failing test on ${short} without the fix: they pass there, fail the same way as the base does without them, or fail without a parsable test name. Add or change a test that fails before the fix.`,
+    `KIND: bugfix: the changed test files (${tests.slice(0, 5).join(", ")}${tests.length > 5 ? ", ..." : ""}) add no failing test on ${short} without the fix: they pass there, fail the same way as the base does without them, or fail without a parsable test name or only as a whole file that does not load. Add or change a test that fails before the fix.`,
     extra,
   );
 }
