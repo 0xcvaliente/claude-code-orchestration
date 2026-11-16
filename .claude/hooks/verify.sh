@@ -162,6 +162,7 @@ run_limited() { # limit infile outfile errfile cmd...
     "$@" <"$inf" >"$outf" 2>"$errf" &
   fi
   pid=$!
+  lim_pid="$pid" # for on_signal: a TERM, INT or HUP to the hook ends this group first
   set +m
   # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
   # can be reached limit-1 seconds after the start (a run that took 2.6 s was timed out under a 3 s limit); one more
@@ -187,6 +188,7 @@ run_limited() { # limit infile outfile errfile cmd...
     exit 0
   ) >/dev/null 2>&1 &
   wd=$!
+  lim_wd="$wd"
   wait "$pid" 2>/dev/null
   lim_rc=$?
   # Timed out is the hook's own fact, never a file the command could delete: the watchdog exits 124 when it signalled
@@ -204,8 +206,33 @@ run_limited() { # limit infile outfile errfile cmd...
       kill -KILL -- "-$pid" 2>/dev/null # the leader ended on the SIGTERM: its group's stragglers go now
     fi
   fi
+  lim_pid="" lim_wd=""
   return 0
 }
+lim_pid="" lim_wd=""
+
+# A TERM, INT or HUP to the hook: the running command's process group (a test run or the bugfix-check.mjs helper, which
+# runs in a group of its own and would outlive the hook) is ended the way a limit ends it, SIGTERM and SIGKILL after
+# LIM_GRACE_S while its leader is still there, before the EXIT trap releases the lock, so the next gate's suite never
+# overlaps it. bash runs the trap at once while it waits for the job. A hook killed with SIGKILL runs no trap: its lock
+# is then taken over as stale, and its suite may still be running.
+on_signal() { # exit status
+  local g=0
+  trap '' TERM INT HUP
+  [ -z "$lim_wd" ] || kill -KILL "$lim_wd" 2>/dev/null
+  if [ -n "$lim_pid" ]; then
+    kill -TERM -- "-$lim_pid" 2>/dev/null || kill -TERM "$lim_pid" 2>/dev/null
+    while [ "$g" -lt "$LIM_GRACE_S" ] && kill -0 "$lim_pid" 2>/dev/null; do
+      sleep 1
+      g=$((g + 1))
+    done
+    kill -KILL -- "-$lim_pid" 2>/dev/null || kill -KILL "$lim_pid" 2>/dev/null
+  fi
+  exit "$1"
+}
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+trap 'on_signal 129' HUP
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/orch-verify.XXXXXX" 2>/dev/null)" || work=""
 if [ -z "$work" ] || [ ! -d "$work" ]; then
@@ -223,19 +250,27 @@ fi
 lock="$state/test-gate.lock"
 lock_token="" lock_held=0
 LOCK_STALE_S=900 # the hook timeout in the settings
+# A lock that is gone again when the failed link is looked at was released in between: the link is tried again. Only a
+# state dir that is missing or cannot be written (or, after 5 such tries, a file system with no hard links) is "no lock".
 take_lock() { # 0: taken; 1: held by another; 2: no lock can be made here (the gate goes on without one)
-  local priv="$state/.test-gate.lock.$$"
+  local priv="$state/.test-gate.lock.$$" tries=0
   mkdir -p "$state" 2>/dev/null || return 2
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   lock_token="$$ $(date +%s)"
   printf '%s\n' "$lock_token" 2>/dev/null >"$priv" || return 2
-  if ln "$priv" "$lock" 2>/dev/null; then
-    rm -f "$priv"
-    lock_held=1
-    return 0
-  fi
+  while [ "$tries" -lt 5 ]; do
+    if ln "$priv" "$lock" 2>/dev/null; then
+      rm -f "$priv"
+      lock_held=1
+      return 0
+    fi
+    if [ -e "$lock" ]; then
+      rm -f "$priv"
+      return 1
+    fi
+    tries=$((tries + 1))
+  done
   rm -f "$priv"
-  [ -e "$lock" ] && return 1
   return 2
 }
 lock_stale() { # $1: the lock's content as read; true when its holder is gone or it is older than the hook timeout

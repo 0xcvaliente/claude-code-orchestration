@@ -95,8 +95,18 @@ function isolatedRepo() {
   write(wt, { "app.js": "y\n" });
   return { main, wt };
 }
+/** @param {number} pid */
+const alive = (pid) => {
+  if (!(pid > 0)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 /** @param {number} ms */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep =(ms) => new Promise((r) => setTimeout(r, ms));
 /** @param {() => boolean} cond @param {number} ms */
 async function until(cond, ms) {
   const end = Date.now() + ms;
@@ -176,6 +186,49 @@ test("gate load: a stale lock (its holder gone, or older than the hook timeout) 
     assert.ok(p !== pid && (s ?? 0) >= nowS() - 30, `${name}: the suite ran under the gate's own lock, saw ${p} ${s}`);
     assert.ok(r.ms < 6000, `${name}: taken over at once, took ${r.ms} ms`);
     assert.ok(!existsSync(lockFile(project)), `${name}: the lock is gone afterwards`);
+  }
+});
+
+test("gate load: a lock that vanishes between the failed link and the look at it is tried again, never run without", async () => {
+  const project = tmp("orch-gl-race-");
+  holdLock(project, process.pid, nowS());
+  // An `ln` first on PATH that, the first time the real one fails, removes the lock: the holder released it in between.
+  const bin = tmp("orch-gl-bin-");
+  const realLn = spawnSync("sh", ["-c", "command -v ln"], { encoding: "utf8" }).stdout.trim();
+  const mark = join(bin, "vanished");
+  writeFileSync(join(bin, "ln"), `#!/bin/sh\n'${realLn}' "$@" && exit 0\nrc=$?\nif [ ! -e '${mark}' ]; then : > '${mark}'; rm -f '${lockFile(project)}'; fi\nexit $rc\n`, { mode: 0o755 });
+  const seen = join(tmp("orch-gl-seen-"), "seen");
+  const r = await gate(project, { env: { ...QUIET, PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `cat '${lockFile(project)}' > '${seen}' 2>/dev/null; true` }, limitMs: 30000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(existsSync(mark), "the lock vanished between the two steps");
+  assert.match(existsSync(seen) ? readFileSync(seen, "utf8") : "", /^\d+ \d+\n?$/, "the suite ran under the gate's own lock");
+  assert.ok(!existsSync(lockFile(project)), "and released it");
+});
+
+test("gate load: TERM to the gate ends its running suite's process group before the lock is released", async () => {
+  const project = tmp("orch-gl-sig-");
+  const pids = tmp("orch-gl-pids-");
+  const suitePid = join(pids, "suite.pid");
+  const childPid = join(pids, "child.pid");
+  const result = join(pids, "second");
+  /** @param {string} f */
+  const pidOf = (f) => Number(existsSync(f) ? readFileSync(f, "utf8").trim() : 0);
+  try {
+    /** @type {import("node:child_process").ChildProcess | undefined} */
+    let first;
+    const run = gate(project, { env: { ...QUIET, ORCH_TEST_CMD: `echo $$ > '${suitePid}'; sleep 300 & echo $! > '${childPid}'; wait` }, limitMs: 30000, onStart: (c) => (first = c) });
+    assert.ok(await until(() => pidOf(suitePid) > 0 && pidOf(childPid) > 0, 20000), "the suite started");
+    first?.kill("SIGTERM");
+    const r = await run;
+    assert.ok(r.status === 143 || r.signal === "SIGTERM", `ended by the signal: ${r.status} ${r.signal}`);
+    assert.ok(await until(() => !alive(pidOf(suitePid)) && !alive(pidOf(childPid)), 8000), "the suite and its child are gone shortly after");
+    assert.ok(!existsSync(lockFile(project)), "the lock is gone");
+    // A second gate started now runs its suite alone.
+    const second = await gate(project, { id: "a2", env: { ...QUIET, ORCH_TEST_CMD: `if kill -0 $(cat '${childPid}') 2>/dev/null; then echo overlap; else echo alone; fi > '${result}'` } });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(readFileSync(result, "utf8").trim(), "alone");
+  } finally {
+    for (const p of [pidOf(suitePid), pidOf(childPid)]) if (p > 0 && alive(p)) process.kill(p, "SIGKILL");
   }
 });
 
