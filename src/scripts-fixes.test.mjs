@@ -268,6 +268,32 @@ test("O-9: auto.sh prints the plain session's terminal form on a terminal and it
   }
 });
 
+test("O-5: the plain branch asks for the Concise style in the settings that clear the agent; ORCH_OUTPUT_STYLE overrides it", () => {
+  /** @param {Record<string, string | undefined>} env */
+  const settings = (env) => {
+    const a = dryRun(env);
+    return a.includes("--settings") ? JSON.parse(String(a[a.indexOf("--settings") + 1])) : null;
+  };
+  assert.deepEqual(settings({}), { agent: "", outputStyle: "Concise" });
+  assert.deepEqual(settings({ ORCH_OUTPUT_STYLE: "default" }), { agent: "" });
+  assert.deepEqual(settings({ ORCH_OUTPUT_STYLE: "" }), { agent: "" });
+  assert.deepEqual(settings({ ORCH_OUTPUT_STYLE: "Explanatory" }), { agent: "", outputStyle: "Explanatory" });
+  assert.deepEqual(settings({ ORCH_OUTPUT_STYLE: "my-style_2" }), { agent: "", outputStyle: "my-style_2" });
+  // A named agent passes no settings at all, whatever the variable says.
+  assert.equal(settings({ ORCH_AGENT: "reviewer", ORCH_AGENT_PREFIX: "orchestration:", ORCH_OUTPUT_STYLE: "Concise" }), null);
+  // Not a plain word: refused before any model call, so it can never break or extend the JSON.
+  const repo = mkdtempSync(join(tmpdir(), "orch-fix-style-"));
+  try {
+    for (const bad of ['x","agent":"orchestrator', "two words", "a\nb", "-x", "a*"]) {
+      const r = spawnSync("bash", [orchestrateSh, "t", repo], { env: cleanEnv({ ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_OUTPUT_STYLE: bad }), encoding: "utf8" });
+      assert.equal(r.status, 1, JSON.stringify(bad));
+      assert.equal(r.stdout, "");
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
   test(`W-4: bench/lib/${launcher} carries a dash-led prompt through as the positional prompt after --`, () => {
     const tmp = mkdtempSync(join(tmpdir(), "orch-fix-launch-"));

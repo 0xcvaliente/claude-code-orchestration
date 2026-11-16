@@ -46,6 +46,14 @@ if [ -n "${ORCH_BUDGET_USD:-}" ]; then
   echo "ORCH_BUDGET_USD was replaced by ORCH_BUDGET_TOKENS (a token count such as 2M)" >&2
   exit 1
 fi
+# The plain session's output style (ORCH_AGENT=none only): unset is Claude Code's built-in Concise; "default" or empty
+# passes none (Claude Code's default style); any other value must be a plain word, the name of a style.
+style="${ORCH_OUTPUT_STYLE-Concise}"
+[ "$style" = default ] && style=""
+if [ -n "$style" ] && ! [[ "$style" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  echo "ORCH_OUTPUT_STYLE must be a style name of letters, digits, _ and -, or default" >&2
+  exit 1
+fi
 budget_usd=""
 if [ -n "${ORCH_BUDGET_TOKENS:-}" ]; then
   budget_usd="$(node "$here/tokens.mjs" budget-usd "$ORCH_BUDGET_TOKENS")" || exit 1
@@ -150,8 +158,13 @@ else
   # A plain session must stay plain. A folder's settings can name a main agent (this repo's .claude/settings.json sets
   # "agent": "orchestrator", and a copy of .claude/ carries it along), and `claude -p` would then run as that agent,
   # with its tools. An empty `agent` in the flag settings, which rank above the folder's, gives the default agent back
-  # (probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md). It changes no other setting.
-  args+=(--settings '{"agent":""}')
+  # (probed on Claude Code 2.1.325: docs/data/live-checks-2026-11-16.md). The same JSON names the output style, Concise
+  # unless ORCH_OUTPUT_STYLE says otherwise (Check 5 there; the key and the case-sensitive name are Claude Code's).
+  if [ -z "$style" ]; then
+    args+=(--settings '{"agent":""}')
+  else
+    args+=(--settings "{\"agent\":\"\",\"outputStyle\":\"$style\"}")
+  fi
 fi
 # The event stream, not --output-format json: a session that waits for agents produces one result per wake-up, and
 # json prints the last one only. scripts/run-result.mjs reduces the stream to that last result plus the run's totals.
