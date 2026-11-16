@@ -33,7 +33,7 @@
 # the bugfix cap are counted separately, each over the blocks since the agent's latest SubagentStart in telemetry.jsonl
 # (a SendMessage resume starts the agent again under its id), or over all its blocks when no start is recorded.
 # Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block, so the whole hook ends
-# within ORCH_HOOK_BUDGET_S (default 870, 30 s under the 900 s timeout for logging and exit):
+# within ORCH_HOOK_BUDGET_S (default and maximum 870, 30 s under the 900 s timeout for logging and exit):
 #   test run    min(ORCH_TEST_TIMEOUT_S (default 600), time left). When it is reached the test command and its
 #               children (its own process group) are killed and the stop blocks as a test failure (tests_failed, with
 #               timed_out:1 and limit_s; tests_failed_isolated in an isolated worktree in warn mode), under the same
@@ -100,6 +100,8 @@ pos_int() { # value default
   case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) if [ "$1" -gt 0 ] 2>/dev/null; then printf '%s' "$((10#$1))"; else printf '%s' "$2"; fi ;; esac
 }
 budget="$(pos_int "${ORCH_HOOK_BUDGET_S:-}" 870)"
+# Never above 870: a hook killed at its 900 s timeout does not block, so a larger budget could let a slow suite through.
+[ "$budget" -le 870 ] || budget=870
 test_limit="$(pos_int "${ORCH_TEST_TIMEOUT_S:-}" 600)"
 base_limit="$(pos_int "${ORCH_BASE_TIMEOUT_S:-}" 300)"
 time_left() { printf '%s' "$((budget - SECONDS))"; }
