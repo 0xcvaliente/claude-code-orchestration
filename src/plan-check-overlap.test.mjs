@@ -269,6 +269,25 @@ test("file_overlap and dependency_cycle: a retry of a slice that a later slice D
   }
 });
 
+test("file_overlap: a retry's DEPENDS on a slice ordered after it adds no order for a later slice", () => {
+  const dir = project({ reviewed: false });
+  try {
+    plan(dir, "PLAN REVIEW\nSLICE: a\nFILES: f.txt\nDEPENDS: none\nGOAL: a\nSLICE: b\nFILES: f.txt\nDEPENDS: a\nGOAL: b\nSLICE: c\nFILES: f.txt\nDEPENDS: a\nGOAL: c");
+    for (const [s, d] of [["a", "none"], ["b", "a"], ["a", "none"], ["a", "b"], ["b", "a"], ["a", "b"]]) {
+      const r = launch(dir, `SLICE: ${s}\nFILES: f.txt\nDEPENDS: ${d}`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [0, "ok"], `launch ${s} DEPENDS ${d}: ${r.stderr}`);
+    }
+    // c and b both come after a and are not ordered against each other: a real overlap, every time.
+    for (let i = 0; i < 3; i++) {
+      const r = launch(dir, "SLICE: c\nFILES: f.txt\nDEPENDS: a");
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "file_overlap"], r.stderr);
+      assert.match(r.stderr, /f\.txt \(owned by b\)/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("file_overlap and dependency_cycle: a transitive dependant is ordered after the retried slice; a real cycle still blocks", () => {
   const dir = project({ reviewed: false });
   try {
