@@ -1,6 +1,6 @@
 # Claude Code orchestrator
 
-Split a task (code, research, writing, analysis or operations) across specialised agents when that pays off, and keep it in one plain session when it does not. A router sizes each task and picks the cheapest of three routes: a plain session, a plain session plus an independent reviewer, or a pipeline that plans the task, builds independent slices in parallel and has a fresh-context reviewer check each one, behind hooks that block a launch or a reply until the checks hold. It runs natively inside Claude Code (agents, hooks, skills and a workflow, shipped as a plugin), which takes any task, and as a TypeScript pipeline on the Claude Agent SDK, which takes code in a git repository only and has been frozen (maintenance only) since 0.3.0. This README describes version 1.1.0, the first stable release.
+Split a task (code, research, writing, analysis or operations) across specialised agents when that pays off, and keep it in one plain session when it does not. A router sizes each task and picks the cheapest of three routes: a plain session, a plain session plus an independent reviewer, or a pipeline that plans the task, builds independent slices in parallel and has a fresh-context reviewer check each one, behind hooks that block a launch or a reply until the checks hold. It runs natively inside Claude Code (agents, hooks, skills and a workflow, shipped as a plugin), which takes any task, and as a TypeScript pipeline on the Claude Agent SDK, which takes code in a git repository only and has been frozen (maintenance only) since 0.3.0. This README describes version 1.4.4; [CHANGELOG.md](CHANGELOG.md) lists what changed in each release.
 
 ## Contents
 
@@ -28,7 +28,7 @@ Two settings the plugin cannot set for you:
 - **Parallel code slices need `baseRef: "head"`.** Claude Code starts a worktree from the remote default branch unless told otherwise, so a parallel slice would not see unpushed or feature-branch commits. Add `{ "worktree": { "baseRef": "head" } }` to your `.claude/settings.json` or `~/.claude/settings.json`. Without it the orchestrator runs code slices one after another in the shared tree and says so.
 - **Permission denies.** A plugin cannot ship them. This repo denies Claude Code's built-in subagents (seven since Claude Code 2.1.325 added `web-fetch`; the list is `.claude/hooks/builtin-agents.mjs`), `Agent(fork)`, `git remote*`, `sudo*` and `rm -rf` in its own `.claude/settings.json`; add the ones you want to your settings. Without them the plan check still blocks fork and built-in launches while a run is open (`builtin_agent_in_run`).
 
-Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist (the package registries and the hosts the task needs): the 0.4.0 guards narrow what a researcher or reviewer can reach, but Bash can still reach the network.
+Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist (the package registries and the hosts the task needs): the guards narrow what a researcher or reviewer can reach, but Bash can still reach the network.
 
 **From a checkout** (`npm install` first):
 
@@ -42,6 +42,8 @@ npm run native -- "task" /path/to/folder         # headless: always the orchestr
 npm run route -- --repo /path/to/folder --task "..."   # triage only, prints the decision as JSON
 ```
 
+`npm run auto` takes the task as its first argument, even a task that begins with `-`.
+
 The default agent applies to this repo only: the plugin does not ship the `agent` setting. What must stay plain clears it itself: `ORCH_AGENT=none` in `scripts/orchestrate.sh`, the SDK workers and `npm run plain` ([live checks](docs/data/live-checks-2026-11-16.md)).
 
 The gated workflow is started by you, never by the model: `/orchestration:orchestrate {"task":"...","code":true,"baseRefHead":true}` (project copy: `/orchestrate`). See [The gated workflow](#the-gated-workflow).
@@ -52,7 +54,7 @@ Every task goes through triage first. The kind of task (the triage fact `code`) 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/routes-dark.svg">
-  <img alt="Triage sends a task to a plain session, a plain session plus a fresh reviewer, or the pipeline. Plain and reviewed runs leave their results in place when their checks pass; when checks fail, the task escalates to the pipeline, which leaves git branches for code in a git repository and files in place otherwise." src="docs/diagrams/routes-light.svg">
+  <img alt="Triage, one read-only Sonnet call, sends a task to a plain session, a plain session plus a fresh reviewer, or the pipeline. Plain and reviewed runs leave their results in place when their checks pass; when checks fail, the task escalates to the pipeline, which merges branches into your branch for code in a git repository and leaves files in place otherwise." src="docs/diagrams/routes-light.svg">
 </picture>
 
 | Route | What runs | Result lands in | Verified by |
@@ -92,7 +94,7 @@ The diagram shows the flow for code in a git repository in the native orchestrat
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/pipeline-dark.svg">
-  <img alt="Pipeline: Fable plans, Sonnet explores, Opus writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and the same gap twice stalls the slice until one replan." src="docs/diagrams/pipeline-light.svg">
+  <img alt="Pipeline for code in git: Fable plans, Sonnet explores, a reviewer checks the plan; Opus writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and the same gap twice stalls the slice until one replan; the integrator merges passing branches into your current branch and runs the whole suite once (SDK: orch/&lt;id&gt;/result)." src="docs/diagrams/pipeline-light.svg">
 </picture>
 
 Why each step is shaped this way:
@@ -110,7 +112,7 @@ One slice's life:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/slice-lifecycle-dark.svg">
-  <img alt="One slice's states: planned, writing, testing, reviewing, validating gaps, then passed and merged, stalled and replaced, or failed for good after three attempts." src="docs/diagrams/slice-lifecycle-light.svg">
+  <img alt="One slice's states: planned, writing, testing, reviewing (opus too on a doubt signal), validating gaps, then passed and merged (code in git), stalled and replaced, or failed for good after three attempts." src="docs/diagrams/slice-lifecycle-light.svg">
 </picture>
 
 ### The roles
@@ -125,7 +127,7 @@ One slice's life:
 | Triager | Sonnet, low | read-only | Sizes a task for the router |
 | Plain session (`npm run auto`) / solo | Opus, medium | as the session allows | Does a small task alone, with no agents |
 
-Models, effort, turn caps and the tool policy live in `src/config.ts`, the single source of truth; `npm run sync-agents` copies them into `.claude/agents/*.md`. No worker can start another agent. Claude Code's six built-in subagents and fork subagents are denied in this repo's settings (`DENIED_AGENTS`), and headless runs export `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`.
+Models, effort, turn caps and the tool policy live in `src/config.ts`, the single source of truth; `npm run sync-agents` copies them into `.claude/agents/*.md`. No worker can start another agent. Claude Code's seven built-in subagents (listed in `.claude/hooks/builtin-agents.mjs`) and fork subagents are denied in this repo's settings (`DENIED_AGENTS`), and headless runs export `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`.
 
 ## The gates
 
@@ -133,7 +135,7 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/gates-sequence-dark.svg">
-  <img alt="Sequence of the native gates: plan-check blocks bad implementer launches or replan_required, or allows with a model raise and skill hints; the guards deny unsafe Bash and unlisted hosts; verify.sh blocks on failing tests or a missing bugfix test; quote-check blocks unverified quotes once; review-gate blocks the final reply until every slice passes review." src="docs/diagrams/gates-sequence-light.svg">
+  <img alt="Sequence of the native gates: plan-check blocks bad implementer launches (a worktree not from HEAD included) or replan_required, or allows with the haiku raise, the read router's model raise and skill hints; the guards deny unsafe Bash and unlisted hosts; verify.sh blocks on failing tests or a missing bugfix test; quote-check and handback-check send a report back once; review-gate blocks the final reply until every slice passes review and no implementer is left unfinished." src="docs/diagrams/gates-sequence-light.svg">
 </picture>
 
 | Gate | Hook | What it does |
@@ -147,13 +149,13 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 
 **Review gate reasons**, in order: `agents_running` (allows the stop without counting a block while Stop's `background_tasks` lists a running subagent, workflow or teammate); `no_reviewer_after_last_implementer`, `last_reviewer_failed`, `last_reviewer_no_status` (per slice); `constraints_unchecked` (a passing review left a `CHECKS:` id unanswered); `opus_review_required` (a review on opus or a stronger model meets it); `replan_required`; `implementer_unfinished` (an implementer launched with the Agent tool started and never stopped, the mark of a turn-limit stop, which fires no SubagentStop; it blocks until the implementer is resumed and stops, or a later implementer stop takes the slice over; two blocks and one give-up per such implementer for the whole session); and `slice_failed_for_good` (allows: a slice whose latest review failed after 3 attempts is named in a `systemMessage` so the reply reports it as failed). The review gate only sees implementers: an orchestrator that writes the answer itself is told to send it to a reviewer first, and no hook checks that.
 
-**Doubt signals** send a slice to an opus reviewer before it counts as passed: `RISKY: yes` (reviewed on opus from the start), a retry, a `(read)` constraint answer, a non-empty OPEN, an isolated test failure, and, since 0.4.0, a failing review whose gaps are all below the cutoff (`low_confidence_fail`: it counts as a pass with a doubt signal).
+**Doubt signals** send a slice to an opus reviewer before it counts as passed: `RISKY: yes` (reviewed on opus from the start), a retry, a `(read)` constraint answer, a non-empty OPEN, an isolated test failure, and a failing review whose gaps are all below the cutoff (`low_confidence_fail`: it counts as a pass with a doubt signal).
 
 **Loop guards.** Most gates block twice per reason and scope, then let the launch or reply through and log `<reason>_gave_up` (or `max_blocks_reached`); the review gate's give-up carries a `systemMessage` saying the work is unverified. `file_overlap` and `dependency_cycle` block every time, the guards deny every time, and the quote check blocks once.
 
 **Run scope.** A run belongs to one session. It opens at a `PLAN REVIEW` launch, or at a light-path implementer launch; a `PLAN REVIEW` with `REPLAN:` extends it; it closes when every slice is final. A slice is final when it failed for good (its latest review failed after 3 implementer attempts), or when its latest review passed and the escalation rule is met: no doubt signal, or a passing opus review after its latest attempt. A sonnet pass that still needs its opus review keeps the run open, so that review and any further launch of the slice join the same run instead of opening a new one ([docs/brief-grammar.md, Final slice](docs/brief-grammar.md#run-model)). A new user prompt does not close it. After `ORCH_RUN_STALE_MIN` minutes (default 30) with nothing running, the plan check treats it as closed, while the review gate still gates its unreviewed slices. A run waiting for an opus review that never comes, for example after the review gate gave up on it (`opus_review_required_gave_up`), stays open until it goes stale. Until then a new light task is blocked with `light_path_multi` and an unplanned implementer with `not_in_plan`, each at most twice. `foldRuns` in `.claude/hooks/brief.mjs` computes all of this from the log records alone.
 
-### What 0.4.0 adds to the gates
+### Gate details
 
 - **Gap cutoff.** Reviewers write each gap as `GAP: <0-100> <text>`. A `STATUS: fail` review counts as a fail when it has a gap at or above the cutoff (default 80), a gap with no number, a failed checked id, or no gaps at all (an old-style reply). A fail whose gaps are all below the cutoff counts as a pass with the doubt signal `low_confidence_fail`.
 - **Validation before a retry** (orchestrator prompt, not a hook). Before a retry the orchestrator sends the failing gaps with the diff to a fresh reviewer whose brief carries `VALIDATE: gaps`, and forwards only the gaps it confirms. That review replaces the earlier reviews of the same attempt in the count; if it confirms none, the slice counts as passed with a doubt signal.
@@ -162,23 +164,12 @@ The native order is the orchestrator's prompt; the gates are hooks that block a 
 - **Test baseline.** When the tests fail at an implementer stop and the tree has changes against its base, `bugfix-check.mjs` runs the same command in a clean detached worktree of the base (limited to `ORCH_BASE_TIMEOUT_S`, default 300, and to the time left in the test gate's budget, `ORCH_HOOK_BUDGET_S`; cached per base commit and command). Three modes: `inform` (the default) still blocks and lists the qualified failing tests that also fail on the base as probably pre-existing; `allow` (opt-in, heuristic) lets the implementer finish with `tests_failed_baseline` when every failing test, qualified by its file or package, also fails on the base, while unqualified names, crash markers and a base run that timed out keep the block; `off` runs no base.
 - **Bugfix check.** For a `KIND: bugfix` slice, after its tests pass, the test gate checks that a test file was changed or added and that it fails on the base. Otherwise it blocks and says what is missing; after two blocks it allows with `bugfix_unverified_gave_up`. A check that runs out of time blocks with `bugfix_timeout`, and one whose temp folder was removed while it ran with `bugfix_tmp_lost`; both count toward those two blocks.
 - **Quote check.** Each researcher `QUOTE: <locator> | <verbatim text>` is searched in the whole file the locator names (text as is; PDF, xlsx, docx and pptx through a cached text conversion). A quote not found blocks the researcher once; URLs, images and scans with no text layer are unverifiable and never block.
-- **Guards.** `researcher-guard.mjs` allows only commands from the researcher's read-only Bash list, with no redirection, substitution or expansion; the one exception is a stderr redirection written exactly `2>/dev/null` or `2>&1` as a word of its own (`2> /dev/null` with a space is refused). Since 1.2.0 the list includes search and paging (`grep`, `rg`, `find`, `head`, `tail`, `cat`) in forms that cannot write a file or start a program: `find` without `-exec`, `-ok`, `-delete` and `-fprint`, `grep` and `rg` with long options from a fixed list (and no `rg -z` or `grep -Q`), `head` and `tail` without follow in any spelling, none of them on a `/dev/` device other than `/dev/null` (also as an option's value, `--file=/dev/zero`), no glob in an option's name (`tail -?`, `rg -g*.md x`; quote the glob or use the long form), and a lone `--` never ends the check. On macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose tools also name Bash, so without these the researcher could only read whole files. `egress-guard.mjs` allows a reviewer's fetch only to hosts named in its brief or its slice's planned files, or in the coordinator's message that resumed it (`SendMessage`); no other later record, such as a tool result, a fetched page or a compaction summary, adds a host. An unreadable brief allows and logs `egress_unverified`. Both are deny-only and not a boundary.
+- **Guards.** `researcher-guard.mjs` allows only commands from the researcher's read-only Bash list, with no redirection, substitution or expansion; the one exception is a stderr redirection written exactly `2>/dev/null` or `2>&1` as a word of its own (`2> /dev/null` with a space is refused). The list includes search and paging (`grep`, `rg`, `find`, `head`, `tail`, `cat`) in forms that cannot write a file or start a program: `find` without `-exec`, `-ok`, `-delete` and `-fprint`, `grep` and `rg` with long options from a fixed list (and no `rg -z` or `grep -Q`), `head` and `tail` without follow in any spelling, none of them on a `/dev/` device other than `/dev/null` (also as an option's value, `--file=/dev/zero`), no glob in an option's name (`tail -?`, `rg -g*.md x`; quote the glob or use the long form), and a lone `--` never ends the check. On macOS and Linux Claude Code leaves the Grep and Glob tools out of an agent whose tools also name Bash, so without these the researcher could only read whole files. `egress-guard.mjs` allows a reviewer's fetch only to hosts named in its brief or its slice's planned files, or in the coordinator's message that resumed it (`SendMessage`); no other later record, such as a tool result, a fetched page or a compaction summary, adds a host. An unreadable brief allows and logs `egress_unverified`. Both are deny-only and not a boundary.
+- **Hand-back capture.** `handback-check.mjs` also records each handed-back report's parsed fields (`handbacks.jsonl`, never report text), with the check on or off, so the run journal and telemetry read the report a worker delivered through `SubagentHandback`; without it a first stop was recorded with no status.
 - **Context after compaction.** `compact-context.mjs` (SessionStart, matcher `compact`) puts the open run's planned slices, their states and the constraint texts back in context.
-- **Native Bash judge** (opt-in since 0.3.0, `ORCH_JUDGE=native`): since 0.4.0 the hook is registered with `onFailure: "block"` and a 120 s timeout, behind a wrapper that exits 0 when `node` is missing, so a crash or timeout refuses the command. Details in [docs/bash-judge.md](docs/bash-judge.md#native-hook-030).
+- **Native Bash judge** (opt-in, `ORCH_JUDGE=native`): the hook is registered with `onFailure: "block"` and a 120 s timeout, behind a wrapper that exits 0 when `node` is missing, so a crash or timeout refuses the command. Details in [docs/bash-judge.md](docs/bash-judge.md#native-hook-030).
 
 The test gate skips the tests only in a git work tree when every changed path is prose (`.md`, `.markdown`, `.rst`, `.adoc`, `.txt`, with exceptions for build files and test-data folders); an explicit `ORCH_TEST_CMD` always runs, and it never reads the triage fact `code`. In isolated worktrees it runs the tests and only warns by default (`tests_failed_isolated`, a doubt signal), because sibling slices may not be merged yet. Every detail of the gates, with the live checks behind them, is in [docs/native-mode.md](docs/native-mode.md#gates) and [What 0.4.0 adds](docs/native-mode.md#what-040-adds).
-
-### What 1.2.0 adds
-
-1.2.0 follows Claude Code 2.1.317 to 2.1.322 ([docs/research-2026-11-10.md](docs/research-2026-11-10.md)).
-
-- **Researcher search.** The researcher's Bash list gains read-only search and paging, checked by `researcher-guard.mjs`. Before it, a researcher launched from a plain session on macOS or Linux had no way to search.
-- **Turn-limit stops are gated.** `implementer_unfinished` in the review gate: an implementer that ran out of turns no longer slips past the test gate and the review gate.
-- **Opus or stronger.** A passing review on Fable (or any tier above opus) meets `opus_review_required`. Defaults are unchanged: escalations still launch on opus.
-- **Reports checked before delivery.** In auto mode a worker's report passes `handback-check.mjs` and, for researchers, the quote check, before the orchestrator sees it. Each sends a report back at most once.
-- **Cost in the report.** Estimated cost by role and model, one-hour cache writes and mid-run cache rewrites.
-- **Subagent status line.** Shipped by the plugin ([Dashboard and status line](#dashboard-and-status-line)).
-- **SDK pipeline.** Agent SDK 0.3.322 (0.3.325 since 1.2.2); the Bash judge's hook is registered with `onFailure: "block"`.
 
 ### After a Claude Code update
 
@@ -195,12 +186,13 @@ It reads the built-in subagent types from the installed Claude Code and fails wh
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/worker-launch-dark.svg">
-  <img alt="How plan-check shapes a worker launch: blocked on a rule, or allowed with one updatedInput carrying the read router's model raise and up to 3 suggested skills; built-ins, fork and the integrator start unchanged." src="docs/diagrams/worker-launch-light.svg">
+  <img alt="How plan-check shapes a worker launch: blocked on a rule, or allowed with one updatedInput carrying the haiku raise to sonnet, the read router's model raise and up to 3 suggested skills (1 or 2 for a reviewer); built-ins, fork and launches with nothing to change start unchanged." src="docs/diagrams/worker-launch-light.svg">
 </picture>
 
-`plan-check.mjs` is the only hook that ever returns an allow. For two features it rewrites a launch with `permissionDecision: "allow"` and `updatedInput` (which takes effect only with allow or ask, and ask cannot be answered headless), combined into one `updatedInput` when both apply. It does so only for this plugin's or project's implementer (when its own checks allow the launch), researcher and reviewer: never for the integrator, a built-in, fork or a launch it blocks. A `permissions.deny` rule still wins.
+`plan-check.mjs` is the only hook that ever returns an allow. For two features it rewrites a launch with `permissionDecision: "allow"` and `updatedInput` (which takes effect only with allow or ask, and ask cannot be answered headless), combined into one `updatedInput` when both apply. The read router and the skill suggestions apply only to this plugin's or project's implementer (when its own checks allow the launch), researcher and reviewer; the haiku rule applies to all five of its agents, the integrator included. None of them ever rewrites a built-in, fork or a launch it blocks. A `permissions.deny` rule still wins.
 
 - **No Haiku (on by default, `ORCH_ALLOW_HAIKU=1` to allow it).** A launch of any of this plugin's agents whose model is in the haiku family, from the call or from an older agent file, is raised to sonnet in the same `updatedInput`.
+- **Coverage note (on by default, `ORCH_SOURCES_NOTE=off` to drop).** A researcher brief whose `SOURCES:` names two or more local files gets a note appended: read every file in full and end the report with a `FILES-READ:` line, listing a file not read under OPEN.
 - **Read router (opt-in, `ORCH_READ_ROUTER=on`).** For a researcher brief that names `SOURCES:`, it profiles each file with local tools (poppler, unzip, no model call) and picks the cheapest adequate tier: a PDF with a good text layer is haiku; scans, tables, multi-column pages or figures make it sonnet; a 50-page or longer PDF with `READ: judge` is one read on opus. The launch's model is raised to the tier, never lowered. Text conversions are cached under the state dir and listed in the brief. It was checked once live (a scanned PDF raised a researcher from haiku to sonnet) and benchmarked once on `d3-reader` ([route-040](#read-router-benchmark-route-040)): direction only, with the model raise and the converted-text notes confounded. It stays off until H14 is decided.
 - **Skill suggestions (on by default, `ORCH_SKILL_HINTS=off` to drop).** The plan check appends one block naming at most 3 installed skills (1 for a reviewer, 2 when the reviewer's launch runs on opus or above, from the call's `model` else the agent file's), names and reason codes only, picked from the brief's `SKILLS:` names, the file types in FILES or SOURCES, the role and the goal's words. Installed skills are found on disk: `~/.claude/skills` (synced skills as `anthropic-skills:<name>`), the project's `.claude/skills` and enabled plugins' skills. A worker loads what fits with the Skill tool and reports a skipped suggestion in one line of its report, not under OPEN, because a non-empty OPEN is a doubt signal. The orchestrator has the `Skill` tool: before planning it may load at most two installed skills that shape the plan itself (domain rules, architecture, a threat model), since each one stays in its context for the whole run, and passes every other fitting skill to the workers by name. In the PLAN REVIEW brief each slice may carry `SKILLS: <names>` or `SKILLS: none` (always one of the two on a RISKY slice), and the plan reviewer checks the choice. In the gated workflow a planned slice may carry `skills`, which become a `SKILLS:` line in its implementer and reviewer briefs.
 
@@ -210,7 +202,7 @@ Workflow agents get neither: they make no Agent tool call, so they never reach t
 
 ## Telemetry and the read log
 
-- **Telemetry v2.** At SubagentStop `telemetry.mjs` reads the agent's transcript and records `tokens` (input, output, cache read, cache write, and since 1.2.0 `cache_write_1h`, the part written at the one-hour lifetime), `turns`, `models`, `max_turns_hit` and `cache_rewrites` (requests after the agent's first that wrote most of their context to the cache again: a cache that went cold in mid-run): numbers and model names only. A subagent that stops at its turn limit fires no SubagentStop, so `max_turns_hit` cannot see it; the report lists agents that started and never stopped instead. Headless runs pass `--no-session-persistence` by default and keep no subagent transcripts, so these fields are empty there. `ORCH_SESSION_PERSISTENCE=1` drops that flag, so headless runs (`npm run native`, `npm run auto`, the bench) write transcripts and the fields fill in ([docs/data/live-checks-telemetry.md](docs/data/live-checks-telemetry.md)). The cost is a session transcript under `~/.claude/projects/` per run.
+- **Telemetry v2.** At SubagentStop `telemetry.mjs` reads the agent's transcript and records `tokens` (input, output, cache read, cache write, and `cache_write_1h`, the part written at the one-hour lifetime), `turns`, `models`, `max_turns_hit` and `cache_rewrites` (requests after the agent's first that wrote most of their context to the cache again: a cache that went cold in mid-run): numbers and model names only. A subagent that stops at its turn limit fires no SubagentStop, so `max_turns_hit` cannot see it; the report lists agents that started and never stopped instead. Headless runs pass `--no-session-persistence` by default and keep no subagent transcripts, so these fields are empty there. `ORCH_SESSION_PERSISTENCE=1` drops that flag, so headless runs (`npm run native`, `npm run auto`, the bench) write transcripts and the fields fill in ([docs/data/live-checks-telemetry.md](docs/data/live-checks-telemetry.md)). The cost is a session transcript under `~/.claude/projects/` per run.
 - **File trail.** The journal's implementer stop record carries `files_touched`, taken from tool calls (plus git in an isolated worktree), never from the reply.
 - **Read log.** `read-log.mjs` (PostToolUse on `Read|WebFetch`) writes one line per call to `reads.jsonl`: path, extension, size, pages and kind, or the host only for WebFetch. Never content.
 - **Turn warning.** `turn-budget.mjs` (PostToolUse, no matcher) counts a worker's turns from its transcript and, the first time our researcher, implementer, reviewer or integrator has used 80% of its maxTurns, adds as context: "You have used N of your M turns. Commit your work and report now; list what is unfinished under OPEN." An agent that reaches its limit stops without a report. Once per agent, never blocks; an sh pre-filter starts node only for a subagent's tool call (`ORCH_TURN_WARNING=off`).
@@ -227,13 +219,13 @@ The orchestrator's briefs and the workers' replies follow one spec, [docs/brief-
 | `SLICE:`, `FILES:`, `DEPENDS:` | first lines of every implementer brief | plan check, journal, dashboard |
 | `PATH: light`, `RISKY: yes`, `CHECKS: C1, C3` | implementer briefs | plan check, review gate (escalation, constraint answers) |
 | `PLAN REVIEW`, `REPLAN: <n>`, `CONSTRAINTS:` block, per-slice `GOAL:` | the plan reviewer's brief | run model, `not_in_plan`, dashboard progress |
-| `KIND: bugfix` | implementer briefs (0.4.0) | the implementer writes a failing reproduction test first; the bugfix check |
-| `VALIDATE: gaps` | reviewer briefs (0.4.0) | review counting |
-| `SOURCES:`, `READ: lookup\|extract\|judge` | researcher briefs (0.4.0) | read router |
-| `SKILLS: <names>` | implementer, researcher and reviewer briefs, never the integrator's (0.4.0) | the worker; the skill suggestions |
+| `KIND: bugfix` | implementer briefs | the implementer writes a failing reproduction test first; the bugfix check |
+| `VALIDATE: gaps` | reviewer briefs | review counting |
+| `SOURCES:`, `READ: lookup\|extract\|judge` | researcher briefs | read router |
+| `SKILLS: <names>` | implementer, researcher and reviewer briefs, never the integrator's | the worker; the skill suggestions |
 | `STATUS:`, `C1: pass (cmd) ...`, `C1: pass (read) ...`, `C1: fail ...`, `OPEN:` | every reply | journal, review gate, dashboard |
-| `GAP: <0-100> <text>` | reviewer replies (0.4.0) | review counting, stall gate |
-| `QUOTE: <locator> \| <verbatim text>` | researcher replies (0.4.0) | quote check |
+| `GAP: <0-100> <text>` | reviewer replies | review counting, stall gate |
+| `QUOTE: <locator> \| <verbatim text>` | researcher replies | quote check |
 | `KIND: skill`, `SKILL: <name>`, `TARGET:`, `UPDATE: yes`; `DRAFTS: <names>` | a skill slice's implementer brief; any worker brief | plan check (skill slices, [docs/skills.md](docs/skills.md)), skill gate |
 | `DRAFT: <name> <branch>` | a skill slice's reply | journal |
 | `SKILLS-USED: <names>`, `SKILLS-SKIPPED: <names>` | worker replies whose brief named or suggested skills | journal, `npm run report` |
@@ -273,7 +265,7 @@ The remaining environment variables (headless runs, the SDK, the nudge) are in [
 
 `.claude/workflows/orchestrate.js` fixes the order in code instead of the orchestrator's prompt. The plugin ships it as `/orchestration:orchestrate`; in this repo it is `/orchestrate`. Claude Code runs a workflow only on the person's explicit request ([workflows](https://code.claude.com/docs/en/workflows.md)), so the route skill, the nudge and the orchestrator may suggest it but never start it.
 
-What it does: plan with a CONSTRAINTS ledger (at most `maxSlices`, default 6), check the plan in code and have a reviewer check it, explore with researchers in parallel, build and review each slice (a RISKY slice gets an opus reviewer at once; others go to one on a doubt signal), retry with refuted gaps, replan once the slices that failed for good, and merge isolated code branches. A failing review that names no gap fails the slice; a slice whose dependency failed is not built and is reported failed ("depends on failed <id>"); the integrator answers through a schema, and a slice whose branch is not in its `merged` list fails before review. Arguments: `task` (required), `code` (default `true`), `baseRefHead`, `plan` and `skip` (resume in a new session: pass the logged `plan: <JSON>` and the passed slice ids), `maxSlices`, `maxRetries`, and since 0.4.0 `gapMin` (80), `planCheck`, `planReview`, `refute` and `escalateLast` (all on by default).
+What it does: plan with a CONSTRAINTS ledger (at most `maxSlices`, default 6), check the plan in code and have a reviewer check it, explore with researchers in parallel, build and review each slice (a RISKY slice gets an opus reviewer at once; others go to one on a doubt signal), retry with refuted gaps, replan once the slices that failed for good, and merge isolated code branches. A failing review that names no gap fails the slice; a slice whose dependency failed is not built and is reported failed ("depends on failed <id>"); the integrator answers through a schema, and a slice whose branch is not in its `merged` list fails before review. Arguments: `task` (required), `code` (default `true`), `baseRefHead`, `plan` and `skip` (resume in a new session: pass the logged `plan: <JSON>` and the passed slice ids), `maxSlices`, `maxRetries`, `gapMin` (80), `planCheck`, `planReview`, `refute` and `escalateLast` (all on by default). The plan may name `suite`, the command that runs the project's whole test suite; the integrator's brief then runs it once after the merge, and slices' own checks stay narrow.
 
 How it differs from the native orchestrator:
 
@@ -418,7 +410,9 @@ The full list, with the evidence for each, is in [docs/native-mode.md](docs/nati
 - Headless runs keep no subagent transcripts by default, so telemetry v2's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set.
 - No WorktreeCreate hook ships; `worktree.baseRef: "head"` is the way to start worktrees from the local HEAD. Settings load from the folder a session started in; the plan check blocks an isolated implementer launch that would start from the remote default branch while HEAD differs (`worktree_base_not_head`).
 - A long-lived agent-team teammate listed as running keeps the review gate deferring. `file_overlap` and `dependency_cycle` block with no give-up.
-- The eval suite (`npm run eval`) has not been smoke-run.
+- The eval suite (`npm run eval`) was smoke-run on 2026-11-10, bounded to `t2-single`, one run, twice, about $0.37 each: it runs end to end and 4 of 7 graders pass; why the other three fail is not understood yet ([docs/research-2026-11-10.md](docs/research-2026-11-10.md)).
+- A report that the hand-back check sends back is still captured, so a worker that then stops without handing back again is recorded with the undelivered report.
+- The gated workflow's file-overlap check is coarser than the plan check's: it can run one after the other two slices that could have run together. It never rejects a plan.
 - The dashboard counts a run as stale after 10 minutes with no agent running, not after `ORCH_RUN_STALE_MIN`.
 
 ## Safety
@@ -433,7 +427,7 @@ The full list, with the evidence for each, is in [docs/native-mode.md](docs/nati
 
 ## SDK pipeline
 
-The TypeScript pipeline in `src/` takes code in a git repository only, fixes the order in code and leaves its result on the branch `orch/<id>/result` without touching your checkout. It is frozen since 0.3.0: maintenance only, none of the 0.4.0 gates.
+The TypeScript pipeline in `src/` takes code in a git repository only, fixes the order in code and leaves its result on the branch `orch/<id>/result` without touching your checkout. It is frozen since 0.3.0: maintenance only, none of the native gates above. It runs on Agent SDK 0.3.325, with the Bash judge's hook registered as `onFailure: "block"`.
 
 ```bash
 npm start -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
@@ -442,7 +436,7 @@ npm start -- --repo . --task "..." --mode plain    # skip triage
 npm start -- --repo . --resume <id>                # continue a run
 ```
 
-It retries transient errors (rate limit, overload, 5xx, dropped stream) up to twice with backoff, writes `runs/<id>/journal.json` after each slice for `--resume`, replans failed slices with `--replans N` (0 to 3) and caps tokens only when `--budget` is set. A run writes `plan.json`, `findings.md`, `journal.json`, `judge-audit.jsonl`, `telemetry.jsonl` and `report.json` under `runs/<id>/`, and branches `orch/<id>/<slice>`; it never pushes on its own.
+It retries transient errors (rate limit, overload, 5xx, dropped stream) up to twice with backoff, writes `runs/<id>/journal.json` after each slice for `--resume`, replans failed slices with `--replans N` (0 to 3) and caps tokens only when `--budget` is set; the cap stops every route, the plain and reviewed routes as well as the pipeline. When `git merge --abort` fails it refreshes the index with `git status`, aborts again, then runs `git reset --merge`, and stops with an error if a merge is still in progress. A run writes `plan.json`, `findings.md`, `journal.json`, `judge-audit.jsonl`, `telemetry.jsonl` and `report.json` under `runs/<id>/`, and branches `orch/<id>/<slice>`; it never pushes on its own.
 
 ### Bash judge (SDK workers)
 
@@ -459,7 +453,7 @@ SDK workers with Bash (`solo`, `writer`, `verifier`) run every command through `
 | `--no-escalate` | Do not rerun a failed plain or reviewed run through the pipeline |
 | `--test-cmd CMD` | The acceptance command, run by the harness after each worker |
 | `--setup-cmd CMD` | Runs in each new worktree before its writer, for example `npm ci` |
-| `--budget TOKENS` | Optional run cap in tokens (`500000`, `500k` or `2M`; at least 10k). Unset means no cap |
+| `--budget TOKENS` | Optional run cap in tokens (`500000`, `500k` or `2M`; at least 10k), for every route. Unset means no cap |
 | `--concurrency N`, `--retries N` | Parallel workers (3) and retries per slice (2) |
 | `--replans N` | Replanning rounds after failures, 0 to 3 (default 0) |
 | `--plan-only` | Stop after planning (implies the pipeline) |
@@ -467,7 +461,7 @@ SDK workers with Bash (`solo`, `writer`, `verifier`) run every command through `
 | `--keep-worktrees` | Keep every worktree; by default passing slices' and the result worktree are removed and branches always stay |
 | `--out DIR` | Where runs are written (`runs`) |
 
-Invalid numbers exit 2; a failed plan exits 1.
+A bad flag prints the usage message and exits 2; an invalid number or an unknown `--mode` also exits 2, with a message; a failed plan exits 1.
 
 ### Environment
 
@@ -515,7 +509,7 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
 | `npm run install-statusline` | Copy the status line script and print the setting |
 | `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](docs/claude-code-updates.md)) |
 | `npm run skill-publish` | List draft skills; `-- <name>` pushes a draft and opens its pull request, `--merge` merges, installs and removes the draft, `--dry-run` prints the steps ([docs/skills.md](docs/skills.md#publishing)) |
-| `npm run eval` | `claude plugin eval` on `dist/plugin` with the four cases in `evals/` (paid, `--max-cost-usd 10`); not smoke-run yet |
+| `npm run eval` | `claude plugin eval` on `dist/plugin` with the four cases in `evals/` (paid, `--max-cost-usd 10`); smoke-run once, 4 of 7 graders pass |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](bench/README.md)) |
 | `npm start` | SDK pipeline with triage |
 
@@ -526,7 +520,8 @@ The native test gate detects the runner in this order: `ORCH_TEST_CMD`; `npm tes
   agents/            orchestrator, researcher, implementer, integrator, reviewer
   hooks/             plan-check.mjs (plan check, read router, skill hints), verify.sh and bugfix-check.mjs (test gate,
                      baseline, bugfix check), review-gate.mjs, quote-check.mjs, researcher-guard.mjs, egress-guard.mjs,
-                     compact-context.mjs, journal.mjs, telemetry.mjs, read-log.mjs, turn-budget.mjs (turn warning),
+                     handback-check.mjs (report check and hand-back capture), compact-context.mjs, journal.mjs,
+                     telemetry.mjs, read-log.mjs, turn-budget.mjs (turn warning),
                      nudge.mjs, brief.mjs (the parser),
                      run.mjs, state.mjs, file-profile.mjs, skill-catalog.mjs, skill-hint.mjs, judge-hook.mjs,
                      judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
@@ -539,7 +534,9 @@ dist/plugin/, dist/dashboard/   the built plugin and the dashboard mod alone (co
 dashboard/           the live pane (source for both builds)
 statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
-scripts/             check.mjs (`npm run check`), run-tests.mjs (`npm test`), auto.sh, orchestrate.sh, build-plugin.mjs, report.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
+scripts/             check.mjs (`npm run check`), run-tests.mjs (`npm test`), auto.sh, orchestrate.sh, build-plugin.mjs,
+                     report.mjs and prices.mjs (`npm run report`), tokens.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
+                     install-statusline.sh,
                      claude-update.mjs (the check to run after a Claude Code update), skill-publish.mjs (a person
                      publishes a draft skill),
                      run-result.mjs and log-run.mjs (a headless run's one result document and its row in runs.jsonl)
@@ -547,7 +544,7 @@ evals/               the plugin eval suite
 bench/               the benchmark: run, grade, analyze, report, tasks/, matrix/
 docs/                native-mode.md, brief-grammar.md, skills.md, dashboard.md, native-vs-plugin.md, bash-judge.md,
                      claude-code-updates.md, benchmark pages,
-                     research-2026-10-31.md, data/ (run data, live checks), diagrams/
+                     research-2026-10-31.md, research-2026-11-10.md, data/ (run data, live checks), diagrams/
 ```
 
 ## Development
