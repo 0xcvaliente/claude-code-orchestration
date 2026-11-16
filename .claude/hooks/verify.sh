@@ -10,7 +10,9 @@
 # spec, fixtures, __fixtures__, golden, snapshots or __snapshots__ (golden files and snapshots feed the tests).
 # Logs allow no_code_changes and skips the tests. Judged from git, never from what the agent says. A clean tree (an
 # isolated slice that already committed), a folder that is not a git work tree and any other path keep the test run.
-# Isolated worktrees (cwd under .claude/worktrees/) follow ORCH_GATE_ISOLATED, because sibling slices
+# In an isolated worktree the paths the slice committed since its base (the fork point) must be prose as well.
+# Isolated worktrees (cwd under .claude/worktrees/, other than the session's own project folder, which is the shared
+# tree also when the session itself runs in a worktree) follow ORCH_GATE_ISOLATED, because sibling slices
 # may not be merged yet: warn (default: run tests, log tests_failed_isolated, never block),
 # block (gate as usual), skip (do not run tests).
 # Test baseline (ORCH_BASELINE: inform by default, allow, or off): when the tests fail and the tree has changes against
@@ -28,9 +30,10 @@
 # KIND: bugfix (ORCH_BUGFIX_CHECK=off disables): after the tests pass, an implementer whose brief says KIND: bugfix
 # must have changed or added a test file that adds a qualified failing test on the base (bugfix-check.mjs); blocks
 # say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
-# the bugfix cap are counted separately.
+# the bugfix cap are counted separately, each over the blocks since the agent's latest SubagentStart in telemetry.jsonl
+# (a SendMessage resume starts the agent again under its id), or over all its blocks when no start is recorded.
 # Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block, so the whole hook ends
-# within ORCH_HOOK_BUDGET_S (default 870, 30 s under the 900 s timeout for logging and exit):
+# within ORCH_HOOK_BUDGET_S (default and maximum 870, 30 s under the 900 s timeout for logging and exit):
 #   test run    min(ORCH_TEST_TIMEOUT_S (default 600), time left). When it is reached the test command and its
 #               children (its own process group) are killed and the stop blocks as a test failure (tests_failed, with
 #               timed_out:1 and limit_s; tests_failed_isolated in an isolated worktree in warn mode), under the same
@@ -90,13 +93,15 @@ if [ "${1:-}" = --plugin ] && ! { [ -f "$project/.claude/hooks/telemetry.mjs" ] 
   state="${CLAUDE_PLUGIN_DATA:-${HOME:-}/.claude/orchestration}/state/$key"
 fi
 
-MAX_BLOCKS=2 # per agent; the cap is the loop guard, so a still-failing agent is rechecked, not waved through
+MAX_BLOCKS=2 # per agent, since its latest SubagentStart (a resume starts a new count); the cap is the loop guard, so a still-failing agent is rechecked, not waved through
 
 # A whole number of seconds above 0, else the default.
 pos_int() { # value default
   case "$1" in '' | *[!0-9]*) printf '%s' "$2" ;; *) if [ "$1" -gt 0 ] 2>/dev/null; then printf '%s' "$((10#$1))"; else printf '%s' "$2"; fi ;; esac
 }
 budget="$(pos_int "${ORCH_HOOK_BUDGET_S:-}" 870)"
+# Never above 870: a hook killed at its 900 s timeout does not block, so a larger budget could let a slow suite through.
+[ "$budget" -le 870 ] || budget=870
 test_limit="$(pos_int "${ORCH_TEST_TIMEOUT_S:-}" 600)"
 base_limit="$(pos_int "${ORCH_BASE_TIMEOUT_S:-}" 300)"
 time_left() { printf '%s' "$((budget - SECONDS))"; }
@@ -237,6 +242,20 @@ is_bugfix_agent() {
   [ "$kind" = bugfix ]
 }
 
+# The agent's blocks with reason $1 (a prefix when it ends in _), counted since its latest SubagentStart in
+# telemetry.jsonl (bugfix-check.mjs countBlocks): a SendMessage resume starts the agent again under its id, so each
+# attempt gets its own cap. With no start record every block counts. When node fails, the grep pattern $2 counts them
+# over the whole log, as before.
+count_blocks() { # reason grep-pattern
+  local n=""
+  [ -n "$agent_id" ] || { printf 0; return 0; }
+  n="$(node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { countBlocks } = await import(pathToFileURL(process.argv[2]).href); process.stdout.write(String(countBlocks(process.argv[3], process.argv[4], process.argv[5])));' count "$hooks_dir/bugfix-check.mjs" "$state" "$agent_id" "$1" </dev/null 2>/dev/null)"
+  case "$n" in
+    '' | *[!0-9]*) n="$(grep -c "$2" "$state/gates.jsonl" 2>/dev/null || true)" ;;
+  esac
+  printf '%s' "${n:-0}"
+}
+
 chk_parse() { # helper output
   local res="$1"
   chk_decision="$(printf '%s\n' "$res" | sed -n 1p)"
@@ -287,7 +306,21 @@ only_prose_changed() {
         ;;
     esac
   done < <(GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=all -z 2>/dev/null)
-  [ "$seen" = 1 ]
+  [ "$seen" = 1 ] || return 1
+  # An isolated slice commits its work, so HEAD moves with it: what it committed since its base (the fork point from the
+  # main worktree's HEAD, as bugfix-check.mjs baseInfo computes it) must be prose too. A base that cannot be found keeps
+  # the tests. --no-renames lists both sides of a move.
+  [ "$isolated" = 1 ] || return 0
+  local main_wt main_head fork
+  main_wt="$(GIT_OPTIONAL_LOCKS=0 git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -n1)"
+  [ -n "$main_wt" ] || return 1
+  main_head="$(GIT_OPTIONAL_LOCKS=0 git -C "$main_wt" rev-parse --verify -q HEAD 2>/dev/null)" || return 1
+  fork="$(GIT_OPTIONAL_LOCKS=0 git merge-base HEAD "$main_head" 2>/dev/null)" || return 1
+  [ -n "$fork" ] || return 1
+  while IFS= read -r -d '' entry; do
+    is_prose "$entry" || return 1
+  done < <(GIT_OPTIONAL_LOCKS=0 git diff --name-only --no-renames -z "$fork" HEAD 2>/dev/null || printf 'x\0')
+  return 0
 }
 
 # A string field of the event JSON, with its escapes \" \\ and \/ undone (sed -E only: it exists wherever the hook
@@ -321,6 +354,20 @@ fi
 
 isolated=0
 case "$PWD" in */.claude/worktrees/*) isolated=1 ;; esac
+# A session that itself runs in a worktree (its project folder under .claude/worktrees/) is the shared tree: inside the
+# project folder only a worktree under the project's own .claude/worktrees/ is isolated, never the folder itself.
+if [ "$isolated" = 1 ]; then
+  here="$(pwd -P)"
+  proj_real="$(cd "$project" 2>/dev/null && pwd -P)"
+  if [ -n "$proj_real" ]; then
+    case "$here/" in
+      "$proj_real"/*)
+        rel="${here#"$proj_real"}"
+        case "$rel/" in /.claude/worktrees/*/*) ;; *) isolated=0 ;; esac
+        ;;
+    esac
+  fi
+fi
 mode="${ORCH_GATE_ISOLATED:-warn}"
 if [ "$isolated" = 1 ] && [ "$mode" = skip ]; then
   log_gate allow isolated_skipped
@@ -361,7 +408,7 @@ if [ "$rc" = 0 ]; then
       # KIND: bugfix agent: any other agent passes as before.
       bblocks=0
       if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
-        bblocks="$(grep -c "\"decision\":\"block\",\"reason\":\"bugfix_.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
+        bblocks="$(count_blocks bugfix_ "\"decision\":\"block\",\"reason\":\"bugfix_.*\"agent_id\":\"$agent_id\"")"
       fi
       if [ "${bblocks:-0}" -ge "$MAX_BLOCKS" ]; then
         log_gate allow bugfix_unverified_gave_up
@@ -406,6 +453,11 @@ if [ "$timed_out" = 1 ]; then
 elif [ "${ORCH_BASELINE:-}" != off ]; then
   check baseline "$out" 1
   if [ "$chk_decision" = warn ] && [ "${ORCH_BASELINE:-}" = allow ]; then
+    # An isolated failure keeps its own reason (a doubt signal), with the baseline's counts as extra fields.
+    if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+      log_gate warn tests_failed_isolated "$chk_extra"
+      exit 0
+    fi
     log_gate warn "$chk_reason" "$chk_extra"
     exit 0
   fi
@@ -422,8 +474,8 @@ fi
 
 blocks=0
 if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
-  # Only tests_failed blocks count here; bugfix-check.mjs counts its own bugfix_ blocks.
-  blocks="$(grep -c "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"" "$state/gates.jsonl" 2>/dev/null || true)"
+  # Only tests_failed blocks count here, since the agent's latest start; bugfix-check.mjs counts its own bugfix_ blocks.
+  blocks="$(count_blocks tests_failed "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"")"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   log_gate allow max_blocks_reached "$base_extra"
