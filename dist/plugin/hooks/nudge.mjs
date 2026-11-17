@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SessionStart hook (plugin only): remind the main session to size non-trivial tasks with the route skill. That
+// SessionStart hook (plugin only; also UserPromptSubmit, below): remind the main session to size non-trivial tasks with the route skill. That
 // covers any task (code, research, writing, analysis, operations), not only coding in a git repository: the route
 // skill, this text and the orchestrator's sizing step describe the same three routes (see .claude/rules/agents.md).
 // Silent when ORCH_NO_NUDGE is set; scripts/orchestrate.sh sets it for every headless run so those sessions do not
@@ -16,15 +16,39 @@
 // Silent too when the session itself runs as the orchestrator (`claude --agent orchestrator`, or an `agent` setting,
 // as in this repo's own .claude/settings.json): it is already routed, its prompt holds the same rules, and it has no
 // Skill tool to run the route skill with. SessionStart input carries `agent_type` for such a session.
+// UserPromptSubmit (1.6.0; project and plugin, the plugin copy exits on duplicate()): when the typed prompt holds the
+// word `ultracode` (whole word, any case), one context line says that keyword-started workflows are off here and that
+// the task goes through the orchestrator; any other prompt gets nothing. The event also fires for a subagent's report,
+// a task notification and another session's message; `typedPrompt` in state.mjs tells them apart by their text, and
+// they get nothing. It never blocks the prompt, runs for every
+// session (the orchestrator's too) and is not silenced by ORCH_NO_NUDGE: it describes a refusal workflow-guard.mjs makes
+// anyway (the guard's own switch turns the guard off, not this line). Claude Code still highlights the keyword and the
+// prompt still reaches the model.
 import { readFileSync } from "node:fs";
+import { duplicate, typedPrompt } from "./state.mjs";
 
-if (process.env.ORCH_NO_NUDGE) process.exit(0);
+/** @type {any} */
+let input = null;
 try {
-  const input = JSON.parse(readFileSync(0, "utf8"));
-  if (String(input?.agent_type ?? "").split(":").pop() === "orchestrator") process.exit(0);
+  input = JSON.parse(readFileSync(0, "utf8"));
 } catch {
   // no input, or input that is not JSON: nudge as before
 }
+
+const ULTRACODE_LINE =
+  "Orchestration: workflows started by the ultracode keyword or written on the spot are off in this project, and a Workflow call with a script is refused. Do this task through this project's orchestrator instead, or suggest that the person start the saved orchestrate workflow; never start a workflow yourself.";
+
+if (input?.hook_event_name === "UserPromptSubmit") {
+  if (duplicate("nudge.mjs")) process.exit(0);
+  const prompt = typeof input.prompt === "string" ? input.prompt : "";
+  if (typedPrompt(input) && /(^|[^A-Za-z0-9_])ultracode(?![A-Za-z0-9_])/i.test(prompt)) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: ULTRACODE_LINE } }) + "\n");
+  }
+  process.exit(0);
+}
+
+if (process.env.ORCH_NO_NUDGE) process.exit(0);
+if (String(input?.agent_type ?? "").split(":").pop() === "orchestrator") process.exit(0);
 
 const lines = [
   "Orchestration plugin: before starting a non-trivial task (code, research, writing, analysis or operations; more than a quick edit or a quick question), run the orchestration:route skill with the task description and follow the route it returns.",

@@ -1,17 +1,17 @@
 # SDK pipeline
 
-The [SDK pipeline](glossary.md#s) is the TypeScript orchestrator in `src/`, built on the Claude Agent SDK. This page lists its commands, flags, environment variables and outputs, and its Bash judge in short. It is for maintainers. The SDK pipeline is frozen: it gets maintenance only, no new features.
+The [SDK pipeline](glossary.md#s) is the secondary orchestrator: the older TypeScript one in `src/`, built on the Claude Agent SDK, run with `npm run sdk`. The native orchestrator is the main toolkit and the main entry (`npm start`). This page lists its commands, flags, environment variables and outputs, and its Bash judge in short. It is for maintainers. The SDK pipeline is frozen: it gets maintenance only, no new features.
 
-For any task other than code in a git repository, use the native orchestrator instead ([How the native orchestrator works](native-mode.md)).
+Start with the native orchestrator, for code in git too; it is the only one for any other task ([How the native orchestrator works](native-mode.md)).
 
 ## What it is
 
 - It takes code in a git repository only. Its order is fixed in code.
 - It leaves its result on the branch `orch/<id>/result`. It does not touch your checkout, and it never pushes on its own.
-- It runs on Agent SDK 0.3.325 (`package.json`). The Bash judge's hook is registered with `onFailure: "block"` ([Bash judge](#bash-judge)).
+- It runs on Agent SDK 0.3.326 (`package.json`). The Bash judge's hook is registered with `onFailure: "block"` ([Bash judge](#bash-judge)).
 - None of the native [gates](gates.md) run here. Its own checks are the `--test-cmd` command and a verifier per slice.
 
-**The routes.** `--mode auto` (the default) asks the triager first and picks one of three routes, like the native [triage](../README.md#choosing-a-route-triage):
+**The routes.** `--mode auto` (the default) asks the triager first and picks one of three routes. It is an older copy of the native [triage](../README.md#choosing-a-route-triage), which `npm run auto` runs and which is the main entry:
 
 | Route | `--mode` | What runs |
 |---|---|---|
@@ -49,7 +49,8 @@ When a triaged plain or reviewed run fails, the task runs again on the orchestra
 - A failing commit hook (husky, lefthook, pre-commit) is shown to the writer as feedback and retried within `--retries`. When the retries are used up, the slice fails with the hook's message as its issue and the real attempt count. Hooks still run: the SDK pipeline never passes `--no-verify`.
 - When `git merge --abort` fails, it refreshes the index with `git status`, aborts again, then runs `git reset --merge`. It stops with an error if a merge is still in progress.
 - SDK workers run with an empty `agent` setting, so a repository whose settings name a default agent does not change them, and with Claude Code's auto memory off.
-- The `triager` alone also takes no MCP server and no account connector (`strictMcpConfig: true`, `mcpServers: {}`, `disableClaudeAiConnectors: true`), and writes no session transcript unless `ORCH_SESSION_PERSISTENCE=1` (`triageOptions` in `src/agent.ts`). The other roles get none of these options.
+- No role takes a claude.ai account connector (`disableClaudeAiConnectors: true` in its flag settings), and by default no MCP server either (`strictMcpConfig: true`, `mcpServers: {}`, sent with `mcpServersDelivery: 'initialize'`, the form Agent SDK 0.3.326 does not deprecate; `leanOptions` in `src/agent.ts`). `ORCH_SDK_MCP=project` keeps the project's own servers for the writer, the verifier and solo: the `mcpServers` of the `.mcp.json` in the worker's folder, passed as written. Claude Code's approval step for a project's `.mcp.json` does not apply to them, so set the switch only for a project whose `.mcp.json` you trust. The planner, the explorer and the triager never get one.
+- The `triager` alone also runs no hook (`disableAllHooks: true` in its flag settings: no hook of the project's settings, the case probed in live-checks-2026-11-17.md, Check 1; plugin hooks too by the setting's meaning, not probed; and no status line command; hooks of managed settings still run), writes no session transcript unless `ORCH_SESSION_PERSISTENCE=1`, and takes a dollar cap when `npm run auto` or `npm run route --budget` gives one, and passes the session title `triage`, so Claude Code makes no haiku call to name the session. It still reads the project's settings and CLAUDE.md. Probed live in [docs/data/live-checks-2026-11-17.md](data/live-checks-2026-11-17.md): no hook ran (Check 1), no title call (Check 2), and a triage the cap stopped fell back with `capStopped: true` (Check 4); the cap is checked after each request, so one request can overshoot it.
 
 ## Run it
 
@@ -57,16 +58,16 @@ Needs `npm install` and a logged-in `claude`.
 
 ```bash
 # run a task; --test-cmd is the acceptance command the harness runs after each worker
-npm start -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
+npm run sdk -- --repo /path/to/git/repo --task "add rate limiting to the API" --test-cmd "npm test"
 
 # plan only, then stop: the cheapest way to try it
-npm start -- --repo . --task "..." --plan-only
+npm run sdk -- --repo . --task "..." --plan-only
 
 # skip triage and force a route
-npm start -- --repo . --task "..." --mode plain
+npm run sdk -- --repo . --task "..." --mode plain
 
 # continue a run; pass --task again, or the Bash judge refuses pushes and recursive deletes
-npm start -- --repo . --resume <id> --task "<the original request>"
+npm run sdk -- --repo . --resume <id> --task "<the original request>"
 
 # triage only: prints the decision as JSON; --budget 300k caps the triage call (at least 10k)
 npm run route -- --repo /path/to/folder --task "..."
@@ -80,11 +81,11 @@ Exit codes:
 - 1: a slice failed, a merge conflicted, the plan failed, or the plain or reviewed session failed.
 - 2: a bad flag, an invalid number, an unknown `--mode`, or a `--repo` that is not a git repository. A bad flag also prints the usage message.
 
-`npm start` warns when the repository has uncommitted changes: workers branch from HEAD and will not see them.
+`npm run sdk` warns when the repository has uncommitted changes: workers branch from HEAD and will not see them.
 
 ## Flags
 
-`npm start -- <flags>` (`src/cli.ts`):
+`npm run sdk -- <flags>` (`src/cli.ts`):
 
 | Flag | Meaning |
 |---|---|
@@ -108,7 +109,7 @@ Exit codes:
 - Orchestrate route: the cap is checked before each slice attempt and before each replan. Once it is spent, no new attempt or replan starts. Triage tokens, and on escalation the failed session's tokens, count against the cap.
 - Reviewed route: the cap is checked before each round. Once it is spent no further round starts, but a session already running is not cut short. Triage tokens do not count toward that check.
 - Plain route: a single session, so the cap never stops it.
-- Triage: `--budget` gives the triage call no cap of its own; its tokens count only as above. `npm run route -- --budget <tokens>` caps a triage call on its own, at 1M tokens per dollar, and a triage it stops falls back to the orchestrate route.
+- Triage: `--budget` gives the triage call no cap of its own; its tokens count only as above. `npm run route -- --budget <tokens>` caps a triage call on its own, at 1M tokens per dollar. A triage it stops prints the orchestrate route with `capStopped: true`; `npm run auto` then starts no session ([Settings, Headless runs](settings.md#headless-runs)).
 - The Bash judge's own tokens are not counted ([Cost and behaviour](bash-judge.md#10-cost-and-behaviour)).
 
 ## Environment
@@ -123,6 +124,7 @@ The SDK pipeline reads these variables. The native ones are in [Settings, Enviro
 | `ORCH_JUDGE_AUDIT` | none | The audit file when the run does not set one. A normal run writes `runs/<id>/judge-audit.jsonl`. |
 | `ORCH_SANDBOX` | off | `on` runs the Bash roles in the SDK's OS sandbox. Opt-in; smoke-tested on macOS only. |
 | `ORCH_SANDBOX_DOMAINS` | empty | Comma-separated network domains the sandbox allows (wildcards such as `*.example.com` pass through). |
+| `ORCH_SDK_MCP` | unset: no MCP server | `project` (any case) gives the writer, the verifier and solo the MCP servers of the `.mcp.json` in their folder. Any other value, and every other role: none. No role ever takes a claude.ai account connector. |
 
 Details of the judge's variables: [The Bash judge, Configuration](bash-judge.md#6-configuration). Details of the sandbox: [The Bash judge, The OS sandbox](bash-judge.md#9-the-os-sandbox-opt-in).
 
@@ -146,7 +148,7 @@ Also:
 - Branches `orch/<id>/<slice>` per slice and `orch/<id>/result` for the merge. Branches are never removed.
 - `runs/` is git-ignored, so none of this reaches a commit.
 
-At the end `npm start` prints the run id, tokens by role, one line per slice with its status and attempts, and the result branch. A failed run also prints the `--resume` command.
+At the end `npm run sdk` prints the run id, tokens by role, one line per slice with its status and attempts, and the result branch. A failed run also prints the `--resume` command.
 
 ## Bash judge
 
@@ -167,5 +169,5 @@ Everything else, including the full rules ([section 2.1](bash-judge.md#21-deny-r
 - None of the native gates, guards or hooks: no plan check, no review gate, no test gate.
 - The Bash judge is best-effort, not a sandbox ([The Bash judge, Limits](bash-judge.md#11-limits)).
 - The sandbox is opt-in and was smoke-tested on macOS only.
-- Only the triager is kept free of MCP servers and account connectors. The planner, explorer, writer, verifier and solo are not, and their token use was not measured.
+- The roles' options were checked with a faked model only. Whether a live worker then has no account connector and no hook, and how `ORCH_SDK_MCP=project` servers start (`${VAR}` in a `.mcp.json` included), is for a live probe; their token use was not measured.
 - Worktrees isolate git state, not the file system ([Safety, Worktrees](safety.md#worktrees)).

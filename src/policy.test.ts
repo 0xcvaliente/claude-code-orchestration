@@ -72,9 +72,23 @@ test("this repo runs as the orchestrator: the project settings name it, the plug
   assert.deepEqual(Object.keys(plugin), ["subagentStatusLine"]);
   // Everything that must stay a plain session says so itself.
   assert.match(readFileSync(new URL("../scripts/orchestrate.sh", import.meta.url), "utf8"), /args\+=\(--settings '\{"agent":""\}'\)/);
-  assert.match(readFileSync(new URL("./agent.ts", import.meta.url), "utf8"), /settings: \{ agent: "" \}/);
+  // SDK workers: the flag settings start with an empty agent (src/agent.test.ts checks every role's options).
+  assert.match(readFileSync(new URL("./agent.ts", import.meta.url), "utf8"), /settings: \{ agent: ""[,\s}]/);
   // npm run plain clears the agent and names the Concise output style, as orchestrate.sh does for a plain session.
   const plain = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.plain;
   assert.match(plain, /^claude --settings '\{"agent":"","outputStyle":"Concise"\}'$/);
   assert.deepEqual(JSON.parse(plain.match(/^claude --settings '(.*)'$/)[1]), { agent: "", outputStyle: "Concise" });
+});
+
+test("npm start launches the native orchestrator; the SDK pipeline runs only under npm run sdk", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const { start, sdk, orchestrate } = pkg.scripts;
+  assert.doesNotMatch(start, /src\/cli\.ts/, "npm start must not run the SDK pipeline");
+  assert.match(start, /^claude --agent orchestrator(\s|$)/);
+  assert.equal(start, orchestrate, "npm start and npm run orchestrate run the same native command");
+  assert.match(sdk, /^tsx src\/cli\.ts$/);
+  assert.match(pkg.description, /native orchestrator/i);
+  // Native scripts come before the SDK pipeline in the list.
+  const names = Object.keys(pkg.scripts);
+  for (const name of ["start", "orchestrate", "native", "auto"]) assert.ok(names.indexOf(name) < names.indexOf("sdk"), `${name} before sdk`);
 });

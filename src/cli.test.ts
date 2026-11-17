@@ -51,7 +51,7 @@ test("cli.ts: an unknown flag, a flag with no value or a dash-led value prints t
   for (const args of [["--repo", ".", "--task", "t", "--bogus"], ["--repo", ".", "--task"], ["--repo", ".", "--task", "- add tests"]]) {
     const r = tsx("cli.ts", args);
     assert.equal(r.status, 2, `${args.join(" ")}: ${r.stderr}`);
-    assert.match(r.stderr, /usage: npm start/);
+    assert.match(r.stderr, /usage: npm run sdk/);
     noStack(r.stderr);
   }
 });

@@ -53,6 +53,15 @@ test("withTransientRetry: retries a rate limit, then returns the success with su
   assert.deepEqual(seen, [1]);
 });
 
+test("withTransientRetry: sums the cost across attempts, and reports none when no attempt had one", async () => {
+  const { run } = scripted([res({ ok: false, subtype: "exception", text: "429 rate limit", costUsd: 0.01 }), res({ costUsd: 0.02 })]);
+  const req = { role: "triager" as const, prompt: "p", cwd: "." };
+  const r = await withTransientRetry(run, noWait)(req);
+  assert.ok(Math.abs(r.costUsd! - 0.03) < 1e-12, String(r.costUsd));
+  const plain = scripted([res({})]);
+  assert.equal("costUsd" in (await withTransientRetry(plain.run, noWait)(req)), false);
+});
+
 test("withTransientRetry: sums the usage breakdown across attempts", async () => {
   const usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 };
   const { run } = scripted([res({ ok: false, subtype: "exception", text: "429 rate limit", usage }), res({ usage })]);

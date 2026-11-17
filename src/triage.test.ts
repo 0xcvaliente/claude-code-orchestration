@@ -272,3 +272,19 @@ test("triage: a call stopped by the token cap takes the failed-triage fallback, 
   assert.match(d.reason, /token cap/);
   assert.match(d.reason, /error_max_budget_usd/);
 });
+
+// 1.5.1 Known and not fixed: the cap was per session, and a cap-stopped triage went on to the orchestrator with the full
+// cap again. The decision now says the cap stopped it and what the call cost, which scripts/auto.sh counts for the run.
+test("triage: a call stopped by the token cap says so (capStopped), with its cost; nothing else does", async () => {
+  const capped = await triage({ run: recordingRun({ ok: false, subtype: "error_max_budget_usd", structured: undefined, text: "", costUsd: 0.31 }).run, repo: "/r", task: "t", budgetTokens: 300_000 });
+  assert.equal(capped.capStopped, true);
+  assert.equal(capped.costUsd, 0.31);
+  assert.match(capped.reason, /cap is spent, so no session follows/);
+  for (const out of [{}, { ok: false, subtype: "error_max_turns", structured: undefined }, { structured: { nope: 1 } }] as Partial<AgentResult>[]) {
+    const d = await triage({ run: recordingRun({ ...out, costUsd: 0.02 }).run, repo: "/r", task: "t", budgetTokens: 300_000 });
+    assert.equal("capStopped" in d, false, JSON.stringify(out));
+    assert.equal(d.costUsd, 0.02, "every triage decision carries the call's cost");
+  }
+  const noCost = await triage({ run: recordingRun().run, repo: "/r", task: "t" });
+  assert.equal("costUsd" in noCost, false, "no cost reported, none invented");
+});

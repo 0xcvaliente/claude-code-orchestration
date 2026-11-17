@@ -26,7 +26,7 @@ Terms are defined once, in the [glossary](glossary.md).
 - [Logs and reports](logs.md): where the hooks log, what each log holds, telemetry, and `npm run report`.
 - [The Bash judge](bash-judge.md): how pushes, remote changes and recursive deletes are judged, in SDK workers and in the opt-in native hook.
 - [After a Claude Code update](claude-code-updates.md): what to run after Claude Code updates itself, and what the repo relies on.
-- [SDK pipeline](sdk-pipeline.md): the frozen SDK pipeline in `src/`: commands, flags, environment, outputs.
+- [SDK pipeline](sdk-pipeline.md): the secondary, frozen SDK pipeline in `src/` (`npm run sdk`): commands, flags, environment, outputs. The native orchestrator is the main entry ([How the native orchestrator works](native-mode.md)).
 - [Development](development.md): for contributors: npm scripts, repository layout, rules, building the plugin, diagrams.
 - [Benchmark](../bench/README.md): the benchmark harness, the plugin eval suite, and every campaign's result in short.
 
@@ -39,4 +39,5 @@ Dated records. They are not edited after they are written.
 - [Research of 2026-11-10](research-2026-11-10.md) and [research of 2026-10-31](research-2026-10-31.md): the research behind 1.2.0 and 0.4.0.
 - Benchmark write-ups: [built-in subagents blocked](benchmark-builtins-blocked.md), [compare-040](benchmark-compare-040.md), [route-040](benchmark-route-040.md), [short k2 run](benchmark-short-k2.md), [onext](benchmark-onext.md), and the generated [benchmark report of 2026-10-15](benchmarks.md).
 - [Pre-registered hypotheses](../bench/HYPOTHESES.md): the benchmark's hypotheses and verdict rules, written before the runs.
+- [Live checks, 2026-11-17](data/live-checks-2026-11-17.md): the probes behind 1.6.0 (the triage call's hooks, title call and connectors, a triage stopped by the cap, the workflow guard).
 - [Run data and live checks](data/): raw campaign data and the live probes behind the gates.

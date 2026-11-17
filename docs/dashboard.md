@@ -277,6 +277,7 @@ npm run build-plugin      # rebuild dist/plugin and dist/dashboard from dashboar
 
 - The orchestration plugin ships the pane, built into `dist/plugin/hooks/dashboard.tsx`.
 - In this repo the agents come from `.claude/`, not the plugin, so `npm run orchestrate` loads the standalone mod from `dist/dashboard`.
+- Loading it there makes Claude Code write `tsconfig.json` and `.claude-plugin/types/` into `dist/dashboard`; git ignores both and `npm run check-plugin` skips them, so they may stay.
 
 ## Status lines
 

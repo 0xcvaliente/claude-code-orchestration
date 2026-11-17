@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { aucOf, analyze, buildComparisons, evaluateHypotheses, latestGrades, latestRows, outsideGraded, processOf, timelineOf, tokensOf } from "./analyze.mjs";
+import { aucOf, analyze, buildComparisons, evaluateHypotheses, latestGrades, latestRows, outsideGraded, preTriageFix, processOf, timelineOf, tokensOf } from "./analyze.mjs";
 import { matrixText, renderHtml, renderMarkdown } from "./report.mjs";
 import { classifyClaim } from "./lib/claims.mjs";
 import { bootstrapCI, iqr, median, medianDiff, mulberry32, quantile, ratioCI } from "./lib/stats.mjs";
@@ -248,6 +248,32 @@ test("fixture: tokens across several result docs plus triage", () => {
   assert.equal(r.tokens.output_total, 2300);
   assert.deepEqual(r.routes, ["reviewed"]);
   assert.equal(run("t1-parallel__O-mix__main__r1").tokens.total, 50000 + 200000);
+});
+
+test("triage tokens counted before 1.5.1 are marked, with a footnote; later campaigns and runs with no triage are not", async () => {
+  // The fixture manifest says plugin_version 0.1.5: its AUTO runs logged the triage call as it ran before 1.5.1.
+  assert.equal(run("t1-parallel__AUTO__main__r1").triage_pre_fix, true);
+  assert.equal("triage_pre_fix" in run("t1-parallel__O-mix__main__r1"), false, "no logged route, nothing to mark");
+  const marked = summary.runs.filter((r) => r.triage_pre_fix);
+  assert.ok(marked.every((r) => r.tokens.by_model.triage));
+  assert.equal(summary.notes.length, 1);
+  assert.match(summary.notes[0], new RegExp(`^${marked.length} run\\(s\\) marked triage_pre_fix: .*before 1\\.5\\.1`));
+  assert.ok(renderMarkdown(summary, { htmlPath: "x.html" }).includes("triage_pre_fix"), "the report's caveats carry the footnote");
+
+  for (const [v, old] of [["1.5.0", true], ["1.4.9", true], ["0.9.0", true], [undefined, true], ["x", true], ["1.5.1", false], ["1.6.0", false], ["2.0.0", false], ["1.10.0", false]]) {
+    assert.equal(preTriageFix(v === undefined ? {} : { plugin_version: v }), old, String(v));
+  }
+
+  const { cpSync, mkdtempSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tmp = mkdtempSync(join(tmpdir(), "an-triage-"));
+  cpSync(FIXTURE, tmp, { recursive: true });
+  const mf = join(tmp, "manifest.json");
+  writeFileSync(mf, JSON.stringify({ ...JSON.parse(readFileSync(mf, "utf8")), plugin_version: "1.6.0" }));
+  const after = analyze([tmp], { now: "x" });
+  assert.equal(after.runs.filter((r) => r.triage_pre_fix).length, 0);
+  assert.deepEqual(after.notes, []);
+  assert.equal(after.runs.find((r) => r.run_id === "t1-parallel__AUTO__main__r1").tokens.by_model.triage.total, 5000, "the tokens themselves are unchanged");
 });
 
 test("fixture: score, timeline, t90/t100, auc", () => {

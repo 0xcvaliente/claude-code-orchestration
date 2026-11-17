@@ -61,6 +61,8 @@ Two deny-only hooks narrow what one role can do. `ORCH_GUARDS=off` turns both of
 - The **researcher guard** holds a researcher's Bash to read-only forms: no redirection except `2>/dev/null` and `2>&1`, no substitution, no device reads. See [Researcher guard](gates.md#researcher-guard).
 - The **egress guard** lets a reviewer's `WebFetch` reach only hosts its brief, its launch record or its slice's planned files name. See [Egress guard](gates.md#egress-guard).
 
+A third guard covers every session, not one role. The **workflow guard** (1.6.0) refuses every Workflow launch except this repo's saved `orchestrate` workflow, so a workflow the model writes on the spot (Claude Code's `ultracode` keyword, or a plain request for a workflow) does not run outside the gates. `ORCH_WORKFLOW_GUARD=off` turns it off. See [Workflow guard](gates.md#workflow-guard).
+
 What they do not do: they are not a boundary. Bash can still reach the network. Web search and fetch are read-only, and fetched pages are data, not instructions: that is a prompt rule plus the egress guard for reviewers, not a sandbox.
 
 ## Sandbox
