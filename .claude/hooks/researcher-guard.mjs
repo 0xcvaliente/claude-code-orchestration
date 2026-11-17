@@ -104,12 +104,24 @@ const TOO_MANY = "the command's globs are too wide to judge (they may expand to 
 // deadline of DEADLINE_MS from the start of the hook process: Claude Code sets no timeout for this hook and a hook
 // cancelled for time does not block, so the guard refuses before any limit can cancel it.
 const TOTAL_NAMES = 400000;
-const DEADLINE_MS = 4000;
+// w3 third attempt: 10 s, not 4 (`rg x **/*.md` from this repository's root took 4.2 s on a cold file cache and was
+// refused as too wide, then passed warm in about 1 s). The hook's own limit is Claude Code's default of 600 s; every
+// loop that can run long checks the deadline at each step (each segment, each listed name, each expanded path), and one
+// step is bounded: a name is matched in time proportional to pattern length times name length (matchSegment), the
+// pattern is at most MAX_WORD characters and a name at most 255, and the tokenizer (judge-core.mjs, whose bracket and
+// brace scans are quadratic in a word's length) gets at most MAX_COMMAND characters with at most MAX_BRACKETS of `[`
+// and `{` (measured: 256 brackets in 65,536 characters tokenize in well under a second).
+export const DEADLINE_MS = 10000;
+export const MAX_COMMAND = 65536;
+export const MAX_BRACKETS = 256;
+const LATE = "the command took too long to judge (it is too long, or its globs are too wide to judge); split it into shorter commands, quote the glob so the command expands it itself (`rg x -g '*.md'`), or name a folder";
 /** The decision's budget and caches (reset by researcherViolation). */
 const decision = {
   names: TOTAL_NAMES,
   deadline: Infinity,
   cheap: false,
+  /** @type {{ src: string, t?: any, failed?: boolean, err?: unknown } | null} the tokenizer's reading of the command, read once */
+  tok: null,
   /** @type {Map<string, { name: string, dir: boolean, link: boolean, odd: boolean }[]>} */
   lists: new Map(),
   /** @type {Map<string, { paths: string[], special: boolean } | null>} */
@@ -162,8 +174,15 @@ export function researcherViolation(command, cwd = process.cwd(), project, opts 
   decision.deadline = Date.now() + (typeof o.deadlineMs === "number" ? o.deadlineMs : DEADLINE_MS) - (o.fromProcessStart ? performance.now() : 0);
   decision.lists = new Map();
   decision.expansions = new Map();
+  decision.tok = null;
   try {
-    const c = withoutStderrNull(String(command));
+    const raw = String(command);
+    // w3 third attempt: bounds the tokenizer's quadratic scans before it runs (see MAX_COMMAND).
+    if (raw.length > MAX_COMMAND) return { reason: `the command is too long to judge (over ${MAX_COMMAND} characters); split it into shorter commands` };
+    let brackets = 0;
+    for (let i = 0; i < raw.length; i++) if (raw.charCodeAt(i) === 0x5b || raw.charCodeAt(i) === 0x7b) brackets++;
+    if (brackets > MAX_BRACKETS) return { reason: `the command has too many \`[\` and \`{\` characters to judge (over ${MAX_BRACKETS}); split it into shorter commands` };
+    const c = withoutStderrNull(raw);
     // The cheap decisions first, for every segment: an operand forbidden by its text or by what it names on disk (a
     // literal device, a FIFO named outright) is refused before any glob is expanded, wherever it stands on the line.
     decision.cheap = true;
@@ -230,32 +249,92 @@ function withoutStderrNull(command) {
   return out;
 }
 
+/**
+ * The command with quoted text removed, exactly as `command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "")` did (w3 third
+ * attempt), in linear time: that expression rescanned the rest of the line from every `"` that never closed (`\"`
+ * repeated, seconds for 60,000 characters). A `'` opens a match when another `'` follows; a `"` opens one when a `"`
+ * follows with every `\` before it escaping a character other than a line terminator (`.` in the old expression). When
+ * a `"` at i fails at f, every `"` between them was the escaped half of `\"`, and its scan meets the same f: it fails
+ * too, so it is not rescanned.
+ * @param {string} command @returns {string}
+ */
+export function withoutQuoted(command) {
+  const s = String(command);
+  let out = "";
+  let noSingle = false; // no `'` at or after the current index
+  let dqFails = -1; // a `"` before this index cannot open a match
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && !noSingle) {
+      const end = s.indexOf("'", i + 1);
+      if (end >= 0) {
+        i = end;
+        continue;
+      }
+      noSingle = true;
+    } else if (c === '"' && i >= dqFails) {
+      let j = i + 1;
+      let closed = false;
+      while (j < s.length) {
+        const d = s[j];
+        if (d === '"') {
+          closed = true;
+          break;
+        }
+        if (d === "\\") {
+          const e = s[j + 1];
+          if (e === undefined || e === "\n" || e === "\r" || e === "\u2028" || e === "\u2029") break;
+          j += 2;
+        } else j++;
+      }
+      if (closed) {
+        i = j;
+        continue;
+      }
+      dqFails = j;
+    }
+    out += c;
+  }
+  return out;
+}
+
 /** @param {string} command @param {string} cwd @param {string | undefined} project @returns {{ reason: string, word?: string } | null} */
 function violation(command, cwd, project) {
   /** @type {any} */
   let t;
-  try {
-    t = tokenize(command);
-  } catch (err) {
+  // Both passes read the same command: tokenize it once per decision.
+  if (decision.tok?.src !== command) {
+    decision.tok = { src: command };
+    try {
+      decision.tok.t = tokenize(command);
+    } catch (err) {
+      decision.tok.failed = true;
+      decision.tok.err = err;
+    }
+  }
+  if (decision.tok.failed) {
+    const err = decision.tok.err;
     return { reason: `the command cannot be read with confidence (${err instanceof Error ? err.message : String(err)})` };
   }
+  t = decision.tok.t;
   if (t.substitutions.length) return { reason: "command or process substitution (or backticks)" };
   if (t.defines) return { reason: "a function definition" };
   // The tokenizer records no word for a heredoc or here-string, so `<<` anywhere in the raw text denies, quoted or not:
   // an escaped quote (`ls \'<<X ...`) would hide it from any quote-stripping regex.
   if (command.includes("<<")) return { reason: "a heredoc or here-string" };
   // Quoted text removed, any < or > left is a redirection.
-  const unquoted = command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, "");
-  if (/[<>]/.test(unquoted)) return { reason: "output redirection or a heredoc" };
+  if (/[<>]/.test(withoutQuoted(command))) return { reason: "output redirection or a heredoc" };
   // stdin from anything but a pipe (heredoc, here-string, `<`) denies. A pipe also sets stdin on the command after it,
   // so stdin is only proof of an input redirection on the first command or in a command with no `|` at all.
-  if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !command.includes("|")))) {
+  const piped = command.includes("|");
+  if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !piped))) {
     return { reason: "input redirection, a heredoc or here-string" };
   }
   // The folders the shell may be in when a segment runs: where the command starts, plus each folder an allowed cd reached.
   const folders = [cwd];
   for (const c of t.commands) {
     const words = /** @type {any[]} */ (c.words);
+    if (late()) return { reason: LATE, word: words[0]?.text };
     if (words[0]?.text === "cd") {
       const reached = cdReach(words, folders, project);
       if (!reached) return { reason: CD_FORM, word: "cd" };
@@ -349,19 +428,23 @@ function pathsOf(word, text, folder) {
  * @returns {{ paths: string[], special: boolean } | null}
  */
 function expand(pieces, folder, wide) {
-  /** @type {{ re: RegExp | null, text: string, stars: boolean, follow: boolean, dot: boolean }[]} */
+  /** @type {{ pat: number[] | null, text: string, stars: boolean, follow: boolean, dot: boolean }[]} */
   const segs = [];
-  let src = "", text = "", glob = false, dot = false, fresh = true;
+  /** @type {number[]} */
+  let pat = [];
+  let text = "", glob = false, dot = false, fresh = true, starsOnly = true, starCount = 0;
   const close = () => {
     // A segment of two or more stars alone (`**`) also matches across folders.
-    const stars = glob && text === "" && /^(?:\.\*){2,}$/.test(src);
-    const follow = glob && text === "" && /^(?:\.\*){3,}$/.test(src); // zsh `***/` follows symlinks
-    segs.push({ re: glob ? new RegExp(`^${src}$`, "is") : null, text, stars, follow, dot });
-    src = "";
+    const stars = glob && text === "" && starsOnly && starCount >= 2;
+    const follow = stars && starCount >= 3; // zsh `***/` follows symlinks
+    segs.push({ pat: glob ? pat : null, text, stars, follow, dot });
+    pat = [];
     text = "";
     glob = false;
     dot = false;
     fresh = true;
+    starsOnly = true;
+    starCount = 0;
   };
   for (const p of pieces) {
     if ("lit" in p) {
@@ -370,17 +453,19 @@ function expand(pieces, folder, wide) {
         if (!part) return;
         if (fresh) dot = part.startsWith(".");
         fresh = false;
-        src += part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        pushLiteral(pat, part);
         text += part;
       });
     } else if ("glob" in p) {
       glob = true;
       fresh = false;
-      src += p.glob === "*" ? ".*" : p.glob === "?" ? "." : ".+";
+      if (p.glob === "*") starCount++;
+      else starsOnly = false;
+      pushGlob(pat, p.glob);
     } else return null; // an expansion: refused elsewhere, never judged here
   }
   close();
-  const absolute = segs.length > 1 && segs[0]?.re === null && segs[0].text === "";
+  const absolute = segs.length > 1 && segs[0]?.pat === null && segs[0].text === "";
   const start = absolute ? "/" : folder;
   /** @type {string[]} */
   const found = [];
@@ -389,7 +474,6 @@ function expand(pieces, folder, wide) {
   let special = false;
   // This pattern's own bound, counted over every folder it walks (read from disk or from the decision's cache).
   let left = wide ? WIDE_ENTRIES : GLOB_ENTRIES;
-  let steps = 0;
   /** The folders already counted toward this pattern's bound (one folder may be listed for several segments). */
   const counted = new Set();
   /**
@@ -411,7 +495,7 @@ function expand(pieces, folder, wide) {
     const last = i === segs.length - 1;
     const sep = last ? "" : "/";
     const join2 = (/** @type {string} */ name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
-    if (!s.re) {
+    if (!s.pat) {
       if (absolute && i === 0) return walk("/", "/", 1);
       // A literal name may be a symlink (to /dev, to /) or `.`/`..`: the matches past it are judged.
       let litOdd = odd || s.text === "." || s.text === "..";
@@ -468,7 +552,8 @@ function expand(pieces, folder, wide) {
     if (s.dot) list.push({ name: ".", dir: true, link: false, odd: true }, { name: "..", dir: true, link: false, odd: true });
     for (const e of list) {
       if (over || special) return;
-      if (++steps % 4096 === 0 && late()) {
+      // Every name, so no run of matches can hide past the deadline (one match is bounded: matchCompiled).
+      if (late()) {
         over = true;
         return;
       }
@@ -476,7 +561,7 @@ function expand(pieces, folder, wide) {
       // wide reading takes every name.
       if (!wide && !s.dot && e.name.startsWith(".")) continue;
       const path = join2(e.name);
-      const matched = s.stars || s.re.test(e.name);
+      const matched = s.stars || matchCompiled(s.pat, e.name);
       if (!matched) continue;
       const next = odd || e.link || e.odd;
       if (s.stars) {
@@ -497,6 +582,78 @@ function expand(pieces, folder, wide) {
     return null;
   }
   return over ? null : { paths: found, special };
+}
+
+// w3 third attempt: a glob segment is matched without a regular expression. Its compiled form is an array: STAR for a
+// run of `*` (collapsed), ONE for `?`, ONE then STAR for a bracket expression (one or more characters, as before: the
+// tokenizer keeps no class text), else a UTF-16 code unit case-folded as a case-insensitive JavaScript regular
+// expression without the u flag folds it (`fold`). The old expression was `^...$` with flags `is`, so the rules are the
+// same: any code unit, newlines included, and the same case folding.
+const STAR = -1;
+const ONE = -2;
+/** @type {Map<number, number>} */
+const FOLDED = new Map();
+/**
+ * The canonical form of one code unit under the `i` flag without `u` (ECMAScript Canonicalize): its upper case when that
+ * is one code unit, unless that maps a non-ASCII unit to ASCII.
+ * @param {number} cu @returns {number}
+ */
+function fold(cu) {
+  if (cu < 128) return cu >= 97 && cu <= 122 ? cu - 32 : cu;
+  let f = FOLDED.get(cu);
+  if (f === undefined) {
+    const u = String.fromCharCode(cu).toUpperCase();
+    f = u.length !== 1 || u.charCodeAt(0) < 128 ? cu : u.charCodeAt(0);
+    FOLDED.set(cu, f);
+  }
+  return f;
+}
+/** @param {number[]} pat @param {string} text */
+function pushLiteral(pat, text) {
+  for (let k = 0; k < text.length; k++) pat.push(fold(text.charCodeAt(k)));
+}
+/** @param {number[]} pat @param {string} glob `*`, `?` or `[]` */
+function pushGlob(pat, glob) {
+  if (glob !== "*") pat.push(ONE);
+  if (glob !== "?" && pat[pat.length - 1] !== STAR) pat.push(STAR);
+}
+/**
+ * Does a compiled segment match the whole name? The two-pointer wildcard match: on a mismatch it returns to the latest
+ * star and lets it take one more character, so it never backtracks further. Time at most pattern length times name
+ * length (a name is at most 255 units on disk, a pattern at most MAX_WORD), with no recursion.
+ * @param {number[]} pat @param {string} name @returns {boolean}
+ */
+function matchCompiled(pat, name) {
+  let i = 0, j = 0, star = -1, mark = 0;
+  while (j < name.length) {
+    const p = pat[i];
+    if (p === ONE || (p !== undefined && p >= 0 && p === fold(name.charCodeAt(j)))) {
+      i++;
+      j++;
+    } else if (p === STAR) {
+      star = i++;
+      mark = j;
+    } else if (star >= 0) {
+      i = star + 1;
+      j = ++mark;
+    } else return false;
+  }
+  while (pat[i] === STAR) i++;
+  return i === pat.length;
+}
+/**
+ * Does one segment's pieces (literal text without `/`, and globs `*`, `?`, `[]`, as the tokenizer gives them) match
+ * the whole name, by the guard's rules? Exported for the tests.
+ * @param {any[]} pieces @param {string} name @returns {boolean}
+ */
+export function matchSegment(pieces, name) {
+  /** @type {number[]} */
+  const pat = [];
+  for (const p of pieces) {
+    if ("lit" in p) pushLiteral(pat, String(p.lit));
+    else pushGlob(pat, p.glob);
+  }
+  return matchCompiled(pat, String(name));
 }
 
 /**
@@ -557,6 +714,8 @@ function optionViolation(w, folders, words = []) {
       const name = a.split("=")[0] ?? "";
       if (!isOpt(name)) continue;
       const at = joined && a.includes("=") ? i : i + 1;
+      // w3 third attempt: the value is judged suffix by suffix (readsDevice) and may be a glob; bounded like an operand.
+      if ((args[at] ?? "").length > MAX_WORD) return `${first}: a word longer than ${MAX_WORD} characters is too long to judge`;
       const hit = at < args.length ? deviceAt(at) : null;
       if (hit === "many") return TOO_MANY;
       if (hit !== null) return `${first} ${hit} reads a device that may never end`;
@@ -582,8 +741,12 @@ function optionViolation(w, folders, words = []) {
   if (args.some((a) => a.length > MAX_WORD)) return `${first}: a word longer than ${MAX_WORD} characters is too long to judge`;
   // For grep and rg `.` too: with no path they search the folder they run in (round 2, item C: so in /dev or below it
   // every search is refused, also one with a path elsewhere, since a pattern and a path cannot be told apart).
-  const device = [...args, ...(SEARCH.has(first) ? ["."] : [])].find((a) => folders.some((f) => readsDevice(a, f)));
-  if (device) return `${first} ${device} reads a device that may never end`;
+  // The deadline is checked at each operand (w3 third attempt): a line of tens of thousands of operands is judged with
+  // a stat call or more per operand.
+  for (const a of [...args, ...(SEARCH.has(first) ? ["."] : [])]) {
+    if (late()) return LATE;
+    if (folders.some((f) => readsDevice(a, f))) return `${first} ${a} reads a device that may never end`;
+  }
   // w3 item 1: a word with a glob, judged on each path the shell may expand it to (the check above saw its text only).
   for (let i = 0; i < args.length; i++) {
     if (!hasGlob(words[i + 1])) continue;
