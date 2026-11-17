@@ -6,6 +6,7 @@ of the 0.30 USD allowed.
 | # | What | Command | Cap | Cost |
 |---|---|---|---|---|
 | 1 | Item 8: `${VAR:-default}` and an unset `${VAR}` in a project's `.mcp.json`, SDK pipeline with `ORCH_SDK_MCP=project` | below | 0.08 USD (`maxBudgetUsd`, `maxTurns: 2`, `timeout 60`) | 0.0273086 USD |
+| 3 | Item 6: `claude plugin validate` and `claude plugin test` without a login (CI) | below | none needed: no model call | 0 |
 | 2 | Items 4 and 5: `node scripts/claude-update.mjs --json` on this machine | `node scripts/claude-update.mjs --json` | none needed: no model call (safe-mode start-up request, `--help`, `plugin list`, a read of the program file) | 0 |
 
 ## Probe 1: `.mcp.json` variable forms (item 8)
@@ -38,9 +39,32 @@ behaviour of the frozen pipeline). Not covered: http and sse servers, `${VAR}` i
 
 ## Probe 2: the new `claude-update` checks on this machine (items 4 and 5)
 
-`payload` ok (all 13 fields named in `/root/.local/share/claude/versions/2.1.326`), `memory` ok
+`payload` ok (all 13 fields named in `<claude program file>`, the native install's versioned binary), `memory` ok
 (`CLAUDE_CODE_DISABLE_AUTO_MEMORY` named there), `workflow` FAIL: the loaded plugin is the 1.2.2 install in
-`~/.claude/plugins/cache/...` (the plugin list's `readFromFolder` is the main checkout, not this worktree, so the
+`<config dir>/plugins/cache/...` (the plugin list's `readFromFolder` is the main checkout, not this worktree, so the
 cached install counts), whose `workflows/orchestrate.js` differs from the content the 1.6.1 guard expects; `plugin`
-fails on the same install (1.2.2 against 1.6.1). The run also rewrote the record `~/.claude/orchestration/claude-update.json`,
+fails on the same install (1.2.2 against 1.6.1). The run also rewrote the record `<config dir>/orchestration/claude-update.json`,
 as every run of the script does.
+
+## Probe 3: the dashboard test without a login (item 6, CI)
+
+Question: can CI, which has no Claude login, run `npm run test-dashboard`? That script builds a folder from
+`dist/dashboard` plus `dashboard/register.tsx`, `dashboard/types/index.d.ts`, `dashboard/register.test.tsx` and the
+brief fixtures (bundled into `fixtures/fixtures.ts`), then runs `claude plugin validate <dir>` and `claude plugin test <dir>`.
+The probe built the same folder (its copy steps, in a scratch script) and ran each command alone, with the login hidden:
+`env -i PATH="$PATH" HOME=<empty scratch folder>`, so no `~/.claude`, no `~/.claude.json`, no `ANTHROPIC_API_KEY`
+and no `CLAUDE_CONFIG_DIR`; each under `timeout 120`. Claude Code 2.1.326.
+
+| Command | Login | Exit | Time | Printed (last lines) |
+|---|---|---|---|---|
+| `claude plugin validate <dir>` | none | 0 | 18 s | the plugin directory notes, then `✔ Validation passed` |
+| `claude plugin test <dir>` | none | 0 | 99 s | `119 pass`, `0 fail`, `Ran 119 tests across 1 file. [96.02s]` |
+| `claude plugin test <dir>` | the machine's | 0 | 91 s | `119 pass`, `0 fail`, `Ran 119 tests across 1 file. [89.76s]` |
+| `claude plugin test <copy of dist/dashboard alone>` | none, and the machine's | 1 | 1-2 s | `no *.test.ts or *.test.tsx under <dir>` |
+
+The no-login runs wrote only `.claude/` and `.claude.json` (first-start state) into the empty HOME. Reading: neither
+command needs a login. The first attempt's "no result in 120 s" came from running the whole `scripts/test-dashboard.mjs`
+(validate, 18 s, plus test, about 99 s) under one 120 s limit, not from a missing login. CI now installs the CLI
+(`npm install -g @anthropic-ai/claude-code@2.1.326`, the version the Agent SDK 0.3.326 carries; `npm view` lists it)
+and runs `npm run test-dashboard` after `npm run check`, with no `continue-on-error`. The step is not run on a CI
+runner here (no push).
