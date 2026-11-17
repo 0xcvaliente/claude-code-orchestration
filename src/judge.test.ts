@@ -7,7 +7,7 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
-  bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
+  askOpus, bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
   type BashClass, type JudgeContext, type JudgeDeps, type PathStat,
 } from "./judge.js";
 
@@ -1629,4 +1629,37 @@ test("bashGuard: a missing or non-string command is a deny", async () => {
   for (const ti of [{}, { command: 42 }, { command: ["git", "push"] }, null, undefined]) {
     assert.equal(decision(await run(guard(deps), input("Bash", ti))), "deny", JSON.stringify(ti));
   }
+});
+
+test("askOpus: the judge's own call takes no account connectors and keeps every other option", async () => {
+  let seen: Record<string, unknown> | undefined;
+  const fakeQuery = ((args: { prompt: string; options: Record<string, unknown> }) => {
+    seen = args.options;
+    return (async function* () {
+      yield { type: "result", subtype: "success", is_error: false, result: "{}", usage: { input_tokens: 1, output_tokens: 1 } };
+    })();
+  }) as unknown as Parameters<typeof askOpus>[2];
+  const out = await askOpus("judge-model", 5000, fakeQuery)("a prompt");
+  assert.equal(out.text, "{}");
+  assert.ok(seen);
+  const { env, abortController, cwd, ...rest } = seen;
+  assert.equal((env as Record<string, string>).CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
+  assert.ok(abortController instanceof AbortController);
+  assert.equal(cwd, tmpdir());
+  assert.deepEqual(rest, {
+    model: "judge-model",
+    effort: "medium",
+    maxTurns: 1,
+    tools: [],
+    allowedTools: [],
+    settingSources: [],
+    settings: { disableClaudeAiConnectors: true },
+    mcpServers: {},
+    mcpServersDelivery: "initialize",
+    strictMcpConfig: true,
+    plugins: [],
+    permissionMode: "dontAsk",
+    persistSession: false,
+    systemPrompt: "You judge whether a shell command may run. Reply with one JSON object only.",
+  });
 });
