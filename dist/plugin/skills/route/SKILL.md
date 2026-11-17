@@ -8,9 +8,14 @@ Size the task before doing it.
 1. Get the route.
    - If `${ORCH_HOME:-$HOME/claude-code-orchestration}` contains both `package.json` and `node_modules`, run the triager. `--repo` is the folder the task is about (any folder; a git repository is not required); substitute its absolute path for `$TASK_DIR`:
 
-     ```bash
-     (cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" npm run --silent route -- --repo "$TASK_DIR" --task "$ARGUMENTS")
-     ```
+```bash
+task_file="$(mktemp)" && cat > "$task_file" <<'ORCH_ROUTE_TASK_END'
+$ARGUMENTS
+ORCH_ROUTE_TASK_END
+(cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" npm run --silent route -- --repo "$TASK_DIR" --task="$(cat "$task_file")"); rc=$?; rm -f "$task_file"; (exit "$rc")
+```
+
+     Keep the task text exactly as given, between the two `ORCH_ROUTE_TASK_END` lines, and keep the quotes around that word on the first line: the shell then reads the task as plain text (quotes, backticks, `$`, several lines), and `--task=` keeps a task that starts with a dash a task. If a line of the task is exactly `ORCH_ROUTE_TASK_END`, use another closing word on both lines. Run the block as it stands, each line from its first column: the closing word ends the text only at the start of a line.
 
      It makes one cheap read-only model call and prints JSON: `mode`, `reason`, and the `facts` behind it (`filesToTouch`, `linesToChange`, `independentSlices`, `risky` and `code`). It also appends the decision to `routes.jsonl` in that folder's state dir: `.claude/state/` when the project registers the orchestration hooks itself, otherwise the plugin's per-user dir, so nothing is written into the folder.
    - Otherwise (no checkout, e.g. a plugin-only install) size the task yourself. Skim the folder, then estimate five facts:
