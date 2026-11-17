@@ -5,13 +5,14 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { launchRecord } from "../.claude/hooks/brief.mjs";
-import { findingLine, scanBranch } from "../.claude/hooks/skill-scan.mjs";
+import { findingLine, objectFindings, scanBranch, scanText } from "../.claude/hooks/skill-scan.mjs";
 import { seal } from "../.claude/hooks/skill-seal.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -99,7 +100,7 @@ test("item 1: an author or committer name with a token is a finding; an identity
     (s) => {
       const r = scan(s);
       assert.deepEqual(meta(r), [["author", null, "GitHub token"]]);
-      assert.match(findingLine(/** @type {any} */ (r.findings.find((f) => f.where))), /^the author of commit [0-9a-f]{12}: GitHub token$/);
+      assert.match(findingLine(/** @type {any} */ (r.findings.find((f) => f.where))), /^the author line of commit [0-9a-f]{12}: GitHub token$/);
     },
     { env: { GIT_AUTHOR_NAME: `bot ${TOKEN}` } },
   );
@@ -214,7 +215,123 @@ test("item 1: skill-publish --dry-run refuses a token in a commit message, a for
     git(s.draft, ["tag", "-a", "v1", "-m", `key ${TOKEN}`], s.base);
     const r = publish(s, ["--dry-run"]);
     assert.equal(r.status, 1, r.stdout);
-    assert.match(r.stderr, /a tag on commit [0-9a-f]{12} \(its name, tagger or message\): GitHub token/);
+    assert.match(r.stderr, /a tag on commit [0-9a-f]{12} \(its name or its tag object\): GitHub token/);
     assert.equal(pushed(s), false);
   });
+});
+
+// ---- Review of attempt 1: every byte of a raw commit or tag object is scanned, but its fixed-form id lines. ----
+
+/** git with stdin. @param {string} dir @param {string[]} args @param {string} input @param {string} home */
+function gitIn(dir, args, input, home) {
+  const r = spawnSync("git", ["-C", dir, ...args], { input, encoding: "utf8", env: { ...process.env, ...GIT_ENV, HOME: home } });
+  assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+}
+/** Replace the draft's head commit by a raw object made from it. @param {ReturnType<typeof setup>} s @param {(raw: string) => string} edit */
+function rewriteHead(s, edit) {
+  const raw = `${gitIn(s.draft, ["cat-file", "commit", "HEAD"], "", s.base)}\n`;
+  const id = gitIn(s.draft, ["hash-object", "-t", "commit", "-w", "--literally", "--stdin"], edit(raw), s.base);
+  git(s.draft, ["update-ref", `refs/heads/${BRANCH}`, id], s.base);
+}
+/** Put a raw tag object made from tag `name` back under that name. @param {ReturnType<typeof setup>} s @param {string} name @param {(raw: string) => string} edit */
+function rewriteTag(s, name, edit) {
+  const raw = `${gitIn(s.draft, ["cat-file", "tag", name], "", s.base)}\n`;
+  const id = gitIn(s.draft, ["hash-object", "-t", "tag", "-w", "--literally", "--stdin"], edit(raw), s.base);
+  git(s.draft, ["update-ref", `refs/tags/${name}`, id], s.base);
+}
+/** Insert header lines after the committer line. @param {string} raw @param {string} lines */
+const afterCommitter = (raw, lines) => raw.replace(/^(committer [^\n]*\n)/m, `$1${lines}`);
+/** Deterministic base64 armour lines, as a signature block holds them. @param {number} n @param {string} seed */
+const armour = (n, seed) => {
+  /** @type {string[]} */
+  const out = [];
+  let h = Buffer.from(seed);
+  for (let i = 0; i < n; i++) {
+    h = createHash("sha512").update(h).digest();
+    out.push(Buffer.concat([h, createHash("sha256").update(h).digest()]).toString("base64").slice(0, 64));
+  }
+  return out;
+};
+/** An armoured signature block. @param {string} seed @param {string[]} [extra] */
+const SIG = (seed, extra = []) => ["-----BEGIN PGP SIGNATURE-----", "", ...armour(6, seed), ...extra, "=AbCd", "-----END PGP SIGNATURE-----"];
+
+test("gap 1: an encoding header holding a token is found (raw object and git -c i18n.commitEncoding)", () => {
+  withSetup((s) => {
+    rewriteHead(s, (raw) => afterCommitter(raw, `encoding ${TOKEN}\n`));
+    assert.deepEqual(meta(scan(s)), [["header", null, "GitHub token"]]);
+  });
+  withSetup((s) => {
+    writeFileSync(join(s.draft, "skills", NAME, "more.md"), "more\n");
+    seal(join(s.draft, "skills", NAME), { target: "private" });
+    git(s.draft, ["add", "-A"], s.base);
+    git(s.draft, ["-c", `i18n.commitEncoding=${TOKEN}`, "commit", "-q", "-m", "more"], s.base);
+    assert.deepEqual(meta(scan(s)), [["header", null, "GitHub token"]]);
+  });
+});
+
+test("gap 2: a token on a continuation line of a gpgsig or gpgsig-sha256 block is found", () => {
+  for (const key of ["gpgsig", "gpgsig-sha256"]) {
+    withSetup((s) => {
+      const [first, ...rest] = SIG(key, [`key ${TOKEN}`]);
+      rewriteHead(s, (raw) => afterCommitter(raw, `${key} ${first}\n${rest.map((l) => ` ${l}\n`).join("")}`));
+      assert.deepEqual(meta(scan(s)), [["header", null, "GitHub token"]], key);
+    });
+  }
+});
+
+test("gap 3: a token after the date or in a second <...> of an identity line is found; a second address is foreign", () => {
+  withSetup((s) => {
+    rewriteHead(s, (raw) => raw.replace(/^(author [^\n]*)$/m, `$1 ${TOKEN}`));
+    assert.deepEqual(meta(scan(s)), [["author", null, "GitHub token"]]);
+  });
+  withSetup((s) => {
+    rewriteHead(s, (raw) => raw.replace(/^(committer [^\n]*)$/m, "$1 <bob@corp-mail.com>"));
+    const r = scan(s, [ME]);
+    assert.deepEqual(meta(r), [["committer", null, "e-mail address"]]);
+    assert.deepEqual(r.foreign.map((f) => f.email), ["bob@corp-mail.com"]);
+    assert.match(findingLine(/** @type {any} */ (r.findings.find((f) => f.where))), /^the committer line of commit [0-9a-f]{12}: e-mail address$/);
+  });
+});
+
+test("whole objects: an unknown header's continuation line, a tagger line after the date and a tag's signature are found", () => {
+  withSetup((s) => {
+    rewriteHead(s, (raw) => afterCommitter(raw, `x-note first line\n second ${HOMEPATH}\n`));
+    assert.deepEqual(meta(scan(s)), [["header", null, "home-directory path"]]);
+  });
+  withSetup((s) => {
+    git(s.draft, ["tag", "-a", "v1", "-m", "release"], s.base);
+    rewriteTag(s, "v1", (raw) => raw.replace(/^(tagger [^\n]*)$/m, `$1 ${TOKEN}`));
+    assert.deepEqual(meta(scan(s)), [["tag", null, "GitHub token"]]);
+  });
+  withSetup((s) => {
+    git(s.draft, ["tag", "-a", "v1", "-m", "release"], s.base);
+    rewriteTag(s, "v1", (raw) => `${raw}${SIG("tag", [`key ${TOKEN}`]).join("\n")}\n`);
+    assert.deepEqual(meta(scan(s)), [["tag", null, "GitHub token"]]);
+  });
+});
+
+test("whole objects: tree, parent, object and type lines are skipped only in their exact form", () => {
+  const hex = "a".repeat(40);
+  const at = { commit: "c".repeat(40) };
+  const kinds = (/** @type {string} */ raw, /** @type {"commit" | "tag"} */ type) => objectFindings(raw, type, at).map((f) => [f.where, f.kind]);
+  assert.deepEqual(kinds(`tree ${hex}\nparent ${hex}\nauthor t <${ME}> 1 +0000\ncommitter t <${ME}> 1 +0000\n\nok\n`, "commit"), []);
+  assert.deepEqual(kinds(`tree ${hex} ${TOKEN}\nparent ${hex}\n\nok\n`, "commit"), [["header", "GitHub token"]]);
+  assert.deepEqual(kinds(`tree ${hex}\nparent ${HOMEPATH}\n\nok\n`, "commit"), [["header", "home-directory path"]]);
+  assert.deepEqual(kinds(`tree ${"b".repeat(64)}\nparent ${"b".repeat(64)}\n\nok\n`, "commit"), [], "SHA-256 ids");
+  assert.deepEqual(kinds(`object ${hex}\ntype commit\ntag v1\ntagger t <${ME}> 1 +0000\n\nok\n`, "tag"), []);
+  assert.deepEqual(kinds(`object ${hex}\ntype commit ${TOKEN}\n\nok\n`, "tag"), [["tag", "GitHub token"]]);
+  assert.deepEqual(kinds(`object ${TOKEN}\ntype commit\n\nok\n`, "tag"), [["tag", "GitHub token"]]);
+  // A latin1 byte or an encoding header changes nothing: every byte is read.
+  assert.deepEqual(kinds(`tree ${hex}\nencoding ISO-8859-1\n\nZürich ${TOKEN}\n`, "commit"), [["message", "GitHub token"]]);
+});
+
+test("whole objects: a signed-looking commit with an armoured block and no secret passes; base64 armour never matches", () => {
+  withSetup((s) => {
+    const [first, ...rest] = SIG("clean");
+    rewriteHead(s, (raw) => afterCommitter(raw, `gpgsig ${first}\n${rest.map((l) => ` ${l}\n`).join("")}`));
+    const r = scan(s, [ME]);
+    assert.deepEqual([meta(r), r.problems, r.foreign], [[], [], []]);
+  });
+  assert.deepEqual(scanText(armour(20000, "bulk").join("\n")), [], "20,000 armour lines: no pattern fires on plain base64");
 });

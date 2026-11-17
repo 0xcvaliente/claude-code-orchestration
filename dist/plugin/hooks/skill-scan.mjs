@@ -10,12 +10,14 @@
 //                 in the branch's last version gives file and line; one that a later commit removed gives file and the
 //                 commit that added it. Paths other than skills/<name>/... and README.md (the catalog file a skill slice
 //                 may change) are `outside`. A branch, base or merge base git cannot find, or a history git cannot list
-//                 within the limits, is a `problem`: callers block on it, never pass. Since 2.0.0 also each commit's
-//                 metadata, which a push carries too: message lines (secret, home-path and e-mail patterns; a no-reply
-//                 address and the commit's own identity addresses pass), author and committer (name with every
-//                 pattern, address field with all but the e-mail pattern), and every tag pointing at one of the
-//                 commits (name, tagger, message). With `identity` it lists in `foreign` the authors and committers
-//                 whose address the person's git does not use (the publish step blocks on them, as on outside paths).
+//                 within the limits, is a `problem`: callers block on it, never pass. Since 2.0.0 also every byte of
+//                 each raw commit object the push carries and of each raw tag object pointing at one of those commits
+//                 (and the tag's name), read as latin1 whatever its encoding header says, with every pattern; only a
+//                 commit's `tree <id>`/`parent <id>` and a tag's `object <id>`/`type <type>` lines in exactly that form
+//                 are skipped. Addresses: the object's own (first <...> of its first author and committer, or tagger,
+//                 line) and no-reply addresses pass; any other is a finding. With `identity` it lists in `foreign`
+//                 every author or committer address the person's git does not use (the publish step blocks on them,
+//                 as on outside paths).
 // Git runs read commands only, with optional locks off and repository hooks and fsmonitor off.
 import { spawnSync } from "node:child_process";
 
@@ -179,57 +181,67 @@ function catFile(dir, ids) {
     const head = b.subarray(i, nl).toString("latin1").split(" ");
     const size = Number(head[2]);
     if (head.length !== 3 || head[1] === "missing" || !Number.isInteger(size) || nl + 1 + size > b.length) return null;
-    out.set(id, b.subarray(nl + 1, nl + 1 + size).toString("utf8"));
+    // latin1: one character per byte, whatever the object's `encoding` header says, so no byte is lost to decoding.
+    out.set(id, b.subarray(nl + 1, nl + 1 + size).toString("latin1"));
     i = nl + 1 + size + 1;
   }
   return out;
 }
 
-/**
- * A raw commit or tag object split into header fields (continuation lines joined with "\n") and the message.
- * @param {string} raw @returns {{ headers: { key: string, value: string }[], message: string }}
- */
-function parseObject(raw) {
-  const sep = raw.indexOf("\n\n");
-  const head = sep < 0 ? raw : raw.slice(0, sep);
-  /** @type {{ key: string, value: string }[]} */
-  const headers = [];
-  for (const l of head.split("\n")) {
-    const prev = headers.at(-1);
-    if (l.startsWith(" ") && prev) prev.value += `\n${l.slice(1)}`;
-    else {
-      const k = l.indexOf(" ");
-      headers.push({ key: k < 0 ? l : l.slice(0, k), value: k < 0 ? "" : l.slice(k + 1) });
-    }
-  }
-  return { headers, message: sep < 0 ? "" : raw.slice(sep + 2) };
-}
-
-/** The name and address of an ident header (`Name <addr> 1700000000 +0000`). @param {string} v */
-function ident(v) {
-  const m = /^(.*?) ?<([^>\n]*)>(?: .*)?$/s.exec(v);
-  return m ? { name: String(m[1]), email: String(m[2]) } : { name: v, email: "" };
-}
+const HEX_ID = String.raw`[0-9a-f]{40}(?:[0-9a-f]{24})?`;
+// The only lines of a raw object the scan does not read, each in its exact, checked form; a line of any other form,
+// such a key included, is scanned as text.
+const EXEMPT = {
+  commit: new RegExp(String.raw`^(?:tree|parent) ${HEX_ID}$`),
+  tag: new RegExp(String.raw`^(?:object ${HEX_ID}|type (?:commit|tree|blob|tag))$`),
+};
+const IDENT_KEYS = { commit: ["author", "committer"], tag: ["tagger"] };
+// An address in a line as the e-mail pattern finds it.
+const ADDRESS = /(?<![\w.%+-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b/g;
 
 /** An address that names no one who would mind: a no-reply address (noreply@..., ...@users.noreply.github.com). @param {string} local @param {string} domain */
 const noReply = (local, domain) => /^no-?reply$/i.test(local) || /^users\.noreply\.github\.com$/i.test(domain);
 
+/** The header lines of a raw object (up to its first empty line), with their line numbers. @param {string} raw */
+const headerLines = (raw) => {
+  const lines = raw.split("\n");
+  const end = lines.indexOf("");
+  return { lines, end: end < 0 ? lines.length : end };
+};
+
 /**
- * The findings in a commit's or tag's metadata: its message lines, its author, committer or tagger (the name with every
- * kind, the address field with every kind but `e-mail address`, since each commit names one), a tag's name, and any
- * other header but the tree, parent and signature lines (a `mergetag` carries a whole tag). Messages let a no-reply
- * address and the object's own identity addresses through (a Co-Authored-By trailer); every other address counts.
- * @param {string} raw @param {{ commit: string, tagName?: string, base?: boolean }} at
+ * The object's own addresses: the first `<...>` of its first author and first committer line (a tag: tagger line).
+ * @param {string} raw @param {"commit" | "tag"} type
+ */
+function ownAddresses(raw, type) {
+  const { lines, end } = headerLines(raw);
+  /** @type {string[]} */
+  const own = [];
+  for (const key of IDENT_KEYS[type]) {
+    const l = lines.slice(0, end).find((x) => x.startsWith(`${key} `));
+    const m = l ? /<([^<>\n]*)>/.exec(l) : null;
+    if (m) own.push(String(m[1]).toLowerCase());
+  }
+  return own;
+}
+
+/**
+ * The findings in one raw commit or tag object as a push carries it (2.0.0): every line is scanned as text with every
+ * pattern (UTF-16 and NUL handling included), except a commit's `tree <id>` and `parent <id>` header lines and a tag's
+ * `object <id>` and `type <commit|tree|blob|tag>` header lines, each only in exactly that form. One rule lets
+ * addresses through: the object's own addresses (the first `<...>` of its first author and committer, or tagger, line)
+ * and no-reply addresses; any other address, in an identity line, a header, a signature or the message, is a finding.
+ * @param {string} raw the object's bytes as latin1 @param {"commit" | "tag"} type
+ * @param {{ commit: string, tagName?: string, base?: boolean }} at
  * @returns {Finding[]}
  */
-function metaFindings(raw, at) {
+export function objectFindings(raw, type, at) {
   /** @type {Finding[]} */
   const out = [];
-  const { headers, message } = parseObject(raw);
-  const own = new Set(headers.filter((h) => ["author", "committer", "tagger"].includes(h.key)).map((h) => ident(h.value).email.toLowerCase()));
+  const own = new Set(ownAddresses(raw, type));
   /** @param {string} l @param {string} d */
-  const inMessage = (l, d) => noReply(l, d) || own.has(`${l}@${d}`.toLowerCase());
-  const where = at.tagName !== undefined ? "tag" : "message";
+  const allowed = (l, d) => noReply(l, d) || own.has(`${l}@${d}`.toLowerCase());
+  const { lines, end } = headerLines(raw);
   const seen = new Set();
   /** @param {string} w @param {number | null} line @param {string} kind */
   const add = (w, line, kind) => {
@@ -238,21 +250,35 @@ function metaFindings(raw, at) {
     seen.add(key);
     out.push({ file: "", line, kind, commit: at.commit, where: w, ...(at.base ? { base: true } : {}) });
   };
-  if (at.tagName !== undefined) for (const kind of lineKinds(at.tagName)) add("tag", null, kind);
-  for (const h of headers) {
-    if (["tree", "parent", "object", "type", "gpgsig", "gpgsig-sha256", "encoding"].includes(h.key)) continue;
-    if (["author", "committer", "tagger"].includes(h.key)) {
-      const { name, email } = ident(h.value);
-      const w = h.key === "tagger" ? "tag" : h.key;
-      for (const kind of lineKinds(name)) add(w, null, kind);
-      for (const kind of lineKinds(email, () => true)) add(w, null, kind);
-      continue;
-    }
-    for (const l of h.value.split("\n")) for (const kind of lineKinds(l, inMessage)) add(where === "tag" ? "tag" : "message", null, kind);
-  }
-  message.split("\n").forEach((l, i) => {
-    for (const kind of lineKinds(l, inMessage)) add(where, where === "message" ? i + 1 : null, kind);
+  if (at.tagName !== undefined) for (const kind of lineKinds(at.tagName, allowed)) add("tag", null, kind);
+  lines.forEach((l, i) => {
+    const inHeader = i < end;
+    if (inHeader && EXEMPT[type].test(l)) return;
+    const key = inHeader ? l.slice(0, l.indexOf(" ") < 0 ? l.length : l.indexOf(" ")) : "";
+    const where = type === "tag" ? "tag" : !inHeader ? "message" : IDENT_KEYS.commit.includes(key) ? key : "header";
+    for (const kind of lineKinds(l, allowed)) add(where, where === "message" ? i - end : null, kind);
   });
+  return out;
+}
+
+/**
+ * The authors and committers of a raw commit whose addresses are not in `mine`: every address on an author or
+ * committer line, the first `<...>` and any other one alike. Names and addresses decoded as UTF-8 for display.
+ * @param {string} raw @param {Set<string>} mine @param {string} commit @returns {Identity[]}
+ */
+function identities(raw, mine, commit) {
+  const { lines, end } = headerLines(raw);
+  /** @type {Identity[]} */
+  const out = [];
+  const utf8 = (/** @type {string} */ s) => Buffer.from(s, "latin1").toString("utf8");
+  for (const l of lines.slice(0, end)) {
+    const key = IDENT_KEYS.commit.find((k) => l.startsWith(`${k} `));
+    if (!key) continue;
+    const name = l.slice(key.length + 1).split("<")[0]?.trim() ?? "";
+    const first = /<([^<>\n]*)>/.exec(l)?.[1] ?? "";
+    const addresses = new Set([first, ...[...l.matchAll(ADDRESS)].map((m) => m[0])].map((a) => a.toLowerCase()));
+    for (const a of addresses) if (!mine.has(a)) out.push({ name: utf8(name), email: utf8(a), commit });
+  }
   return out;
 }
 
@@ -347,7 +373,7 @@ function eachAdded(out, each) {
  *   a push goes to; a commit counts as present only when every address has it (the union of what each lacks).
  *   `identity`: the e-mail addresses the person's git uses (the publish step); each author or committer of the
  *   draft's own commits with another address is listed in `foreign`. Without it `foreign` stays empty.
- * Besides the lines and paths, every commit's metadata is scanned (metaFindings): message, author, committer and the
+ * Besides the lines and paths, every commit's metadata is scanned (objectFindings: every line of each raw object but its fixed-form id lines): message, author, committer and the
  * tags that point at it (name, tagger, message), for the draft's commits and the unpushed base commits alike.
  * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[], foreign: Identity[] }}
  */
@@ -491,23 +517,22 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
       problems.push("git cannot show its commits' messages and authors");
       return { mergeBase, findings, outside, unpushed, problems, foreign };
     }
-    for (const id of [...ownIds, ...unpushed]) findings.push(...metaFindings(objects.get(id) ?? "", { commit: id, base: baseIds.has(id) && !ownIds.includes(id) }));
+    for (const id of [...ownIds, ...unpushed]) findings.push(...objectFindings(objects.get(id) ?? "", "commit", { commit: id, base: baseIds.has(id) && !ownIds.includes(id) }));
     for (const t of tags) {
       const raw = t.annotated ? (objects.get(t.obj) ?? "") : "";
-      findings.push(...metaFindings(raw, { commit: t.target, tagName: t.tagName, base: baseIds.has(t.target) && !ownIds.includes(t.target) }));
+      findings.push(...objectFindings(raw, "tag", { commit: t.target, tagName: t.tagName, base: baseIds.has(t.target) && !ownIds.includes(t.target) }));
     }
-    // Whose names go out: authors and committers of the draft's own commits whose address the person's git does not use.
+    // Whose names go out: every address on the author and committer lines of the draft's own commits that the
+    // person's git does not use.
     if (identity) {
       const mine = new Set(identity.map((/** @type {string} */ e) => e.toLowerCase()).filter(Boolean));
       const listed = new Set();
       for (const id of ownIds) {
-        for (const h of parseObject(objects.get(id) ?? "").headers) {
-          if (h.key !== "author" && h.key !== "committer") continue;
-          const who = ident(h.value);
-          const key = `${who.name}\n${who.email.toLowerCase()}`;
-          if (mine.has(who.email.toLowerCase()) || listed.has(key)) continue;
+        for (const who of identities(objects.get(id) ?? "", mine, id)) {
+          const key = `${who.name}\n${who.email}`;
+          if (listed.has(key)) continue;
           listed.add(key);
-          foreign.push({ ...who, commit: id });
+          foreign.push(who);
         }
       }
     }
@@ -523,7 +548,7 @@ export const findingLine = (f) => {
   if (f.where) {
     const c = (f.commit ?? "unknown").slice(0, 12);
     // A tag's name is never shown: it may be what the scan found.
-    const what = f.where === "message" ? `the message of commit ${c}${f.line === null ? "" : ` line ${f.line}`}` : f.where === "tag" ? `a tag on commit ${c} (its name, tagger or message)` : `the ${f.where} of commit ${c}`;
+    const what = f.where === "message" ? `the message of commit ${c}${f.line === null ? "" : ` line ${f.line}`}` : f.where === "tag" ? `a tag on commit ${c} (its name or its tag object)` : f.where === "header" ? `a header line of commit ${c}` : `the ${f.where} line of commit ${c}`;
     return `${what}${f.base ? ", which is not part of the draft" : ""}: ${f.kind}`;
   }
   const at = f.base && f.commit ? `, in commit ${f.commit.slice(0, 12)}, which is not part of the draft` : f.commit ? `, only in earlier commit ${f.commit.slice(0, 12)}` : f.line === null ? "" : ` line ${f.line}`;
