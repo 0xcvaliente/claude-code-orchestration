@@ -121,6 +121,9 @@ const timeOf = (ts) => Date.parse(String(ts ?? "")) || 0;
  * (stopGateOf): a stop that follows a hand-back and its test-gate record carry the same after_handback (2.0.0); a stop
  * with none (a worker that only stops, or older logs) is paired by count as before. The hand-back gate's records (at
  * "handback", handback_id) belong to a hand-back and are never a stop's record.
+ * test, testAt, testBlock and testReason come from the SubagentStop gate's records only (a reuse, tests_passed_cached,
+ * is one): a hand-back gate's record is never an agent's test record, so a hand-back allow can never replace or clear
+ * a SubagentStop block, for testBlocked (the review gate's implementer_unfinished) or for the reviewer hold.
  * The review gate keeps comparing times (testBlocked); only the plan check's reviewer hold reads stopGate.
  */
 
@@ -128,7 +131,8 @@ const timeOf = (ts) => Date.parse(String(ts ?? "")) || 0;
  * The implementer agents of a session with their latest start, stop and test-gate record. `telemetry` holds
  * SubagentStart/SubagentStop records (telemetry.jsonl, or loadRecords' `starts`); only bare or namespaced `implementer`
  * agent types count. `gates` holds gates.jsonl records; only test-gate records with an agent_id of one of those agents and
- * this session (or no session_id, older verify.sh) count, and on equal times the later line wins.
+ * this session (or no session_id, older verify.sh) count, never the hand-back gate's, and on equal times the later
+ * line wins.
  * @param {any[]} telemetry @param {any[]} gates @param {string} sessionId @returns {Map<string, ImplementerTestState>}
  */
 export function implementerTestStates(telemetry, gates, sessionId) {
@@ -143,6 +147,7 @@ export function implementerTestStates(telemetry, gates, sessionId) {
   }
   for (const g of gates) {
     if (g.gate !== "test" || typeof g.agent_id !== "string" || (g.session_id !== undefined && g.session_id !== sessionId)) continue;
+    if (handbackRecord(g)) continue; // a hand-back's record: never the agent's test record (see the typedef)
     const a = agents.get(g.agent_id);
     if (!a || timeOf(g.ts) < a.testAt) continue;
     a.testAt = timeOf(g.ts);

@@ -56,15 +56,17 @@
 #               helper is killed when the budget runs out. A baseline that cannot run only loses its note (the block
 #               stays); a bugfix check that has no time or is killed blocks as unverified (bugfix_timeout), counted
 #               with the other bugfix blocks.
-#   cache       (2.0.0; test-gate-cache.mjs) each of these helper runs gets min(60, time left - 10) s, and none runs
-#               with less than 11 s left (no key, no finished scan: nothing is stored or taken, the suite runs); one
-#               that hangs is stopped like any limit, by the time left - 2 s at the latest. At a hand-back: the tree key
-#               before the run, then (the test run's limit being the time left less 30 s, HB_RESERVE_S) the key again
-#               and the store with its scan of the trees, after the run or after a lock-wait give-up. At a stop that
-#               follows a hand-back: the key and the take with its scan, before the lock and the run. Before the run they
-#               come out of the time the test run then gets; after it they come out of the base run's (a baseline then
-#               only loses its note) and are never followed by the bugfix check (the hand-back gate does not run it),
-#               so the worst cases below stand.
+#   cache       (2.0.0; test-gate-cache.mjs) each of its helper runs (the tree key, a listing of the trees, the store,
+#               the take with its listing) gets min(60, time left - 10) s, and none runs with less than 11 s left (no
+#               key or no finished listing: nothing is stored or taken, the suite runs); one that hangs is stopped like
+#               any limit, by the time left - 2 s at the latest. At a hand-back: the key, then listing L0 (before the
+#               lock and the run; taken again right before the run when the lock had to be waited for), and after the
+#               run (the test run's limit being the time left less HB_RESERVE_S, 30 s) listing L1, the key again and
+#               the store. At a stop that follows a hand-back: the key and the take with its listing L2, before the lock
+#               and the run. Before the run they come out of the time the test run then gets; after it they come out of
+#               the base run's (a baseline then only loses its note) and are never followed by the bugfix check (the
+#               hand-back gate does not run it), so the worst cases below stand. A listing of this repository's two
+#               trees (about 10,600 entries) took 1.3 s cold and 0.3 s warm.
 #   So lock wait + test run + base run (or bugfix check) <= budget: <= 540 s < 600 s by default, <= 870 s < 900 s at most.
 #   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
 #   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
@@ -600,15 +602,21 @@ floor=120
 [ "$floor" -le "$test_limit" ] || floor="$test_limit"
 [ "$floor" -ge 1 ] || floor=1
 
-# The result cache (test-gate-cache.mjs; its header states the rule). Only the SubagentStop gate takes an outcome, and
-# only the one its own hand-back's gate stored, once, while fresh, for the same tree key and with nothing newer than that
-# run's start in the work tree or the main checkout (git-ignored files included) but the run's own creations, unchanged;
-# anything else runs the suite. A pass is taken as a pass, a fail as a fail, a timed-out run as a timed-out block and a
-# lock-wait give-up as a reason not to wait again; the records say so (reused, reused_from: the hand-back).
-# compute_key sets key_out (the tree's key, or "") and key_since (the run's start, ms), and is called only where it is
-# used: at a hand-back and at a stop that follows one. Every key run, scan and store is cut to the time left in the
-# budget less KEY_RESERVE_S, at most 60 s, and skipped when none is left: no key or no finished scan means no record
-# and no reuse. The hand-back gate's test run keeps HB_RESERVE_S of the budget for the key and the scan after it.
+# The result cache (test-gate-cache.mjs; its header states the rule and its limits). Only the SubagentStop gate takes
+# an outcome, and only the one its own hand-back's gate stored, once, within 30 s, for the same tree key, and only when
+# a listing of every entry of the work tree and, for a linked worktree, of the main checkout (git-ignored entries
+# included; each tree's .git, .claude/state and .claude/worktrees left out) taken at the stop (L2) equals the listing
+# taken just before the hand-back's run began (L0). The hand-back gate stores an outcome only when the listing taken
+# just after its run (L1) equals L0 exactly (the suite wrote nothing into the trees and nothing else changed them while
+# it ran), no entry's time is within 2 s before L0 or in the future, no symlink points outside the trees, the times
+# have sub-second parts, the clock did not go back and the key did not change; else nothing is stored and its record
+# says why ("store": the reason code, or "stored"). A suite that writes into the trees therefore gets no reuse: it runs
+# at both points. A stop that follows a hand-back and takes nothing says why too ("reuse"). A pass is taken as a pass,
+# a fail as a fail, a timed-out run as a timed-out block and a lock-wait give-up as a reason not to wait again; the
+# records say so (reused, reused_from: the hand-back). compute_key sets key_out (the tree's key, or ""), and is called
+# only where it is used: at a hand-back and at a stop that follows one. Every helper run is cut to the time left in the
+# budget less KEY_RESERVE_S, at most 60 s, and skipped when none is left: no key or no finished listing means no record
+# and no reuse. The hand-back gate's test run keeps HB_RESERVE_S of the budget for L1, the key and the store after it.
 KEY_RESERVE_S=10
 HB_RESERVE_S=30
 helper_limit() { # prints the limit for a key run, scan or store, or 0 when none is left
@@ -619,42 +627,61 @@ helper_limit() { # prints the limit for a key run, scan or store, or 0 when none
 }
 compute_key() {
   local lim
-  key_out="" key_since=""
+  key_out=""
   lim="$(helper_limit)"
   [ "$lim" -ge 1 ] || return 0
   ensure_work || return 0
   run_limited "$lim" /dev/null "$work/key.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" key "$PWD" "$cmd" "$isolated"
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
   key_out="$(sed -n 1p "$work/key.out" 2>/dev/null | LC_ALL=C tr -cd '0-9a-f')"
-  key_since="$(sed -n 2p "$work/key.out" 2>/dev/null | LC_ALL=C tr -cd '0-9')"
-  [ "${#key_out}" = 64 ] && [ -n "$key_since" ] || key_out="" key_since=""
+  [ "${#key_out}" = 64 ] || key_out=""
   return 0
 }
 # After the run (or the lock-wait give-up): the key again; key_stable=1 when it is the one taken before.
 recheck_key() {
-  local before="$cache_key" since="$cache_since"
   key_stable=0
-  [ -n "$before" ] || return 0
+  [ -n "$cache_key" ] || return 0
   compute_key
-  [ "$key_out" != "$before" ] || key_stable=1
-  key_since="$since"
+  [ "$key_out" != "$cache_key" ] || key_stable=1
 }
-cache_put() { # result extra message: the hand-back gate only; the helper scans what the run created and may refuse
+# A listing of the trees into $work/$1 (l0.json or l1.json); the file is removed first and left out when the listing
+# cannot run or finish, so the store then refuses (l0_missing, l1_missing). The hand-back gate only, with a key.
+list_trees() {
   local lim
-  [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ -n "$cache_since" ] && [ -n "$handback_id" ] && [ "$key_stable" = 1 ] || return 0
+  [ "$handback" = 1 ] && [ -n "$cache_key" ] || return 0
+  ensure_work || return 0
+  rm -f "$work/$1" 2>/dev/null
   lim="$(helper_limit)"
   [ "$lim" -ge 1 ] || return 0
-  mkdir -p "$state" 2>/dev/null || return 0
-  [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
-  { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || return 0
-  run_limited "$lim" "$work/put.in" /dev/null /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
-    "${session_id:-}" "${agent_id:-}" "$cache_since" "$PWD" "$((lim - 1))"
+  run_limited "$lim" /dev/null "$work/$1" /dev/null node "$hooks_dir/test-gate-cache.mjs" list "$state" "$PWD" "$((lim - 1))"
+  [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || rm -f "$work/$1" 2>/dev/null
   return 0
 }
-cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key="" cache_since=""
+# The store's verdict goes into the hand-back's record ("store"): "stored" or why not.
+store_note() { tree_extra="${tree_extra:+$tree_extra,}\"store\":\"$1\""; }
+cache_put() { # result extra message: the hand-back gate only; the helper compares L0 and L1 and may refuse
+  local lim code
+  [ "$handback" = 1 ] || return 0
+  [ -n "$cache_key" ] || { store_note no_key; return 0; }
+  [ -n "$handback_id" ] || { store_note no_handback_id; return 0; }
+  [ "$key_stable" = 1 ] || { store_note key_changed; return 0; }
+  lim="$(helper_limit)"
+  [ "$lim" -ge 1 ] || { store_note no_time; return 0; }
+  mkdir -p "$state" 2>/dev/null || { store_note no_state; return 0; }
+  [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
+  { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || { store_note no_work; return 0; }
+  run_limited "$lim" "$work/put.in" "$work/put.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
+    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json"
+  code="$(sed -n 1p "$work/put.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
+  [ "$lim_timed_out" = 0 ] && [ -n "$code" ] || code=put_failed
+  store_note "$code"
+  return 0
+}
+cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key="" take_reason=""
 if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
   compute_key
-  cache_key="$key_out" cache_since="$key_since"
+  cache_key="$key_out"
+  [ -n "$cache_key" ] || [ "$handback" = 1 ] || take_reason=no_key
 fi
 if [ -n "$cache_key" ]; then
   tree_extra="\"tree\":\"${cache_key:0:16}\""
@@ -662,10 +689,20 @@ if [ -n "$cache_key" ]; then
   take_lim="$(helper_limit)"
   if [ "$handback" = 0 ] && [ "$take_lim" -ge 1 ] && ensure_work; then
     run_limited "$take_lim" /dev/null "$work/cache.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" take "$state" "$cache_key" "${session_id:-}" "$agent_id" "$after_handback" "$PWD" "$((take_lim - 1))"
+    take_reason=take_failed
     if [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ]; then
       cached="$(sed -n 1p "$work/cache.out" 2>/dev/null)"
-      case "$cached" in pass | fail | timeout | lock_wait) ;; *) cached="" ;; esac
+      case "$cached" in
+        pass | fail | timeout | lock_wait) take_reason="" ;;
+        none)
+          cached=""
+          take_reason="$(sed -n 2p "$work/cache.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
+          ;;
+        *) cached="" ;;
+      esac
     fi
+  elif [ "$handback" = 0 ]; then
+    take_reason=no_time
   fi
   if [ -n "$cached" ]; then
     cached_by="$(sed -n 2p "$work/cache.out" | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
@@ -674,6 +711,7 @@ if [ -n "$cache_key" ]; then
     tree_extra="$tree_extra,\"reused\":\"$cached\",\"reused_from\":\"$cached_by\""
   fi
 fi
+[ -z "$take_reason" ] || tree_extra="${tree_extra:+$tree_extra,}\"reuse\":\"$take_reason\""
 
 lock_wait_s=0
 timed_out=0 limit=0
@@ -695,12 +733,15 @@ else
     fi
     lock_r=1
   else
+    # L0 before the lock: a give-up compares it with L1 after the wait; a run that had to wait lists again before it.
+    list_trees l0.json
     acquire_lock "$floor"
     lock_r=$?
   fi
   if [ "$lock_r" = 1 ]; then
     if [ "$handback" = 1 ]; then
       # Stored so that the stop does not wait for the lock a second time (the hand-back and the stop are one wait).
+      list_trees l1.json
       recheck_key
       cache_put lock_wait "" ""
       log_gate allow handback_lock_wait "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
@@ -717,12 +758,21 @@ else
   [ "$handback" = 0 ] || limit=$((limit - HB_RESERVE_S))
   [ "$limit" -le "$test_limit" ] || limit="$test_limit"
   [ "$limit" -ge 1 ] || limit=1
+  # L0 again right before the run when the lock had to be waited for (the listing comes out of the run's time).
+  if [ "$handback" = 1 ] && [ "${lock_wait_s:-0}" -gt 0 ]; then
+    list_trees l0.json
+    limit="$(time_left)"
+    limit=$((limit - HB_RESERVE_S))
+    [ "$limit" -le "$test_limit" ] || limit="$test_limit"
+    [ "$limit" -ge 1 ] || limit=1
+  fi
   ensure_work
   run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
   rc="$lim_rc"
   timed_out="$lim_timed_out"
+  # At a hand-back: L1 at once, then the key again, so that an outcome is stored only for the trees the run began with.
+  list_trees l1.json
   out="$(cat "$work/test.out" 2>/dev/null)"
-  # At a hand-back: the key again, so that an outcome is stored only for the tree the run began with.
   [ "$handback" = 0 ] || recheck_key
   if [ "$timed_out" = 1 ]; then
     [ "$rc" != 0 ] || rc=137

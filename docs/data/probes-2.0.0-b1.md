@@ -58,4 +58,23 @@ So the hand-back gate tests the worktree the implementer worked in, exactly as t
 - After two reviews the cache serves one case only: the SubagentStop gate of agent X takes the outcome stored by X's hand-back gate for X's latest hand-back, once, within 30 s (live, 1 to 2 s passed between the two records), when the tree key still matches and a scan of the work tree and the main checkout (git-ignored files included) finds nothing newer than that run's start beyond the entries the run itself created, unchanged. A symlink to a target outside both trees means no record at all. The rule is in the header of `.claude/hooks/test-gate-cache.mjs`.
 - Measured without a model (2026-11-17): `npx tsx --test` on three of this repo's test files and `node --test bench/*.test.mjs` created nothing in the work tree or the main checkout. A scan of this worktree plus the main checkout (with `node_modules`) took 0.8 s cold and 0.2 s warm, and found no symlink that points outside them.
 
-Total cost of the slice's probes: about 0.011 USD (runs 1 to 3).
+## Third review: the listing rule (2026-11-17, no model calls)
+
+The third rule replaces the scan of entries newer than the run's start (which took a file another process replaced by rename during the run for the run's own creation) with whole listings. `listTrees` in `.claude/hooks/test-gate-cache.mjs` lists every entry of the work tree and, for a linked worktree, of the main checkout, git-ignored ones included, with each tree's `.git`, `.claude/state` and `.claude/worktrees` left out. The hand-back gate takes L0 just before its run and L1 just after, and stores an outcome only when L1 equals L0. The stop takes L2 and reuses the outcome only when L2 equals L0. The header of that file states the rule, the reason codes and the limits.
+
+Reproductions, a scratch script run against the hooks of commit 1a32657 and against the new ones:
+
+| Case | 1a32657 | Now |
+|---|---|---|
+| An ignored input replaced by rename while the hand-back's suite sleeps; the suite now fails | stop `allow tests_passed_cached` (the pass reused) | hand-back `store: tree_changed`; stop `block tests_failed` |
+| A SubagentStop `tests_failed` block, then a hand-back gate allow | `testBlocked` false | `testBlocked` true |
+
+Listing time on this repository (this worktree plus the main checkout with `node_modules`, 10,606 entries): 1.3 s cold (page cache dropped), 0.2 to 0.3 s warm.
+
+C10 on this repository's own runner: a clone in a scratch folder, `node_modules` copied (not linked), a linked worktree under `.claude/worktrees`, and as test command a one-file copy of `scripts/run-tests.mjs` (its own `TMPDIR` folder; `npx --no-install tsx --test src/judge.test.ts`, then `node --test src/test-tmp.test.mjs`). Result: the hand-back gate ran the suite in 18 s and logged `store: stored`. The stop logged `tests_passed_cached` (`reused: pass`) in 1 s. `find -newer` showed nothing changed in either tree but `.claude/state`. So L1 equals L0 for this suite: tsx and the test runner write only under `TMPDIR`, outside the trees. Two findings from the probe:
+- The real checkout's `node_modules/node_modules` is an absolute symlink to the checkout's own `node_modules`. It points inside the trees, so it passes. In a copy it pointed outside, and the gate logged `store: symlink_outside`, as it should.
+- tsx's IPC socket lives under `TMPDIR`. With a `TMPDIR` path over about 100 characters, the suite fails (socket path too long). That is the test command's problem, not the gate's.
+
+No exclusion was widened.
+
+Total cost of the slice's probes: about 0.011 USD (runs 1 to 3); the third review's work made no model call.

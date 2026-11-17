@@ -372,6 +372,20 @@ test("2.0.0: the hand-back gate's records are never a stop's record", () => {
   }
 });
 
+test("2.0.0: a hand-back gate's allow after a SubagentStop tests_failed block does not lift the hold", () => {
+  const dir = project();
+  try {
+    implementer(dir);
+    gate(dir, 4, "block", "tests_failed");
+    gate(dir, 5, "allow", "tests_passed", { at: "handback", handback_id: "toolu_9" });
+    const r = launch(dir, REVIEW);
+    assert.equal(r.status, 2, "still refused");
+    assert.match(r.stderr, /tests failed after the worker had reported/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("when the hold's record cannot be written, the launch is let through rather than refused for good", () => {
   const dir = project();
   try {

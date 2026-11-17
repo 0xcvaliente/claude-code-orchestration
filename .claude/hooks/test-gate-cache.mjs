@@ -4,40 +4,54 @@
 //
 // One use only. verify.sh runs the suite at an implementer's hand-back (PreToolUse on SubagentHandback, --handback), and
 // the SubagentStop gate follows seconds after a delivered hand-back. That stop gate may take the hand-back gate's outcome
-// as its own instead of running the suite again, and nothing else ever reuses one (cacheTake). All of these must hold,
-// else the suite runs:
-//   1. the outcome was written by the hand-back gate of the same session and agent, for the agent's latest hand-back
-//      since its latest start (state.mjs latestHandbackId: the tool_use_id the stop follows): never across agents,
-//      sessions, runs or a later start;
-//   2. it was not taken before (an entry is marked used when taken: one reuse per hand-back);
-//   3. the tree key (treeKey) is the same: tracked, staged, unstaged and untracked content, the command and the facts;
-//   4. nothing the suite could read changed since the hand-back's run began (scanTree): the work tree and, for a linked
-//      worktree, the main checkout (node_modules resolves through it), git-ignored files included, hold no file, folder
-//      or symlink whose mtime or ctime is at or after the run's start, other than exactly the entries the run itself
-//      created, recorded when it ended with their size, mtime, ctime and birth time, and still identical. A change made
-//      after the run ended gives a newer ctime (the kernel sets it on every write, rename or chmod, and it cannot be set
-//      back without changing the clock), so it is either a new entry or a listed entry whose times differ: no reuse;
-//   5. no symlink anywhere in those trees points outside them (its target's content is not watched);
-//   6. the scans finished within their time limit, the file system keeps sub-second times, and the run created its
-//      entries rather than rewrote existing ones (an entry with a birth time before the run's start, or no birth time,
-//      in the run's list means no record is written at all: an existing git-ignored file the run changed may be an
-//      input changed by another process while the suite ran);
-//   7. it is at most REUSE_MAX_S seconds old (live, the stop came 1 to 2 s after the hand-back): a second line of defence.
-// The scans leave out every folder named .git, the gate's state folder and .claude/worktrees (other slices' worktrees;
-// a linked worktree under it is scanned as its own root). What they do not see: files outside the two trees that a test
-// reads directly (not through a symlink in them), and a change by another process during the run itself to a file the
-// run then lists as its own creation (a file replaced by rename).
+// as its own instead of running the suite again; nothing else ever reuses one. The rule rests on one function,
+// listTrees: a listing of EVERY entry (file, folder, symlink, other) of the work tree and, when the work tree is a linked
+// worktree, of the main checkout too (node_modules resolves through it), git-ignored entries included, each with its
+// path, type, size, mtime and ctime in nanoseconds, inode, device and, for a symlink, its target text (never atime),
+// reduced to one sha256 over the entries in a fixed order. Left out, in both trees: each tree's own .git, its whole
+// .claude/state folder (the gate's log and lock, the journal, telemetry, the read log and the hand-back captures are
+// written there all the time; the plugin's state folder too, wherever it is) and its .claude/worktrees (other agents'
+// worktrees; a linked worktree under it is listed as its own root). A listing gives no hash when it cannot finish
+// before its deadline (cut from the hook's time left), when an entry cannot be read (one vanished while it was listed)
+// or when an entry lies on another device than its tree's root (a mount point inside the tree).
+// Store, at the hand-back (cachePut, storeVerdict): the clock is read, listing L0 is taken immediately before the suite
+// starts, listing L1 immediately after it ends. An outcome is stored only when L1 equals L0 exactly: the suite wrote
+// nothing into the trees and nobody else changed anything during the run. Nothing is stored (each with its reason code,
+// logged by verify.sh as "store") when: a listing has no hash (l0_<reason>, l1_<reason>); a symlink points outside
+// both trees or into a left-out folder (symlink_outside: its target's content is not watched); no entry carries a
+// sub-second time (coarse_times: the file system keeps whole seconds or cannot say); an entry's mtime or ctime lies in
+// the future (future_time) or later than RECENT_MS before the clock read for L0 (recent_change: a change that close
+// could hide behind equal timestamps); the clock after L1 is earlier than the clock before L0 (clock_backwards); L1
+// differs from L0 (tree_changed: also every suite that writes into the trees, which so gets no reuse); the tree key
+// changed during the run (key_changed). Nothing stored only means the suite runs again at the stop.
+// Reuse, at the stop (cacheTake): listing L2 is taken and the outcome is reused only when L2 equals the stored L0
+// exactly, and the outcome was written by the hand-back gate of the same session and agent for the agent's latest
+// hand-back since its latest start (state.mjs latestHandbackId), was not taken before (marked used before it is
+// returned), has the same tree key (treeKey: tracked, staged, unstaged and untracked content, the command and the
+// environment facts) and is at most REUSE_MAX_S seconds old. Otherwise the suite runs (reason codes in take's output,
+// logged by verify.sh as "reuse"). Why equal listings mean nothing changed since before the run began: every write,
+// truncate, rename, link, unlink, chmod or chown sets the ctime of the entry or of its folder to the kernel's clock,
+// and ctime cannot be set back (touch -d sets back mtime only, and the ctime moves on); a replacement by rename brings
+// another inode; a deletion or an addition changes the folder's listing and ctime. With every time at least RECENT_MS
+// before L0, a change made later gets a time that differs from the one listed, also on a file system whose timestamps
+// are as coarse as RECENT_MS.
 // Outcomes stored: "pass" (exit 0), "fail" (a test failure, with the block message), "timeout" (the suite was stopped
-// at its limit: reused as a timed-out block, never a pass) and "lock_wait" (the hand-back gate gave up waiting for the
-// suite lock: the stop gate does not wait again). The file is test-gate-cache.json in the state dir, at most MAX_ENTRIES
-// entries, each message cut to MAX_MESSAGE characters, written whole to a temporary file and renamed into place. Two
-// gates writing at once may lose one entry: a lost entry only means the suite runs again.
+// at its limit: reused as the same timed-out block, never a pass) and "lock_wait" (the hand-back gate gave up waiting
+// for the suite lock: L0 before the wait, L1 after the give-up; the stop then does not wait again). A cache never turns
+// a fail, a timeout or an unknown result into a pass. The file is test-gate-cache.json in the state dir, at most
+// MAX_ENTRIES entries, each message cut to MAX_MESSAGE characters, written whole to a temporary file and renamed into
+// place. Two gates writing at once may lose one entry: a lost entry only means the suite runs again.
 // Any doubt gives no key (and so no record and no reuse): not a git work tree, a failing git command, a repository with
 // submodules, more than MAX_UNTRACKED files or MAX_UNTRACKED_BYTES bytes untracked, an untracked file that cannot be read.
+// Limits, beyond what a listing can prove: a file outside both trees that a test reads directly (not through a symlink
+// in them); a write through a shared memory mapping, or through a descriptor opened before the run, that the file
+// system has not stamped yet; a remote file system whose server stamps times from a clock behind the gate's by more
+// than RECENT_MS together with timestamps coarser than a second (the listing only sees what the server reports); a
+// file system whose times are coarser than RECENT_MS but still carry sub-second parts on some entries.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { latestHandbackId } from "./state.mjs";
 
@@ -46,12 +60,13 @@ export const MAX_ENTRIES = 16;
 export const MAX_MESSAGE = 8000;
 export const MAX_UNTRACKED = 5000;
 export const MAX_UNTRACKED_BYTES = 64 * 1024 * 1024;
-/** At most this many entries newer than the run's start; more means no record. */
-export const MAX_DURING = 2000;
 /** How old a hand-back gate's outcome may be when its stop takes it, in seconds. */
 export const REUSE_MAX_S = 30;
-/** The run's start is taken this many ms early: the kernel stamps files from a coarse clock that may lag Date.now(). */
-export const CLOCK_SLACK_MS = 100;
+/** No entry's mtime or ctime may be later than this many ms before the clock read for L0. */
+export const RECENT_MS = 2000;
+/** Folders left out of each tree's listing, relative to its root. */
+export const LEFT_OUT = [".git", join(".claude", "state"), join(".claude", "worktrees")];
+const LIST_VERSION = "1";
 const RESULTS = new Set(["pass", "fail", "timeout", "lock_wait"]);
 const ENV_FACTS = ["PATH", "NODE_OPTIONS", "NODE_ENV", "CI"];
 
@@ -146,112 +161,136 @@ export function scanRoots(cwd) {
 }
 
 /**
- * @typedef {{ p: string, d: number, s: number, m: number, c: number, b: number }} ScanEntry
- * @typedef {{ complete: boolean, newer: ScanEntry[], outside: boolean }} ScanResult
+ * A listing of the trees (see the header). hash is null when the listing is incomplete (reason: deadline, mount,
+ * read_error, no_roots). clock0 and clock1: Date.now() before and after; maxMs: the latest mtime or ctime of any entry
+ * (ms); outside: a symlink points outside every tree or into a left-out folder; coarse: no entry has a sub-second time;
+ * future: an entry's time is later than clock1.
+ * @typedef {{ v: string, hash: string | null, reason: string, clock0: number, clock1: number, maxMs: number, outside: boolean, coarse: boolean, future: boolean, entries: number }} Listing
  */
 
 /**
- * Every file, folder and symlink under `roots` whose mtime or ctime is at or after `since` (ms), symlinks not followed,
- * leaving out folders named .git, `.claude/worktrees` under each root, and the paths in `exclude`. `outside` is true when
- * a symlink's target lies outside every root. Incomplete (nothing else to trust) past `deadline` (ms since the epoch),
- * past MAX_DURING newer entries, or on any read error.
- * @param {string[]} roots real paths @param {number} since
- * @param {{ exclude?: string[], deadline?: number }} [o] @returns {ScanResult}
+ * List every entry under `roots` (real paths), symlinks not followed, leaving out LEFT_OUT under each root and the
+ * paths in `exclude` (see the header). Gives up (no hash) past `deadline` (ms since the epoch).
+ * @param {string[]} roots @param {{ exclude?: string[], deadline?: number }} [o] @returns {Listing}
  */
-export function scanTree(roots, since, o = {}) {
-  const fail = { complete: false, newer: [], outside: false };
+export function listTrees(roots, o = {}) {
+  const clock0 = Date.now();
   const deadline = o.deadline ?? Infinity;
-  const skip = new Set(roots.map((r) => join(r, ".claude", "worktrees")));
-  for (const e of o.exclude ?? []) {
-    try {
-      skip.add(realpathSync(e));
-    } catch {
-      skip.add(resolve(e));
-    }
-  }
-  for (const r of roots) skip.delete(r);
-  /** @param {string} t */
-  const inside = (t) => roots.some((r) => t === r || t.startsWith(r + sep));
-  /** @type {ScanEntry[]} */
-  const newer = [];
+  let maxNs = 0n;
+  let sub = false;
   let outside = false;
   let n = 0;
-  /** @param {string} p @returns {import("node:fs").Stats | null} */
-  const look = (p) => {
-    const st = lstatSync(p);
-    if (st.isSymbolicLink()) {
-      let t;
-      try {
-        t = realpathSync(p);
-      } catch {
-        t = resolve(dirname(p), readlinkSync(p));
-      }
-      if (!inside(t)) outside = true;
+  /** @param {string | null} hash @param {string} reason @returns {Listing} */
+  const done = (hash, reason) => {
+    const clock1 = Date.now();
+    const maxMs = Number(maxNs / 1000n) / 1000;
+    return { v: LIST_VERSION, hash, reason, clock0, clock1, maxMs, outside, coarse: n > 0 && !sub, future: maxMs > clock1, entries: n };
+  };
+  if (!roots.length) return done(null, "no_roots");
+  /** @type {string[]} */
+  const skip = [];
+  for (const r of roots) for (const x of LEFT_OUT) skip.push(join(r, x));
+  for (const e of o.exclude ?? []) {
+    try {
+      skip.push(realpathSync(e));
+    } catch {
+      skip.push(resolve(e));
     }
-    if (Math.max(st.mtimeMs, st.ctimeMs) >= since) newer.push({ p, d: st.isDirectory() ? 1 : 0, s: st.size, m: st.mtimeMs, c: st.ctimeMs, b: st.birthtimeMs });
+  }
+  /** @param {string} t @param {string} r */
+  const under = (t, r) => t === r || t.startsWith(r + sep);
+  // A path is watched when some root holds it and no left-out folder below that root holds it.
+  /** @param {string} t */
+  const watched = (t) => roots.some((r) => under(t, r) && !skip.some((x) => x !== r && x.startsWith(r + sep) && under(t, x)));
+  const skipSet = new Set(skip.filter((x) => !roots.includes(x)));
+  const h = createHash("sha256");
+  h.update(`v${LIST_VERSION}\0${roots.join("\0")}\n`);
+  /** @param {string} p @param {bigint} dev @returns {import("node:fs").BigIntStats | "mount"} */
+  const entry = (p, dev) => {
+    const st = lstatSync(p, { bigint: true });
+    if (st.dev !== dev) return "mount";
+    n += 1;
+    for (const t of [st.mtimeNs, st.ctimeNs]) {
+      if (t > maxNs) maxNs = t;
+      if (t % 1000000000n !== 0n) sub = true;
+    }
+    let type = "o";
+    let target = "";
+    if (st.isSymbolicLink()) {
+      type = "l";
+      target = readlinkSync(p);
+      const abs = resolve(dirname(p), target);
+      /** @type {string | null} */
+      let real = null;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        try {
+          real = join(realpathSync(dirname(abs)), basename(abs));
+        } catch {
+          real = null;
+        }
+      }
+      if (!real || !watched(real)) outside = true;
+    } else if (st.isDirectory()) type = "d";
+    else if (st.isFile()) type = "f";
+    h.update(`${p}\0${type}\0${st.size}\0${st.mtimeNs}\0${st.ctimeNs}\0${st.ino}\0${st.dev}\0${target}\n`);
     return st;
   };
   try {
-    const stack = [];
     for (const r of roots) {
-      look(r);
-      stack.push(r);
-    }
-    while (stack.length) {
-      const dir = /** @type {string} */ (stack.pop());
-      for (const d of readdirSync(dir, { withFileTypes: true })) {
-        if ((++n & 255) === 0 && Date.now() > deadline) return fail;
-        if (d.name === ".git") continue;
-        const p = join(dir, d.name);
-        if (skip.has(p)) continue;
-        const st = look(p);
-        if (newer.length > MAX_DURING) return fail;
-        if (st?.isDirectory()) stack.push(p);
+      const rootDev = lstatSync(r, { bigint: true }).dev;
+      if (entry(r, rootDev) === "mount") return done(null, "mount");
+      /** @type {string[]} */
+      const stack = [r];
+      while (stack.length) {
+        const dir = /** @type {string} */ (stack.pop());
+        const names = readdirSync(dir).sort();
+        /** @type {string[]} */
+        const dirs = [];
+        for (const name of names) {
+          if ((n & 255) === 0 && Date.now() > deadline) return done(null, "deadline");
+          const p = join(dir, name);
+          if (skipSet.has(p)) continue;
+          const st = entry(p, rootDev);
+          if (st === "mount") return done(null, "mount");
+          if (st.isDirectory()) dirs.push(p);
+        }
+        for (let i = dirs.length - 1; i >= 0; i -= 1) stack.push(/** @type {string} */ (dirs[i]));
       }
     }
-    if (Date.now() > deadline) return fail;
-    return { complete: true, newer, outside };
+    if (Date.now() > deadline) return done(null, "deadline");
+    return done(h.digest("hex"), "");
   } catch {
-    return fail;
+    return done(null, "read_error");
   }
 }
 
-/** A time that is a whole second (a file system that keeps no sub-second times). @param {number} t */
-const wholeSecond = (t) => t % 1000 === 0;
+/** @param {unknown} l @returns {l is Listing} */
+const isListing = (l) => !!l && typeof l === "object" && /** @type {any} */ (l).v === LIST_VERSION && typeof (/** @type {any} */ (l).clock0) === "number";
 
 /**
- * What the run itself created, from the scan taken when it ended, or null when no record may be written (see the header,
- * points 4 to 6). `since` is the run's start (ms).
- * @param {ScanResult} scan @param {number} since @returns {ScanEntry[] | null}
+ * Why an outcome of a run between listings `l0` and `l1` may not be stored, or "" when it may (see the header).
+ * @param {Listing | null | undefined} l0 @param {Listing | null | undefined} l1 @returns {string}
  */
-export function runCreated(scan, since) {
-  if (!scan.complete || scan.outside) return null;
-  for (const e of scan.newer) {
-    if (wholeSecond(e.m) && wholeSecond(e.c)) return null;
-    if (!e.d && !(e.b >= since)) return null;
-  }
-  return scan.newer;
+export function storeVerdict(l0, l1) {
+  if (!isListing(l0)) return "l0_missing";
+  if (!isListing(l1)) return "l1_missing";
+  if (!l0.hash) return `l0_${l0.reason || "incomplete"}`;
+  if (!l1.hash) return `l1_${l1.reason || "incomplete"}`;
+  if (l0.outside || l1.outside) return "symlink_outside";
+  if (l0.coarse || l1.coarse) return "coarse_times";
+  if (l0.future || l1.future) return "future_time";
+  if (l1.clock0 < l0.clock1 || l1.clock1 < l0.clock0) return "clock_backwards";
+  if (l0.maxMs > l0.clock0 - RECENT_MS) return "recent_change";
+  if (l1.hash !== l0.hash) return "tree_changed";
+  return "";
 }
 
 /**
- * True when the scan at the stop shows nothing new since the run's start but exactly the run's own entries, unchanged.
- * @param {ScanResult} scan @param {ScanEntry[]} during @returns {boolean}
- */
-export function unchangedSince(scan, during) {
-  if (!scan.complete || scan.outside) return false;
-  const known = new Map(during.map((e) => [e.p, e]));
-  for (const e of scan.newer) {
-    const k = known.get(e.p);
-    if (!k || k.d !== e.d || k.s !== e.s || k.m !== e.m || k.c !== e.c || k.b !== e.b) return false;
-    if (wholeSecond(e.m) && wholeSecond(e.c)) return false;
-  }
-  return true;
-}
-
-/**
- * by: the tool_use_id of the hand-back whose gate wrote it; since: the run's start (ms); during: the entries the run
- * created; used: true once a stop has taken it.
- * @typedef {{ key: string, result: string, ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string, since?: number, during?: ScanEntry[], used?: boolean }} CacheEntry
+ * by: the tool_use_id of the hand-back whose gate wrote it; tree: the hash of its L0; clock0: the clock read for L0;
+ * used: true once a stop has taken it.
+ * @typedef {{ key: string, result: string, ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string, tree?: string, clock0?: number, used?: boolean }} CacheEntry
  */
 
 /** @param {string} state @returns {CacheEntry[]} */
@@ -277,47 +316,58 @@ function writeEntries(state, entries) {
 }
 
 /**
- * The outcome a stop may take as its own (see the header), marked used, or null. `handback` is the hand-back the stop
- * follows; `roots` and `exclude` are the scan's (scanRoots, the state folder); `deadline` ends the scan.
+ * The outcome a stop may take as its own (see the header), marked used, with "" as reason; or no entry and the reason
+ * code. `handback` is the hand-back the stop follows. L2 is `l2` when given, else listed here from `roots` (scanRoots)
+ * leaving out `exclude` (the state folder), ending at `deadline`.
  * @param {string} state
- * @param {{ key: string, session: string, agent: string, handback: string, roots?: string[] | null, exclude?: string[], deadline?: number, now?: number, maxAgeS?: number }} q
- * @returns {CacheEntry | null}
+ * @param {{ key: string, session: string, agent: string, handback: string, roots?: string[] | null, exclude?: string[], deadline?: number, now?: number, maxAgeS?: number, l2?: Listing }} q
+ * @returns {{ entry: CacheEntry | null, reason: string }}
  */
-export function cacheTake(state, q) {
-  if (!/^[0-9a-f]{64}$/.test(q.key) || !q.session || !q.agent || !q.handback) return null;
+export function cacheTakeWhy(state, q) {
+  /** @param {string} reason */
+  const no = (reason) => ({ entry: null, reason });
+  if (!/^[0-9a-f]{64}$/.test(q.key) || !q.session || !q.agent || !q.handback) return no("bad_query");
   const entries = readCache(state);
   const i = entries.findLastIndex((e) => e.by === q.handback && e.agent_id === q.agent && e.session_id === q.session);
   const e = entries[i];
-  if (!e || e.used || e.key !== q.key || typeof e.since !== "number" || !Array.isArray(e.during)) return null;
+  if (!e) return no("no_entry");
+  if (e.used) return no("used");
+  if (e.key !== q.key) return no("key_changed");
+  if (typeof e.tree !== "string" || !/^[0-9a-f]{64}$/.test(e.tree) || typeof e.clock0 !== "number") return no("no_tree");
   const age = (q.now ?? Date.now()) - Date.parse(e.ts);
-  if (!(age >= 0 && age <= (q.maxAgeS ?? REUSE_MAX_S) * 1000)) return null;
-  if (!q.roots?.length) return null;
-  if (!unchangedSince(scanTree(q.roots, e.since, { exclude: q.exclude, deadline: q.deadline }), e.during)) return null;
+  if (!(age >= 0 && age <= (q.maxAgeS ?? REUSE_MAX_S) * 1000)) return no("too_old");
+  const l2 = q.l2 ?? (q.roots?.length ? listTrees(q.roots, { exclude: q.exclude, deadline: q.deadline }) : null);
+  if (!isListing(l2)) return no("l2_missing");
+  if (!l2.hash) return no(`l2_${l2.reason || "incomplete"}`);
+  if (l2.outside) return no("symlink_outside");
+  if (l2.future) return no("future_time");
+  if (l2.clock0 < e.clock0) return no("clock_backwards");
+  if (l2.hash !== e.tree) return no("tree_changed");
   // Marked before it is returned: when the mark cannot be written, nothing is reused.
-  if (!writeEntries(state, entries.map((x, j) => (j === i ? { ...x, used: true } : x)))) return null;
-  return e;
+  if (!writeEntries(state, entries.map((x, j) => (j === i ? { ...x, used: true } : x)))) return no("mark_failed");
+  return { entry: e, reason: "" };
 }
 
+/** cacheTakeWhy's entry alone. @param {string} state @param {Parameters<typeof cacheTakeWhy>[1]} q @returns {CacheEntry | null} */
+export const cacheTake = (state, q) => cacheTakeWhy(state, q).entry;
+
 /**
- * Store an outcome of a hand-back's run: replaces an entry of the same hand-back, keeps the newest MAX_ENTRIES, written
- * atomically. With `roots`, the scan of what the run created is taken here, and nothing is stored when it may not be.
- * @param {string} state @param {CacheEntry} entry @param {{ roots?: string[] | null, exclude?: string[], deadline?: number }} [scan]
- * @returns {boolean}
+ * Store an outcome of a hand-back's run taken between listings `l0` and `l1`: only when storeVerdict allows it, with
+ * L0's hash and clock. Replaces an entry of the same hand-back, keeps the newest MAX_ENTRIES, written atomically.
+ * Returns "stored", or the reason code why nothing was stored.
+ * @param {string} state @param {CacheEntry} entry @param {Listing | null | undefined} l0 @param {Listing | null | undefined} l1
+ * @returns {string}
  */
-export function cachePut(state, entry, scan) {
-  if (!/^[0-9a-f]{64}$/.test(entry.key) || !RESULTS.has(entry.result)) return false;
+export function cachePut(state, entry, l0, l1) {
+  if (!/^[0-9a-f]{64}$/.test(entry.key) || !RESULTS.has(entry.result)) return "bad_entry";
+  const why = storeVerdict(l0, l1);
+  if (why || !l0?.hash) return why || "l0_missing";
   try {
-    let during = entry.during;
-    if (scan) {
-      if (!scan.roots?.length || typeof entry.since !== "number") return false;
-      during = runCreated(scanTree(scan.roots, entry.since, { exclude: scan.exclude, deadline: scan.deadline }), entry.since) ?? undefined;
-      if (!during) return false;
-    }
     const rest = readCache(state).filter((e) => !(e.by && e.by === entry.by && e.agent_id === entry.agent_id && e.session_id === entry.session_id));
-    const clean = { ...entry, ...(during ? { during } : {}), ...(typeof entry.message === "string" ? { message: entry.message.slice(-MAX_MESSAGE) } : {}) };
-    return writeEntries(state, [...rest, clean]);
+    const clean = { ...entry, tree: l0.hash, clock0: l0.clock0, ...(typeof entry.message === "string" ? { message: entry.message.slice(-MAX_MESSAGE) } : {}) };
+    return writeEntries(state, [...rest, clean]) ? "stored" : "write_failed";
   } catch {
-    return false;
+    return "write_failed";
   }
 }
 
@@ -358,14 +408,16 @@ export function refusedHandbacks(state, sessionId, agentId, exclude = "") {
   return ids.size + anonymous;
 }
 
-// CLI for verify.sh. Every command prints nothing and exits 0 on any error, so the gate then runs as it would without
-// a cache. <secs> is the time the command may take (its scan stops there; verify.sh also limits the process).
-//   key <cwd> <cmd> <isolated>                prints the tree key, then the run's start (ms, CLOCK_SLACK_MS early)
-//   take <state> <key> <session> <agent> <handback-id> <cwd> <secs>   prints result, by, extra, then the message;
-//                                              nothing when no outcome may be taken (cacheTake)
-//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <since> <cwd> <secs>   message on stdin
-//   link <state> <session> <agent>             prints the hand-back the agent's stop follows, or nothing
-//   refused <state> <session> <agent> <exclude-id>              prints a count
+// CLI for verify.sh. Every command exits 0 on any error, so the gate then runs as it would without a cache. <secs> is
+// the time the command may take (its listing stops there; verify.sh also limits the process).
+//   key <cwd> <cmd> <isolated>                   prints the tree key, or nothing
+//   list <state> <cwd> <secs>                    prints a listing of the trees (one JSON line; hash null if incomplete)
+//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <l0-file> <l1-file>   message on stdin; prints
+//                                                "stored" or the reason code why nothing was stored
+//   take <state> <key> <session> <agent> <handback-id> <cwd> <secs>   prints result, by, extra, then the message; or
+//                                                "none" and the reason code when no outcome may be taken (cacheTakeWhy)
+//   link <state> <session> <agent>               prints the hand-back the agent's stop follows, or nothing
+//   refused <state> <session> <agent> <exclude-id>   prints a count
 const isMain = (() => {
   try {
     return !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
@@ -378,25 +430,33 @@ if (isMain) {
   const [cmd, ...a] = process.argv.slice(2);
   /** @param {string | undefined} s */
   const deadlineOf = (s) => t0 + Math.max(0, Number(s) || 0) * 1000;
+  /** @param {string} p @returns {Listing | null} */
+  const readListing = (p) => {
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  };
   try {
     if (cmd === "key") {
       const key = treeKey(a[0] ?? ".", a[1] ?? "", { isolated: a[2] ?? "" });
-      if (key) process.stdout.write(`${key}\n${t0 - CLOCK_SLACK_MS}\n`);
+      if (key) process.stdout.write(`${key}\n`);
+    } else if (cmd === "list") {
+      const roots = scanRoots(a[1] ?? ".");
+      const l = roots ? listTrees(roots, { exclude: [a[0] ?? ""].filter(Boolean), deadline: deadlineOf(a[2]) }) : null;
+      if (l) process.stdout.write(`${JSON.stringify(l)}\n`);
     } else if (cmd === "take") {
       const state = a[0] ?? "";
-      const e = cacheTake(state, { key: a[1] ?? "", session: a[2] ?? "", agent: a[3] ?? "", handback: a[4] ?? "", roots: scanRoots(a[5] ?? "."), exclude: [state], deadline: deadlineOf(a[6]) });
+      const r = cacheTakeWhy(state, { key: a[1] ?? "", session: a[2] ?? "", agent: a[3] ?? "", handback: a[4] ?? "", roots: scanRoots(a[5] ?? "."), exclude: [state], deadline: deadlineOf(a[6]) });
+      const e = r.entry;
       if (e) process.stdout.write(`${e.result}\n${String(e.by ?? "").replace(/[^A-Za-z0-9_.:-]/g, "")}\n${String(e.extra ?? "").replace(/\n/g, "")}\n${e.message ?? ""}`);
+      else process.stdout.write(`none\n${r.reason}\n`);
     } else if (cmd === "put") {
       const state = a[0] ?? "";
       const message = readFileSync(0, "utf8");
-      const since = Number(a[7]);
-      if (Number.isFinite(since) && since > 0) {
-        cachePut(
-          state,
-          { key: a[1] ?? "", result: a[2] ?? "", ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", since, message },
-          { roots: scanRoots(a[8] ?? "."), exclude: [state], deadline: deadlineOf(a[9]) },
-        );
-      }
+      const entry = { key: a[1] ?? "", result: a[2] ?? "", ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", message };
+      process.stdout.write(`${cachePut(state, entry, readListing(a[7] ?? ""), readListing(a[8] ?? ""))}\n`);
     } else if (cmd === "link") process.stdout.write(latestHandbackId(a[1] ?? "", a[2] ?? "", a[0] ?? "") ?? "");
     else if (cmd === "refused") process.stdout.write(String(refusedHandbacks(a[0] ?? "", a[1] ?? "", a[2] ?? "", a[3] ?? "")));
   } catch {
