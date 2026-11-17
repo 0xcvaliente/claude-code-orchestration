@@ -11,8 +11,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /**
- * The stop key of an agent's transcript (2.0.0): the uuid of its last entry ("uuid:<id>"), else "size:<bytes>"; null
- * when it cannot be read. Every SubagentStop hook of one event reads the same transcript, so verify.sh (through
+ * The stop key of an agent's transcript (2.0.0): the uuid of its last assistant entry ("uuid:<id>"); null
+ * when it cannot be read or holds none. Every SubagentStop hook of one event reads the same transcript, so verify.sh (through
  * test-gate-cache.mjs), telemetry.mjs and journal.mjs store the same value, and two stops of one agent differ in it (a
  * block or a resume adds entries in between). run.mjs pairs a test-gate record with its stop by it. Reads only the last
  * 256 KiB.
@@ -28,18 +28,20 @@ export function stopKey(path) {
     const len = Math.min(size, 256 * 1024);
     const buf = Buffer.alloc(len);
     const got = readSync(fd, buf, 0, len, size - len);
+    // The last assistant entry: live (2.1.326) the transcript grows during the stop hooks (verify.sh and telemetry.mjs
+    // read different last entries), but only with entries that are not the agent's own messages, and an agent never
+    // stops twice without a new assistant message in between.
     const lines = buf.subarray(0, got).toString("utf8").split("\n").filter(Boolean);
-    const last = lines.at(-1);
-    if (last !== undefined) {
+    for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const e = JSON.parse(last);
-        const id = e && typeof e.uuid === "string" ? e.uuid.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
+        const e = JSON.parse(/** @type {string} */ (lines[i]));
+        const id = e && e.type === "assistant" && typeof e.uuid === "string" ? e.uuid.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
         if (id) return `uuid:${id}`;
       } catch {
-        // a line being written: the size stands for it
+        // a line being written, or the window's partial first line
       }
     }
-    return `size:${size}`;
+    return null;
   } catch {
     return null;
   } finally {

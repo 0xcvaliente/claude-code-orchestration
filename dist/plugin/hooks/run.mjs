@@ -157,7 +157,8 @@ export function implementerTestStates(telemetry, gates, sessionId) {
     const mine = gates
       .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId))
       .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
-    a.stopGate = stopGateOf(stops, mine, a.start);
+    const earlier = telemetry.filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && timeOf(e.ts) < a.start);
+    a.stopGate = stopGateOf(stops, mine, a.start, earlier);
   }
   return agents;
 }
@@ -173,14 +174,22 @@ const handbackRecord = (g) => g?.at === "handback" || (typeof g?.handback_id ===
  * record of an earlier stop that lands after a resume (the earlier gate still ran) is never counted for the new stop.
  * A stop with no key (older logs) is paired by count as before: since the latest start, the latest stop has its record
  * once there are at least as many records as stops, leaving out the hand-back gate's records.
- * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start @returns {any}
+ * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start
+ * @param {any[]} [earlier] the agent's stops before `start` @returns {any}
  */
-export function stopGateOf(stops, gates, start) {
+export function stopGateOf(stops, gates, start, earlier = []) {
   const latest = stops.at(-1);
   if (!latest) return null;
   const key = keyOf(latest);
-  if (key) return gates.findLast((g) => keyOf(g) === key && !handbackRecord(g)) ?? null;
-  const counted = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start);
+  if (key) {
+    const own = gates.findLast((g) => keyOf(g) === key && !handbackRecord(g));
+    if (own) return own;
+  }
+  // No record with the stop's key (yet, or the hooks read different keys: live on 2.1.326 the transcript was still
+  // growing while the stop hooks ran, docs/data/probes-2.0.0-b1.md): the count, as before, leaving out a record keyed to
+  // one of the agent's earlier stops (`earlier`), which is never this stop's.
+  const other = new Set(earlier.map(keyOf).filter((k) => k && k !== key));
+  const counted = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start && !other.has(keyOf(g)));
   return counted.length >= stops.length ? (counted.at(-1) ?? null) : null;
 }
 

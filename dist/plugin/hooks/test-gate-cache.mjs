@@ -23,7 +23,7 @@
 //
 // Record keys. A test-gate record names the hand-back or the stop it belongs to: handback_id, the SubagentHandback
 // call's tool_use_id, or stop_key (stopKey), which every SubagentStop hook of one event computes alike from the agent's
-// transcript (state.mjs stopKey): the uuid of its last entry (else its size). Two stops of one agent differ in it, since a block or a
+// transcript (state.mjs stopKey): the uuid of its last assistant entry. Two stops of one agent differ in it, since a block or a
 // resume adds entries in between. telemetry.mjs and journal.mjs store the same stop_key in their stop records, and
 // run.mjs pairs records with stops by it.
 import { createHash } from "node:crypto";
