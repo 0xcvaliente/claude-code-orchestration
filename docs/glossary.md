@@ -202,7 +202,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 ## S
 
-**SDK pipeline.** The TypeScript orchestrator in `src/` on the Claude Agent SDK (`npm start`). Code in a git repository only. Frozen: maintenance only. Its roles are planner, explorer, writer, verifier, triager and solo. Also called: the pipeline. [docs/sdk-pipeline.md; CLAUDE.md]
+**SDK pipeline.** The TypeScript orchestrator in `src/` on the Claude Agent SDK (`npm run sdk`). Code in a git repository only. Frozen: maintenance only. Its roles are planner, explorer, writer, verifier, triager and solo. Also called: the pipeline. [docs/sdk-pipeline.md; CLAUDE.md]
 
 **SDK worker.** One agent the SDK pipeline starts for a role: planner, explorer, writer, verifier, triager or solo. The ones with Bash (solo, writer, verifier) run the Bash judge. [docs/sdk-pipeline.md "What it is"; `rolesFor` in `src/config.ts`]
 

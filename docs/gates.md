@@ -24,11 +24,12 @@ A [gate](glossary.md#g) is a hook that blocks a worker launch, a worker's stop o
 | [Quote check](#quote-check) | `quote-check.mjs` | PreToolUse on `SubagentHandback`, and SubagentStop of a researcher | A researcher reply whose `QUOTE:` text is not in its source (once) | `ORCH_QUOTE_CHECK` |
 | [Researcher guard](#researcher-guard) | `researcher-guard.mjs` | PreToolUse on `Bash`, researcher only | Any researcher command outside its read-only list | `ORCH_GUARDS` |
 | [Egress guard](#egress-guard) | `egress-guard.mjs` | PreToolUse on `WebFetch`, reviewer only | A reviewer fetch to a host its own work does not name | `ORCH_GUARDS` |
+| [Workflow guard](#workflow-guard) | `workflow-guard.mjs` | PreToolUse on `Workflow`, every session | Every Workflow launch except this repo's saved `orchestrate` workflow: a script written on the spot (the `ultracode` keyword), a script path, any other name | `ORCH_WORKFLOW_GUARD` |
 | Skill gate | `skill-gate.mjs` | SubagentStop of an implementer (timeout 120 s) | The stop of a skill slice whose draft fails its checks; see [skills.md, The skill gate](skills.md#the-skill-gate) | `ORCH_SKILL_CREATE` |
 | Native Bash judge | `judge-hook.mjs`, `prompt-capture.mjs` | PreToolUse on `Bash`, UserPromptSubmit | Pushes, remote changes and recursive deletes the person did not ask for (opt-in); see [bash-judge.md, Native hook](bash-judge.md#native-hook) | `ORCH_JUDGE` |
 | [Turn warning](#turn-warning) | `turn-budget.mjs` | PostToolUse, no matcher | Nothing: advice at 80% of a worker's turns | `ORCH_TURN_WARNING` |
 | [Context after compaction](#context-after-compaction) | `compact-context.mjs` | SessionStart, matcher `compact` | Nothing: puts the open run back in context | none |
-| [Nudge](#nudge) | `nudge.mjs` | SessionStart (plugin only) | Nothing: tells a new session to route its task | `ORCH_NO_NUDGE` |
+| [Nudge](#nudge) | `nudge.mjs` | SessionStart (plugin only); UserPromptSubmit | Nothing: tells a new session to route its task, and adds one line when a typed prompt holds the word `ultracode` | `ORCH_NO_NUDGE` (SessionStart text only) |
 
 Two more hooks write logs and never block: `journal.mjs` and `telemetry.mjs` ([logs.md](logs.md)). The gates read those logs, so a gate decides from records, never from what a worker says.
 
@@ -507,6 +508,33 @@ A host is compared lower-cased, without a leading `www.`, with its port when the
 
 WebSearch is not gated. Decisions go to `gates.jsonl` as gate `egress`, with the host only. `ORCH_GUARDS=off` turns it off.
 
+## Workflow guard
+
+The workflow guard (`.claude/hooks/workflow-guard.mjs`, 1.6.0) runs at PreToolUse on `Workflow`, in the project's settings and in the plugin, for every session. Claude Code's keyword `ultracode` in a typed prompt, or a plain request for a workflow, makes the model write a workflow script on the spot and run it with Claude Code's own agents, outside the plan check, the run journal and the review rules. Claude Code's own off switches (the `disableWorkflows` setting, `CLAUDE_CODE_DISABLE_WORKFLOWS=1`) would also remove the saved workflows, and with them the [gated workflow](native-mode.md#the-gated-workflow). A plugin cannot ship `permissions.deny`. So the guard narrows the tool instead.
+
+**It stays silent (exit 0, no output) only when all of these hold:**
+1. `tool_input` is an object with `name` and, optionally, `args` and a string `resumeFromRunId`, and no other key.
+2. `name` is exactly `orchestrate` or `orchestration:orchestrate`.
+3. The saved file exists where Claude Code loads it from, where the hook can tell: for `orchestrate`, `.claude/workflows/orchestrate.js` under `CLAUDE_PROJECT_DIR` or the input's `cwd`; for `orchestration:orchestrate`, the plugin copy checks `workflows/orchestrate.js` in its own plugin folder. The project copy cannot see where the plugin is installed and lets that name through.
+
+Everything else is refused with exit 2:
+
+| Reason | When |
+|---|---|
+| `inline_script` | the input has `script`: a script written on the spot (what the `ultracode` keyword produces) |
+| `script_path` | the input has `scriptPath`: a script file on disk, also a resume by path |
+| `name_not_allowed` | another name, Claude Code's bundled workflows included; names are compared exactly |
+| `workflow_file_missing` | the name is allowed but its saved file is not there |
+| `unknown_shape` | no `tool_input` object, no string `name`, a key the guard does not know, or a crash while deciding (fail closed) |
+
+**Observed shapes** (Claude Code 2.1.326, [live checks 2026-11-17](data/live-checks-2026-11-17.md), Check 5): a script written on the spot reaches PreToolUse as `{"script": "<the whole script>"}`; a saved launch as `{"name": "orchestrate", "args": {...}}`, and through a plugin as `{"name": "orchestration:orchestrate", "args": {...}}`. `scriptPath` and `resumeFromRunId` come from the tool's schema text, not from a probe.
+
+- The block message says, in plain words, that workflows started by a keyword or written on the spot are off in this project and that the task goes through the orchestrator (the orchestrator agent, or the saved workflow, which the person starts). It names no switch.
+- Deny-only: it never prints an allow. Input that is not JSON, another tool's event and another hook event exit 0. The plugin copy exits on `duplicate()` where the project registers its own.
+- One record per decision in `workflow-guard.jsonl` in the state dir: `gate: "workflow"`, `decision`, `reason`, the workflow `name` (at most 80 characters) and the input's key names. Never the script or the arguments.
+- `ORCH_WORKFLOW_GUARD=off` (plugin setting `workflow_guard`) turns it off.
+- The [nudge](#nudge) adds one line of context to a typed prompt that holds the word `ultracode`, so the model is told before it writes a script.
+
 ## Turn warning
 
 `turn-budget.mjs` runs at PostToolUse with no matcher. A worker that reaches its maxTurns stops with no reply and fires no SubagentStop, so nothing tests or reviews its work. The turn warning tries to prevent that.
@@ -531,12 +559,21 @@ It is capped at about 1,500 characters. Over the cap the slice lines give way fi
 
 The plugin's SessionStart hook `nudge.mjs` tells a new main session to route a non-trivial task first. It blocks nothing. Details: [native-mode.md, The plugin](native-mode.md#the-plugin).
 
+Since 1.6.0 the same file also runs at UserPromptSubmit, in the project and the plugin (the plugin copy exits on `duplicate()` where the project registers its own). When the typed prompt holds the word `ultracode` (a whole word, any case) it adds one line of context: workflows started by that keyword are off in this project, and the task goes through the orchestrator. Any other prompt gets nothing. The event also fires for a subagent's report, a task notification and another session's message, with no field that says so; `typedPrompt` in `state.mjs` tells them apart by how their text opens, and they get nothing (a reviewer's report that quoted the word drew the line before this check). It never blocks the prompt, and `ORCH_NO_NUDGE` does not silence this line.
+
 ## Limits
 
 What each gate and guard does not catch. [safety.md](safety.md) links here.
 
 **Guards in general**
 - The guards narrow what a researcher or reviewer can do. They are not a security boundary: Bash can still reach the network. Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist.
+
+**Workflow guard**
+- Claude Code still highlights the `ultracode` keyword and the prompt still reaches the model; only the Workflow launch is refused. A refused model may do the task another way: in probe (b) it fell back to launching subagents itself, which the plan check blocks only while a run is open and the project's `permissions.deny` blocks only where it is copied.
+- A hook that does not load guards nothing: a session with neither this project's `.claude/settings.json` nor the plugin, or with hooks turned off.
+- It trusts the name. A file a model writes at `.claude/workflows/orchestrate.js` passes as the saved workflow; another project's own `orchestrate` workflow passes too, where the plugin is on.
+- Resuming a stopped run by `scriptPath` is refused (`script_path`); start the saved workflow again.
+- The nudge's line tells a typed prompt from a report or notification by its opening text only (Claude Code documents no field for it): a new kind of message would draw the line, and a person who types such an opening gets none.
 
 **Plan check**
 - `file_overlap` and `dependency_cycle` block every time, with no give-up. A plan that cannot be fixed stalls those launches until the orchestrator changes the plan. A retry of a planned slice is judged against the run's DEPENDS order, so a sound retry passes; a broken plan still blocks every time.

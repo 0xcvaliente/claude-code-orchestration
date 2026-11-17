@@ -414,6 +414,7 @@ function caveats(s) {
     `${s.counts.excluded} run(s) were excluded (${s.counts.rate_limited} rate limited, ${s.counts.error} harness errors); ${inc.length} were analysed; ${s.counts.retries ?? 0} earlier attempt(s) were superseded by a retry.`,
     "Everything ran on a single machine against a subscription account, so rate limits and machine load can shift wall times between runs.",
     "Token counts are input, output, cache-read and cache-write tokens summed over every model; they do not weigh models, and an Opus token is worth more than a Sonnet token.",
+    ...(s.notes ?? []), // analyze.mjs footnotes, such as triage tokens counted before 1.5.1
   ];
 }
 

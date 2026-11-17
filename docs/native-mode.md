@@ -183,7 +183,7 @@ npm run auto   -- "task description" /path/to/folder    # triage first: plain, r
 - An explicit tool allowlist. `ORCH_ALLOWED_TOOLS` replaces it and `ORCH_EXTRA_ALLOWED_TOOLS` appends to it, one permission rule per line (for example `ORCH_ALLOWED_TOOLS=$'Read\nBash(npm test*)'`). The default list includes `Agent` and `SendMessage`, so a retry can resume the same implementer.
 - No web tools by default. For research, add `WebSearch` and `WebFetch` through `ORCH_EXTRA_ALLOWED_TOOLS`. `npm run auto` adds them itself when it counts the task as not code.
 - The test command's permission rules (pytest, cargo, go, swift, make) are added from `ORCH_TEST_CMD` or the detected runner. In the reviewed route, the read-only reviewer gets the same rules, so it can run the tests and nothing broader. Benchmark tasks declare their test command in `bench/tasks/<id>/meta.json` (`test_cmd`), which `bench/run.mjs` exports as `ORCH_TEST_CMD`.
-- An optional token cap, `ORCH_BUDGET_TOKENS`, off by default. It is approximate: it is converted at 1M tokens per list-price dollar. It caps each session on its own, so a run of several sessions (`npm run auto`) can spend more than the cap in total. `ORCH_BUDGET_USD` is rejected.
+- An optional token cap, `ORCH_BUDGET_TOKENS`, off by default. It is approximate: it is converted at 1M tokens per list-price dollar. `npm run native` is one session, which gets the whole cap. In `npm run auto` it caps the whole run: each session gets what the triage call and the earlier sessions left (below). `ORCH_BUDGET_USD` is rejected.
 - `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`, so only the agents from the folder or the plugin can start.
 - One sentence through `--append-system-prompt`: nobody can answer a question, so the run decides and goes on.
 
@@ -212,7 +212,7 @@ Every headless variable, with its default: [Environment variables](settings.md#e
 
 A folder with agents of its own but no `orchestrator.md` or `reviewer.md` gets the plugin's for the missing ones. `ORCH_AGENT_PREFIX=orchestration:` skips both checks and always runs the plugin's agents (for CI, or a plugin that `claude plugin list` does not show). An `ORCH_AGENT` that already has a namespace, such as `orchestration:reviewer`, is used as it is. The plugin's agents are the installed version, which can be older than your checkout (`claude plugin update orchestration`). Their hooks log to the plugin's per-user state dir, while `runs.jsonl` and `routes.jsonl` stay in the folder's `.claude/state/` ([Where logs go](logs.md#where-logs-go)).
 
-**`npm run auto` for any task.** It triages first (`src/route.ts`, one read-only model call), then runs the cheapest route that fits, in any folder. The triage call takes no MCP server and no account connector, and writes no transcript unless `ORCH_SESSION_PERSISTENCE=1`. With `ORCH_BUDGET_TOKENS` set, it gets the cap too (as `--budget`); a triage stopped by the cap falls back to the orchestrate route, whose session gets the same cap again. Two facts shape the run:
+**`npm run auto` for any task.** It triages first (`src/route.ts`, one read-only model call), then runs the cheapest route that fits, in any folder. The triage call takes no MCP server and no account connector, and writes no transcript unless `ORCH_SESSION_PERSISTENCE=1`. With `ORCH_BUDGET_TOKENS` set, the cap is the run's: the triage call gets it (as `--budget`), and each later session (the plain session, the reviewer, the orchestrator, an escalated orchestrator) gets what is left after the cost the triage call and the earlier sessions reported. With less than 10k left no session starts, and a triage stopped by the cap has spent it, so none starts after it either: the run says why on stderr and exits 3. Two facts shape the run:
 - **Git**: in a git work tree, the reviewed route's reviewer reads the diff ([The reviewed route](#the-reviewed-route)).
 - **Code**: the triager's `code` fact. With no facts (a forced `ORCH_MODE`, a failed triage), it counts as code when the folder is a git work tree or has a detected test runner. The route line on stderr ends in `(code: yes|no)`.
 
@@ -234,6 +234,8 @@ The [gated workflow](glossary.md#g) (`.claude/workflows/orchestrate.js`) runs th
 ```
 
 **You start it.** Claude Code runs a workflow only on the person's explicit request ([workflows](https://code.claude.com/docs/en/workflows.md)). The route skill, the nudge and the orchestrator may suggest it but never start it. The plugin ships it as `dist/plugin/workflows/orchestrate.js`; a repo with a copy of `.claude/` has it as `/orchestrate`.
+
+**The only workflow that starts.** Since 1.6.0 the [workflow guard](gates.md#workflow-guard) refuses every other Workflow launch where the project's `.claude/` or the plugin is loaded: a script the model writes on the spot (the `ultracode` keyword), a script path, any other saved or bundled workflow. Claude Code's own off switch would remove this workflow too, so the guard is a hook instead.
 
 **What it does.**
 1. **Plan.** A planner returns a constraints ledger (the task's hard rules as `C<n>` ids) and at most `maxSlices` (default 6) slices with disjoint files, each with the ids it can break. The plan check in code flags overlapping files, unknown or duplicate ids and cycles; the planner is asked once more, then what remains is fixed in code and logged. A reviewer checks the plan; a gap at or above `gapMin` sends it back once. The plan may name `suite`, the command that runs the project's whole suite (one line of at most 300 characters).
@@ -279,11 +281,11 @@ The marketplace manifest `.claude-plugin/marketplace.json` points at the committ
 - the gated workflow and the eval suite (`evals/`);
 - the opt-in native Bash judge hooks ([Native hook](bash-judge.md#native-hook));
 - the pane's mod and the subagent status line ([Status lines](dashboard.md#status-lines));
-- 20 [plugin settings](settings.md#plugin-settings) (`userConfig`), shown in `/config`.
+- 21 [plugin settings](settings.md#plugin-settings) (`userConfig`), shown in `/config`.
 
 It does not carry permission denies or the `worktree` setting. A plugin's own settings can set only `agent` and `subagentStatusLine` ([plugins reference](https://code.claude.com/docs/en/plugins-reference.md)), and the plugin never sets `agent`. Add the rest to your own settings ([Install](../README.md#install)).
 
-**The nudge.** A SessionStart hook (`nudge.mjs`) tells each new main session to run `orchestration:route` before a non-trivial task: code, research, writing, analysis or operations, in any folder. `ORCH_NO_NUDGE=1` silences it; headless runs set it. With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` it adds a warning: an Agent call that passes `name` starts a teammate, which runs outside the plan check, the journal and the gates.
+**The nudge.** A SessionStart hook (`nudge.mjs`) tells each new main session to run `orchestration:route` before a non-trivial task: code, research, writing, analysis or operations, in any folder. `ORCH_NO_NUDGE=1` silences it; headless runs set it. With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` it adds a warning: an Agent call that passes `name` starts a teammate, which runs outside the plan check, the journal and the gates. Since 1.6.0 it also runs at UserPromptSubmit: a typed prompt that holds the word `ultracode` gets one line saying that keyword-started workflows are off here and the task goes through the orchestrator ([Nudge](gates.md#nudge)).
 
 **Where it logs.** The plugin's hooks log to a per-user state dir, not to your project. In a repo that registers its own copy of the hooks, such as this one, they log to `.claude/state/`, and the plugin's copies step aside so nothing runs twice ([Where logs go](logs.md#where-logs-go)).
 

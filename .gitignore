@@ -3,6 +3,8 @@ runs/
 dist/*
 !dist/plugin/
 !dist/dashboard/
+# Claude Code writes this when it loads the pane from dist/dashboard; .claude-plugin/types/ beside it carries its own .gitignore.
+/dist/dashboard/tsconfig.json
 .claude/state/
 .claude/worktrees/
 *.log
