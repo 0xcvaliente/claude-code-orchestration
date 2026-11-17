@@ -118,9 +118,19 @@ export const promptStore = join(promptStoreDir(project), "prompts.jsonl");
 // `source: "poll_event"`), so the text decides: a subagent's hand-back arrives as `Another Claude session sent a
 // message:` and an `<agent-message ...>` line, a notification as `<task-notification>`. An origin-like field is honoured
 // too, in case a later version adds one. Unknown shapes count as typed. A person can still type such an opening.
+// Both rules look only at the start of the prompt: a header line ("Another Claude session sent a message:", and the
+// "... while you were working:" forms of it and of "A peer session sent a message"), which marks the prompt as not typed
+// whatever follows it, or a known tag (task-notification, system-reminder, or any `<...-message>` tag such as
+// agent-message, peer-message, teammate-message, channel-message and cross-session-message, the tag 2.1.326 gives
+// another session's message). A prompt that only mentions one of them further down counts as typed.
+// No transcript lookup: a probe on 2.1.326 (docs/data/probes-1.6.1-k2.md) found the record of the prompt not yet in the
+// transcript when UserPromptSubmit fires (the file does not exist at a session's first prompt; at a task notification
+// its last lines are the queue's enqueue and dequeue records, which carry no origin), so the lookup would only ever see
+// the previous prompt's record.
 const ORIGIN_KEYS = ["origin", "prompt_origin", "prompt_source", "source", "kind", "prompt_kind", "sender"];
 const NOT_PERSON = /notification|system|peer|agent|teammate|hook|tool|background|scheduled|cron|automat|bot|poll/i;
-const NOT_PERSON_TAG = /^\s*(?:Another Claude session sent a message:\s*)?<(task-notification|system-reminder|teammate-message|peer-message|agent-message|channel-message)\b/i;
+const NOT_PERSON_HEADER = /^\s*(?:another(?: claude)?|a peer) session sent (?:you )?a message\b[^\n:]{0,80}:/i;
+const NOT_PERSON_TAG = /^\s*<(?:task-notification|system-reminder|[a-z]+(?:-[a-z]+)*-message)\b/i;
 
 /** True unless the UserPromptSubmit input shows the prompt came from somewhere other than the person. @param {any} input */
 export function typedPrompt(input) {
@@ -129,7 +139,8 @@ export function typedPrompt(input) {
     const value = typeof v === "string" ? v : typeof v?.kind === "string" ? v.kind : typeof v?.type === "string" ? v.type : "";
     if (value && NOT_PERSON.test(value)) return false;
   }
-  return !NOT_PERSON_TAG.test(typeof input?.prompt === "string" ? input.prompt : "");
+  const prompt = typeof input?.prompt === "string" ? input.prompt : "";
+  return !NOT_PERSON_HEADER.test(prompt) && !NOT_PERSON_TAG.test(prompt);
 }
 
 /** @param {{ dir: string, inProject: boolean }} [state] */

@@ -4,7 +4,8 @@
 // Appends {ts, session_id, prompt_id, text (first 2000 chars)} to prompts.jsonl in the per-user prompt store
 // (state.mjs `promptStore`: <config dir>/orchestration/judge-prompts/<project key>, outside the project, so the judged
 // worker's own folder never holds its judge's authority). Prompts that do not come from the person (a task notification,
-// a subagent's report, a peer or system message) are skipped by `typedPrompt` in state.mjs, which nudge.mjs shares.
+// a subagent's report, a peer or system message, another session's message in any of its known wrappings) are skipped
+// by `typedPrompt` in state.mjs, which nudge.mjs shares; it reads the opening of the prompt only, never the transcript.
 // When the origin is unknown, the prompt is kept.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
