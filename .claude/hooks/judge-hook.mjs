@@ -11,15 +11,16 @@
 //   Anything else (a refusal, a timeout, a missing CLI, an unreadable answer, no recorded request): deny.
 // - The record of those requests (state.mjs `promptStore`) is a per-user folder outside the project; a prompts.jsonl
 //   in the project's state dir is never read. A Bash command that names the record's folder is denied with no model
-//   call (audit 2026-11-16 J-12). A text check: a glob or a name built at run time gets past it, and the Write and Edit
-//   tools never reach this hook. Best-effort, not a sandbox.
+//   call (audit 2026-11-16 J-12), and so is one whose glob matches the record's folder (globReachesStore). A text
+//   check: a name built at run time gets past it, and the Write and Edit tools never reach this hook. Best-effort, not
+//   a sandbox.
 // - Malformed hook input: exit 0, no decision. Every floor or judged decision goes to gates.jsonl in the state dir.
 // Settings: ORCH_JUDGE_CLAUDE_BIN (the claude binary, default `claude`), ORCH_JUDGE_MODEL (default opus),
 // ORCH_JUDGE_TIMEOUT_MS (default 40000, clamped to 45000 so the hook always decides before Claude Code kills it).
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput, tokenize } from "./judge-core.mjs";
 import { PROMPT_STORE_NAME, duplicate, ensureStateDir, promptStore, stateDir } from "./state.mjs";
 
@@ -78,9 +79,10 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
 //   that joined text cannot be read) get the same looks, the raw one with `$` dropped too. So `bash -c "cat
 //   judge-\$'prompts'/x"`, `eval cat judge-\$\'prompts\'/x` and a script string inside a script string count. A
 //   decoded text with no quote, backslash, `$` or backtick decodes to itself and is not read again.
-// Out of reach (best-effort, not a sandbox): a glob (`judge-*`), a name built at run time from variables or command
-// output, a `cd` into the parent then a relative glob, a spelling nested deeper than DECODE_LEVELS script strings, and
-// a line the tokenizer cannot read at the top level (the judge's floor denies that one anyway).
+// Out of reach (best-effort, not a sandbox): a name built at run time from variables or command output, a spelling
+// nested deeper than DECODE_LEVELS script strings, and a line the tokenizer cannot read at the top level (the judge's
+// floor denies that one anyway). Globs (`judge-*`, a `cd` into the parent then a relative glob) are matched against
+// the folder's path below (globReachesStore).
 const DECODE_LEVELS = 4;
 
 /** @param {string} command @returns {boolean} */
@@ -136,6 +138,144 @@ function scanForStore(text, level, subDepth) {
 }
 
 if (namesPromptStore(command)) deny("always blocked: the command names the judge's record of the user's requests");
+
+// A glob can reach the store without holding its name (`cd ~/.claude/orchestration && cat judge-*/*/prompts.jsonl`,
+// `echo x >> ~/.claude/*/judge-*/*/prompts.jsonl`, a relative glob after a `cd` into the parent in an earlier call).
+// Each glob word of the line, of its substitutions and of the quoted words read again as script text (up to
+// DECODE_LEVELS) is matched against the store folder's path, segment by segment (`*`, `?` and `[...]` within one
+// segment, a `**` segment across segments, case ignored):
+// - a glob with no expansion in it is resolved against the hook input's folder and every literal `cd`/`pushd` target
+//   on the line (a bare `cd` is the home folder); it reaches the store when its leading segments match the store
+//   folder's path (or its real path) to the end, so it names the store folder or something inside it;
+// - a glob whose start the guard cannot know (`~`, `$HOME`, `$D`, or any relative glob on a line with a dynamic or
+//   `cd -` target) reaches it when its segments after the last expansion line up with the end of the store folder's
+//   path and one of those segments has a literal character (`$D/j*`, `~/.claude/orchestration/*`). So `"$dir"/*` alone
+//   is not refused: a name built at run time stays out of reach, as above.
+// Not refused either: a glob that names only a folder above the store (`ls ~/.claude/*`), and a recursive tool given
+// such a folder (`grep -r x ~/.claude`), which reads the store without naming it.
+const storeRoot = (() => {
+  const at = promptStore.toLowerCase().lastIndexOf(PROMPT_STORE_NAME);
+  return at < 0 ? "" : promptStore.slice(0, at + PROMPT_STORE_NAME.length);
+})();
+
+/** @typedef {({ lit: string } | { glob: string } | { dyn: true })[]} Seg */
+
+/** A word's pieces split into path segments; `abs`: it starts with `/`. @param {any[]} pieces */
+function segmentsOf(pieces) {
+  /** @type {Seg[]} */
+  const segs = [[]];
+  /** @type {Seg} */
+  let cur = segs[0] ?? [];
+  for (const p of pieces) {
+    if ("lit" in p) {
+      /** @type {string[]} */
+      const parts = p.lit.split("/");
+      parts.forEach((part, i) => {
+        if (i > 0) segs.push((cur = []));
+        if (part) cur.push({ lit: part });
+      });
+    } else cur.push(p);
+  }
+  const abs = "lit" in (pieces[0] ?? {}) && pieces[0].lit.startsWith("/");
+  return { segs: abs ? segs.slice(1) : segs, abs };
+}
+
+const isStar2 = (/** @type {Seg} */ s) => s.length === 2 && s.every((p) => "glob" in p && p.glob === "*");
+const hasGlob = (/** @type {Seg} */ s) => s.some((p) => "glob" in p);
+const hasLit = (/** @type {Seg} */ s) => s.some((p) => "lit" in p);
+/** @param {Seg} seg @param {string} name */
+function segMatch(seg, name) {
+  if (isStar2(seg)) return true;
+  const re = seg.map((p) => ("lit" in p ? p.lit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "glob" in p ? (p.glob === "*" ? "[^/]*" : "[^/]") : "[^/]*")).join("");
+  return new RegExp(`^${re}$`, "i").test(name);
+}
+
+/**
+ * The pattern segments `p` (from `i`) match the folder segments `r` (from `j`) to the end of `r`.
+ * @param {Seg[]} p @param {number} i @param {string[]} r @param {number} j @returns {boolean}
+ */
+function reachesFrom(p, i, r, j) {
+  const seg = p[i];
+  const name = r[j];
+  if (name === undefined) return true;
+  if (!seg) return false;
+  if (isStar2(seg)) return reachesFrom(p, i + 1, r, j) || reachesFrom(p, i, r, j + 1);
+  return segMatch(seg, name) && reachesFrom(p, i + 1, r, j + 1);
+}
+
+/** Folder paths of the store: as configured and, when it exists, its real path. */
+const storePaths = (() => {
+  if (!storeRoot) return [];
+  const out = [storeRoot.split("/").filter(Boolean)];
+  try {
+    const real = realpathSync(storeRoot);
+    if (real !== storeRoot) out.push(real.split("/").filter(Boolean));
+  } catch {
+    // not created yet: the configured path is all there is
+  }
+  return out;
+})();
+
+/** @param {string} text @param {string} cwd @param {number} level @param {number} subDepth @returns {boolean} */
+function globReachesStore(text, cwd, level, subDepth) {
+  if (!storePaths.length || !/[*?[]/.test(text)) return false; // no glob character anywhere, nested text included
+  /** @type {{ commands: { words: { pieces: any[], text: string, dynamic: boolean }[] }[], substitutions: string[] }} */
+  let t;
+  try {
+    t = tokenize(text);
+  } catch {
+    return false; // unreadable: the floor denies it anyway at the top level
+  }
+  const bases = [cwd];
+  let unknownBase = false;
+  let cur = cwd;
+  for (const { words } of t.commands) {
+    const w0 = words.find((w) => !w.dynamic && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text));
+    if (!w0 || !["cd", "pushd"].includes(w0.text)) continue;
+    const target = words.slice(words.indexOf(w0) + 1).find((w) => w.dynamic || !w.text.startsWith("-") || w.text === "-");
+    if (!target) cur = homedir();
+    else if (target.dynamic || target.text === "-") {
+      unknownBase = true;
+      continue;
+    } else cur = resolve(cur, target.text);
+    bases.push(cur);
+  }
+  for (const { words } of t.commands)
+    for (const w of words) {
+      const { segs, abs } = segmentsOf(w.pieces);
+      if (segs.some(hasGlob)) {
+        let d = -1;
+        segs.forEach((s, i) => {
+          if (s.some((p) => "dyn" in p)) d = i;
+        });
+        if (d >= 0 || (!abs && unknownBase)) {
+          const tail = segs.slice(d + 1);
+          for (const r of storePaths)
+            for (let o = Math.max(0, r.length - tail.length); o < r.length; o++) {
+              const n = r.length - o;
+              if (tail.slice(0, n).some(hasLit) && tail.slice(0, n).every((s, i) => segMatch(s, r[o + i] ?? ""))) return true;
+            }
+        }
+        if (d < 0)
+          for (const b of abs ? ["/"] : bases) {
+            /** @type {Seg[]} */
+            const full = b.split("/").filter(Boolean).map((x) => [{ lit: x }]);
+            for (const s of segs) {
+              const only = s.length === 1 && s[0] && "lit" in s[0] ? s[0].lit : undefined;
+              if (only === ".") continue;
+              if (only === "..") full.pop();
+              else if (s.length) full.push(s);
+            }
+            if (storePaths.some((r) => reachesFrom(full, 0, r, 0))) return true;
+          }
+      }
+      // A quoted word may be script text another command runs (`bash -c`, `eval`): read it again.
+      if (!w.dynamic && level < DECODE_LEVELS && /[*?[]/.test(w.text) && /\s/.test(w.text) && globReachesStore(w.text, cwd, level + 1, subDepth)) return true;
+    }
+  return subDepth < 8 && t.substitutions.some((s) => globReachesStore(s, cwd, level, subDepth + 1));
+}
+
+if (globReachesStore(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd(), 0, 0)) deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
 
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {

@@ -1677,3 +1677,144 @@ test("askOpus: the judge's own call takes no account connectors and keeps every 
     systemPrompt: "You judge whether a shell command may run. Reply with one JSON object only.",
   });
 });
+
+// Release 2.0.0, slice w2: forms docs/bash-judge.md and CHANGELOG 1.2.0, 1.4.5 and 1.5.0 listed as passing. Each list is
+// one string per line (judge-differential.test.mjs reads them with listIn, both copies must give the same class).
+// Item 1: zsh options that run text as code (globsubst, promptsubst), in every form zsh takes, and zsh's sched.
+// Item 2: PS0/PS1/PS4 with a value that can expand, on any line (a traced script or a later shell sees it).
+// Item 3: parallel, flock -c, script -c; the difftool, mergetool and browser keys (already denied since 1.4.5/1.5.0).
+// Item 4: further git options and keys that run a program (clone -c, send-email, instaweb, guitool), the env names
+// GIT_ALLOW_PROTOCOL (ext:: transport) and LESSOPEN/LESSCLOSE (git's pager runs them), brace groups with other quoting.
+const W2_DENY: string[] = [
+  "setopt globsubst; echo $x",
+  "setopt GLOB_SUBST",
+  "setopt Glob_Subst",
+  "setopt promptsubst",
+  "setopt prompt_subst; print -P x",
+  "unsetopt noglobsubst",
+  "unsetopt NO_PROMPT_SUBST",
+  "set -o globsubst",
+  "set -o GLOB_SUBST",
+  "set +o noglobsubst",
+  "set -o \"$opt\"",
+  "setopt -m '*subst'",
+  "setopt $opts",
+  "if setopt globsubst; then echo $x; fi",
+  "noglob setopt globsubst",
+  "builtin setopt globsubst",
+  "emulate ksh",
+  "emulate sh -c 'echo $x'",
+  "emulate -L zsh -o globsubst",
+  "zsh -o globsubst -c 'echo $x'",
+  "zsh +o noglobsubst -c 'echo $x'",
+  "bash -o \"$O\" -c ls",
+  "options[globsubst]=on",
+  "options=(globsubst on)",
+  "typeset -A options; options[promptsubst]=on",
+  "sched +1 'rm -rf ../victim'",
+  "sched 12:00 git push origin main",
+  "if sched +1 ls; then :; fi",
+  "PS4='$(rm -rf ../victim)' ./x.sh",
+  "export PS4='$(sudo id)'",
+  "export PS1='\\$(id)'",
+  "PS0=`id` true",
+  "export PS4=$X",
+  "parallel 'rm -rf {}' ::: a",
+  "parallel ::: 'sudo id'",
+  "ls | parallel gzip",
+  "sem -j 2 make",
+  "nice parallel echo ::: a",
+  "flock /tmp/l -c 'rm -rf ../victim'",
+  "flock -c 'sudo id' /tmp/l",
+  "flock --command='rm -rf ../victim' /tmp/l",
+  "flock /tmp/l -c \"$CMD\"",
+  "script -c 'sudo id' /dev/null",
+  "script -qc 'rm -rf ../v' log",
+  "script --command 'rm -rf ../v' log",
+  "git -c difftool.x.cmd=evil difftool",
+  "git -c mergetool.x.cmd=evil mergetool",
+  "git -c browser.x.cmd=evil help -w log",
+  "git config browser.x.path /tmp/evil",
+  "git -c instaweb.httpd='rm -rf ../v' instaweb",
+  "git config guitool.x.cmd 'rm -rf ../v'",
+  "git config guitool.x.cmd x",
+  "git -c instaweb.httpd=x instaweb",
+  "git clone -c core.fsmonitor='rm -rf ../v' ../o.git x",
+  "git clone --config=core.hooksPath=/tmp/h ../o.git x",
+  "git clone --conf core.sshCommand=evil u x",
+  "git clone -c \"$KV\" ../o.git x",
+  "git send-email --to-cmd='rm -rf ../v' x.patch",
+  "git send-email --sendmail-cmd 'sudo id' x.patch",
+  "git instaweb --httpd='rm -rf ../v'",
+  "git instaweb -d 'sudo id'",
+  "GIT_ALLOW_PROTOCOL=ext git fetch 'ext::sh -c id'",
+  "LESSOPEN='|rm -rf ../v %s' git log",
+  "{rm,\"-rf\",'../victim'}",
+  "echo {a,$'b'}",
+  "echo {a,\\ b}",
+  "echo $[1<<2]",
+];
+// Item 2, audit J-11: a fetch or pull whose refspec writes a branch goes to the judge (in a local remote it is a push).
+const W2_JUDGE: string[] = [
+  "git -C ../origin.git fetch \"$PWD\" main:main",
+  "git --git-dir=../origin.git fetch . main:main",
+  "git fetch origin main:main",
+  "git fetch origin '+refs/heads/*:refs/heads/*'",
+  "git fetch --refmap='+refs/heads/*:refs/heads/*' origin main",
+  "git pull ../x main:main",
+  "git fetch origin \"$REF\"",
+];
+// The neighbours that keep passing: options that run nothing, a static prompt, fetches that write no branch, and
+// flock/script/clone/send-email forms that run nothing the guard refuses.
+const W2_PASS: string[] = [
+  "setopt extendedglob",
+  "setopt no_nomatch",
+  "unsetopt nomatch",
+  "set -o pipefail",
+  "set -euo pipefail",
+  "emulate -L zsh",
+  "emulate zsh",
+  "sched",
+  "sched -2",
+  "echo setopt globsubst",
+  "PS4='+ ' ./x.sh",
+  "export PS1='> '",
+  "echo 'PS4=$(x)'",
+  "git fetch origin",
+  "git fetch origin main",
+  "git fetch --all --prune",
+  "git pull --rebase origin main",
+  "git fetch git@github.com:o/r.git main",
+  "git clone -c user.name=x ../o.git x",
+  "git clone --depth 1 https://example.com/r.git",
+  "git send-email --to a@example.com x.patch",
+  "git send-email --cc b@example.com x.patch",
+  "flock /tmp/l make test",
+  "flock -n /tmp/l -c 'make test'",
+  "script -q -c 'make test' log",
+  "script -q log",
+  "echo parallel",
+  "brew install parallel",
+  "grep -c script f",
+  "cat options.txt",
+];
+
+test("classify (w2, items 1-4): zsh exec options, sched, prompts, parallel, flock/script -c and more git exec routes are denied; a fetch that writes a branch is judged", () => {
+  assert.deepEqual(misread([
+    ...W2_DENY.map((c): [string, BashClass] => [c, "deny"]),
+    ...W2_JUDGE.map((c): [string, BashClass] => [c, "judge"]),
+    ...W2_PASS.map((c): [string, BashClass] => [c, "pass"]),
+  ]), []);
+  // The reason names the rule, not an older one that happened to fire.
+  assert.match(classifyDetail("setopt GLOB_SUBST", CWD).reason ?? "", /^setopt of globsubst or promptsubst/);
+  assert.match(classifyDetail("sched +1 'rm -rf ../victim'", CWD).reason ?? "", /^sched runs a command later/);
+  assert.match(classifyDetail("PS4='$(x)' ./x.sh", CWD).reason ?? "", /^setting PS4 to a value with \$/);
+  assert.match(classifyDetail("options[globsubst]=on", CWD).reason ?? "", /^assigning zsh's options table/);
+  assert.match(classifyDetail("parallel ::: 'sudo id'", CWD).reason ?? "", /^parallel runs its arguments/);
+  assert.match(classifyDetail("git clone -c core.fsmonitor=x u d", CWD).reason ?? "", /^git clone core\.fsmonitor: a config key that runs a program/);
+});
+
+test("judge policy (w2): a fetch whose refspec writes a branch is a push when it runs in another repository", () => {
+  assert.match(JUDGE_POLICY, /git fetch or pull whose refspec writes a branch/);
+  assert.match(JUDGE_POLICY, /it is a push to that repository/);
+});

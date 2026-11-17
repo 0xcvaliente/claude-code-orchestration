@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
 import { stateKey } from "../.claude/hooks/state.mjs";
@@ -627,4 +627,112 @@ test("parity: judge-core's floor and classification agree with src/judge.ts", ()
   assert.ok(strings.length > 500, `only ${strings.length} strings found`);
   const differ = strings.filter((s) => JSON.stringify(coreClassify(s, "/w")) !== JSON.stringify(sdkClassify(s, "/w")));
   assert.deepEqual(differ, []);
+});
+
+// Release 2.0.0, slice w2: one table fed to both copies. Each row is the class both must give, and the two decisions
+// (class, reason, kind, targets) must be equal. Items 1 to 4 of the slice; src/judge.test.ts has the longer lists.
+/** @type {Array<[string, string]>} */
+const W2_TABLE = [
+  // item 1: zsh options that run text as code, in the forms zsh takes, and sched
+  ["setopt globsubst; echo $x", "deny"],
+  ["setopt GLOB_SUBST", "deny"],
+  ["unsetopt noglobsubst", "deny"],
+  ["unsetopt NO_PROMPT_SUBST", "deny"],
+  ["set -o glob_subst", "deny"],
+  ["set +o noglobsubst", "deny"],
+  ["setopt -m '*subst'", "deny"],
+  ["if setopt promptsubst; then print -P x; fi", "deny"],
+  ["emulate ksh", "deny"],
+  ["emulate sh -c 'echo $x'", "deny"],
+  ["zsh -o globsubst -c 'echo $x'", "deny"],
+  ["options[globsubst]=on", "deny"],
+  ["sched +1 'rm -rf ../victim'", "deny"],
+  ["setopt extendedglob", "pass"],
+  ["set -euo pipefail", "pass"],
+  ["emulate -L zsh", "pass"],
+  ["sched", "pass"],
+  // item 2: a prompt that can expand, on any line; a fetch that writes a branch (J-11)
+  ["PS4='$(rm -rf ../victim)' ./x.sh", "deny"],
+  ["export PS4='$(sudo id)'", "deny"],
+  ["PS4='+ ' ./x.sh", "pass"],
+  ["git -C ../origin.git fetch \"$PWD\" main:main", "judge"],
+  ["git fetch origin main:main", "judge"],
+  ["git fetch origin main", "pass"],
+  // item 3: parallel, flock -c, script -c; the tool and browser keys (denied already)
+  ["parallel 'rm -rf {}' ::: a", "deny"],
+  ["parallel ::: 'sudo id'", "deny"],
+  ["flock /tmp/l -c 'rm -rf ../victim'", "deny"],
+  ["script -c 'sudo id' /dev/null", "deny"],
+  ["git -c difftool.x.cmd=evil difftool", "deny"],
+  ["git -c browser.x.cmd=evil help -w log", "deny"],
+  ["flock /tmp/l make test", "pass"],
+  ["script -q -c 'make test' log", "pass"],
+  // item 4: more git routes to a program
+  ["git clone -c core.fsmonitor='rm -rf ../v' ../o.git x", "deny"],
+  ["git send-email --to-cmd='rm -rf ../v' x.patch", "deny"],
+  ["git instaweb --httpd='rm -rf ../v'", "deny"],
+  ["git -c instaweb.httpd=x instaweb", "deny"],
+  ["git config guitool.x.cmd x", "deny"],
+  ["GIT_ALLOW_PROTOCOL=ext git fetch 'ext::sh -c id'", "deny"],
+  ["LESSOPEN='|rm -rf ../v %s' git log", "deny"],
+  ["git clone -c user.name=x ../o.git x", "pass"],
+  ["git send-email --to a@example.com x.patch", "pass"],
+];
+
+test("parity (w2): both copies give each new row the same decision, and the class the table names", () => {
+  const wrong = [];
+  for (const [c, want] of W2_TABLE) {
+    const core = coreClassify(c, "/w");
+    const sdk = sdkClassify(c, "/w");
+    if (JSON.stringify(core) !== JSON.stringify(sdk)) wrong.push(`${c}: judge-core ${JSON.stringify(core)}, judge.ts ${JSON.stringify(sdk)}`);
+    if (core.cls !== want) wrong.push(`${c}: want ${want}, got ${core.cls}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// Item 5: a glob reaches the store without its name. Each command below, with the judge on, is refused with no model
+// call; the neighbours that only list a folder above the store, or glob elsewhere, are not.
+test("J-12 (w2): a glob that matches the prompt store's folder is refused with no model call; other globs are not", () => {
+  const orch = join(configDir, "orchestration");
+  mkdirSync(join(orch, STORE_NAME), { recursive: true });
+  /** @type {Array<[string, string]>} */
+  const refused = [
+    [`cat ${orch}/judge-*/*/prompts.jsonl`, work],
+    [`echo x >> ${orch}/*/*/prompts.jsonl`, work],
+    [`cd ${orch} && cat judge-*/*/prompts.jsonl`, work],
+    [`cd ${configDir} && cat orchestration/j*/*/*`, work],
+    ["cat j*/*/prompts.jsonl", orch], // the shell's folder moved to the parent in an earlier call
+    [`cat ${configDir}/**/judge-pro*/x`, work],
+    [`cat ${relative(work, orch)}/J*/x`, work],
+    ["cat $CLAUDE_CONFIG_DIR/orchestration/judge-*/x", work],
+    ['cat "$D"/j*/x', work],
+    ["cd - && cat orchestration/j*/x", work], // a cd target the guard cannot know
+    [`bash -c 'cat ${orch}/judge-*/x'`, work],
+    [`echo $(cat ${orch}/judge-*/x)`, work],
+  ];
+  for (const [command, cwd] of refused) {
+    reset();
+    mkdirSync(join(orch, STORE_NAME), { recursive: true });
+    capture("gl", "push feature/login to origin");
+    const r = run(HOOK, bash(command, "gl", { cwd }), { ...ON, STUB_MODE: "approve" });
+    assert.equal(r.code, 2, `${command}: ${r.stderr}`);
+    assertNoDecision(r);
+    assert.match(r.stderr, /record of the user's requests \(through a glob\)/, command);
+    assert.equal(stubCalls().length, 0, `${command}: no model call`);
+  }
+  /** @type {Array<[string, string]>} */
+  const allowed = [
+    [`ls ${configDir}/*`, work],
+    ["cat src/*.ts", work],
+    ["ls *", work],
+    ['for f in "$dir"/*; do echo "$f"; done', work],
+    ["cd build && ls *", work],
+    ["ls *", configDir],
+  ];
+  for (const [command, cwd] of allowed) {
+    reset();
+    const r = run(HOOK, bash(command, "gl", { cwd }), ON);
+    assert.equal(r.code, 0, `${command}: ${r.stderr}`);
+    assert.equal(r.stdout + r.stderr, "", command);
+  }
 });

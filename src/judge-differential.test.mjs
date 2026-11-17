@@ -74,6 +74,16 @@ const HARDENING_REASONS = [
   /\(an assigning \$\{\.\.\.\} of a zsh function, alias or commands table\)/,
   // fix-judge-3: the same rule on the widest reading of the whole command text
   /^an assigning \$\{\.\.\.\} of zsh's functions, aliases or commands table/,
+  // Release 2.0.0, slice w2
+  /^(setopt|unsetopt) of globsubst or promptsubst/,
+  /^set -o globsubst or promptsubst/,
+  /^emulate is always blocked/,
+  /^sched runs a command later/,
+  /^(parallel|sem) runs its arguments/,
+  /^setting PS[014] to a value with/,
+  /^assigning zsh's options table/,
+  /^[a-z]+ -?[-+][A-Za-z]* (with an option the guard cannot read|\S+) is always blocked: globsubst and promptsubst/,
+  /^git clone .*: a config key that runs a program/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -141,6 +151,12 @@ for (const c of AUDIT_1116_2_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
 // fix-judge-3: the same rule on the widest reading (an escaped }, a backslash-newline, a quoted }, a nested expansion).
 const AUDIT_1116_3_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_3_TABLE_EXPANSION_DENY");
 for (const c of AUDIT_1116_3_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
+// Release 2.0.0, slice w2: the forms the docs listed as passing (W2_DENY), and the fetches that write a branch, which
+// now go to the judge (W2_JUDGE).
+const W2_DENY = listIn("judge.test.ts", "W2_DENY");
+for (const c of W2_DENY) HARDENED.push([c, ["deny"]]);
+const W2_JUDGE = listIn("judge.test.ts", "W2_JUDGE");
+for (const c of W2_JUDGE) HARDENED.push([c, ["judge", "deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
 
