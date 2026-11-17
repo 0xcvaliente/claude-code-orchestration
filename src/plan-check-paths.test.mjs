@@ -1,5 +1,6 @@
 // plan-check.mjs: two names for one file (a symlink, or another case on a case-insensitive file system) are one file
-// in file_overlap and not_in_plan, and the read router's budget stays under the hook's 60 s timeout. Driven end to end
+// in file_overlap and not_in_plan; in file_overlap also (w3 item 4) a symlink behind ** or a later wildcard, a hard link
+// and two Unicode normal forms; and the read router's budget stays under the hook's 60 s timeout. Driven end to end
 // through the hook like src/plan-check-overlap.test.mjs: a throwaway project with the hooks copied in.
 import "./test-tmp.mjs";
 import { test } from "node:test";
@@ -229,37 +230,94 @@ test("file_overlap: with no symlink in the folder a glob is compared as before",
   }
 });
 
-test("out of reach: a symlink reached only through ** or a later wildcard is not seen as its target", () => {
-  // **/link/a.ts matches link/a.ts, which is src/a.ts, yet both launches are allowed today; so is t*/l*/a.ts, whose
-  // link sits behind the first wildcard segment.
-  for (const [a, b] of [["**/link/a.ts", "src/a.ts"], ["t*/l*/a.ts", "src/a.ts"]]) {
+// w3 item 4: these three were pinned as out of reach (both launches allowed); each is now one file, both ways.
+test("file_overlap (w3 item 4): a symlink reached through **, a later wildcard, a literal after a wildcard or inside a folder entry is its target", () => {
+  for (const [a, b] of [
+    ["**/link/a.ts", "src/a.ts"],
+    ["t*/l*/a.ts", "src/a.ts"],
+    ["t*/link/a.ts", "src/a.ts"],
+    ["t1", "src/a.ts"], // a folder entry holding a symlink to another folder
+    ["src/a.ts", "**/link/a.ts"],
+    ["src/a.ts", "t*/l*/a.ts"],
+  ]) {
     const dir = linked();
     try {
       mkdirSync(join(dir, "t1"));
       symlinkSync(join(dir, "src"), join(dir, "t1", "link"));
-      assert.equal(pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b)).status, 0, `${a} then ${b}`);
+      const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b));
+      assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${a} then ${b}: ${r.stderr}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+  // A symlink to a file behind a wildcard is its target too.
+  const dir = project();
+  try {
+    mkdirSync(join(dir, "lib"));
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "lib", "b.ts"), "");
+    symlinkSync(join(dir, "lib", "b.ts"), join(dir, "src", "b.ts"));
+    const r = pairIn(dir, "src/*.ts", "lib/b.ts");
+    assert.deepEqual([r.status, r.reason], [2, "file_overlap"], r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("out of reach: a hard link to a file is another name the check does not see", () => {
+test("file_overlap (w3 item 4): a hard link to a file is the same file, as a file entry, under a folder entry or behind a glob", () => {
+  for (const [a, b] of [["h.ts", "src/a.ts"], ["src/a.ts", "h.ts"], ["h.ts", "src"], ["src/*.ts", "h.ts"], ["hl", "src/**"]]) {
+    const dir = linked();
+    try {
+      linkSync(join(dir, "src", "a.ts"), join(dir, "h.ts"));
+      mkdirSync(join(dir, "hl"));
+      linkSync(join(dir, "src", "a.ts"), join(dir, "hl", "z.ts"));
+      const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b));
+      assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${a} then ${b}: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  // Two files that are not linked stay two files.
   const dir = linked();
   try {
-    linkSync(join(dir, "src", "a.ts"), join(dir, "h.ts"));
+    writeFileSync(join(dir, "h.ts"), "");
     assert.equal(pairIn(dir, "h.ts", "src/a.ts").status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("out of reach: two Unicode normal forms of one name are two entries, even where the file system folds them", () => {
-  const dir = project();
-  try {
-    assert.equal(pairIn(dir, "café.md", "café.md", INSENSITIVE).status, 0);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
+test("file_overlap (w3 item 4): two Unicode normal forms of one name are one entry, on any file system", () => {
+  const nfc = "café.md";
+  const nfd = "café.md";
+  for (const env of [INSENSITIVE, {}]) {
+    for (const [a, b] of [[nfc, nfd], [nfd, nfc], [`docs/${nfc}`, `docs/${nfd}`], ["dé/x.md", "dé/*"]]) {
+      const dir = project();
+      try {
+        const r = pairIn(dir, /** @type {string} */ (a), /** @type {string} */ (b), env);
+        assert.deepEqual([r.status, r.reason], [2, "file_overlap"], `${JSON.stringify(a)} then ${JSON.stringify(b)}: ${r.stderr}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("not_in_plan (w3 item 4): the new names never widen what a planned entry covers", () => {
+  // A hard link, an NFD spelling and a target behind a planned ** symlink are refused as before: not_in_plan uses only
+  // the names it used before (C4: nothing is let through that was refused).
+  for (const [planned, launched] of [["src/a.ts", "h.ts"], ["café.md", "café.md"], ["**/link/a.ts", "src/a.ts"]]) {
+    const dir = linked({ reviewed: false });
+    try {
+      linkSync(join(dir, "src", "a.ts"), join(dir, "h.ts"));
+      mkdirSync(join(dir, "t1"));
+      symlinkSync(join(dir, "src"), join(dir, "t1", "link"));
+      plan(dir, `PLAN REVIEW\nSLICE: a\nFILES: ${planned}\nDEPENDS: none\nGOAL: g`);
+      const r = launch(dir, `SLICE: a\nFILES: ${launched}\nDEPENDS: none`);
+      assert.deepEqual([r.status, lastCheck(dir).reason], [2, "not_in_plan"], `${planned} planned, ${launched} launched: ${r.stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
