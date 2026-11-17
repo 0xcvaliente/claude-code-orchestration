@@ -96,7 +96,7 @@ test("check: a healthy machine passes, writes its record and never runs a model"
   try {
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, JSON.stringify(r.checks));
-    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["sdk", "ok"], ["plugin", "ok"], ["dist", "ok"]]);
+    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["sdk", "ok"], ["plugin", "ok"], ["sandbox", "ok"], ["dist", "ok"]]);
     assert.equal(r.claude_code_version, CC);
     assert.equal(r.orchestration_version, VERSION);
     assert.equal(JSON.parse(readFileSync(join(m.home, "orchestration", "claude-update.json"), "utf8")).claude_code_version, CC);
@@ -278,4 +278,73 @@ test("main: exit codes and output forms", () => {
   assert.equal(main(["--nope"], { env: m.env, run: m.run, root, stdout: (s) => out.push(s) }), 2);
   assert.match(out[0] ?? "", /^usage: /);
   m.done();
+});
+
+// sandbox: Claude Code 2.1.326 lets sandboxed commands write to fewer home folders; the per-user orchestration folder
+// (state, skill drafts, the judge's record) is writable again only through sandbox.filesystem.allowWrite in user settings.
+test("check sandbox: off, missing file or a covering entry is ok; on without the entry is a note naming the exact entry", () => {
+  const m = machine();
+  const file = join(m.home, "settings.json");
+  const dir = join(m.home, "orchestration");
+  const sandbox = (/** @type {any} */ settings) => {
+    if (settings === undefined) rmSync(file, { force: true });
+    else writeFileSync(file, typeof settings === "string" ? settings : `${JSON.stringify(settings, null, 2)}\n`);
+    return of(check({ env: m.env, run: m.run, root }), "sandbox");
+  };
+  try {
+    assert.equal(sandbox(undefined)?.status, "ok", "no user settings: the sandbox is off");
+    assert.equal(sandbox({ model: "opus" })?.status, "ok");
+    assert.equal(sandbox({ sandbox: { enabled: false } })?.status, "ok");
+    for (const entry of [dir, `${dir}/`, `${dir}/**`, m.home, "orchestration", `/${dir}`]) {
+      const c = sandbox({ sandbox: { enabled: true, filesystem: { allowWrite: ["/other", entry] } } });
+      assert.equal(c?.status, "ok", `${entry}: ${c?.text}`);
+    }
+    for (const settings of [{ sandbox: { enabled: true } }, { sandbox: { enabled: true, filesystem: { allowWrite: [`${dir}-old`, join(dir, "skill-drafts")] } } }]) {
+      const before = `${JSON.stringify(settings, null, 2)}\n`;
+      const c = sandbox(settings);
+      assert.equal(c?.status, "warn", JSON.stringify(settings));
+      assert.ok(c?.text.includes(`add ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite`), c?.text);
+      assert.equal(readFileSync(file, "utf8"), before, "a check changes nothing");
+    }
+    const r = check({ env: m.env, run: m.run, root });
+    assert.equal(r.ok, true, "a note, not a failure");
+    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "sdk", "plugin", "sandbox", "dist"], "placed after plugin");
+  } finally {
+    m.done();
+  }
+});
+
+test("check sandbox --fix: adds the entry, keeps every other key and the indent; an unreadable file is a note and never rewritten", () => {
+  const m = machine();
+  const file = join(m.home, "settings.json");
+  const dir = join(m.home, "orchestration");
+  try {
+    const settings = { model: "opus", permissions: { allow: ["Bash(ls)"] }, sandbox: { enabled: true, excludedCommands: ["docker"], filesystem: { allowWrite: ["/srv/cache"], denyRead: ["~/.ssh"] } }, theme: "dark" };
+    writeFileSync(file, `${JSON.stringify(settings, null, 4)}\n`);
+    let c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+    assert.equal(c?.status, "fixed", c?.text ?? "no sandbox check");
+    const want = { ...settings, sandbox: { ...settings.sandbox, filesystem: { ...settings.sandbox.filesystem, allowWrite: ["/srv/cache", dir] } } };
+    assert.equal(readFileSync(file, "utf8"), `${JSON.stringify(want, null, 4)}\n`, "same keys, same order, same indent");
+    assert.equal(of(check({ env: m.env, run: m.run, root }), "sandbox")?.status, "ok", "covered now");
+    // No filesystem block yet: one is made.
+    writeFileSync(file, `{\n\t"sandbox": { "enabled": true }\n}\n`);
+    assert.equal(of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox")?.status, "fixed");
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { sandbox: { enabled: true, filesystem: { allowWrite: [dir] } } });
+    assert.match(readFileSync(file, "utf8"), /^\t"sandbox"/m, "tab indent kept");
+    // A file that does not parse, or cannot be read, is a note; --fix leaves it as it is and nothing throws.
+    for (const bad of ['{ "sandbox": { "enabled": true, } ', "[1, 2]"]) {
+      writeFileSync(file, bad);
+      c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+      assert.equal(c?.status, "warn", bad);
+      assert.match(c?.text ?? "", /could not be (read|parsed)|is not a JSON object/);
+      assert.equal(readFileSync(file, "utf8"), bad, "never rewritten");
+    }
+    rmSync(file);
+    mkdirSync(file);
+    c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+    assert.equal(c?.status, "warn");
+    assert.match(c?.text ?? "", /could not be read/);
+  } finally {
+    m.done();
+  }
 });

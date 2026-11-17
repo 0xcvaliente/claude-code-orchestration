@@ -1638,12 +1638,12 @@ export function workerEnv(env: NodeJS.ProcessEnv = process.env): Record<string, 
  * The default `deps.ask`: one model call with nothing attached. No tools, no settings or CLAUDE.md, no MCP servers, no
  * plugins, no auto memory, one turn, in the temp folder; `dontAsk` so nothing could prompt even if a tool slipped in.
  */
-export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5", timeoutMs = JUDGE_TIMEOUT_MS): JudgeDeps["ask"] {
+export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5", timeoutMs = JUDGE_TIMEOUT_MS, run: typeof query = query): JudgeDeps["ask"] {
   return async (prompt) => {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     try {
-      const stream = query({
+      const stream = run({
         prompt,
         options: {
           model,
@@ -1653,6 +1653,9 @@ export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5
           tools: [],
           allowedTools: [],
           settingSources: [],
+          // No claude.ai account connectors either: settingSources [] and strictMcpConfig leave Claude Code free to fetch
+          // the account's connector list (1.6.0, Known and not fixed); every SDK role passes this since 1.6.0.
+          settings: { disableClaudeAiConnectors: true },
           mcpServers: {},
           mcpServersDelivery: "initialize", // the SDK's non-deprecated form (0.3.326); see leanOptions in agent.ts
           strictMcpConfig: true,
