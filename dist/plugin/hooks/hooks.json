@@ -61,7 +61,7 @@
           },
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --plugin --handback",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh\" --handback --plugin",
             "timeout": 900
           }
         ]

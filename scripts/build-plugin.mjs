@@ -93,7 +93,7 @@ const hooks = {
         hooks: [
           { type: "command", command: run("handback-check.mjs") },
           { type: "command", command: run("quote-check.mjs") },
-          { type: "command", command: `${run("verify.sh")} --handback`, timeout: 900 },
+          { type: "command", command: `"\${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh" --handback --plugin`, timeout: 900 },
         ],
       },
       // Deny-only: refuses every Workflow launch but this repo's saved orchestrate workflow (a plugin cannot ship

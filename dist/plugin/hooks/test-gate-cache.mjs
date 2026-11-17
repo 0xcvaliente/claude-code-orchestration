@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The test gate's result cache and its record keys (2.0.0). Not a hook: verify.sh calls its CLI, and telemetry.mjs and
-// journal.mjs import stopKey. Node built-ins only; no side effects at import.
+// journal.mjs use stopKey from state.mjs. Node built-ins and state.mjs only; no side effects at import beyond state.mjs.
 //
 // Result cache. verify.sh runs the suite at an implementer's hand-back (PreToolUse on SubagentHandback, --handback) and
 // again at its SubagentStop. When the tree has not changed in between, the second gate reuses the first one's result
@@ -23,14 +23,15 @@
 //
 // Record keys. A test-gate record names the hand-back or the stop it belongs to: handback_id, the SubagentHandback
 // call's tool_use_id, or stop_key (stopKey), which every SubagentStop hook of one event computes alike from the agent's
-// transcript: the uuid of its last entry (else its size). Two stops of one agent differ in it, since a block or a
+// transcript (state.mjs stopKey): the uuid of its last entry (else its size). Two stops of one agent differ in it, since a block or a
 // resume adds entries in between. telemetry.mjs and journal.mjs store the same stop_key in their stop records, and
 // run.mjs pairs records with stops by it.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { stopKey } from "./state.mjs";
 
 export const CACHE_FILE = "test-gate-cache.json";
 export const MAX_ENTRIES = 32;
@@ -39,38 +40,8 @@ export const MAX_UNTRACKED = 5000;
 export const MAX_UNTRACKED_BYTES = 64 * 1024 * 1024;
 const ENV_FACTS = ["PATH", "NODE_OPTIONS", "NODE_ENV", "CI"];
 
-/**
- * The stop key of an agent's transcript: the uuid of its last entry, else "size:<bytes>"; null when it cannot be read.
- * Reads only the last 256 KiB.
- * @param {unknown} path @returns {string | null}
- */
-export function stopKey(path) {
-  if (typeof path !== "string" || !path) return null;
-  /** @type {number | undefined} */
-  let fd;
-  try {
-    fd = openSync(path, "r");
-    const size = fstatSync(fd).size;
-    const len = Math.min(size, 256 * 1024);
-    const buf = Buffer.alloc(len);
-    const got = readSync(fd, buf, 0, len, size - len);
-    const lines = buf.subarray(0, got).toString("utf8").split("\n").filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const e = JSON.parse(/** @type {string} */ (lines[i]));
-        if (e && typeof e.uuid === "string" && e.uuid) return `uuid:${e.uuid}`.replace(/[^A-Za-z0-9_.:-]/g, "");
-        break;
-      } catch {
-        // a partial first line of the window, or a line being written: look at the one before
-      }
-    }
-    return `size:${size}`;
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
+// The stop key lives in state.mjs (every hook copy has it); re-exported for verify.sh's CLI and the tests.
+export { stopKey };
 
 /** @param {string} cwd @param {string[]} args @returns {Buffer | null} */
 function git(cwd, args) {

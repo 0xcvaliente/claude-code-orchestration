@@ -6,8 +6,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatus } from "./brief.mjs";
-import { duplicate, ensureStateDir, handbackFor, stateDir } from "./state.mjs";
-import { stopKey } from "./test-gate-cache.mjs";
+import { duplicate, ensureStateDir, handbackFor, stateDir, stopKey } from "./state.mjs";
 
 // Imported by turn-budget.mjs for usageFromTranscript (its turn count) and maxTurnsOf: the hook code below runs only
 // when this file is the entry script (argv[1], which keeps a symlinked plugin path working).
@@ -176,7 +175,7 @@ if (process.argv[1]?.endsWith("telemetry.mjs")) {
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) process.exit(0); // valid JSON, not a hook payload
 
-  // The stop key (test-gate-cache.mjs stopKey), read before anything else, as verify.sh and journal.mjs read it at this
+  // The stop key (state.mjs stopKey), read before anything else, as verify.sh and journal.mjs read it at this
   // stop: run.mjs pairs a test-gate record with this stop by it.
   const stop_key = payload.hook_event_name === "SubagentStop" ? stopKey(payload.agent_transcript_path) : null;
   let status;

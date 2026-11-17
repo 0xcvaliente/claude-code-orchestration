@@ -347,10 +347,10 @@ test("1.2.0: reports are checked at SubagentHandback in the project and the plug
 });
 
 test("2.0.0: the test gate runs at SubagentHandback after the report checks, in the project and the plugin, and keeps its SubagentStop entry", () => {
-  for (const [h, args] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), " --handback"], [read("dist/plugin/hooks/hooks.json"), " --plugin --handback"]])) {
+  for (const [h, tail] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), "/.claude/hooks/verify.sh --handback"], [read("dist/plugin/hooks/hooks.json"), '/hooks/verify.sh" --handback --plugin']])) {
     const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
     const gate = e.hooks.at(-1);
-    assert.ok(String(gate.command).endsWith(`verify.sh${args.startsWith(" --plugin") ? '"' : ""}${args}`), gate.command);
+    assert.ok(String(gate.command).endsWith(tail), gate.command);
     // The SubagentStop gate's 900 s: verify.sh's own budget (540 s by default, 870 s at most) ends first.
     assert.equal(gate.timeout, 900);
     // Not fail-closed: a crash or a timeout lets the report through, and the SubagentStop gate decides.

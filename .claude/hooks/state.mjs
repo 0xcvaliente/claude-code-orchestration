@@ -6,9 +6,46 @@
 // When the project registers its own copy of a hook (this repo, or a repo with .claude/ copied in), both copies
 // fire on every event. The plugin copy then exits at once (duplicate) and the project copy does the work; the
 // plugin hooks the project does not register use the project's state, so every gate reads one log.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * The stop key of an agent's transcript (2.0.0): the uuid of its last entry ("uuid:<id>"), else "size:<bytes>"; null
+ * when it cannot be read. Every SubagentStop hook of one event reads the same transcript, so verify.sh (through
+ * test-gate-cache.mjs), telemetry.mjs and journal.mjs store the same value, and two stops of one agent differ in it (a
+ * block or a resume adds entries in between). run.mjs pairs a test-gate record with its stop by it. Reads only the last
+ * 256 KiB.
+ * @param {unknown} path @returns {string | null}
+ */
+export function stopKey(path) {
+  if (typeof path !== "string" || !path) return null;
+  /** @type {number | undefined} */
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, 256 * 1024);
+    const buf = Buffer.alloc(len);
+    const got = readSync(fd, buf, 0, len, size - len);
+    const lines = buf.subarray(0, got).toString("utf8").split("\n").filter(Boolean);
+    const last = lines.at(-1);
+    if (last !== undefined) {
+      try {
+        const e = JSON.parse(last);
+        const id = e && typeof e.uuid === "string" ? e.uuid.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
+        if (id) return `uuid:${id}`;
+      } catch {
+        // a line being written: the size stands for it
+      }
+    }
+    return `size:${size}`;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
 
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
