@@ -29,7 +29,9 @@
 #   off: no base run, as in 0.3.0.
 # KIND: bugfix (ORCH_BUGFIX_CHECK=off disables): after the tests pass, an implementer whose brief says KIND: bugfix
 # must have changed or added a test file that adds a qualified failing test on the base (bugfix-check.mjs); blocks
-# say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up. The tests_failed cap and
+# say what is missing, and after two such blocks it allows with bugfix_unverified_gave_up (at once, with
+# "cause":"lock_mismatch" in the record, when a lock file differs from the base's: no worker can fix that). The
+# review gate clears a bugfix_ block (never a tests_failed one) once a later review of the slice passes. The tests_failed cap and
 # the bugfix cap are counted separately, each over the blocks since the agent's latest SubagentStart in telemetry.jsonl
 # (a SendMessage resume starts the agent again under its id), or over all its blocks when no start is recorded.
 # Time budget. The wiring gives this hook 900 s, and a hook killed at its timeout does not block. Claude Code also fails

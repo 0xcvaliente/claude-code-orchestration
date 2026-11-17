@@ -22,6 +22,10 @@
 //    Its loop guard is per agent for the whole session: two blocks that name it, one give-up, then it is left alone.
 //    An implementer whose latest test-gate record (gates.jsonl) is a block with no later SubagentStop counts the same
 //    way (G-2, audit 2026-11-16): the block can land after a passing review, and the agent may never stop again.
+//    The message names the block's reason: tests_failed (or a record with no reason) keeps the test-failure text; a
+//    bugfix_ reason (the tests passed, but the gate could not verify the reproduction test) gets its own text. A
+//    bugfix_ block, and only that, is cleared by a later passing review of the agent's slice (K1, run of 2026-11-17:
+//    nothing but the give-up cleared it). A tests_failed block needs a later stop of the agent or the give-up.
 // 2. Per slice of the current run (run.mjs folds journal-launches.jsonl, journal.jsonl, gates.jsonl and telemetry.jsonl
 //    with brief.mjs foldRuns): every slice of the latest run with an implementer attempt, and the slice of the session's
 //    last implementer, needs its latest review after its latest attempt to pass (no_reviewer_after_last_implementer,
@@ -130,11 +134,11 @@ const lastImpl = implStops.at(-1);
 // Also (G-2) an implementer whose latest test-gate record is a block with no later SubagentStop: the test gate runs beside
 // the journal at a stop and decides minutes later, so its block can land after a reviewer passed the slice; an agent
 // sent back that never stops again left failing tests nobody saw.
-/** @type {Map<string, { id: string, start: number, stop: number, testAt: number, testBlock: boolean }>} */
+/** @type {Map<string, { id: string, start: number, stop: number, testAt: number, testBlock: boolean, testReason: string }>} */
 const implAgents = new Map();
 for (const e of telemetry) {
   if (role(e) !== "implementer" || typeof e.agent_id !== "string" || !e.agent_id) continue;
-  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity, testAt: -Infinity, testBlock: false };
+  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity, testAt: -Infinity, testBlock: false, testReason: "" };
   if (e.hook_event_name === "SubagentStart") a.start = Math.max(a.start, time(e.ts));
   if (e.hook_event_name === "SubagentStop") a.stop = Math.max(a.stop, time(e.ts));
   implAgents.set(e.agent_id, a);
@@ -145,9 +149,25 @@ for (const g of gatesRaw) {
   if (!a || time(g.ts) < a.testAt) continue;
   a.testAt = time(g.ts);
   a.testBlock = g.decision === "block";
+  a.testReason = typeof g.reason === "string" ? g.reason : "";
 }
 /** @param {{ stop: number, testAt: number, testBlock: boolean }} a */
 const testBlocked = (a) => a.testBlock && a.testAt > a.stop;
+// A bugfix_ block comes after the tests passed: the gate could not verify the reproduction test. Anything else (tests_failed,
+// or an older record with no reason) is a test failure.
+/** @param {{ testReason: string }} a */
+const notTestFailure = (a) => a.testReason.startsWith("bugfix_");
+/** What the gate could not do, per bugfix_ reason. @type {Record<string, string>} */
+const BUGFIX_WHAT = {
+  bugfix_no_test: "found no changed or added test file that reproduces the bug",
+  bugfix_test_passes_on_base: "found no reproduction test that fails on the base commit",
+  bugfix_base_unusable: "could not use the test run on the base commit",
+  bugfix_no_base: "could not run the reproduction test on a base commit",
+  bugfix_timeout: "ran out of time checking the reproduction test against the base commit",
+  bugfix_tmp_lost: "lost its temporary folder while checking the reproduction test",
+};
+/** @param {{ testReason: string }} a */
+const bugfixWhat = (a) => (Object.hasOwn(BUGFIX_WHAT, a.testReason) ? BUGFIX_WHAT[a.testReason] : "could not verify the reproduction test against the base commit");
 const neverStopped = [...implAgents.values()].filter((a) => a.start > a.stop || testBlocked(a));
 if (!lastImpl && !neverStopped.length) decide("allow", "no_implementer_in_session", 0);
 
@@ -169,11 +189,21 @@ const sessionGates = gatesRaw.filter((g) => g.gate === "review" && g.session_id 
 const names = (g, id) => Array.isArray(g.unfinished) && g.unfinished.includes(id);
 /** @param {string} id */
 const unfinishedBlocks = (id) => sessionGates.filter((g) => g.decision === "block" && names(g, id)).length;
+/** Slices whose bugfix_ test-gate block a later passing review cleared (logged in skips). @type {string[]} */
+const clearedByReview = [];
 // Only an Agent tool launch (it has a launch record) counts, and only while no later implementer stop took the slice over.
 const unfinished = neverStopped.flatMap((a) => {
   if (!records.launches.some((l) => l.agent_id === a.id && !l.workflow)) return [];
   if (sessionGates.some((g) => g.decision === "allow" && names(g, a.id))) return []; // the gate already gave up on it
   const slice = sliceOfAgent(records, a.id);
+  // A block that is not a test failure, after which a reviewer of the slice passed it: the review vouches for the work.
+  if (slice && a.start <= a.stop && testBlocked(a) && notTestFailure(a)) {
+    const reviewed = records.stops.some((st) => role(st) === "reviewer" && (st.slice ?? sliceOfAgent(records, st.agent_id)) === slice && st.status === "pass" && time(st.ts) > a.testAt);
+    if (reviewed) {
+      clearedByReview.push(`implementer_unfinished:${slice}:${a.testReason}_cleared_by_review`);
+      return [];
+    }
+  }
   const takenOver = slice
     ? records.stops.some((st) => role(st) === "implementer" && st.slice === slice && st.agent_id !== a.id && time(st.ts) > a.start)
     : implStops.some((e) => e.agent_id !== a.id && time(e.ts) > a.start);
@@ -195,7 +225,7 @@ const problems = [];
 /** @type {string[]} */
 const failedForGood = [];
 /** @type {string[]} */
-const skips = [];
+const skips = [...clearedByReview];
 
 // A fold that throws on the log's data must not approve the reply: block (with the usual loop guard) instead.
 if (foldFailed) problems.push({ reason: "run_state_unreadable", message: "Review gate: the run state could not be folded from the logs, so the work cannot be shown reviewed. Send the result to a reviewer before replying, or say in your reply that it is unverified." });
@@ -204,7 +234,7 @@ for (const u of unfinished) {
     ...(u.slice ? { slice: u.slice } : {}),
     agent: u.id,
     reason: "implementer_unfinished",
-    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) ${testBlocked(u) && u.start <= u.stop ? "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed" : "started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed"}. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
+    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) ${testBlocked(u) && u.start <= u.stop ? (notTestFailure(u) ? `was sent back by the test gate with ${u.testReason}: the tests themselves passed, but the gate ${bugfixWhat(u)}. It never finished after that, and no review of the slice has passed since the block (a passing review of the slice clears it)` : "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed") : "started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed"}. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
   });
 }
 

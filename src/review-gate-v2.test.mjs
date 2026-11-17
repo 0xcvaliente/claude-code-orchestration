@@ -599,6 +599,64 @@ test("G-2 Stop gate: a test-gate block followed by a stop of the same implemente
   assert.equal(t.last().reason, "reviewer_passed");
 });
 
+// ---- K1 (run of 2026-11-17): a test-gate block that is not a test failure (a bugfix_ reason: the gate could not
+// check the reproduction test, after the tests passed) was reported as "the tests failed" and nothing but the give-up
+// cleared it. ----
+const TESTS_FAILED_TEXT = "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed";
+
+test("K1 Stop gate: a tests_failed block keeps its message and still holds the slice after a later passing review", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "tests_failed");
+  s.review("a", "STATUS: pass"); // a review cannot vouch for tests the gate saw fail
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.ok(r.stderr.includes(TESTS_FAILED_TEXT), r.stderr);
+});
+
+test("K1 Stop gate: a bugfix_ block names its reason, says the tests did not fail, and a later passing review clears it", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "bugfix_base_unusable");
+  // The review came before the block: it does not clear it.
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.match(r.stderr, /bugfix_base_unusable/);
+  assert.match(r.stderr, /the tests themselves passed/);
+  assert.ok(!r.stderr.includes("(the tests failed)"), r.stderr);
+  assert.doesNotMatch(r.stderr, /ORCH_/, "no switch in a block message");
+  // A failing review after the block does not clear it either.
+  s.review("a", "STATUS: fail\nGAP: 90 broken");
+  assert.equal(s.run("review-gate.mjs", { background_tasks: [] }).status, 2);
+  assert.equal(s.last().reason, "implementer_unfinished");
+  // A passing review of the slice after the block does.
+  s.review("a", "STATUS: pass");
+  const ok = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(s.last().reason, "reviewer_passed");
+  assert.ok(s.last().skips?.includes("implementer_unfinished:a:bugfix_base_unusable_cleared_by_review"), JSON.stringify(s.last()));
+});
+
+test("K1 Stop gate: a passing review of another slice does not clear a bugfix_ block", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  s.impl("b");
+  testGate(s, id, "block", "bugfix_no_base");
+  s.review("b", "STATUS: pass", { model: "opus" });
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["implementer_unfinished", "a"]);
+  assert.match(r.stderr, /bugfix_no_base/);
+});
+
 // ---- G-1 (audit 2026-11-16): a second plain PLAN REVIEW while slices are in flight. The run it closes hands an
 // unreviewed attempt of a slice the new plan names again to the new run, and a slice that was final and passed there
 // counts as final in the new run until it is launched again. Spec: docs/brief-grammar.md, "Run model". ----
