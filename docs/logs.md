@@ -41,6 +41,7 @@ The key is the project path with every byte that is not a letter or digit replac
 | `skills.jsonl` | `plan-check.mjs` | skill suggestion decision | role, slice, skill names, reason codes, counts |
 | `skill-create.jsonl` | `plan-check.mjs` | skill-slice decision or DRAFTS lookup | decision, reason, skill name, target, paths, slice, run |
 | `skill-gate.jsonl` | `skill-gate.mjs` | skill slice stop | decision, reason, failed reason codes |
+| `workflow-guard.jsonl` | `workflow-guard.mjs` (1.6.0) | Workflow launch | `gate: "workflow"`, decision (`allow` or `deny`), reason, the workflow name (at most 80 characters), the input's key names, ids; never the script or the arguments ([Workflow guard](gates.md#workflow-guard)) |
 | `routes.jsonl` | `src/route.ts` (triage) | triage decision | the task (first 200 characters), the route, its reason and the triage facts |
 | `runs.jsonl` | `scripts/log-run.mjs` | headless run | [Headless run results](#headless-run-results) |
 

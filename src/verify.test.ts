@@ -181,6 +181,82 @@ test("auto.sh: a set ORCH_BUDGET_USD or a bad ORCH_BUDGET_TOKENS exits 1 before 
   assert.equal(t.calls().length, 0, "no model call");
 });
 
+// 1.5.1 Known and not fixed: ORCH_BUDGET_TOKENS capped each session of `npm run auto`, not the run. Now the triage call's
+// cost and each earlier session's are subtracted before the next session starts (scripts/run-budget.mjs).
+const capOf = (call: string) => {
+  const lines = call.split("\n");
+  return lines.includes("--max-budget-usd") ? lines[lines.indexOf("--max-budget-usd") + 1] : undefined;
+};
+
+test("auto.sh run-wide cap: the triage call's cost is subtracted before the plain session starts", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({ session: '{"result":"done","total_cost_usd":0.1}', route: { mode: "plain", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.05 } });
+  const r = runAuto(repo, t.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(capOf(callOf(t.calls(), "none")), "0.25", "300k - 50k (0.05 USD at 1M tokens per dollar)");
+  // Without a cost the triage call's token count is what it spent.
+  const u = fakeTools({ session: '{"result":"done"}', route: { mode: "plain", source: "triage", reason: "stub", tokens: 20000 } });
+  assert.equal(runAuto(repo, u.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) }).status, 0);
+  assert.equal(capOf(callOf(u.calls(), "none")), "0.28");
+  // No cap: no session gets one.
+  const v = fakeTools({ session: '{"result":"done"}', route: { mode: "plain", source: "triage", reason: "stub", tokens: 20000, costUsd: 0.05 } });
+  assert.equal(runAuto(repo, v.bin, { ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "", ...notGit(repo) }).status, 0);
+  assert.equal(capOf(callOf(v.calls(), "none")), undefined);
+});
+
+test("auto.sh run-wide cap: the reviewer gets what the triage call and the plain session left", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({ session: '{"result":"done","total_cost_usd":0.1}', route: { mode: "reviewed", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.05 } });
+  const r = runAuto(repo, t.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(r.status, 0, r.stderr);
+  const calls = t.calls();
+  assert.equal(capOf(callOf(calls, "none")), "0.25");
+  assert.equal(capOf(callOf(calls, "reviewer")), "0.15", "300k - 50k triage - 100k plain session");
+});
+
+test("auto.sh run-wide cap: an escalated orchestrator gets what the failed plain session left", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({ session: '{"result":"failed","total_cost_usd":0.2}', sessionExit: 1, route: { mode: "plain", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.05 } });
+  runAuto(repo, t.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  const calls = t.calls();
+  assert.equal(capOf(callOf(calls, "none")), "0.25");
+  assert.equal(capOf(callOf(calls, "orchestrator")), "0.05", "300k - 50k triage - 200k plain session");
+});
+
+test("auto.sh run-wide cap: with less than 10k left no session starts and the run exits 3 with a message", () => {
+  const repo = withAgents(tmp());
+  // The triage call left 5k: the plain session never starts.
+  const t = fakeTools({ session: '{"result":"must not run"}', route: { mode: "plain", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.295 } });
+  const r = runAuto(repo, t.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /budget: ORCH_BUDGET_TOKENS=300k is the cap for the whole run, and this run has spent 295k of it .*leaving 5\.0k, under the 10k a session needs: the plain session does not start/);
+  assert.equal(t.calls().length, 0, "no session started");
+  // The plain session spent the rest: the reviewer never starts.
+  const u = fakeTools({ session: '{"result":"done","total_cost_usd":0.26}', route: { mode: "reviewed", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.04 } });
+  const ru = runAuto(repo, u.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(ru.status, 3, ru.stderr);
+  assert.match(ru.stderr, /the reviewer does not start/);
+  assert.deepEqual(u.calls().map(agentOf), ["none"]);
+  // A failed plain session that spent the rest: no escalated orchestrator.
+  const w = fakeTools({ session: '{"result":"failed","total_cost_usd":0.3}', sessionExit: 1, route: { mode: "plain", source: "triage", reason: "stub", tokens: 9000, costUsd: 0.01 } });
+  const rw = runAuto(repo, w.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(rw.status, 3, rw.stderr);
+  assert.match(rw.stderr, /the orchestrator does not start/);
+  assert.deepEqual(w.calls().map(agentOf), ["none"]);
+});
+
+test("auto.sh run-wide cap: a triage call the cap stopped starts no session and exits 3", () => {
+  const repo = withAgents(tmp());
+  const t = fakeTools({
+    session: '{"result":"must not run"}',
+    route: { mode: "orchestrate", source: "fallback", reason: "triage failed (the token cap stopped it, error_max_budget_usd)", tokens: 280000, costUsd: 0.2, capStopped: true },
+  });
+  const r = runAuto(repo, t.bin, { ORCH_BUDGET_TOKENS: "300k", ORCH_BUDGET_USD: "", ...notGit(repo) });
+  assert.equal(r.status, 3, r.stderr);
+  assert.match(r.stderr, /budget: the triage call reached ORCH_BUDGET_TOKENS=300k, the cap for the whole run, so the cap is spent and no session starts/);
+  assert.equal(t.calls().length, 0, "1.5.1 started the orchestrator here with the full cap again");
+});
+
 test("auto.sh reviewed route: the reviewer gets the detected runner's rules and no broader Bash", () => {
   const repo = withAgents(join(tmp(), "a repo")); // a space in the path must still give one rule per line
   mkdirSync(join(repo, "tests"));

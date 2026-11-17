@@ -70,7 +70,9 @@ export async function auto(opts: AutoOptions): Promise<AutoResult> {
     // The cheap route failed: fall back to the pipeline. The failed session's edits stay uncommitted in the working
     // tree (never reverted: they may sit beside the user's own changes); the pipeline works from HEAD in worktrees.
     const why = (soloReport.error ?? "failed").replace(/\s+/g, " ").slice(0, 160);
-    const escalated: Decision = { ...decision, mode: "orchestrate", source: "escalated", reason: `${decision.mode} session failed (${why}); rerunning through the pipeline`, tokens: 0 };
+    // tokens 0: the triage call is not this decision's; neither is its cost.
+    const { costUsd: _triageCost, ...earlierDecision } = decision;
+    const escalated: Decision = { ...earlierDecision, mode: "orchestrate", source: "escalated", reason: `${decision.mode} session failed (${why}); rerunning through the pipeline`, tokens: 0 };
     logRoute(opts.outRoot, opts.task, escalated, { from: decision.mode });
     log(`route: orchestrate (escalated) - ${escalated.reason}`);
     spentBefore = soloReport.spentTokens;

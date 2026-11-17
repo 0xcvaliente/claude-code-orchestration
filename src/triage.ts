@@ -45,6 +45,10 @@ export interface Decision {
   facts?: Facts;
   /** Tokens the triage call used; 0 when triage was forced or skipped. */
   tokens: number;
+  /** The triage call's cost in list-price dollars, when its result reported one: what `npm run auto` counts against the run's cap. */
+  costUsd?: number;
+  /** The token cap stopped the triage call (error_max_budget_usd): the run's cap is spent, so scripts/auto.sh starts no session. */
+  capStopped?: true;
 }
 
 export const TRIAGE_SCHEMA = {
@@ -144,7 +148,9 @@ export function triagePrompt(task: string): string {
  * One cheap read-only call, then the policy. A failed triage falls back to the full pipeline, the pre-triage behaviour.
  * `repo` is the folder the task is about: any folder works, a git repository is not required, and triage never calls git.
  * `budgetTokens` caps the call (src/route.ts --budget, from ORCH_BUDGET_TOKENS): it reaches query() as maxBudgetUsd at
- * TOKENS_PER_USD, the launcher's conversion. A call stopped by the cap is a failed triage like any other.
+ * TOKENS_PER_USD, the launcher's conversion. A call stopped by the cap is a failed triage that also says `capStopped`:
+ * it spent the run's whole cap, so scripts/auto.sh starts no session after it (1.5.1 sent it on to the orchestrator with
+ * the full cap again). The decision carries the call's `costUsd`, which auto.sh subtracts from the run's cap.
  */
 export async function triage(opts: { run: RunAgent; repo: string; task: string; budgetTokens?: number }): Promise<Decision> {
   const r = await opts.run({
@@ -152,15 +158,26 @@ export async function triage(opts: { run: RunAgent; repo: string; task: string; 
     ...(opts.budgetTokens !== undefined && { maxBudgetUsd: opts.budgetTokens / TOKENS_PER_USD }),
   });
   const tokens = Number.isFinite(r.tokens) ? r.tokens : 0;
+  const cost = typeof r.costUsd === "number" && Number.isFinite(r.costUsd) ? { costUsd: r.costUsd } : {};
   const facts = r.ok ? parseFacts(r.structured) : undefined;
   if (!facts) {
-    const why = r.ok ? "invalid output" : r.subtype === "error_max_budget_usd" ? "the token cap stopped it, error_max_budget_usd" : r.subtype;
+    if (!r.ok && r.subtype === "error_max_budget_usd") {
+      return {
+        mode: "orchestrate",
+        source: "fallback",
+        reason: "triage failed (the token cap stopped it, error_max_budget_usd); the run's cap is spent, so no session follows",
+        tokens,
+        ...cost,
+        capStopped: true,
+      };
+    }
     return {
       mode: "orchestrate",
       source: "fallback",
-      reason: `triage failed (${why}); using the full pipeline`,
+      reason: `triage failed (${r.ok ? "invalid output" : r.subtype}); using the full pipeline`,
       tokens,
+      ...cost,
     };
   }
-  return { ...decide(facts), source: "triage", facts, tokens };
+  return { ...decide(facts), source: "triage", facts, tokens, ...cost };
 }

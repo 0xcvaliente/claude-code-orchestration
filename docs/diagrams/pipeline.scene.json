@@ -38,7 +38,7 @@
   "notes": [
     "Retries (dashed) carry the failing output, or the confirmed gaps, back to the same slice. A slice gets at most 3 attempts; then it has failed for good.",
     "Validation, the resume and the Opus third attempt are the native orchestrator's retry flow (.claude/agents/orchestrator.md step 6); the gated workflow validates (refute) and runs its last attempt on Opus (escalateLast) too. The stall and its replan_required block are native only (plan-check.mjs, review-gate.mjs).",
-    "The SDK pipeline (npm start, frozen since 0.3.0) sends the gaps straight back, up to --retries (default 2), with no validation, no Opus attempt and no stall; it replans only with --replans N.",
+    "The SDK pipeline (npm run sdk, frozen since 0.3.0) sends the gaps straight back, up to --retries (default 2), with no validation, no Opus attempt and no stall; it replans only with --replans N.",
     "The bugfix check is native: for a KIND: bugfix slice, verify.sh needs a changed test that fails on the base and passes now (bugfix-check.mjs).",
     "The SDK pipeline works on code in a git repository only (src/cli.ts). Natively, work that changes no code follows the same plan and review steps in the shared folder, with no worktrees, no integrator and no commits (.claude/agents/orchestrator.md, steps 2 to 5).",
     "The integrator runs the acceptance checks and then the project's whole suite once after the merge, so a slice's own check is the narrowest command that proves it (CHANGELOG.md 1.4.3)."

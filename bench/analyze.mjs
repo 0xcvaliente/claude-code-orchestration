@@ -116,6 +116,20 @@ export function tokensOf(results, routes) {
   return { total: vals.reduce((a, t) => a + t.total, 0), by_model: byModel, output_total: vals.reduce((a, t) => a + t.output, 0) };
 }
 
+// Release 1.5.1 cut the triage call that tokensOf adds as `triage` (no claude.ai account connectors: 14,030 tokens instead
+// of 437,331 in docs/data/live-checks-2026-11-16.md, Check 10). A campaign's manifest dates it by `plugin_version` (the
+// built plugin of the checkout that ran it); a version below 1.5.1, or none, means its triage tokens are the old call's.
+export const TRIAGE_FIX_VERSION = "1.5.1";
+export function preTriageFix(manifest) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(manifest?.plugin_version ?? ""));
+  if (!m) return true; // no version: nothing shows the campaign ran the fixed call
+  const [a, b, c] = m.slice(1).map(Number);
+  const [x, y, z] = TRIAGE_FIX_VERSION.split(".").map(Number);
+  return a !== x ? a < x : b !== y ? b < y : c < z;
+}
+export const TRIAGE_NOTE =
+  `triage_pre_fix: the triage tokens of these runs were counted before ${TRIAGE_FIX_VERSION} (plugin_version below ${TRIAGE_FIX_VERSION} or missing in the campaign manifest), when the triage call also carried the MCP tools of the account's claude.ai connectors; their token totals overstate what a triage uses since (CHANGELOG 1.5.1).`;
+
 const pctOf = (g) => (g && typeof g.passed === "number" && g.total > 0 ? (100 * g.passed) / g.total : null);
 
 // Grade rows of one run -> timeline [[secs, pct]] sorted by time, final grade, t90/t100.
@@ -329,6 +343,8 @@ export function analyzeRun(row, grades, campaign) {
   const reader = isReaderRun(row)
     ? readerOf(events, readJsonl(join(runDir, "state", "reads-route.jsonl")), { questions: meta?.total ?? g.final?.total ?? null, routed: row.arm === "reader-routed", byCat: g.final?.by_cat ?? null })
     : null;
+  const tokens = tokensOf(results, routes);
+  const triagePreFix = Boolean(tokens.by_model.triage) && preTriageFix(campaign.manifest);
   return {
     run_id: row.run_id,
     campaign: campaign.manifest.campaign ?? campaign.dir,
@@ -347,7 +363,8 @@ export function analyzeRun(row, grades, campaign) {
     wall_s: wallS,
     num_turns: sum("num_turns"),
     result_docs: results.length,
-    tokens: tokensOf(results, routes),
+    tokens,
+    ...(triagePreFix && { triage_pre_fix: true }), // see TRIAGE_NOTE
     score_pct: score === null ? null : Math.round(score * 100) / 100,
     pass,
     ...lenient,
@@ -849,7 +866,10 @@ export function analyze(dirs, opts = {}) {
   const hasReader = all.some((r) => r.reader);
   const cells = buildCells(included, all);
   for (const cell of cells) cell.retries = retries.filter((r) => r.task === cell.task && r.arm === cell.arm && r.cell === cell.cell).length;
+  const preFix = all.filter((r) => r.triage_pre_fix).length;
   return {
+    // Footnotes on the rows: each names the run field that marks the rows it is about.
+    notes: preFix ? [`${preFix} run(s) marked ${TRIAGE_NOTE}`] : [],
     generated_at: opts.now ?? new Date().toISOString(),
     campaigns: campaigns.map((c) => ({ dir: c.dir, manifest: c.manifest, rows: c.runs.length, runs: c.runs.length - superseded.filter(([, x]) => x === c).length, grades: c.grades.length })),
     counts: {
@@ -906,6 +926,7 @@ if (isEntry()) {
   writeFileSync(file, `${JSON.stringify(summary, null, 2)}\n`);
   const { runs, included, excluded } = summary.counts;
   console.log(`${file}: ${runs} runs (${included} analysed, ${excluded} excluded), ${summary.cells.length} cells`);
+  for (const n of summary.notes) console.log(`note: ${n}`);
   for (const h of summary.hypotheses) console.log(`${h.id}: ${h.verdict}`);
   const f = (x) => (x === null ? "n/a" : x.toFixed(2));
   for (const d of summary.paired) console.log(`paired ${d.arm_b} - ${d.arm_a} (${d.metric}): ${f(d.mean_diff)} (task-clustered SE ${f(d.se_clustered)}; ${d.n_pairs} pairs, ${d.n_tasks} tasks${d.direction_only ? ", direction only" : ""})`);

@@ -9,7 +9,7 @@ A Claude Code plugin that sizes each task and runs it the cheapest way that stil
 - The orchestrate route plans the task, builds independent slices in parallel and has a fresh reviewer check each one.
 - Gates are hooks that block a worker launch, a worker's stop or the final reply until a check holds. They read the tests and the reviews, never a [worker's](docs/glossary.md#w) word.
 - It runs inside Claude Code as a plugin: agents, hooks, skills, a workflow and a live [pane](docs/glossary.md#p).
-- An older [SDK pipeline](docs/sdk-pipeline.md) in `src/` does the same for code in git. It is frozen: maintenance only.
+- The native orchestrator is the main toolkit, and `npm start` opens it. The [SDK pipeline](docs/sdk-pipeline.md) in `src/` is secondary: older, frozen (maintenance only), for code in git only, run with `npm run sdk`.
 
 ## Install
 

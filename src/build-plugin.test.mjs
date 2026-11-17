@@ -97,8 +97,9 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     assert.ok(!existsSync(join(outBare, "plugin", "evals")), "no evals/ without a source");
     const hb = hooksJson(outBare).hooks;
     assert.ok(!/judge-hook|prompt-capture/.test(commands(hb)), "no judge hooks without their files");
-    assert.equal(hb.UserPromptSubmit, undefined);
-    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch", "SubagentHandback"]);
+    // Without the judge files UserPromptSubmit holds the nudge alone (its line for the workflow keyword).
+    assert.deepEqual(hb.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/nudge.mjs" --plugin' }] }]);
+    assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch", "SubagentHandback", "Workflow"]);
     assert.ok(existsSync(join(outBare, "plugin", "settings.json")), "the subagent status line setting ships with its script");
     assert.ok(!existsSync(join(bare, "dist")), "a build with --out writes no dist/");
 
@@ -110,7 +111,7 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     assert.equal(judge.hooks.length, 1);
     assert.equal(judge.hooks[0].command, `sh -c 'command -v node >/dev/null 2>&1 || exit 0; exec node "$0" "$@"' "\${CLAUDE_PLUGIN_ROOT}/hooks/judge-hook.mjs" --plugin`);
     assert.deepEqual([judge.hooks[0].onFailure, judge.hooks[0].timeout], ["block", 120]);
-    assert.deepEqual(hf.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/prompt-capture.mjs" --plugin' }] }]);
+    assert.deepEqual(hf.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/prompt-capture.mjs" --plugin' }, { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/nudge.mjs" --plugin' }] }]);
     assert.ok(existsSync(join(outFull, "plugin", "hooks", "judge-hook.mjs")));
     assert.ok(existsSync(join(outFull, "plugin", "workflows", "orchestrate.js")));
   } finally {
@@ -147,6 +148,52 @@ test("--check skips only dist/plugin/evals/results: a stale source named results
     // A file only on one side fails as well.
     writeFileSync(join(dir, "dist", "plugin", "stray.txt"), "x\n");
     assert.equal(run().status, 1, "an extra file in dist/plugin");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--check skips only the two paths Claude Code writes in dist/dashboard: tsconfig.json at its root and .claude-plugin/types/", () => {
+  const dir = project({});
+  try {
+    const dash = join(dir, "dist", "dashboard");
+    const run = () => spawnSync("node", [script, "--check"], { cwd: dir, encoding: "utf8" });
+    /** @param {string} rel @param {string} text */
+    const put = (rel, text) => {
+      mkdirSync(dirname(join(dir, rel)), { recursive: true });
+      writeFileSync(join(dir, rel), text);
+    };
+    assert.equal(spawnSync("node", [script], { cwd: dir, encoding: "utf8" }).status, 0);
+    assert.equal(run().status, 0, "fresh build");
+    // What Claude Code lays down when it loads the pane from dist/dashboard (2.1.326): still up to date.
+    put("dist/dashboard/tsconfig.json", '{\n  "extends": "./.claude-plugin/types/tsconfig.json"\n}\n');
+    put("dist/dashboard/.claude-plugin/types/.gitignore", "*\n");
+    put("dist/dashboard/.claude-plugin/types/tsconfig.json", "{}\n");
+    put("dist/dashboard/.claude-plugin/types/claude-code/index.d.ts", "export {};\n");
+    const generated = run();
+    assert.equal(generated.status, 0, generated.stderr);
+    // Anything else stays compared, the generated files left in place.
+    /** @param {string} rel @param {string} why @param {string} [made] the folder the test created, removed after */
+    const fails = (rel, why, made = rel) => {
+      put(rel, "x\n");
+      const r = run();
+      assert.equal(r.status, 1, why);
+      assert.ok(r.stderr.includes(rel.split("/").slice(2).join("/")), `${why}: ${r.stderr}`);
+      rmSync(join(dir, made), { recursive: true });
+      assert.equal(run().status, 0, `${why}: removed again`);
+    };
+    fails("dist/dashboard/stray.txt", "a stray file in dist/dashboard");
+    fails("dist/dashboard/sub/tsconfig.json", "a tsconfig.json deeper in dist/dashboard", "dist/dashboard/sub");
+    fails("dist/dashboard/hooks/.claude-plugin/types/x.d.ts", "a types folder deeper in dist/dashboard", "dist/dashboard/hooks/.claude-plugin");
+    fails("dist/plugin/tsconfig.json", "a tsconfig.json in dist/plugin");
+    fails("dist/plugin/.claude-plugin/types/x.d.ts", "a types folder in dist/plugin", "dist/plugin/.claude-plugin/types");
+    // A changed built file in dist/dashboard still fails too.
+    const pj = join(dash, ".claude-plugin", "plugin.json");
+    const saved = readFileSync(pj);
+    writeFileSync(pj, "{}\n");
+    assert.equal(run().status, 1, "a changed plugin.json");
+    writeFileSync(pj, saved);
+    assert.equal(run().status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -192,6 +239,23 @@ test("0.4.0 hooks are registered with the same matchers in the project settings 
   assert.ok(quoteCheck.includes('if (duplicate("quote-check.mjs")) process.exit(0);'), "the plugin copy steps aside");
   const files = ["read-log", "researcher-guard", "egress-guard", "compact-context", "quote-check", "file-profile", "bugfix-check"];
   for (const f of files) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", `${f}.mjs`)), `${f}.mjs ships`);
+});
+
+test("1.6.0: the workflow guard is registered on PreToolUse Workflow in the project and the plugin, and the nudge on UserPromptSubmit", () => {
+  for (const [h, tail] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), ""], [read("dist/plugin/hooks/hooks.json"), " --plugin"]])) {
+    const e = entry(h, "PreToolUse", "workflow-guard.mjs");
+    assert.equal(e?.matcher, "Workflow");
+    assert.equal(e.hooks.length, 1);
+    assert.ok(String(e.hooks[0].command).endsWith(`workflow-guard.mjs"${tail}`), e.hooks[0].command);
+    // Deny-only, not fail-closed on a crash: no onFailure, like every gate but the judge.
+    assert.equal(e.hooks[0].onFailure, undefined);
+    const n = entry(h, "UserPromptSubmit", "nudge.mjs");
+    assert.ok(n && n.matcher === undefined, "the nudge sees every typed prompt");
+  }
+  assert.ok(existsSync(join(root, "dist", "plugin", "hooks", "workflow-guard.mjs")), "workflow-guard.mjs ships");
+  const guard = readFileSync(join(root, ".claude", "hooks", "workflow-guard.mjs"), "utf8");
+  assert.ok(guard.includes('if (duplicate("workflow-guard.mjs")) process.exit(0);'), "the plugin copy steps aside");
+  assert.ok(readFileSync(join(root, ".claude", "hooks", "nudge.mjs"), "utf8").includes('if (duplicate("nudge.mjs")) process.exit(0);'), "the plugin nudge steps aside at UserPromptSubmit");
 });
 
 test("the project quote-check matcher matches both the bare and the plugin researcher", () => {
@@ -246,7 +310,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 20);
+  assert.equal(keys.length, 21);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
