@@ -341,3 +341,25 @@ test("audit 2026-11-16 S-2: a worker that crashes or ends without a result is ch
     assert.deepEqual(res.usage, { input: 200_000, output: 10_007, cacheRead: 200_000, cacheWrite: 0 }, end);
   }
 });
+
+// Item 3 of 2.0.0 (CHANGELOG 1.2.0, Known and not fixed: "the judge's own tokens are outside every budget"). The worker's
+// `tokens`, which the run charges and checks against --budget, now include what its Bash judge's model calls spent.
+test("item 3: the judge's own tokens count in the worker's tokens, on a result and on a stream that ends without one", async () => {
+  for (const end of ["result", "no_result"] as const) {
+    const judge = fakeJudge(["allow", "deny"]);
+    const ask = judge.deps.ask;
+    judge.deps.ask = async (p) => ({ ...(await ask(p)), tokens: 700 });
+    const query = ((args: { prompt: string; options: Options }) =>
+      (async function* () {
+        const hook = hookOf(args.options);
+        await call(hook, "git push origin release-a");
+        await call(hook, "git push origin release-b");
+        await call(hook, "git push origin release-b"); // cached: no second model call
+        if (end === "result") yield { type: "result", subtype: "success", is_error: false, result: "done", num_turns: 1, usage: { input_tokens: 5, output_tokens: 5 }, modelUsage: {} };
+      })()) as unknown as typeof sdkQuery;
+    const res = await makeRunAgent({ query, env: {}, judgeDeps: () => judge.deps })(req("writer", { task: "push the release" }));
+    assert.equal(judge.prompts.length, 2, end);
+    assert.equal(res.tokens, (end === "result" ? 10 : 0) + 2 * 700, end);
+    if (end === "result") assert.deepEqual(res.usage, { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 }, "usage stays the worker's own");
+  }
+});

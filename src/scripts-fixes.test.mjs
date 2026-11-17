@@ -600,14 +600,20 @@ for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
 // (the 1.6.1 skill, to show the test fails there).
 const SKILL_FILE = process.env.ORCH_ROUTE_SKILL_FILE || join(root, ".claude", "skills", "route", "SKILL.md");
 
-/** The route command block of the skill, with the task put in for $ARGUMENTS and a folder for $TASK_DIR. */
+/**
+ * The route command block of the skill, with the task put in for $ARGUMENTS and a folder for $TASK_DIR.
+ * @param {string} skillText @param {string} task @param {string} taskDir
+ */
 function routeBlock(skillText, task, taskDir) {
   const m = /```bash\n([^`]*npm run --silent route[^`]*)```/.exec(skillText);
   assert.ok(m, "the route skill has a bash block that runs `npm run --silent route`");
-  return m[1].split("$ARGUMENTS").join(task).split("$TASK_DIR").join(taskDir);
+  return String(m?.[1]).split("$ARGUMENTS").join(task).split("$TASK_DIR").join(taskDir);
 }
 
-/** Runs the block with `shell`; returns the exit code, the arguments the fake npm got and the marker files that exist. */
+/**
+ * Runs the block with `shell`; returns the exit code, the arguments the fake npm got and the marker files that exist.
+ * @param {string} skillText @param {string} task @param {string} [shell] @param {number} [npmExit]
+ */
 function runRouteBlock(skillText, task, shell = "bash", npmExit = 0) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "route-skill-")));
   try {
@@ -660,5 +666,29 @@ test("item 1: the /route block also holds in sh and zsh", { skip: !hasZsh && "zs
       assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
       assert.ok(r.args.includes(`--task=${task}`), `${shell}: ${JSON.stringify(r.args)}`);
     }
+  }
+});
+
+// Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed: "a task that begins with - still fails once the session is
+// started"). Gone since 1.5.0: shown here end to end, not in a dry run. auto.sh runs the session through orchestrate.sh
+// and a fake claude records what it gets: the task is the last argument, after `--`, and never the word after -p.
+test("item 2: a dash-led task reaches the started session as its prompt after `--` (auto.sh, then orchestrate.sh)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "orch-dash-run-"));
+  try {
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+    const bin = fakeBin(tmp);
+    for (const task of ["--help me"]) { // one task: each run takes about a second; W-4 covers the other forms
+      const r = spawnSync("bash", [join(scripts, "auto.sh"), task, repo], { env: cleanEnv({ PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "plain", GIT_CEILING_DIRECTORIES: tmp }), encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      const npxArgs = readFileSync(join(bin, "npx.args"), "utf8").split("\n");
+      assert.ok(npxArgs.includes(`--task=${task}`), "route.ts gets --task=<task>");
+      const args = readFileSync(join(bin, "claude.args"), "utf8").replace(/\n$/, "").split("\n");
+      assert.deepEqual(args.slice(-2), ["--", task]);
+      assert.equal(args[0], "-p");
+      assert.notEqual(args[1], task);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

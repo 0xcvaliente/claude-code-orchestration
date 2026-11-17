@@ -193,22 +193,44 @@ test("budget: triage tokens are subtracted, so the pipeline stops earlier than t
 });
 
 test("budget: an escalated pipeline run also gets the failed solo session's tokens subtracted", async () => {
+  // 2.0.0: a pipeline starts only with at least 10k left, so the numbers are larger than before (planning is 2 x 10000).
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
   const { run, calls } = fake(small);
   const r = await auto({
-    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500 }),
-    testCmd: "test -f a.txt", runBudgetTokens: 3000, // 3000 - 500 triage - 1000 solo = 1500 < 2000 spent on planning
+    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, spend),
+    testCmd: "test -f a.txt", runBudgetTokens: 25_000, // 25000 - 500 triage - 10000 solo = 14500 < 20000 spent on planning
   });
   assert.equal(r.escalated, true);
-  assert.equal(r.soloReport!.tokensByRole.solo, 1000);
+  assert.equal(r.soloReport!.tokensByRole.solo, 10_000);
   assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
   assert.ok(!calledRoles(calls).includes("writer"));
   assert.equal(r.report!.tokensByRole.triager, 500);
-  assert.equal(r.report!.tokensByRole.solo, 1000);
+  assert.equal(r.report!.tokensByRole.solo, 10_000);
 
-  // Counting only the triage tokens would leave 2500, enough for the slice: the solo tokens are what stop it.
+  // Counting only the triage tokens would leave 24500, enough for planning: the solo tokens are what stop it.
   const roomy = fake(small);
-  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, { triager: 500 }), testCmd: "test -f a.txt", runBudgetTokens: 4000 });
+  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 40_000 });
   assert.equal(ok.report!.slices[0]!.status, "passed");
+});
+
+// Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed): a session the cap stopped counted as failed and escalated to
+// the pipeline with almost no budget left. Now a failed session escalates only with at least 10k of the budget left.
+test("item 2: budget: a failed session with less than 10k of the run budget left is not rerun through the pipeline", async () => {
+  for (const [budget, solo] of [[12_000, 10_000], [10_000, 10_000], [15_000, 20_000]] as const) {
+    const { run, calls } = fake(small);
+    const logs: string[] = [];
+    const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500, solo }), testCmd: "test -f a.txt", runBudgetTokens: budget, log: (l) => logs.push(l) });
+    assert.equal(r.escalated, false, `budget ${budget}`);
+    assert.equal(r.report, undefined);
+    assert.ok(!calledRoles(calls).includes("planner"), "no pipeline call");
+    assert.equal(r.soloReport!.ok, false);
+    assert.match(r.soloReport!.error!, /not rerun through the pipeline/);
+    assert.ok(logs.some((l) => /no escalation/.test(l)));
+  }
+  // Exactly 10k left still escalates.
+  const edge = fake(small);
+  const e = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(edge.run, { triager: 500, solo: 10_000 }), testCmd: "test -f a.txt", runBudgetTokens: 20_500 });
+  assert.equal(e.escalated, true);
 });
 
 test("budget: earlier spend that already meets the budget leaves a floor of 1 token, not a crash", async () => {
