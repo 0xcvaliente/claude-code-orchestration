@@ -14,7 +14,13 @@
 // without rg -z or grep -Q, `tail` without follow in any spelling, and none of them (nor wc) on a /dev/ device other
 // than /dev/null (also as an option's value; judged on the text-normalised path and on the path the system resolves
 // the written string to, not on its text); no command may hold a glob in an option's name (`tail -?`,
-// `find . -delet[e]`). Not judged: a glob that the shell expands to a device path (`cat /dev/zer?`). A lone `--`
+// `find . -delet[e]`). Since w3 (release 2.0.0): /proc and /sys are judged like /dev; a FIFO, socket or device
+// operand is refused; a word with a glob is judged on every path it may expand to (`cat /de?/zero`, a symlinked folder
+// behind a wildcard), over-inclusively and within bounds, past which the command is refused (TOO_MANY: the way around it
+// is naming the files or quoting the glob for the command); and du's --files0-from and find's -files0-from values are
+// judged. Not judged: a FIFO a command opens on its own (an ignore file rg or ugrep reads while searching, git's own
+// files), a file created or swapped between the check and the run, and zsh extendedglob operators (`^`, `#`, `~`),
+// which are off in a non-interactive shell. A lone `--`
 // never ends the check (review of 2026-11-10: `rg -e -- --pre=sh x` used it to hide an option).
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output (the session's own permission rules then
 // decide). It never prints an allow or ask decision. Acts only when the bare agent_type is `researcher`; any other
@@ -25,7 +31,7 @@
 // exception: a stderr redirection written exactly `2>/dev/null` or `2>&1`, as a word of its own, writes no file and is
 // allowed (withoutStderrNull); every other redirection, `2> /dev/null` with a space included, is still refused.
 // Decisions go to gates.jsonl in the state dir (gate "researcher", the first word of the offending segment only).
-import { appendFileSync, lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tokenize } from "./judge-core.mjs";
@@ -79,6 +85,17 @@ const MAX_WORD = 4096;
 // and /dev/null (device and inode, from stat, which showed no fault) decides what reaches a device.
 const DEV_ID = statId("/dev");
 const NULL_ID = statId("/dev/null");
+// w3 item 1: /proc and /sys are judged like /dev. Their files can wait for ever (/proc/kmsg, a tracing pipe), and
+// /proc/self is the guard's own process, not the shell's, so no answer about /proc/self/fd/N holds for the command. A
+// path whose text is under one of them, or whose walk passes through the file system of one of them, is refused.
+const SPECIAL_ROOTS = ["/dev", "/proc", "/sys"];
+const SPECIAL_DEVS = SPECIAL_ROOTS.map(statId).flatMap((s) => (s ? [s.dev] : []));
+// w3 item 1: a word with a glob is judged on what the shell can expand it to. The guard lists the folders the pattern
+// names (at most GLOB_ENTRIES names read in one decision) and judges every match (at most GLOB_MATCHES) like an operand;
+// past either bound the command is refused, with the way around it.
+const GLOB_ENTRIES = 20000;
+const GLOB_MATCHES = 500;
+const TOO_MANY = "a glob with too many matches to judge (it may expand to a device or a FIFO); name the files, quote the glob for the command to read (`grep -rn x . --include='*.ts'`), or use `find`";
 // The lstat calls one decision may make; past it the command is refused as too complex to judge.
 const WALK_BUDGET = 20000;
 let walkBudget = WALK_BUDGET;
@@ -223,7 +240,7 @@ function violation(command, cwd, project) {
     const w = words.map((x) => String(x.text));
     if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
     if (w[0] === "sed" && !sedForm(words)) return { reason: SED_FORM, word: "sed" };
-    const option = optionViolation(w, folders);
+    const option = optionViolation(w, folders, words);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -247,6 +264,132 @@ function globInOptionName(w) {
 
 /** A word with literal text only: no expansion and no glob. @param {any} w */
 const literal = (w) => Array.isArray(w?.pieces) && w.pieces.every((/** @type {any} */ p) => "lit" in p);
+
+/** Does the word hold an unquoted glob character? @param {any} w */
+const hasGlob = (w) => Array.isArray(w?.pieces) && w.pieces.some((/** @type {any} */ p) => "glob" in p);
+
+/** Names the glob expansions of this decision may still read (reset per command segment). */
+let globEntries = GLOB_ENTRIES;
+
+/**
+ * The strings to judge for one word run from `folder`: its text and, for a word with a glob, every path the shell may
+ * expand it to there, plus (for `--name=<glob>`) every path the value alone may name, since an unmatched word reaches
+ * the command as written and the command opens the value. null past the bounds. Never throws (a failed listing names
+ * nothing, as for the shell).
+ * @param {any} word @param {string} text @param {string} folder @returns {string[] | null}
+ */
+function pathsOf(word, text, folder) {
+  if (!hasGlob(word)) return [text];
+  /** @type {string[]} */
+  const out = [text];
+  const whole = expand(word.pieces, folder);
+  if (!whole) return null;
+  out.push(...whole);
+  const first = word.pieces[0];
+  if (first && "lit" in first && first.lit.startsWith("--") && first.lit.includes("=")) {
+    const value = [{ lit: first.lit.slice(first.lit.indexOf("=") + 1) }, ...word.pieces.slice(1)];
+    const named = expand(value, folder);
+    if (!named) return null;
+    out.push(...named);
+  }
+  return out.length > GLOB_MATCHES ? null : out;
+}
+
+/**
+ * Every existing path a glob word may expand to from `folder`, as the shell would write it (relative stays relative),
+ * or null past the bounds. Over-inclusive on purpose: `*` and `?` also match names that start with a dot (dotglob,
+ * GLOB_DOTS), a bracket expression matches any one or more characters (the tokenizer keeps no class text, and an
+ * unmatched `[...]` names itself), names match without regard to case, a segment of two or more stars alone also
+ * matches across folders (bash globstar, zsh `**`), and symlinked folders are followed. `.` and `..` match only a
+ * segment that starts with a literal dot, as in every shell.
+ * @param {any[]} pieces @param {string} folder @returns {string[] | null}
+ */
+function expand(pieces, folder) {
+  /** @type {{ re: RegExp | null, text: string, stars: boolean, dot: boolean }[]} */
+  const segs = [];
+  let src = "", text = "", glob = false, dot = false, fresh = true;
+  const close = () => {
+    // A segment of two or more stars alone (`**`) also matches across folders.
+    const stars = glob && text === "" && /^(?:\.\*){2,}$/.test(src);
+    segs.push({ re: glob ? new RegExp(`^${src}$`, "is") : null, text, stars, dot });
+    src = "";
+    text = "";
+    glob = false;
+    dot = false;
+    fresh = true;
+  };
+  for (const p of pieces) {
+    if ("lit" in p) {
+      String(p.lit).split("/").forEach((part, k) => {
+        if (k > 0) close();
+        if (!part) return;
+        if (fresh) dot = part.startsWith(".");
+        fresh = false;
+        src += part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        text += part;
+      });
+    } else if ("glob" in p) {
+      glob = true;
+      fresh = false;
+      src += p.glob === "*" ? ".*" : p.glob === "?" ? "." : ".+";
+    } else return null; // an expansion: refused elsewhere, never judged here
+  }
+  close();
+  const absolute = segs.length > 1 && segs[0]?.re === null && segs[0].text === "";
+  const start = absolute ? "/" : folder;
+  /** @type {string[]} */
+  const found = [];
+  const seen = new Set();
+  let over = false;
+  /** @param {string} dir the folder reached @param {string} shown the text so far @param {number} i */
+  const walk = (dir, shown, i) => {
+    if (over) return;
+    if (i === segs.length) {
+      if (!seen.has(shown)) {
+        seen.add(shown);
+        found.push(shown);
+        if (found.length > GLOB_MATCHES) over = true;
+      }
+      return;
+    }
+    const s = /** @type {(typeof segs)[number]} */ (segs[i]);
+    const sep = i === segs.length - 1 ? "" : "/";
+    const join2 = (/** @type {string} */ name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
+    if (!s.re) {
+      if (absolute && i === 0) return walk("/", "/", 1);
+      return walk(join2(s.text), `${shown}${s.text}${sep}`, i + 1);
+    }
+    /** @type {string[]} */
+    let names = [];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      names = [];
+    }
+    globEntries -= names.length + 1;
+    if (globEntries < 0) {
+      over = true;
+      return;
+    }
+    if (s.dot) names.push(".", "..");
+    for (const name of names) {
+      if (over) return;
+      if (s.stars) {
+        // zero folders, then this name as one more folder with the same `**` still to match
+        if (name !== "." && name !== "..") walk(join2(name), `${shown}${name}/`, i);
+        continue;
+      }
+      if (s.re.test(name)) walk(join2(name), `${shown}${name}${sep}`, i + 1);
+    }
+    if (s.stars) walk(dir, shown, i + 1);
+  };
+  try {
+    walk(start, "", 0);
+  } catch {
+    return null;
+  }
+  return over ? null : found;
+}
 
 /**
  * `sed -n '<N>p'` or `sed -n '<N>,<M>p'` and file operands that are literal and not options, nothing else.
@@ -274,15 +417,47 @@ function allowedWords(w) {
  * it can be the value of one (`rg -e -- --pre=sh x` reads `--` as the pattern and `--pre` as an option). So a word
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
- * @param {string[]} w @param {string[]} folders the folders the command may run in @returns {string | null}
+ * @param {string[]} w @param {string[]} folders the folders the command may run in @param {any[]} [words] the tokenizer's
+ * words of `w` (glob pieces included) @returns {string | null}
  */
-function optionViolation(w, folders) {
+function optionViolation(w, folders, words = []) {
   const first = w[0] ?? "";
   const args = w.slice(1);
+  globEntries = GLOB_ENTRIES;
+  /**
+   * The word at args[i] reads a device (glob expansions included), "many" past the glob bounds, else null.
+   * @param {number} i @returns {string | null}
+   */
+  const deviceAt = (i) => {
+    for (const f of folders) {
+      const list = pathsOf(words[i + 1], args[i] ?? "", f);
+      if (!list) return "many";
+      const hit = list.find((a) => readsDevice(a, f));
+      if (hit !== undefined) return hit;
+    }
+    return null;
+  };
+  // w3 item 1: GNU find's and du's -files0-from / --files0-from read the file they name (to the end, which a device
+  // or FIFO may never reach), so that value is judged like an operand; du's long option in any shortened spelling.
+  /** @param {(a: string) => boolean} isOpt @param {boolean} joined `--name=value` allowed */
+  const filesFrom = (isOpt, joined) => {
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i] ?? "";
+      const name = a.split("=")[0] ?? "";
+      if (!isOpt(name)) continue;
+      const at = joined && a.includes("=") ? i : i + 1;
+      const hit = at < args.length ? deviceAt(at) : null;
+      if (hit === "many") return TOO_MANY;
+      if (hit !== null) return `${first} ${hit} reads a device that may never end`;
+    }
+    return null;
+  };
   if (first === "find") {
     const action = args.find((x) => FIND_ACTIONS.test(x));
-    return action ? `find ${action} runs a program or writes a file` : null;
+    if (action) return `find ${action} runs a program or writes a file`;
+    return filesFrom((n) => n === "-files0-from", false);
   }
+  if (first === "du") return filesFrom((n) => n.length > 3 && n.startsWith("--f") && "--files0-from".startsWith(n), true);
   if (first === "stat") {
     // stat reads metadata only; its long options still pass by name only (and a lone `--` is not one of them).
     const bad = args.find((a) => a.startsWith("--") && !STAT_LONG.has(a.slice(2).split("=")[0] ?? ""));
@@ -298,6 +473,13 @@ function optionViolation(w, folders) {
   // every search is refused, also one with a path elsewhere, since a pattern and a path cannot be told apart).
   const device = [...args, ...(SEARCH.has(first) ? ["."] : [])].find((a) => folders.some((f) => readsDevice(a, f)));
   if (device) return `${first} ${device} reads a device that may never end`;
+  // w3 item 1: a word with a glob, judged on each path the shell may expand it to (the check above saw its text only).
+  for (let i = 0; i < args.length; i++) {
+    if (!hasGlob(words[i + 1])) continue;
+    const hit = deviceAt(i);
+    if (hit === "many") return `${first}: ${TOO_MANY}`;
+    if (hit !== null) return `${first} ${hit} reads a device that may never end`;
+  }
   if (first === "cut") return cutViolation(args);
   if (!SEARCH.has(first) && !PAGERS.has(first)) return null;
   for (const a of args) {
@@ -394,7 +576,7 @@ function judged(q) {
   if (!st) return "missing";
   if (sameId(st, NULL_ID)) return walked;
   if (st.isCharacterDevice() || st.isBlockDevice() || st.isFIFO() || st.isSocket()) return "device";
-  if (DEV_ID && st.dev === DEV_ID.dev) return "device";
+  if (specialDev(st.dev)) return "device";
   return isDevice(walked) ? "device" : walked;
 }
 
@@ -444,7 +626,7 @@ function resolve(p) {
       rest = [...target.split("/").filter((x) => x !== ""), ...rest];
       continue;
     }
-    if (DEV_ID && st.dev === DEV_ID.dev) throughDev = true;
+    if (specialDev(st.dev)) throughDev = true;
     if (rest.length && !st.isDirectory()) return throughDev ? "device" : "missing";
     cur = next;
     last = st;
@@ -526,11 +708,17 @@ function isFolder(p) {
   }
 }
 
-/** Is `x` /dev itself or under it, other than /dev/null (case-folded: /DEV is /dev on a case-insensitive disk)? @param {string} x */
+/**
+ * Is `x` /dev, /proc or /sys itself or under one of them, other than /dev/null (case-folded: /DEV is /dev on a
+ * case-insensitive disk)? @param {string} x
+ */
 function isDevice(x) {
   const l = x.toLowerCase();
-  return (l === "/dev" || l.startsWith("/dev/")) && l !== "/dev/null";
+  return l !== "/dev/null" && SPECIAL_ROOTS.some((r) => l === r || l.startsWith(`${r}/`));
 }
+
+/** Is a file system identity that of /dev, /proc or /sys? @param {number} dev */
+const specialDev = (dev) => SPECIAL_DEVS.includes(dev);
 
 /**
  * Run as a hook only when executed directly (the tests import researcherViolation): the real paths of the entry script

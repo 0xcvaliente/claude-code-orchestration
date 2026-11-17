@@ -814,6 +814,76 @@ test("researcher guard hook (cd item 3): odd payloads exit 0 or 2, never anythin
   }
 });
 
+// w3 item 1: a glob is judged on what it can expand to, a FIFO, socket or device operand is refused, and /proc and /sys
+// are refused like /dev (their files can wait for ever, and /proc/self is the guard's own process, not the shell's).
+const w3 = join(scratch, "w3-glob");
+mkdirSync(join(w3, "docs"), { recursive: true });
+for (const f of ["a.txt", "b.txt", "docs/c.md"]) writeFileSync(join(w3, f), "x\n");
+symlinkSync("/dev", join(w3, "devlink"));
+symlinkSync("/", join(w3, "rootlink"));
+const hasFifo = spawnSync("mkfifo", [join(w3, "pipe")]).status === 0;
+
+test("researcher guard (w3 item 1): a glob that can expand to a device path is refused", () => {
+  for (const c of [
+    "cat /de?/zero",
+    "cat /d*/zero",
+    "head -c 8 /[d]ev/urandom",
+    "wc -c /*/zero",
+    "grep --file=/de?/zero x",
+    "tail -c 8 devl?nk/zero", // through a symlinked folder
+    "cat rootl?nk/../dev/zero", // through a symlink to / and ..
+    "cat rootlink/../de?/zero",
+    "cut -f1 ./../w3-glob/devl*/zero",
+  ]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  assert.ok(researcherViolation("sed -n 1p /d?v/zero", w3), "sed takes no glob operand at all");
+  // /dev/null reached by a glob, ordinary globs, and commands that never read their operands still pass.
+  for (const c of ["cat /de?/null", "wc -l *.txt docs/*.md", "head -n 1 ?.txt", "cat [ab].txt", "grep -n x */*.md", "ls /de?/*", "du -sh /*", "stat /de?/zero", "find /d* -maxdepth 0"]) {
+    assert.equal(researcherViolation(c, w3), null, c);
+  }
+});
+
+test("researcher guard (w3 item 1): a FIFO operand, also behind a glob, is refused; listing it is not", { skip: hasFifo ? false : "mkfifo unavailable" }, () => {
+  for (const c of ["cat pipe", "head -n 1 pip?", "grep x p*", "wc -l ./*", "tail -n 1 [p]ipe", "cut -f1 pipe", "grep -f pipe x a.txt", "rg --file=pip* x ."]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["ls -la pipe", "stat pipe", "find . -name pipe", "ls p*", "du -a ."]) assert.equal(researcherViolation(c, w3), null, c);
+});
+
+test("researcher guard (w3 item 1): /proc and /sys are refused like /dev, in every spelling", () => {
+  for (const c of ["cat /proc/self/fd/0", "head /proc/kmsg", "cat /sys/kernel/notes", "cat /pro?/self/environ", "cat //proc/../proc/cpuinfo", "cat rootlink/../proc/self/fd/0", "grep x /proc", "wc -l /PROC/x"]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat ../notes/proc.md", "grep -rn proc docs", "ls /proc", "stat /sys"]) assert.equal(researcherViolation(c, w3), null, c);
+});
+
+test("researcher guard (w3 item 1): du --files0-from and find -files0-from read their file and are judged", () => {
+  for (const c of ["du --files0-from=/dev/zero", "du --files0-from /dev/zero", "du --files0=/dev/zero", "find -files0-from /dev/zero", "du --files0-from=/de?/zero"]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  assert.equal(researcherViolation("du --files0-from=a.txt", w3), null);
+});
+
+test("researcher guard (w3 item 1): a glob with too many matches to judge is refused, with the way around it", () => {
+  const many = join(scratch, "w3-many");
+  mkdirSync(many, { recursive: true });
+  for (let i = 0; i < 600; i++) writeFileSync(join(many, `f${i}.txt`), "");
+  const v = researcherViolation("cat *.txt", many);
+  assert.ok(v);
+  assert.match(v.reason, /too many/);
+  assert.match(v.reason, /quote/);
+  assert.equal(researcherViolation("grep -rn x . --include='*.txt'", many), null);
+  assert.equal(researcherViolation("wc -l f1?.txt", many), null);
+});
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
   for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src && ls"]) {
