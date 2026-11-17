@@ -19,7 +19,9 @@
 //             and the base run with those files copied in must show at least one new qualified failing test that
 //             lives in a copied file, compared with the base run without them (a failure of the whole file, such as
 //             an import error, does not count: the test body has to run and fail). Blocks say what is missing; after two
-//             such blocks for the agent since its latest SubagentStart it allows with bugfix_unverified_gave_up.
+//             such blocks for the agent since its latest SubagentStart it allows with bugfix_unverified_gave_up. A base
+//             run that cannot start because a lock file differs from the base's (cause lock_mismatch) is outside the
+//             worker's reach: it allows with bugfix_unverified_gave_up at once, with the cause, and never blocks.
 // Base worktrees are created detached in the OS temp dir (prefix orch-base-) and always removed, also when SIGTERM,
 // SIGINT or SIGHUP stops the helper (verify.sh terminates it at its time budget); each base run first
 // prunes leftovers of killed runs (git worktree prune, and orch-base- dirs older than an hour). Nothing commits or moves
@@ -680,8 +682,6 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
   // [a-z_0-9,:"] of the extra line).
   const why = (/** @type {{ cause: string, file?: string }} */ c, how = "") => {
     switch (c.cause) {
-      case "lock_mismatch":
-        return `could not run: the lock file ${c.file ?? ""} of ${short} differs from the one in the main checkout, so the main checkout's dependencies (node_modules) could not be linked into the base worktree`;
       case "worktree_add_failed":
         return `could not run: \`git worktree add\` of ${short} failed, so there was no base worktree to run it in`;
       case "base_timeout":
@@ -690,7 +690,13 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
         return `${how}failed without parsable test names`;
     }
   };
+  // A lock file that differs from the base's is outside the worker's reach: the base worktree can only borrow the main
+  // checkout's node_modules, and a block would only come back after every resume (run of 2026-11-17). Give up at once:
+  // the give-up record carries the cause and is a doubt signal (test_gate_gave_up), so the slice needs an opus review.
+  const outOfReach = (/** @type {{ cause: string }} */ c) =>
+    c.cause === "lock_mismatch" ? { decision: "allow", reason: "bugfix_unverified_gave_up", extra: `"cause":"${c.cause}"`, message: "" } : null;
   const unusable = (/** @type {{ cause: string, file?: string }} */ c, how = "") =>
+    outOfReach(c) ??
     block(
       "bugfix_base_unusable",
       `KIND: bugfix: unverified. The test run on ${short} ${why(c, how)}, so the gate cannot tell whether the changed tests reproduce the bug. Make the test command run cleanly on the base, or report the bug as unverified.`,
@@ -705,7 +711,7 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
     }
   });
   if ("cause" in withTests) {
-    return block("bugfix_no_base", `KIND: bugfix: the gate could not run the reproduction test on ${short}: the test run there ${why(withTests)}.`, `"cause":"${withTests.cause}"`);
+    return outOfReach(withTests) ?? block("bugfix_no_base", `KIND: bugfix: the gate could not run the reproduction test on ${short}: the test run there ${why(withTests)}.`, `"cause":"${withTests.cause}"`);
   }
   if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);

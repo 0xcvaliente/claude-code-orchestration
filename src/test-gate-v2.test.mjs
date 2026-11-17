@@ -485,6 +485,19 @@ test("bugfix: an environment failure on the base blocks as unverified and is not
   assert.ok(!existsSync(cacheFile(dir)));
 });
 
+// K1 (run of 2026-11-17): a lock file that differs from the base is outside the worker's reach (the base worktree can
+// only borrow the main checkout's node_modules), so blocking only produced the same block again after each resume.
+test("bugfix: a lock file that differs from the base gives up at once with its cause and does not block", () => {
+  const { dir, transcript } = bugRepo("bugfix", { ".gitignore": "node_modules/\n", "package-lock.json": "{}\n" });
+  mkdirSync(join(dir, "node_modules"));
+  write(dir, { "package-lock.json": '{"lockfileVersion":3}\n', "app.sh": "VALUE=2\n", "tests/value_test.sh": REPRO });
+  const r = gate(dir, { transcript, env: { ORCH_TEST_CMD: BUG_CMD } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual([last(dir).gate, last(dir).decision, last(dir).reason, last(dir).cause], ["test", "allow", "bugfix_unverified_gave_up", "lock_mismatch"]);
+  assert.equal(r.stderr, "");
+  assert.ok(!/"decision":"block"/.test(gateLog(dir)), "no block was logged first");
+});
+
 test("bugfix blocks and test-failure blocks have separate caps", () => {
   const { dir, transcript } = bugRepo();
   write(dir, { "app.sh": "VALUE=2\n" });
