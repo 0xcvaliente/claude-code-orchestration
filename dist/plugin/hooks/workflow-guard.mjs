@@ -16,13 +16,16 @@
 //    own form, `wf_` then at least six of [a-z0-9-]), nothing else, with
 //    - `name` exactly `orchestrate`: every one of <CLAUDE_PROJECT_DIR>/.claude/workflows/orchestrate.js and
 //      <the input's cwd>/.claude/workflows/orchestrate.js that exists hashes to PROJECT_WORKFLOW_SHA256, and at least one
-//      exists (`workflow_file_missing` otherwise);
+//      exists (`workflow_file_missing` otherwise). "Exists" means anything at the path, a dangling link included: only a
+//      path where nothing exists is skipped, and a candidate that exists but cannot be hashed (unreadable, not a regular
+//      file, over 4 MB) refuses with `workflow_unreadable`. The same holds for every file hashed below (the plugin's
+//      file, both files of the layout rule; a resume's scriptPath refuses with `script_path`);
 //    - `name` exactly `orchestration:orchestrate`, plugin copy of this hook: the plugin's own workflows/orchestrate.js
 //      (the folder above this file, where Claude Code loads the plugin's workflows from) hashes to PLUGIN_WORKFLOW_SHA256;
 //    - `name` exactly `orchestration:orchestrate`, project copy: it cannot see where the plugin is installed, so it
 //      refuses the name (`plugin_not_located`) except in this repository's own layout: some project root holds both
 //      .claude/workflows/orchestrate.js with PROJECT_WORKFLOW_SHA256 and dist/plugin/workflows/orchestrate.js with
-//      PLUGIN_WORKFLOW_SHA256 (the plugin is built from this checkout). That exception is the both-copies case here:
+//      PLUGIN_WORKFLOW_SHA256 (the plugin is built from this checkout), and no root holds either file with other content. That exception is the both-copies case here:
 //      with the plugin on, the plugin copy steps aside (duplicate(), the project registers this hook), so the project
 //      copy alone decides and must not refuse the plugin's real workflow. It checks the built copy, not the installed
 //      one: an installed plugin of another version is trusted as installed. In another project that carries a copy of
@@ -50,7 +53,7 @@ import { appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
-import { fileSha256, PLUGIN_WORKFLOW_SHA256, PROJECT_WORKFLOW_SHA256 } from "./workflow-hash.mjs";
+import { fileHash, MISSING, PLUGIN_WORKFLOW_SHA256, PROJECT_WORKFLOW_SHA256, UNHASHABLE } from "./workflow-hash.mjs";
 
 /** The only names this hook lets through. */
 export const SAVED_NAMES = Object.freeze(["orchestrate", "orchestration:orchestrate"]);
@@ -95,28 +98,36 @@ export function workflowDecision(input, opts = {}) {
     const { scriptPath: p, resumeFromRunId: id } = ti;
     if (keys.some((k) => !RESUME_FILE_KEYS.has(k)) || typeof p !== "string" || typeof id !== "string" || !RUN_ID.test(id)) return out("script_path");
     if (!isAbsolute(p) || !basename(p).endsWith(`-${id}.js`) || basename(dirname(p)) !== "scripts" || basename(dirname(dirname(p))) !== "workflows") return out("script_path");
-    const sha = fileSha256(p);
-    return sha !== null && (sha === want.project || sha === want.plugin) ? allow("saved_workflow_resume") : out("script_path");
+    const sha = fileHash(p);
+    return sha === want.project || sha === want.plugin ? allow("saved_workflow_resume") : out("script_path");
   }
   if (keys.some((k) => !KNOWN_KEYS.has(k))) return out("unknown_shape");
   if (Object.hasOwn(ti, "resumeFromRunId") && (typeof ti.resumeFromRunId !== "string" || !RUN_ID.test(ti.resumeFromRunId))) return out("unknown_shape");
   if (typeof ti.name !== "string") return out("unknown_shape");
   if (!SAVED_NAMES.includes(ti.name)) return out("name_not_allowed");
   const roots = [...new Set([env.CLAUDE_PROJECT_DIR, typeof input.cwd === "string" ? input.cwd : undefined].filter((r) => typeof r === "string" && r !== ""))].map(String);
-  /** Hash of `<root>/.claude/workflows/orchestrate.js`, null when missing. @param {string} r */
-  const projectSha = (r) => fileSha256(join(r, ".claude", ...WORKFLOW));
+  /** Hash state of `<root>/.claude/workflows/orchestrate.js` (fileHash: a hash, MISSING or UNHASHABLE). @param {string} r */
+  const projectHash = (r) => fileHash(join(r, ".claude", ...WORKFLOW));
   if (ti.name === "orchestrate") {
-    const found = roots.map(projectSha).filter((s) => s !== null);
+    // Every candidate that exists must hash to the stored value; only a path where nothing exists is skipped.
+    const found = roots.map(projectHash).filter((h) => h !== MISSING);
     if (found.length === 0) return out("workflow_file_missing");
-    return found.every((s) => s === want.project) ? allow("saved_workflow") : out("workflow_content_mismatch");
+    if (found.includes(UNHASHABLE)) return out("workflow_unreadable");
+    return found.every((h) => h === want.project) ? allow("saved_workflow") : out("workflow_content_mismatch");
   }
   if (opts.plugin && opts.pluginRoot) {
-    const sha = fileSha256(join(opts.pluginRoot, ...WORKFLOW));
-    if (sha === null) return out("workflow_file_missing");
-    return sha === want.plugin ? allow("saved_workflow") : out("workflow_content_mismatch");
+    const h = fileHash(join(opts.pluginRoot, ...WORKFLOW));
+    if (h === MISSING) return out("workflow_file_missing");
+    if (h === UNHASHABLE) return out("workflow_unreadable");
+    return h === want.plugin ? allow("saved_workflow") : out("workflow_content_mismatch");
   }
-  // The project copy: only in this repository's layout, where the plugin is built (see the header).
-  const builtHere = roots.some((r) => projectSha(r) === want.project && fileSha256(join(r, "dist", "plugin", ...WORKFLOW)) === want.plugin);
+  // The project copy: only in this repository's layout, where the plugin is built (see the header). Same rule for
+  // every candidate of every root: one that exists and cannot be hashed refuses, one of other content refuses, and
+  // some root must hold both files.
+  const pairs = roots.map((r) => [projectHash(r), fileHash(join(r, "dist", "plugin", ...WORKFLOW))]);
+  if (pairs.some((pair) => pair.includes(UNHASHABLE))) return out("workflow_unreadable");
+  const consistent = pairs.every(([p, d]) => (p === MISSING || p === want.project) && (d === MISSING || d === want.plugin));
+  const builtHere = consistent && pairs.some(([p, d]) => p === want.project && d === want.plugin);
   return builtHere ? allow("plugin_built_here") : out("plugin_not_located");
 }
 

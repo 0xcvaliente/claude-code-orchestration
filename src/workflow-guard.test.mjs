@@ -7,14 +7,14 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { builtinAgents } from "../.claude/hooks/builtin-agents.mjs";
 import { BLOCK_MESSAGE, guardOff, LOG, RUN_ID, SAVED_NAMES, workflowDecision } from "../.claude/hooks/workflow-guard.mjs";
-import { fileSha256, PLUGIN_WORKFLOW_SHA256, PROJECT_WORKFLOW_SHA256, workflowSha256 } from "../.claude/hooks/workflow-hash.mjs";
+import { fileHash, fileSha256, MISSING, PLUGIN_WORKFLOW_SHA256, PROJECT_WORKFLOW_SHA256, UNHASHABLE as UNHASHABLE_FILE, workflowSha256 } from "../.claude/hooks/workflow-hash.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const hook = (/** @type {string} */ name) => join(root, ".claude", "hooks", name);
@@ -256,16 +256,16 @@ test("bare orchestrate: other content at the saved name is refused, a missing fi
     refused(run(GUARD, written, launch({ name: "orchestrate", resumeFromRunId: RUN })), "workflow_content_mismatch", "a resume by name runs the file as it is now");
     refused(run(GUARD, bare, go), "workflow_file_missing", "no file");
     assert.deepEqual(Object.values(run(GUARD, crlf, go)), SILENT, "a CRLF checkout of the same file");
-    // A folder at the saved path is no file.
+    // A folder at the saved path exists and cannot be hashed: refused, never counted as missing.
     const folder = project({ workflow: false });
     mkdirSync(join(folder, ".claude", "workflows", "orchestrate.js"), { recursive: true });
-    refused(run(GUARD, folder, go), "workflow_file_missing", "a folder");
+    refused(run(GUARD, folder, go), "workflow_unreadable", "a folder");
     // A FIFO at the saved path neither stalls the hook nor passes.
     const fifo = project({ workflow: false });
     mkdirSync(join(fifo, ".claude", "workflows"), { recursive: true });
     if (spawnSync("mkfifo", [join(fifo, ".claude", "workflows", "orchestrate.js")]).status === 0) {
       const t0 = Date.now();
-      refused(run(GUARD, fifo, go), "workflow_file_missing", "a FIFO");
+      refused(run(GUARD, fifo, go), "workflow_unreadable", "a FIFO");
       assert.ok(Date.now() - t0 < 10_000, "the hook did not wait on the FIFO");
     }
     cleanup(folder, fifo);
@@ -275,6 +275,97 @@ test("bare orchestrate: other content at the saved name is refused, a missing fi
     refused(run(GUARD, written, launch({ name: "orchestrate" }, { cwd: good })), "workflow_content_mismatch", "project dir with other content");
   } finally {
     cleanup(written, bare, good, crlf, appended);
+  }
+});
+
+/**
+ * Puts something that exists but cannot be hashed at `file`: "large" (over the 4 MB cap), "folder", "fifo", "device"
+ * (a link to /dev/null), "dangling" (a link to nothing) or "unreadable" (mode 000). False when the platform cannot
+ * make it, or (unreadable) when this process reads it anyway (root).
+ * @param {string} file @param {string} kind
+ */
+function unhashable(file, kind) {
+  mkdirSync(dirname(file), { recursive: true });
+  rmSync(file, { recursive: true, force: true });
+  if (kind === "large") writeFileSync(file, Buffer.alloc(5 * 1024 * 1024));
+  else if (kind === "folder") mkdirSync(file);
+  else if (kind === "fifo") return spawnSync("mkfifo", [file]).status === 0;
+  else if (kind === "device") {
+    if (!existsSync("/dev/null")) return false;
+    symlinkSync("/dev/null", file);
+  } else if (kind === "dangling") symlinkSync(join(dirname(file), "nothing-here.js"), file);
+  else if (kind === "unreadable") {
+    copyFileSync(SOURCE_WF, file);
+    chmodSync(file, 0o000);
+    try {
+      readFileSync(file);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  return true;
+}
+const UNHASHABLE = ["large", "folder", "fifo", "device", "dangling", "unreadable"];
+
+test("a candidate file that exists but cannot be hashed refuses the launch; only a path where nothing exists is skipped", () => {
+  const made = /** @type {string[]} */ ([]);
+  const dirs = /** @type {string[]} */ ([]);
+  try {
+    for (const kind of UNHASHABLE) {
+      // The reported tree: R/.claude/workflows/orchestrate.js cannot be hashed, R/sub holds the real workflow, cwd R/sub.
+      const r = project({ workflow: false });
+      dirs.push(r);
+      mkdirSync(join(r, "sub", ".claude", "workflows"), { recursive: true });
+      copyFileSync(SOURCE_WF, join(r, "sub", ".claude", "workflows", "orchestrate.js"));
+      if (!unhashable(join(r, ".claude", "workflows", "orchestrate.js"), kind)) continue;
+      made.push(kind);
+      refused(run(GUARD, r, launch({ name: "orchestrate" }, { cwd: join(r, "sub") })), "workflow_unreadable", `${kind} in the project dir, the real file in cwd`);
+      refused(run(GUARD, join(r, "sub"), launch({ name: "orchestrate" }, { cwd: r }), { CLAUDE_PROJECT_DIR: join(r, "sub") }), "workflow_unreadable", `${kind} in cwd, the real file in the project dir`);
+      refused(run(GUARD, r, launch({ name: "orchestrate" })), "workflow_unreadable", `${kind} alone`);
+      // The both-copies rule: the project copy, plugin name, this repository's layout with an unhashable file.
+      const layout = project({ built: true });
+      dirs.push(layout);
+      assert.deepEqual(Object.values(run(GUARD, layout, launch({ name: "orchestration:orchestrate" }))), SILENT);
+      unhashable(join(layout, "dist", "plugin", "workflows", "orchestrate.js"), kind);
+      refused(run(GUARD, layout, launch({ name: "orchestration:orchestrate" })), "workflow_unreadable", `${kind} as the built copy`);
+      const layout2 = project({ built: true });
+      dirs.push(layout2);
+      const sub2 = join(layout2, "sub");
+      mkdirSync(sub2);
+      unhashable(join(sub2, ".claude", "workflows", "orchestrate.js"), kind);
+      refused(run(GUARD, layout2, launch({ name: "orchestration:orchestrate" }, { cwd: sub2 })), "workflow_unreadable", `${kind} in a second root of the layout`);
+      // The plugin copy's own file.
+      const plug = pluginDir(false);
+      dirs.push(plug);
+      unhashable(join(plug, "workflows", "orchestrate.js"), kind);
+      refused(run(join(plug, "hooks", "workflow-guard.mjs"), r, launch({ name: "orchestration:orchestrate" }), { CLAUDE_PLUGIN_DATA: plug }, ["--plugin"]), "workflow_unreadable", `${kind} as the plugin's file`);
+      // A resume's scriptPath.
+      const scripts = join(r, "store", "workflows", "scripts");
+      unhashable(join(scripts, `orchestrate-${RUN}.js`), kind);
+      refused(run(GUARD, r, launch({ scriptPath: join(scripts, `orchestrate-${RUN}.js`), resumeFromRunId: RUN })), "script_path", `${kind} as the resume's file`);
+    }
+    assert.ok(made.includes("large") && made.includes("folder") && made.includes("dangling"), made.join(","));
+    // Nothing at all at either root stays refused; nothing at one root is skipped.
+    const bare = project({ workflow: false });
+    const good = project();
+    dirs.push(bare, good);
+    refused(run(GUARD, bare, launch({ name: "orchestrate" }, { cwd: join(bare, "nowhere") })), "workflow_file_missing", "no candidate exists");
+    assert.deepEqual(Object.values(run(GUARD, bare, launch({ name: "orchestrate" }, { cwd: good }))), SILENT, "a root with nothing is skipped");
+    assert.equal(fileHash(join(bare, "missing.js")), MISSING);
+    assert.equal(fileHash(join(bare, "missing-dir", "x.js")), MISSING, "a missing folder on the way");
+    assert.equal(fileHash(join(SOURCE_WF, "x.js")), MISSING, "a file on the way (ENOTDIR)");
+    assert.equal(fileHash(bare), UNHASHABLE_FILE);
+    assert.equal(fileHash(SOURCE_WF), PROJECT_WORKFLOW_SHA256);
+  } finally {
+    for (const d of dirs) {
+      try {
+        spawnSync("chmod", ["-R", "u+rwx", d]);
+      } catch {
+        // best effort before removal
+      }
+    }
+    cleanup(...dirs);
   }
 });
 
