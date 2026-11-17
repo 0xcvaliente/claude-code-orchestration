@@ -105,11 +105,18 @@ hooks_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 
 # Arguments: --plugin (the plugin's copy: its state dir rule, below) and --handback (the hand-back mode, below), any order.
-plugin_flag=0 handback=0
+# --recent-ms=<n> is for tests only (no hook configuration passes it): the result cache's guard against recent changes
+# (test-gate-cache.mjs RECENT_MS, 2000 ms) for this run's store, so a test need not wait out the production guard.
+plugin_flag=0 handback=0 recent_ms=""
 for _a in "$@"; do
-  case "$_a" in --plugin) plugin_flag=1 ;; --handback) handback=1 ;; esac
+  case "$_a" in
+    --plugin) plugin_flag=1 ;;
+    --handback) handback=1 ;;
+    --recent-ms=*) recent_ms="${_a#--recent-ms=}" ;;
+  esac
 done
 unset _a
+case "$recent_ms" in '' | *[!0-9]* | ???????*) recent_ms="" ;; esac
 
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -671,7 +678,7 @@ cache_put() { # result extra message: the hand-back gate only; the helper compar
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || { store_note no_work; return 0; }
   run_limited "$lim" "$work/put.in" "$work/put.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
-    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json"
+    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json" "$recent_ms"
   code="$(sed -n 1p "$work/put.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
   [ "$lim_timed_out" = 0 ] && [ -n "$code" ] || code=put_failed
   store_note "$code"

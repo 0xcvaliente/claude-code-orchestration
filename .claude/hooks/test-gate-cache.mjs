@@ -270,10 +270,17 @@ export function listTrees(roots, o = {}) {
 const isListing = (l) => !!l && typeof l === "object" && /** @type {any} */ (l).v === LIST_VERSION && typeof (/** @type {any} */ (l).clock0) === "number";
 
 /**
- * Why an outcome of a run between listings `l0` and `l1` may not be stored, or "" when it may (see the header).
- * @param {Listing | null | undefined} l0 @param {Listing | null | undefined} l1 @returns {string}
+ * The recent-change guard in ms: RECENT_MS unless a whole number from 1 to 600000 is given (tests only: verify.sh passes
+ * one only with its test argument --recent-ms=<n>, which no hook configuration names). @param {unknown} ms
  */
-export function storeVerdict(l0, l1) {
+export const recentGuard = (ms) => (typeof ms === "number" && Number.isInteger(ms) && ms >= 1 && ms <= 600000 ? ms : RECENT_MS);
+
+/**
+ * Why an outcome of a run between listings `l0` and `l1` may not be stored, or "" when it may (see the header).
+ * `recentMs` is the recent-change guard (recentGuard: RECENT_MS by default).
+ * @param {Listing | null | undefined} l0 @param {Listing | null | undefined} l1 @param {number} [recentMs] @returns {string}
+ */
+export function storeVerdict(l0, l1, recentMs) {
   if (!isListing(l0)) return "l0_missing";
   if (!isListing(l1)) return "l1_missing";
   if (!l0.hash) return `l0_${l0.reason || "incomplete"}`;
@@ -282,7 +289,7 @@ export function storeVerdict(l0, l1) {
   if (l0.coarse || l1.coarse) return "coarse_times";
   if (l0.future || l1.future) return "future_time";
   if (l1.clock0 < l0.clock1 || l1.clock1 < l0.clock0) return "clock_backwards";
-  if (l0.maxMs > l0.clock0 - RECENT_MS) return "recent_change";
+  if (l0.maxMs > l0.clock0 - recentGuard(recentMs)) return "recent_change";
   if (l1.hash !== l0.hash) return "tree_changed";
   return "";
 }
@@ -356,11 +363,12 @@ export const cacheTake = (state, q) => cacheTakeWhy(state, q).entry;
  * L0's hash and clock. Replaces an entry of the same hand-back, keeps the newest MAX_ENTRIES, written atomically.
  * Returns "stored", or the reason code why nothing was stored.
  * @param {string} state @param {CacheEntry} entry @param {Listing | null | undefined} l0 @param {Listing | null | undefined} l1
+ * @param {number} [recentMs] the recent-change guard (storeVerdict; RECENT_MS by default)
  * @returns {string}
  */
-export function cachePut(state, entry, l0, l1) {
+export function cachePut(state, entry, l0, l1, recentMs) {
   if (!/^[0-9a-f]{64}$/.test(entry.key) || !RESULTS.has(entry.result)) return "bad_entry";
-  const why = storeVerdict(l0, l1);
+  const why = storeVerdict(l0, l1, recentMs);
   if (why || !l0?.hash) return why || "l0_missing";
   try {
     const rest = readCache(state).filter((e) => !(e.by && e.by === entry.by && e.agent_id === entry.agent_id && e.session_id === entry.session_id));
@@ -412,8 +420,9 @@ export function refusedHandbacks(state, sessionId, agentId, exclude = "") {
 // the time the command may take (its listing stops there; verify.sh also limits the process).
 //   key <cwd> <cmd> <isolated>                   prints the tree key, or nothing
 //   list <state> <cwd> <secs>                    prints a listing of the trees (one JSON line; hash null if incomplete)
-//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <l0-file> <l1-file>   message on stdin; prints
-//                                                "stored" or the reason code why nothing was stored
+//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <l0-file> <l1-file> [<recent-ms>]   message on
+//                                                stdin; prints "stored" or the reason code why nothing was stored;
+//                                                <recent-ms> (tests only; empty: RECENT_MS) is the recent-change guard
 //   take <state> <key> <session> <agent> <handback-id> <cwd> <secs>   prints result, by, extra, then the message; or
 //                                                "none" and the reason code when no outcome may be taken (cacheTakeWhy)
 //   link <state> <session> <agent>               prints the hand-back the agent's stop follows, or nothing
@@ -456,7 +465,8 @@ if (isMain) {
       const state = a[0] ?? "";
       const message = readFileSync(0, "utf8");
       const entry = { key: a[1] ?? "", result: a[2] ?? "", ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", message };
-      process.stdout.write(`${cachePut(state, entry, readListing(a[7] ?? ""), readListing(a[8] ?? ""))}\n`);
+      const recent = /^[0-9]{1,6}$/.test(a[9] ?? "") ? Number(a[9]) : undefined;
+      process.stdout.write(`${cachePut(state, entry, readListing(a[7] ?? ""), readListing(a[8] ?? ""), recent)}\n`);
     } else if (cmd === "link") process.stdout.write(latestHandbackId(a[1] ?? "", a[2] ?? "", a[0] ?? "") ?? "");
     else if (cmd === "refused") process.stdout.write(String(refusedHandbacks(a[0] ?? "", a[1] ?? "", a[2] ?? "", a[3] ?? "")));
   } catch {
