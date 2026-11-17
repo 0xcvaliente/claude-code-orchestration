@@ -174,15 +174,23 @@ const handbackRecord = (g) => g?.at === "handback" || (typeof g?.handback_id ===
  * group is the stops since the start with its after_handback ("" for none); it has its record once the records with
  * that after_handback are at least as many as the group's stops, and it is the latest of them. So a stop after a
  * hand-back takes only a record of that hand-back's stop (a late record of an earlier stop names another hand-back), and
- * stops with none are paired by count as in 1.6.1.
+ * stops with none are paired by count as in 1.6.1. When no record since the start names the stop's hand-back at all
+ * (an older verify.sh writes none), the unkeyed records since the start are paired by count against all its stops.
  * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start @returns {any}
  */
 export function stopGateOf(stops, gates, start) {
   const latest = stops.at(-1);
   if (!latest) return null;
   const key = linkOf(latest);
+  const since = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start);
+  const recs = since.filter((g) => linkOf(g) === key);
+  if (key && !recs.length) {
+    // No record names the stop's hand-back: an older verify.sh beside newer hooks writes no after_handback. Its
+    // unkeyed records since the start are paired by count against every stop since the start, as in 1.6.1.
+    const unkeyed = since.filter((g) => !linkOf(g));
+    return unkeyed.length && unkeyed.length >= stops.length ? (unkeyed.at(-1) ?? null) : null;
+  }
   const group = stops.filter((x) => linkOf(x) === key).length;
-  const recs = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start && linkOf(g) === key);
   return recs.length >= group ? (recs.at(-1) ?? null) : null;
 }
 

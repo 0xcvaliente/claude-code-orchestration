@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { implementerTestStates, stopGateOf } from "../.claude/hooks/run.mjs";
 import { latestHandbackId } from "../.claude/hooks/state.mjs";
-import { CACHE_FILE, MAX_ENTRIES, REUSE_MAX_S, cachePut, cacheTake, readCache, refusedHandbacks, treeKey } from "../.claude/hooks/test-gate-cache.mjs";
+import { CACHE_FILE, MAX_ENTRIES, REUSE_MAX_S, cachePut, cacheTake, readCache, refusedHandbacks, scanRoots, scanTree, treeKey } from "../.claude/hooks/test-gate-cache.mjs";
 
 const hook = (/** @type {string} */ name) => new URL(`../.claude/hooks/${name}`, import.meta.url).pathname;
 const SWITCH = /ORCH_|CLAUDE_PLUGIN_OPTION|handback_gate|HANDBACK_GATE/;
@@ -62,12 +62,12 @@ function append(dir, name, rec) {
 /**
  * verify.sh as a hook runs it. `handback` adds --handback and a SubagentHandback PreToolUse event.
  * @param {{ dir: string, tmp: string, base: string, counter: string }} s
- * @param {{ handback?: boolean, id?: string, type?: string, toolUseId?: string, env?: Record<string, string>, plugin?: boolean, cmd?: string, tool?: string, noCwd?: boolean }} [o]
+ * @param {{ handback?: boolean, id?: string, type?: string, toolUseId?: string, env?: Record<string, string>, plugin?: boolean, cmd?: string, tool?: string, noCwd?: boolean, cwd?: string }} [o]
  */
 function gate(s, o = {}) {
   /** @type {Record<string, unknown>} */
   const event = { agent_type: o.type ?? "implementer", agent_id: o.id ?? "a1", session_id: "s1" };
-  if (!o.noCwd) event.cwd = s.dir;
+  if (!o.noCwd) event.cwd = o.cwd ?? s.dir;
   if (o.handback) Object.assign(event, { hook_event_name: "PreToolUse", tool_name: o.tool ?? "SubagentHandback", tool_use_id: o.toolUseId ?? "toolu_1", tool_input: { message: "STATUS: pass\nOPEN: none" } });
   else event.hook_event_name = "SubagentStop";
   const args = [hook("verify.sh"), ...(o.plugin ? ["--plugin"] : []), ...(o.handback ? ["--handback"] : [])];
@@ -215,6 +215,144 @@ test("the reviewer's cases: an ignored input and an untracked symlink's target c
   }
 });
 
+// 2.0.0, second review: inside the age limit too, a change since the hand-back's run began means the suite runs.
+test("the reviewer's reproduction: an ignored input changed after the run ended, within seconds, runs the suite and blocks", () => {
+  const s = setup();
+  try {
+    mkdirSync(join(s.dir, "ignored"));
+    writeFileSync(join(s.dir, "ignored", "in.txt"), "ok\n");
+    const cmd = `echo run >> '${s.counter}'; grep -q ok ignored/in.txt`;
+    spawnSync("sleep", ["0.3"]);
+    assert.equal(handBack(s, "toolu_R", { cmd }).status, 0);
+    assert.equal(readCache(stateOf(s.dir)).length, 1, "the pass was stored");
+    writeFileSync(join(s.dir, "ignored", "in.txt"), "bad\n");
+    const stop = gate(s, { cmd });
+    assert.equal(stop.status, 2, "the stop ran the suite and blocks");
+    assert.deepEqual([lastRec(s.dir).reason, lastRec(s.dir).reused, runs(s)], ["tests_failed", undefined, 2]);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("a symlink to a target outside the trees means no record at all, so the stop runs the suite", () => {
+  const s = setup();
+  try {
+    const outside = join(s.base, "outside.txt");
+    writeFileSync(outside, "ok\n");
+    symlinkSync(outside, join(s.dir, "link.txt"));
+    const cmd = `echo run >> '${s.counter}'; grep -q ok link.txt`;
+    spawnSync("sleep", ["0.3"]);
+    assert.equal(handBack(s, "toolu_O", { cmd }).status, 0);
+    assert.equal(readCache(stateOf(s.dir)).length, 0, "an outside target: nothing stored");
+    writeFileSync(outside, "bad\n");
+    assert.equal(gate(s, { cmd }).status, 2);
+    assert.equal(runs(s), 2);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("files the suite creates during the run do not stop the reuse; a file it rewrites, or a later change to one, does", () => {
+  const s = setup();
+  try {
+    mkdirSync(join(s.dir, "ignored"));
+    writeFileSync(join(s.dir, "ignored", "old.txt"), "1\n");
+    spawnSync("sleep", ["0.3"]);
+    const writes = `echo run >> '${s.counter}'; mkdir -p ignored/out; date +%N > ignored/out/report.txt`;
+    assert.equal(handBack(s, "toolu_W1", { cmd: writes }).status, 0);
+    assert.equal(gate(s, { cmd: writes }).status, 0);
+    assert.deepEqual([lastRec(s.dir).reason, lastRec(s.dir).reused, runs(s)], ["tests_passed_cached", "pass", 1], "C10: reused");
+    // A later change to a file the run created: no reuse.
+    spawnSync("sleep", ["0.3"]);
+    assert.equal(handBack(s, "toolu_W2", { cmd: writes }).status, 0);
+    writeFileSync(join(s.dir, "ignored", "out", "report.txt"), "changed\n");
+    assert.equal(gate(s, { cmd: writes }).status, 0);
+    assert.deepEqual([lastRec(s.dir).reused, runs(s)], [undefined, 3]);
+    // A suite that rewrites an existing ignored file: no record (it may be an input changed by another process).
+    spawnSync("sleep", ["0.3"]);
+    const rewrites = `echo run >> '${s.counter}'; date +%N > ignored/old.txt`;
+    assert.equal(handBack(s, "toolu_W3", { cmd: rewrites }).status, 0);
+    assert.equal(readCache(stateOf(s.dir)).filter((e) => e.by === "toolu_W3").length, 0);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("a linked worktree: a change in the main checkout after the run means no reuse; none means reuse", () => {
+  const s = setup();
+  try {
+    const wt = join(s.dir, ".claude", "worktrees", "w1");
+    git(s.dir, "worktree", "add", "-q", "-b", "w1", wt);
+    mkdirSync(join(s.dir, "ignored"));
+    writeFileSync(join(s.dir, "ignored", "dep.js"), "1\n");
+    spawnSync("sleep", ["0.3"]);
+    writeFileSync(join(s.base, "pass"), "");
+    assert.equal(handBack(s, "toolu_M1", { cwd: wt }).status, 0);
+    assert.equal(gate(s, { cwd: wt }).status, 0);
+    assert.deepEqual([lastRec(s.dir).reason, lastRec(s.dir).reused], ["tests_passed_cached", "pass"]);
+    assert.equal(handBack(s, "toolu_M2", { cwd: wt }).status, 0);
+    writeFileSync(join(s.dir, "ignored", "dep.js"), "2\n"); // node_modules-like, in the main checkout
+    const before = runs(s);
+    assert.equal(gate(s, { cwd: wt }).status, 0);
+    assert.deepEqual([lastRec(s.dir).reused, runs(s)], [undefined, before + 1]);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out hand-back run is taken by the stop as a timed-out block, never a pass, and not run again", () => {
+  const s = setup();
+  try {
+    const slow = `echo run >> '${s.counter}'; sleep 30`;
+    spawnSync("sleep", ["0.3"]);
+    // Budget 36 s: the hand-back's run gets 6 s (30 s kept for the key and the scan), then times out.
+    assert.equal(handBack(s, "toolu_T2", { cmd: slow, env: { ORCH_HOOK_BUDGET_S: "36" } }).status, 0);
+    assert.equal(lastRec(s.dir).reason, "handback_timed_out");
+    assert.equal(readCache(stateOf(s.dir))[0]?.result, "timeout");
+    // The same environment as the hand-back (every ORCH_ variable is part of the key).
+    const stop = gate(s, { cmd: slow, env: { ORCH_HOOK_BUDGET_S: "36" } });
+    assert.equal(stop.status, 2);
+    const rec = lastRec(s.dir);
+    assert.deepEqual([rec.decision, rec.reason, rec.reused, rec.timed_out], ["block", "tests_failed", "timeout", 1]);
+    assert.match(stop.stderr, /did not finish within/);
+    assert.equal(runs(s), 1, "the suite was not started a second time");
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("a lock-wait give-up at the hand-back: the stop does not wait for the lock again", () => {
+  const s = setup();
+  try {
+    writeFileSync(join(s.base, "pass"), "");
+    spawnSync("sleep", ["0.3"]);
+    assert.equal(handBack(s, "toolu_LW").status, 0);
+    // Turn the stored outcome into a lock-wait give-up of that hand-back, then hold the lock with a live process.
+    const entries = readCache(stateOf(s.dir)).map((e) => ({ ...e, result: "lock_wait" }));
+    writeFileSync(join(stateOf(s.dir), CACHE_FILE), `${JSON.stringify({ entries })}\n`);
+    writeFileSync(join(stateOf(s.dir), "test-gate.lock"), `${process.pid} ${Math.floor(Date.now() / 1000)}\n`);
+    const t = Date.now();
+    assert.equal(gate(s).status, 0);
+    assert.ok(Date.now() - t < 30000, "no second wait for the lock");
+    assert.deepEqual([lastRec(s.dir).reason, lastRec(s.dir).reused, runs(s)], ["tests_passed", "lock_wait", 2]);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
+test("no time left for the scan at the stop: the suite runs", () => {
+  const s = setup();
+  try {
+    writeFileSync(join(s.base, "pass"), "");
+    spawnSync("sleep", ["0.3"]);
+    assert.equal(handBack(s, "toolu_NT").status, 0);
+    assert.equal(gate(s, { env: { ORCH_HOOK_BUDGET_S: "10" } }).status, 0);
+    assert.deepEqual([lastRec(s.dir).reused, runs(s)], [undefined, 2]);
+  } finally {
+    rmSync(s.base, { recursive: true, force: true });
+  }
+});
+
 test("no reuse for another agent, after a later start of the agent, or for an expired result", () => {
   const s = setup();
   try {
@@ -250,7 +388,8 @@ test("a cached block is never reused as a pass, and nothing is stored for a tree
     writeFileSync(join(s.base, "pass"), "");
     assert.equal(handBack(s, "toolu_2").status, 0);
     const key = readCache(stateOf(s.dir)).find((e) => e.by === "toolu_1")?.key ?? "";
-    assert.equal(cacheTake(stateOf(s.dir), { key, session: "s1", agent: "a1", handback: "toolu_1" })?.result, "fail", "a fail stays a fail");
+    const q = { key, session: "s1", agent: "a1", handback: "toolu_1", roots: scanRoots(s.dir), exclude: [stateOf(s.dir)] };
+    assert.equal(cacheTake(stateOf(s.dir), q)?.result, "fail", "a fail stays a fail");
     rmSync(join(s.base, "pass"));
     const s2 = setup();
     try {
@@ -380,11 +519,19 @@ test("treeKey changes with the tree and the command; the cache is bounded and wr
     assert.deepEqual(readdirSync(state), [CACHE_FILE], "no temporary file left");
     assert.equal(cachePut(state, { key: "z", result: "pass", ts: "" }), false, "a malformed key is refused");
     assert.equal(cachePut(state, { key: "0".repeat(64), result: /** @type {any} */ ("unknown"), ts: "" }), false, "only pass or fail");
-    const last = (MAX_ENTRIES + 4).toString(16).padStart(64, "0");
-    assert.equal(cacheTake(state, { key: last, session: "s", agent: "b", handback: `t${MAX_ENTRIES + 4}` }), null, "another agent");
-    assert.equal(cacheTake(state, { key: "1".repeat(64), session: "s", agent: "a", handback: `t${MAX_ENTRIES + 4}` }), null, "another tree");
-    assert.equal(cacheTake(state, { key: last, session: "s", agent: "a", handback: `t${MAX_ENTRIES + 4}` })?.result, "pass");
-    assert.equal(cacheTake(state, { key: last, session: "s", agent: "a", handback: `t${MAX_ENTRIES + 4}` }), null, "once");
+    const since = Date.now() + 1000; // nothing in the repo is newer
+    const last = "f".repeat(64);
+    assert.ok(cachePut(state, { key: last, result: "pass", ts: new Date().toISOString(), by: "tl", agent_id: "a", session_id: "s", since, during: [] }));
+    const q = { key: last, session: "s", agent: "a", handback: "tl", roots: scanRoots(s.dir), exclude: [state] };
+    assert.equal(cacheTake(state, { ...q, agent: "b" }), null, "another agent");
+    assert.equal(cacheTake(state, { ...q, key: "1".repeat(64) }), null, "another tree");
+    assert.equal(cacheTake(state, { ...q, roots: null }), null, "no scan roots");
+    assert.equal(cacheTake(state, { ...q, deadline: Date.now() - 1 }), null, "a scan that cannot finish");
+    assert.equal(scanTree(scanRoots(s.dir) ?? [], 0, { deadline: Date.now() - 1 }).complete, false);
+    assert.equal(cacheTake(state, { ...q, now: Date.now() + (REUSE_MAX_S + 1) * 1000 }), null, "expired");
+    assert.equal(REUSE_MAX_S, 30);
+    assert.equal(cacheTake(state, q)?.result, "pass");
+    assert.equal(cacheTake(state, q), null, "once");
   } finally {
     rmSync(s.base, { recursive: true, force: true });
   }
@@ -431,4 +578,8 @@ test("run.mjs pairs by the hand-back a stop follows, never across the latest sta
   assert.equal(stopGateOf([stop], [g(0.5, "block", { at: "handback", handback_id: "t1" })], T), null);
   assert.equal(stopGateOf([stop], [g(0.5, "block", { at: "handback", handback_id: "t1" }), g(1.5, "allow")], T)?.decision, "allow");
   assert.equal(implementerTestStates([tel("SubagentStart", 0), stop], [g(2, "block")], "s1").get("i1")?.stopGate?.decision, "block");
+  // A stop after a hand-back whose only record has no key (an older verify.sh): paired by count, not pending for ever.
+  const keyed = tel("SubagentStop", 1, { after_handback: "h1" });
+  assert.equal(stopGateOf([keyed], [g(2, "block")], T)?.decision, "block");
+  assert.equal(stopGateOf([keyed], [], T), null);
 });

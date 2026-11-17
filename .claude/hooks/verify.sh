@@ -56,12 +56,15 @@
 #               helper is killed when the budget runs out. A baseline that cannot run only loses its note (the block
 #               stays); a bugfix check that has no time or is killed blocks as unverified (bugfix_timeout), counted
 #               with the other bugfix blocks.
-#   tree key    (2.0.0; at a hand-back, before and after the test run, and at a stop that follows a hand-back, before
-#               it) min(60, time left - 10): a key run that hangs is stopped like any limit, by the time left - 2 s at
-#               the latest, and with less than 11 s left none runs (no key: nothing is stored or reused, the suite runs).
-#               The key before the run comes out of the time the test run then gets; the one after it comes out of the
-#               base run's (a baseline then only loses its note) and is never followed by the bugfix check (the
-#               hand-back gate does not run it), so the worst cases below stand.
+#   cache       (2.0.0; test-gate-cache.mjs) each of these helper runs gets min(60, time left - 10) s, and none runs
+#               with less than 11 s left (no key, no finished scan: nothing is stored or taken, the suite runs); one
+#               that hangs is stopped like any limit, by the time left - 2 s at the latest. At a hand-back: the tree key
+#               before the run, then (the test run's limit being the time left less 30 s, HB_RESERVE_S) the key again
+#               and the store with its scan of the trees, after the run or after a lock-wait give-up. At a stop that
+#               follows a hand-back: the key and the take with its scan, before the lock and the run. Before the run they
+#               come out of the time the test run then gets; after it they come out of the base run's (a baseline then
+#               only loses its note) and are never followed by the bugfix check (the hand-back gate does not run it),
+#               so the worst cases below stand.
 #   So lock wait + test run + base run (or bugfix check) <= budget: <= 540 s < 600 s by default, <= 870 s < 900 s at most.
 #   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
 #   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
@@ -597,42 +600,72 @@ floor=120
 [ "$floor" -le "$test_limit" ] || floor="$test_limit"
 [ "$floor" -ge 1 ] || floor=1
 
-# The result cache (test-gate-cache.mjs; its header lists the key's parts). compute_key sets key_out to the tree's key,
-# or "" when none can be proven (then nothing is read or written and the suite runs). A stored pass is reused as a pass
-# and a stored fail as a fail; the records say so (reused, reused_from: the hand-back or stop whose gate wrote it).
-# The key is computed only where it can be used: at a hand-back (to store the result) and at a stop that follows one
-# (to reuse it); every key run is cut to the time left in the budget less KEY_RESERVE_S, and skipped when none is left.
+# The result cache (test-gate-cache.mjs; its header states the rule). Only the SubagentStop gate takes an outcome, and
+# only the one its own hand-back's gate stored, once, while fresh, for the same tree key and with nothing newer than that
+# run's start in the work tree or the main checkout (git-ignored files included) but the run's own creations, unchanged;
+# anything else runs the suite. A pass is taken as a pass, a fail as a fail, a timed-out run as a timed-out block and a
+# lock-wait give-up as a reason not to wait again; the records say so (reused, reused_from: the hand-back).
+# compute_key sets key_out (the tree's key, or "") and key_since (the run's start, ms), and is called only where it is
+# used: at a hand-back and at a stop that follows one. Every key run, scan and store is cut to the time left in the
+# budget less KEY_RESERVE_S, at most 60 s, and skipped when none is left: no key or no finished scan means no record
+# and no reuse. The hand-back gate's test run keeps HB_RESERVE_S of the budget for the key and the scan after it.
 KEY_RESERVE_S=10
+HB_RESERVE_S=30
+helper_limit() { # prints the limit for a key run, scan or store, or 0 when none is left
+  local lim=$(($(time_left) - KEY_RESERVE_S))
+  [ "$lim" -le 60 ] || lim=60
+  [ "$lim" -ge 1 ] || lim=0
+  printf '%s' "$lim"
+}
 compute_key() {
   local lim
-  key_out=""
-  lim=$(($(time_left) - KEY_RESERVE_S))
-  [ "$lim" -le 60 ] || lim=60
+  key_out="" key_since=""
+  lim="$(helper_limit)"
   [ "$lim" -ge 1 ] || return 0
   ensure_work || return 0
   run_limited "$lim" /dev/null "$work/key.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" key "$PWD" "$cmd" "$isolated"
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
-  key_out="$(LC_ALL=C tr -cd '0-9a-f' <"$work/key.out" 2>/dev/null)"
-  [ "${#key_out}" = 64 ] || key_out=""
+  key_out="$(sed -n 1p "$work/key.out" 2>/dev/null | LC_ALL=C tr -cd '0-9a-f')"
+  key_since="$(sed -n 2p "$work/key.out" 2>/dev/null | LC_ALL=C tr -cd '0-9')"
+  [ "${#key_out}" = 64 ] && [ -n "$key_since" ] || key_out="" key_since=""
   return 0
 }
-cache_put() { # result extra message: the hand-back gate only
-  [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ -n "$handback_id" ] && [ "$key_stable" = 1 ] || return 0
+# After the run (or the lock-wait give-up): the key again; key_stable=1 when it is the one taken before.
+recheck_key() {
+  local before="$cache_key" since="$cache_since"
+  key_stable=0
+  [ -n "$before" ] || return 0
+  compute_key
+  [ "$key_out" != "$before" ] || key_stable=1
+  key_since="$since"
+}
+cache_put() { # result extra message: the hand-back gate only; the helper scans what the run created and may refuse
+  local lim
+  [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ -n "$cache_since" ] && [ -n "$handback_id" ] && [ "$key_stable" = 1 ] || return 0
+  lim="$(helper_limit)"
+  [ "$lim" -ge 1 ] || return 0
   mkdir -p "$state" 2>/dev/null || return 0
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
-  printf '%s' "$3" | node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" "${session_id:-}" "${agent_id:-}" >/dev/null 2>&1 || true
+  { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || return 0
+  run_limited "$lim" "$work/put.in" /dev/null /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
+    "${session_id:-}" "${agent_id:-}" "$cache_since" "$PWD" "$((lim - 1))"
+  return 0
 }
-cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key=""
+cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key="" cache_since=""
 if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
   compute_key
-  cache_key="$key_out"
+  cache_key="$key_out" cache_since="$key_since"
 fi
 if [ -n "$cache_key" ]; then
   tree_extra="\"tree\":\"${cache_key:0:16}\""
-  # Only the SubagentStop gate reuses, and only its own hand-back's result (test-gate-cache.mjs cacheTake).
-  if [ "$handback" = 0 ] && ensure_work && node "$hooks_dir/test-gate-cache.mjs" take "$state" "$cache_key" "${session_id:-}" "$agent_id" "$after_handback" </dev/null >"$work/cache.out" 2>/dev/null; then
-    cached="$(sed -n 1p "$work/cache.out" 2>/dev/null)"
-    case "$cached" in pass | fail) ;; *) cached="" ;; esac
+  # Only the SubagentStop gate takes an outcome, and only its own hand-back's (test-gate-cache.mjs cacheTake).
+  take_lim="$(helper_limit)"
+  if [ "$handback" = 0 ] && [ "$take_lim" -ge 1 ] && ensure_work; then
+    run_limited "$take_lim" /dev/null "$work/cache.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" take "$state" "$cache_key" "${session_id:-}" "$agent_id" "$after_handback" "$PWD" "$((take_lim - 1))"
+    if [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ]; then
+      cached="$(sed -n 1p "$work/cache.out" 2>/dev/null)"
+      case "$cached" in pass | fail | timeout | lock_wait) ;; *) cached="" ;; esac
+    fi
   fi
   if [ -n "$cached" ]; then
     cached_by="$(sed -n 2p "$work/cache.out" | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
@@ -644,14 +677,32 @@ fi
 
 lock_wait_s=0
 timed_out=0 limit=0
-if [ -n "$cached" ]; then
-  # No lock and no run: the result of this very tree.
-  if [ "$cached" = pass ]; then rc=0; else rc=1; fi
+reused=0
+if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
+  reused=1
+  # No lock and no run: the outcome of this very tree, taken from its hand-back's run.
+  rc=0
+  [ "$cached" = pass ] || rc=1
+  if [ "$cached" = timeout ]; then rc=137 timed_out=1; fi
   out=""
 else
-  acquire_lock "$floor"
-  if [ "$?" = 1 ]; then
+  if [ "$cached" = lock_wait ]; then
+    # The hand-back gate already waited for the suite lock until its floor: this gate does not wait again. An isolated
+    # agent gets its not-run warn at once; the shared tree runs without the lock, as after its own wait.
+    if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+      log_gate warn tests_failed_isolated "\"not_run\":1,\"lock_wait_s\":0"
+      exit 0
+    fi
+    lock_r=1
+  else
+    acquire_lock "$floor"
+    lock_r=$?
+  fi
+  if [ "$lock_r" = 1 ]; then
     if [ "$handback" = 1 ]; then
+      # Stored so that the stop does not wait for the lock a second time (the hand-back and the stop are one wait).
+      recheck_key
+      cache_put lock_wait "" ""
       log_gate allow handback_lock_wait "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
       exit 0
     fi
@@ -661,8 +712,9 @@ else
     fi
   fi
 
-  # The test run: its own limit, cut to the time left in the hook's budget.
+  # The test run: its own limit, cut to the time left in the hook's budget (at a hand-back, less HB_RESERVE_S).
   limit="$(time_left)"
+  [ "$handback" = 0 ] || limit=$((limit - HB_RESERVE_S))
   [ "$limit" -le "$test_limit" ] || limit="$test_limit"
   [ "$limit" -ge 1 ] || limit=1
   ensure_work
@@ -670,17 +722,20 @@ else
   rc="$lim_rc"
   timed_out="$lim_timed_out"
   out="$(cat "$work/test.out" 2>/dev/null)"
+  # At a hand-back: the key again, so that an outcome is stored only for the tree the run began with.
+  [ "$handback" = 0 ] || recheck_key
   if [ "$timed_out" = 1 ]; then
     [ "$rc" != 0 ] || rc=137
     if [ "$handback" = 1 ]; then
+      # Stored as a timed-out block for the stop to take, so the suite is not started a second time for this tree.
+      cache_put timeout "\"timed_out\":1,\"limit_s\":$limit" "$(
+        echo "Acceptance gate failed: the test suite did not finish within $limit seconds and was stopped: $cmd"
+        echo "A test hangs or the suite is too slow. Find the test that does not finish (run the suite with a per-test timeout) and fix it."
+        printf '%s\n' "$out" | tail -n 40
+      )"
       log_gate allow handback_timed_out "\"limit_s\":$limit"
       exit 0
     fi
-  fi
-  # A result is stored only when the tree is what it was before the run (at a hand-back; within the time left).
-  if [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ "$timed_out" = 0 ]; then
-    compute_key
-    [ "$key_out" != "$cache_key" ] || key_stable=1
   fi
 fi
 if [ "$rc" = 0 ]; then
@@ -723,7 +778,7 @@ if [ "$rc" = 0 ]; then
       exit 0
     fi
   fi
-  if [ -n "$cached" ]; then log_gate allow tests_passed_cached; else log_gate allow tests_passed; fi
+  if [ "$reused" = 1 ]; then log_gate allow tests_passed_cached; else log_gate allow tests_passed; fi
   exit 0
 fi
 case "$cmd" in
@@ -740,7 +795,7 @@ esac
 # the output is cut short, and the budget is spent.
 # A reused fail keeps the counts and the message its own run gave (no base run again).
 base_extra="" base_msg=""
-if [ -n "$cached" ]; then
+if [ "$reused" = 1 ]; then
   base_extra="$cached_extra"
 elif [ "$timed_out" = 1 ]; then
   base_extra="\"timed_out\":1,\"limit_s\":$limit"
@@ -763,7 +818,7 @@ fi
 
 # What failed, as the block message says it; stored with a fail (never after a timeout, and not under the opt-in
 # baseline allow mode, whose warn depends on a base run a reused fail does not repeat).
-if [ -n "$cached" ]; then
+if [ "$reused" = 1 ]; then
   fail_msg="$cached_msg"
 else
   fail_msg="$(
