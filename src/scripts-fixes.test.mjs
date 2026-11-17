@@ -144,16 +144,14 @@ const BASE_ENV = { ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ORC
 
 /** orchestrate.sh's claude arguments, one per element. @param {Record<string, string | undefined>} env @param {string} [task] */
 function dryRun(env = {}, task = "t") {
-  const repo = mkdtempSync(join(tmpdir(), "orch-fix-"));
-  try {
+  const repo = R; // 1.6.1: the git -C write rules name the repo folder, so the samples below use this one
+  {
     /** @type {Record<string, string>} */
     const merged = {};
     for (const [k, v] of Object.entries({ ...process.env, ...BASE_ENV, ...env })) if (v !== undefined) merged[k] = v;
     const r = spawnSync("bash", [orchestrateSh, task, repo], { env: merged, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.replace(/\n$/, "").split("\n");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
   }
 }
 
@@ -184,7 +182,8 @@ const permitted = (args, cmd) => matches(allowRules(args), cmd).length > 0 && ma
 const OLD_ALLOW_GIT = ["Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git rev-parse*)", "Bash(git add*)", "Bash(git commit*)", "Bash(git merge*)", "Bash(git branch*)", "Bash(git worktree*)", "Bash(git reset --merge)", "Bash(git -C *)"];
 const OLD_DENY = ["Bash(git push*)", "Bash(git * push*)", "Bash(git remote*)", "Bash(git * remote*)", "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)"];
 
-const R = "/work/repo";
+// A real folder (the test root removes it): orchestrate.sh resolves the repo path, and the write rules name it.
+const R = realpathSync(mkdtempSync(join(tmpdir(), "orch-fix-")));
 const WT = `${R}/.claude/worktrees/agent-a1b2`;
 
 test("W-3: the five git forms the old `Bash(git -C *)` reached are not allowed in a headless run", () => {
@@ -229,9 +228,7 @@ test("W-3: every git form the agents use in a headless run is still allowed", ()
     `git -C ${R} diff HEAD...worktree-agent-a1b2`, `git -C ${R} log --oneline -5`, `git -C ${R} show HEAD --stat`, `git -C ${R} status --short`, "git worktree list", `git -C ${R} worktree list`, "git log --oneline -3", "git show HEAD",
     // researcher's read-only list
     `git -C ${R} ls-files src`, `git -C ${R} rev-list --count HEAD`, `git -C ${R} rev-parse HEAD`, `git -C ${R} branch --show-current`,
-    // a skill slice: the draft worktree from its brief, then add, commit, status and branch there
-    "git -C /s/skills worktree add -b skill/demo /h/.claude/orchestration/skill-drafts/private/demo main", "git -C /h/.claude/orchestration/skill-drafts/private/demo add -A",
-    'git -C /h/.claude/orchestration/skill-drafts/private/demo commit -m "skill: demo"',
+    // a skill slice's draft worktree: the 1.6.1 tests below (skill slices are off here)
   ];
   for (const cmd of needed) assert.ok(permitted(args, cmd), `${cmd}: allow ${matches(allowRules(args), cmd).join(", ") || "none"}, deny ${matches(denyRules(args), cmd).join(", ") || "none"}`);
 });
@@ -253,11 +250,109 @@ test("W-3: every rule denied before is still denied, and no git allow rule reach
   const gitAllow = allowRules(args).filter((r) => r.startsWith("Bash(git"));
   assert.ok(!gitAllow.includes("Bash(git -C *)"), "the open git -C rule is gone");
   for (const rule of gitAllow) {
-    assert.ok(OLD_ALLOW_GIT.includes(rule) || rule.startsWith("Bash(git -C * "), `${rule} is not one of the old rules or a git -C form of one`);
+    assert.ok(OLD_ALLOW_GIT.includes(rule) || rule.startsWith("Bash(git -C * ") || rule.startsWith(`Bash(git -C ${R}`), `${rule} is not one of the old rules or a git -C form of one`);
   }
   // Each sample still refused, whatever the allow list says.
   for (const cmd of ["git push origin main", `git -C ${R} push`, "git remote add o u", `git -C ${R} remote -v`, "sudo ls", "rm -rf /", "rm -fr x", "rm -r -f x", "rm -f -r x"]) {
     assert.equal(permitted(args, cmd), false, cmd);
+  }
+});
+
+// 1.6.1: the git -C rules with a subcommand that writes are pinned to the project folder, its worktrees and a skill
+// slice's folders (Claude Code 2.1.326 warns that a `*` before the subcommand also stands for inserted options).
+/** orchestrate.sh's arguments for the named repo folder (kept), with skill slices on when `skills` is given. @param {string} repo @param {Record<string, string>} [env] */
+function dryRunIn(repo, env = {}) {
+  /** @type {Record<string, string>} */
+  const merged = {};
+  for (const [k, v] of Object.entries({ ...process.env, ...BASE_ENV, ...env })) if (v !== undefined) merged[k] = v;
+  const r = spawnSync("bash", [orchestrateSh, "t", repo], { env: merged, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  return { args: r.stdout.replace(/\n$/, "").split("\n"), stderr: r.stderr };
+}
+const OLD_GIT_C = ["Bash(git -C * branch --show-current)", "Bash(git -C * worktree list*)", "Bash(git -C * worktree add *)", "Bash(git -C * add *)", "Bash(git -C * commit *)", "Bash(git -C * merge *)", "Bash(git -C * reset --merge)"];
+
+
+test("1.6.1: the seven git -C write rules are pinned to known folders; each pinned command was allowed before; others are refused", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "orch-pin-")));
+  try {
+    const repo = join(scratch, "proj");
+    const skills = join(scratch, "skills");
+    const home = join(scratch, "cfg");
+    mkdirSync(repo);
+    mkdirSync(skills);
+    const { args } = dryRunIn(repo, { ORCH_SKILL_CREATE: "", ORCH_SKILLS_REPO_PRIVATE: skills, ORCH_SKILLS_REPO_PUBLIC: "", CLAUDE_CONFIG_DIR: home });
+    const allow = allowRules(args);
+    for (const r of OLD_GIT_C) assert.ok(!allow.includes(r), `${r} is still open`);
+    const gitC = allow.filter((r) => r.startsWith("Bash(git -C "));
+    for (const r of gitC) {
+      const rest = r.slice("Bash(git -C ".length);
+      if (/^\* (status|diff|log|show|rev-parse|ls-files|rev-list)\*\)$/.test(rest)) continue; // the read rules stay as they were
+      assert.ok(rest.startsWith(`${repo} `) || rest.startsWith(`${repo}/.claude/worktrees/* `) || rest.startsWith(`${skills} `) || rest.startsWith(`${home}/orchestration/skill-drafts/* `), `${r} is pinned elsewhere`);
+      // the rule's own text, each `*` filled in, is a command an old rule allowed
+      assert.ok(matches(OLD_GIT_C, r.slice(5, -1).replace(/\*/g, "x")).length > 0, `${r} is no narrowing of an old rule`);
+    }
+    const drafts = `${home}/orchestration/skill-drafts/private/demo`;
+    const wt = `${repo}/.claude/worktrees/agent-a1b2`;
+    const ok = [
+      ...["branch --show-current", "worktree list", "worktree list --porcelain", "add -A", "commit -m m", "merge --abort", "reset --merge"].map((w) => `git -C ${repo} ${w}`),
+      `git -C ${repo} worktree add ${wt} -b x`, `git -C ${repo} merge --no-ff --no-edit worktree-agent-a1b2`, `git -C ${repo} commit -m "orch: checkpoint"`,
+      `git -C ${wt} add -A`, `git -C ${wt} commit -m "s1"`, `git -C ${wt} branch --show-current`,
+      `git -C ${skills} worktree add -b skill/demo ${drafts} main`, `git -C ${drafts} add -A`, `git -C ${drafts} commit -m "Add skill demo"`, `git -C ${drafts} branch --show-current`,
+      // reads stay open for any folder
+      `git -C /elsewhere status --short`, `git -C /elsewhere diff HEAD`, `git -C /elsewhere log --oneline -3`,
+    ];
+    const oldArgs = [...args.slice(0, args.indexOf("--allowedTools") + 1), ...OLD_GIT_C, "Bash(git -C * status*)", "Bash(git -C * diff*)", "Bash(git -C * log*)"];
+    for (const cmd of ok) {
+      assert.ok(permitted(args, cmd), `${cmd}: allow ${matches(allow, cmd).join(", ") || "none"}, deny ${matches(denyRules(args), cmd).join(", ") || "none"}`);
+      assert.ok(permitted(oldArgs, cmd), `${cmd} was not allowed before`);
+    }
+    // a folder outside the pinned ones: no write
+    for (const cmd of [`git -C /elsewhere add -A`, `git -C /elsewhere commit -m m`, `git -C /elsewhere merge x`, `git -C /elsewhere reset --merge`, `git -C /elsewhere worktree add /x`, `git -C /elsewhere branch --show-current`, `git -C ${repo}x add -A`, `git -C ${skills} add -A`]) {
+      assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${matches(allow, cmd).join(", ")}`);
+    }
+    // the deny rules still refuse their forms under a pinned rule
+    for (const cmd of [
+      `git -C ${repo} -c core.hooksPath=/x commit -m m`, `git -C ${wt} -c alias.p=push add -A`, `git -C ${repo} --config-env core.hooksPath=X add -A`,
+      `git -C ${repo} --git-dir add -A`, `git -C ${repo} --exec-path=/x add -A`, `git -C ${repo} --work-tree add x`, `git -C ${repo} -C /x add -A`, `git -C ${wt} -C /x commit -m m`,
+      `git -C ${repo} --namespace merge x`, `git -C ${repo} --super-prefix add x`, `git -C ${repo} --attr-source commit -m m`,
+      `git -C ${repo} add -A reset --hard`, `git -C ${repo} merge x clean -fdx`, `git -C ${drafts} add -A push`, `git -C ${repo} commit -m "drop the -c flag"`,
+    ]) {
+      assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${matches(allow, cmd).join(", ")}`);
+    }
+    // without skill repositories, no skill folder is named
+    const plain = allowRules(dryRunIn(repo, { CLAUDE_CONFIG_DIR: home }).args);
+    assert.ok(!plain.some((r) => r.includes(skills) || r.includes("skill-drafts")), plain.join("\n"));
+    // a replaced list gets no git -C write rule (it had no git -C rule before)
+    const replaced = allowRules(dryRunIn(repo, { ORCH_ALLOWED_TOOLS: "Read", ORCH_SKILL_CREATE: "", ORCH_SKILLS_REPO_PRIVATE: skills, CLAUDE_CONFIG_DIR: home }).args);
+    assert.ok(!replaced.some((r) => r.startsWith("Bash(git -C")), replaced.join("\n"));
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("1.6.1: a repo path with a space is pinned quoted both ways; one with a glob or quote character gets no write rule, never a `*`", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "orch-pin-")));
+  try {
+    const spaced = join(scratch, "my proj");
+    mkdirSync(spaced);
+    const { args } = dryRunIn(spaced);
+    for (const q of ["'", '"']) {
+      assert.ok(allowRules(args).includes(`Bash(git -C ${q}${spaced}${q} add *)`), `${q} form`);
+      assert.ok(permitted(args, `git -C ${q}${spaced}${q} commit -m m`));
+      assert.ok(permitted(args, `git -C ${q}${spaced}/.claude/worktrees/agent-1${q} add -A`));
+      assert.equal(permitted(args, `git -C ${q}${spaced}${q} -c core.hooksPath=/x commit -m m`), false);
+    }
+    assert.equal(permitted(args, `git -C ${spaced} add -A`), false, "unquoted, the folder is two words");
+    for (const name of ["a*b", "a?b", "a[b]", "it's", 'say"hi', "a$b", "a(b)", "a\\b"]) {
+      const dir = join(scratch, name);
+      mkdirSync(dir);
+      const r = dryRunIn(dir);
+      const writes = allowRules(r.args).filter((x) => x.startsWith("Bash(git -C ") && !/^Bash\(git -C \* (status|diff|log|show|rev-parse|ls-files|rev-list)\*\)$/.test(x));
+      assert.deepEqual(writes, [], name);
+      assert.match(r.stderr, /no git -C write rules for/, name);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 });
 

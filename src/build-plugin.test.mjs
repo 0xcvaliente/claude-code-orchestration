@@ -100,7 +100,7 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     // Without the judge files UserPromptSubmit holds the nudge alone (its line for the workflow keyword).
     assert.deepEqual(hb.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/nudge.mjs" --plugin' }] }]);
     assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch", "SubagentHandback", "Workflow"]);
-    assert.ok(existsSync(join(outBare, "plugin", "settings.json")), "the subagent status line setting ships with its script");
+    assert.ok(!existsSync(join(outBare, "plugin", "settings.json")), "no plugin settings.json: the mod's AgentRow hook draws the worker rows");
     assert.ok(!existsSync(join(bare, "dist")), "a build with --out writes no dist/");
 
     build(full, outFull);
@@ -337,9 +337,11 @@ test("1.2.0: reports are checked at SubagentHandback in the project and the plug
     assert.ok(e.hooks.every((/** @type {any} */ c) => c.onFailure === undefined));
   }
   for (const f of ["handback-check.mjs", "subagent-statusline.mjs"]) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", f)), `${f} ships`);
-  // A plugin may set only `agent` and `subagentStatusLine`: the file holds exactly the one key.
-  assert.deepEqual(read("dist/plugin/settings.json"), { subagentStatusLine: { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-statusline.mjs" --plugin' } });
-  // The project's own settings do not set it: the plugin's default, or the person's own row, applies there.
+  // 1.6.1: no plugin settings.json (`subagentStatusLine` is deprecated in favour of mods): the mod shipped as
+  // hooks/dashboard.tsx draws the worker rows with its AgentRow render hook; the script ships for a person's own setting.
+  assert.ok(!existsSync(join(root, "dist", "plugin", "settings.json")), "dist/plugin/settings.json is gone");
+  assert.match(readFileSync(join(root, "dist", "plugin", "hooks", "dashboard.tsx"), "utf8"), /on\('ui\.render', \{ component: 'AgentRow' \}/);
+  // The project's own settings do not set it: the mod's row, or the person's own row, applies there.
   assert.equal(read(".claude/settings.json").subagentStatusLine, undefined);
 });
 
