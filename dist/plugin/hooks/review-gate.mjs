@@ -50,7 +50,7 @@
 import { appendFileSync, existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { countedStatus, currentReviews, doubtSignals, hasOpusPass, isOpusModel, staleMinutes, stallGateOn } from "./brief.mjs";
-import { readJsonl, sessionRuns, sliceOfAgent } from "./run.mjs";
+import { environmentBlock, implementerTestStates, notTestFailure, readJsonl, sessionRuns, sliceOfAgent, testBlocked } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // per reason since the last implementer finished; a new implementer stop resets the count
@@ -136,36 +136,11 @@ const lastImpl = implStops.at(-1);
 // Also (G-2) an implementer whose latest test-gate record is a block with no later SubagentStop: the test gate runs beside
 // the journal at a stop and decides minutes later, so its block can land after a reviewer passed the slice; an agent
 // sent back that never stops again left failing tests nobody saw.
-/** @type {Map<string, { id: string, start: number, stop: number, testAt: number, testBlock: boolean, testReason: string }>} */
-const implAgents = new Map();
-for (const e of telemetry) {
-  if (role(e) !== "implementer" || typeof e.agent_id !== "string" || !e.agent_id) continue;
-  const a = implAgents.get(e.agent_id) ?? { id: e.agent_id, start: -Infinity, stop: -Infinity, testAt: -Infinity, testBlock: false, testReason: "" };
-  if (e.hook_event_name === "SubagentStart") a.start = Math.max(a.start, time(e.ts));
-  if (e.hook_event_name === "SubagentStop") a.stop = Math.max(a.stop, time(e.ts));
-  implAgents.set(e.agent_id, a);
-}
-for (const g of gatesRaw) {
-  if (g.gate !== "test" || typeof g.agent_id !== "string" || (g.session_id !== undefined && g.session_id !== sessionId)) continue;
-  const a = implAgents.get(g.agent_id);
-  if (!a || time(g.ts) < a.testAt) continue;
-  a.testAt = time(g.ts);
-  a.testBlock = g.decision === "block";
-  a.testReason = typeof g.reason === "string" ? g.reason : "";
-}
-/** @param {{ stop: number, testAt: number, testBlock: boolean }} a */
-const testBlocked = (a) => a.testBlock && a.testAt > a.stop;
-// A bugfix_ block comes after the tests passed: the gate could not verify the reproduction test. Anything else (tests_failed,
-// or an older record with no reason) is a test failure and keeps the test-failure text.
-/** @param {{ testReason: string }} a */
-const notTestFailure = (a) => a.testReason.startsWith("bugfix_");
-// The bugfix_ reasons where the check never ran for a cause outside the worker's code (docs/gates.md, "Bugfix check"):
-// no usable base run, no base or no base worktree, no time left in the gate's budget, the temp folder removed. Named one
-// by one, never a prefix: bugfix_no_test and bugfix_test_passes_on_base are the worker's own to fix, and an unknown
-// reason is not cleared. Only these may be cleared by a later passing opus review of the slice.
-const ENVIRONMENT_REASONS = new Set(["bugfix_base_unusable", "bugfix_no_base", "bugfix_timeout", "bugfix_tmp_lost"]);
-/** @param {{ testReason: string }} a */
-const environmentBlock = (a) => ENVIRONMENT_REASONS.has(a.testReason);
+// The comparison of a block's time with the stop's and the classification of block reasons live in run.mjs
+// (implementerTestStates, testBlocked, notTestFailure, environmentBlock), shared with the plan check's reviewer hold.
+// A bugfix_ block (notTestFailure) gets its own text; only an environment block (environmentBlock: the check never ran)
+// may be cleared by a later passing opus review of the slice.
+const implAgents = implementerTestStates(telemetry, gatesRaw, sessionId);
 /** What the gate could not do, per bugfix_ reason. @type {Record<string, string>} */
 const BUGFIX_WHAT = {
   bugfix_no_test: "found no changed or added test file that reproduces the bug",

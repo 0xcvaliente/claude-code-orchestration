@@ -1079,22 +1079,36 @@ test("classify (audit 2026-11-16, fix-judge-3): a table name after ${ with any =
   ]), []);
 });
 
-test("classify (fix-judge-3): the table-expansion scan is linear: 400,000 characters classify well under a second", () => {
-  const n = 100000;
+// Linear, judged by growth rather than a wall-clock limit: a fixed 1 s limit failed under a machine load of 22-27
+// (release 1.6.1, O3). Each shape at n and 8n: linear work takes about 8 times as long, quadratic about 64 times. Best
+// of three runs after a warm-up; the small run counts as at least 2 ms, so timer noise cannot make a fast run look bad.
+test("classify (fix-judge-3): the table-expansion scan is linear: eight times the input takes under 24 times as long", () => {
   const shapes = [
-    `: ${"${#}".repeat(n)} x=1`,
-    `echo ${"'${functions'".repeat(n / 3)}; x=1`,
-    `echo "${"${#x}".repeat(n)}"; y=1`,
-    `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
-    `echo ${"${functions_x}".repeat(n / 4)} z=1`,
-    `echo ${"${#\\\n".repeat(n / 2)}`,
-    `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
+    (n: number) => `: ${"${#}".repeat(n)} x=1`,
+    (n: number) => `echo ${"'${functions'".repeat(n / 3)}; x=1`,
+    (n: number) => `echo "${"${#x}".repeat(n)}"; y=1`,
+    (n: number) => `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
+    (n: number) => `echo ${"${functions_x}".repeat(n / 4)} z=1`,
+    (n: number) => `echo ${"${#\\\n".repeat(n / 2)}`,
+    (n: number) => `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
   ];
-  for (const cmd of shapes) {
-    const t = performance.now();
-    classifyDetail(cmd, CWD);
-    const ms = performance.now() - t;
-    assert.ok(ms < 1000, `${cmd.slice(0, 20)}... (${cmd.length} characters): ${Math.round(ms)} ms`);
+  const best = (cmd: string) => {
+    let ms = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      classifyDetail(cmd, CWD);
+      ms = Math.min(ms, performance.now() - t);
+    }
+    return ms;
+  };
+  const n = 12000;
+  for (const shape of shapes) {
+    const small = shape(n);
+    const large = shape(8 * n);
+    classifyDetail(small, CWD); // warm-up
+    const s = Math.max(best(small), 2);
+    const l = best(large);
+    assert.ok(l < 24 * s, `${large.slice(0, 20)}... (${large.length} characters): ${Math.round(l)} ms against ${Math.round(s)} ms at ${small.length}`);
   }
 });
 

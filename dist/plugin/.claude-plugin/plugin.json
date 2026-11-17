@@ -1,6 +1,6 @@
 {
   "name": "orchestration",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.",
   "author": {
     "name": "0xcvaliente"
@@ -114,6 +114,11 @@
       "type": "string",
       "title": "Workflow guard",
       "description": "Empty: on; off lets every Workflow launch through, not only the saved orchestrate workflow (ORCH_WORKFLOW_GUARD)."
+    },
+    "review_hold": {
+      "type": "string",
+      "title": "Reviewer hold",
+      "description": "Empty: on; off lets a slice's review start while its implementer has a test-gate block it never saw (ORCH_REVIEW_HOLD)."
     }
   }
 }

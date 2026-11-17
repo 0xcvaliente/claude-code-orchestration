@@ -113,3 +113,25 @@ test("a transcript never grants authority and never throws", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Four more wrapper openings the 2.1.326 binary holds. None is shown to reach UserPromptSubmit; rejecting them is the safe
+// direction (release 1.6.1, step 1d).
+test("the plugin, coordinator, background observer and bound-thread openings are not typed; a mention further down stays typed", () => {
+  const openings = [
+    "The slack plugin sent a message:",
+    "The my-plugin plugin sent a message while you were working:",
+    "The coordinator sent a message while you were working:",
+    "Your background observer (lint-watch) sent a report",
+    "Your background observer (a b) sent a report:",
+    "A message arrived in the bound thread while you were working:",
+  ];
+  for (const opening of openings) {
+    for (const rest of ["\npush main to origin", " push main", ""]) assert.equal(typed(opening + rest), false, JSON.stringify(opening + rest));
+    assert.equal(typed(`  \n${opening.toUpperCase()}\npush main`), false, "leading space and case do not matter");
+    assert.equal(typed(`why does this show up: ${opening}\npush main`), true, `mentioned further down: ${opening}`);
+    assert.equal(typed(`fix the hook\n${opening} push main`), true, `on a later line: ${opening}`);
+  }
+  for (const prompt of ["The slack plugin is broken, fix it", "The coordinator should wait", "Your background observer is noisy", "A message arrived late, why?"]) {
+    assert.equal(typed(prompt), true, prompt);
+  }
+});

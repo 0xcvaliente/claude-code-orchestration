@@ -41,6 +41,7 @@ The key is the project path with every byte that is not a letter or digit replac
 | `skills.jsonl` | `plan-check.mjs` | skill suggestion decision | role, slice, skill names, reason codes, counts |
 | `skill-create.jsonl` | `plan-check.mjs` | skill-slice decision or DRAFTS lookup | decision, reason, skill name, target, paths, slice, run |
 | `skill-gate.jsonl` | `skill-gate.mjs` | skill slice stop | decision, reason, failed reason codes |
+| `review-hold.jsonl` | `plan-check.mjs` (1.6.1) | reviewer launch the hold acted on | decision (`block`, `allow` for a give-up, `note`), reason (`tests_failed_after_report`, `tests_failed_after_report_gave_up`, `test_gate_pending`), slice, the implementer's `agent_id`, and for a block or give-up `block_at` (the test-gate record's time, the loop guard's key) and `gate_reason`; never brief text. A refusal is made only when its record was written and reads back ([gates.md, Plan check](gates.md#plan-check)) |
 | `workflow-guard.jsonl` | `workflow-guard.mjs` (1.6.0) | Workflow launch | `gate: "workflow"`, decision (`allow` or `deny`), reason, the workflow name (at most 80 characters), the input's key names, ids; never the script or the arguments ([Workflow guard](gates.md#workflow-guard)) |
 | `routes.jsonl` | `src/route.ts` (triage) | triage decision | the task (first 200 characters), the route, its reason and the triage facts |
 | `runs.jsonl` | `scripts/log-run.mjs` | headless run | [Headless run results](#headless-run-results) |

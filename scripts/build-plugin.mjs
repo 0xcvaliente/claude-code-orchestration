@@ -154,6 +154,7 @@ const OPTIONS = [
   ["skills_repo_private", "string", "Private skills repository", "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."],
   ["skills_repo_public", "string", "Public skills repository", "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."],
   ["workflow_guard", "string", "Workflow guard", "Empty: on; off lets every Workflow launch through, not only the saved orchestrate workflow (ORCH_WORKFLOW_GUARD)."],
+  ["review_hold", "string", "Reviewer hold", "Empty: on; off lets a slice's review start while its implementer has a test-gate block it never saw (ORCH_REVIEW_HOLD)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(

@@ -113,7 +113,8 @@ tools=(
 # subcommand. A folder is written into a rule only when every character of it is a plain one (letters, digits, bytes of
 # a non-ASCII letter, space and _@%+=:,./-): a `*`, `?`, `[`, quote, backslash, `$` or `(` in a folder would widen or
 # break the rule, so that folder gets no rule and its git -C writes are refused (plain `git add` and the like in the
-# agent's own folder still run). A folder with a space gets the rule twice, as '<dir>' and "<dir>".
+# agent's own folder still run). A folder the plan check would quote gets the rule as '<dir>' and "<dir>" (and bare
+# too, unless it holds a space).
 git_dir_ok() {
   local LC_ALL=C hi=$'\x80'-$'\xff'
   case "$1" in /*) ;; *) return 1 ;; esac
@@ -135,7 +136,12 @@ git_c_rules() {
     return 0
   fi
   local forms=("$dir$suffix")
-  [[ "$dir" == *' '* ]] && forms=("'$dir$suffix'" "\"$dir$suffix\"")
+  # Quoted forms for every folder the plan check's sh() quotes (a character outside [A-Za-z0-9_@%+=:,./-], so a space or
+  # a non-ASCII letter), so the hook's own `git -C '<dir>' ...` is allowed; a folder with a space has no bare form.
+  if ! (LC_ALL=C; [[ "$dir" != *[!A-Za-z0-9_@%+=:,./-]* ]]); then
+    forms=("'$dir$suffix'" "\"$dir$suffix\"")
+    [[ "$dir" == *' '* ]] || forms+=("$dir$suffix")
+  fi
   for f in "${forms[@]}"; do
     for s in "$@"; do tools+=("Bash(git -C $f $s)"); done
   done
@@ -242,13 +248,14 @@ args+=(--append-system-prompt "This run is unattended: nobody can answer a quest
 # (--namespace, --git-dir, --work-tree, --exec-path, --super-prefix, --attr-source, a second -C), so such a value cannot
 # pose as the subcommand of a `git -C * <subcommand>*` rule. They do not stop a command built to get around them: a
 # `git -C * status*` rule also matches `git -C /r branch -D main status`. A guard against mistakes, not a boundary.
-# `git * -c*` also refuses a commit whose message has " -c" in it. Variadic: keep it before --allowedTools.
+# `git * -c*` also refuses a commit whose message has " -c" in it. `git -C */../*` stops a path that climbs out of a
+# pinned folder (`<repo>/.claude/worktrees/../../x`); it also refuses an argument with `/../` in it. Variadic: keep it before --allowedTools.
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
   "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)"
   "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)"
   "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean -*)"
   "Bash(git * --namespace*)" "Bash(git * --git-dir*)" "Bash(git * --work-tree*)" "Bash(git * --exec-path*)"
-  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)")
+  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)" "Bash(git -C */../*)")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last, or end it with `--`
 # `--` ends both the variadic --allowedTools and option parsing, so a dash-led task is the prompt.
 case "$task" in -*) args+=(-- "$task") ;; esac

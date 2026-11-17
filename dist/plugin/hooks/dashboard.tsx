@@ -906,11 +906,12 @@ async function newRun($: Ctx, t: number, keepVerdict: boolean) {
 // Blocked Agent launches: the gate's reason code when its message names one, else the reason the plan check's message stands for.
 const GATE_REASONS = [
   'not_in_plan', 'builtin_agent_in_run', 'agents_running', 'constraints_unchecked', 'opus_review_required', 'missing_lines', 'no_plan_review', 'light_path_multi',
-  'file_overlap', 'dependency_cycle',
+  'file_overlap', 'dependency_cycle', 'tests_failed_after_report',
 ]
 const GATE_PHRASES: [RegExp, string][] = [
   [/every implementer brief starts with SLICE/i, 'missing_lines'], [/PATH: light is only for/i, 'light_path_multi'], [/no plan review has finished/i, 'no_plan_review'],
   [/would change files another slice owns/i, 'file_overlap'], [/forms a cycle/i, 'dependency_cycle'],
+  [/tests failed after the worker had reported/i, 'tests_failed_after_report'],
 ]
 const denialOf = (ran: unknown) => {
   const text = stringsOf(ran).join('\n').slice(0, 20_000)

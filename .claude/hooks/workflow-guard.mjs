@@ -34,7 +34,7 @@
 //    `scriptPath` is an absolute path to `.../workflows/scripts/<anything>-<resumeFromRunId>.js` (the copy Claude Code
 //    persists for every launch, and the form its resume notices give) and that file hashes to either stored value.
 // Shapes observed live (Claude Code 2.1.326; docs/data/live-checks-2026-11-17.md, Check 5, and
-// docs/data/probes-1.6.1-k3.md): an ad-hoc launch reaches PreToolUse as {"script": "<the whole script>"}; a saved launch
+// docs/data/live-checks-2026-11-17-b.md, K9): an ad-hoc launch reaches PreToolUse as {"script": "<the whole script>"}; a saved launch
 // as {"name": "orchestrate", "args": {...}}; a resume by name as {"name", "args", "resumeFromRunId"}, and it runs the
 // saved file as it is now; a resume by file as {"args", "scriptPath", "resumeFromRunId"}, where scriptPath is the
 // persisted copy, byte for byte the saved file. `scriptPath` without `resumeFromRunId`, or with `name` or `script`, was

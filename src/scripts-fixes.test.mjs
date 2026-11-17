@@ -356,6 +356,35 @@ test("1.6.1: a repo path with a space is pinned quoted both ways; one with a glo
   }
 });
 
+test("1.6.1: a folder the plan check quotes (non-ASCII) is pinned quoted too, so the hook's own `git -C '<repo>' worktree add` runs", () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "orch-pin-")));
+  try {
+    const repo = join(scratch, "pröj");
+    const skills = join(scratch, "ünï");
+    const home = join(scratch, "cfg");
+    mkdirSync(repo);
+    mkdirSync(skills);
+    const { args } = dryRunIn(repo, { ORCH_SKILL_CREATE: "", ORCH_SKILLS_REPO_PRIVATE: skills, ORCH_SKILLS_REPO_PUBLIC: "", CLAUDE_CONFIG_DIR: home });
+    const drafts = `${home}/orchestration/skill-drafts/private/demo`;
+    for (const q of ["'", '"', ""]) {
+      assert.ok(permitted(args, `git -C ${q}${skills}${q} worktree add -b skill/demo ${drafts} main`), `${q || "unquoted"} skills repo`);
+      assert.ok(permitted(args, `git -C ${q}${repo}${q} commit -m m`), `${q || "unquoted"} repo`);
+      assert.ok(permitted(args, `git -C ${q}${repo}/.claude/worktrees/agent-1${q} add -A`), `${q || "unquoted"} worktree`);
+      assert.equal(permitted(args, `git -C ${q}${repo}${q} -c core.hooksPath=/x commit -m m`), false);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("1.6.1: a git -C path that climbs with `..` out of a pinned worktree folder is refused", () => {
+  const args = dryRun();
+  for (const cmd of [`git -C ${R}/.claude/worktrees/../../x commit -m m`, `git -C ${R}/.claude/worktrees/a/../../../x add -A`, `git -C '${R}/.claude/worktrees/../../x' add -A`]) {
+    assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${matches(allowRules(args), cmd).join(", ")}`);
+  }
+  assert.ok(permitted(args, `git -C ${R} diff HEAD...worktree-agent-a1b2`), "a range is no climb");
+});
+
 test("W-3: the git denies are on every headless run, also with a replaced allow list", () => {
   const def = denyRules(dryRun());
   const replaced = denyRules(dryRun({ ORCH_ALLOWED_TOOLS: "Read\nBash(git -C *)" }));

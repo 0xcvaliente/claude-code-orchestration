@@ -1581,14 +1581,14 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
   await s.tool.call({ tool: 'mcp__claude_ai_Google_Drive__search_files', query: 'q' })
   await s.tool.call({ tool: 'mcp__notion__notion-search', query: 'q' })
   await s.tool.call({ tool: 'Skill', skill: 'x' }) // counted by skill.prompt, not as a tool
-  await spawnWith($, 'e1', 'look around', 'Explore') // any agent type is listed, not only the four roles
+  await spawnWith($, 'e1', 'look around', 'scout') // any agent type is listed, not only the four roles
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await s.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'b1' }) // an agent's tools count too
   await s.tool.call({ tool: NAME, ...VERDICT }) // the pane's own route tool is a connector too
   const want = [
     'skills     ', 'orchestration:route · plugin-authoring',
     'connectors ', 'Google Drive · notion · orchestration-dashboard',
-    'agents     ', 'Explore 1 · implementer 1',
+    'agents     ', 'scout 1 · implementer 1',
     'tools      ', 'Read 2 · Bash 2 · Edit 1 · Grep 1', // broken.ts errored, so two reads ran
     'edited     ', 'a.ts',
     'read       ', '1 file',
@@ -1601,7 +1601,7 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
   await spawnWith($, 'b2', brief('s9'), IMPL)
   const t = await texts($)
   expect(t.some(x => /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1$/.test(x))).toBe(false)
-  expect(usedOf(t).slice(4, 6)).toEqual(['agents     ', 'implementer 2 · Explore 1'])
+  expect(usedOf(t).slice(4, 6)).toEqual(['agents     ', 'implementer 2 · scout 1'])
 })
 
 test('used in this session: on a narrow pane a row keeps as many names as fit and ends in +N', async ($, on) => {
@@ -1965,16 +1965,20 @@ test('blocked launches: a gate denial of an Agent call is logged with its reason
   on('tool.call', (_: unknown, e: any) => ({
     deny: e.prompt?.includes('s9') ? 'Plan check: slice s9 is not in the plan (not_in_plan). Re-plan with REPLAN first.'
       : e.prompt?.includes('s8') ? 'Plan check: no plan review has finished in this session. Send the plan to a reviewer.'
-      : e.prompt?.includes('s7') ? 'Review gate: let not_in_plan_gave_up through' : 'The user rejected this tool call',
+      : e.prompt?.includes('s7') ? 'Review gate: let not_in_plan_gave_up through'
+      : e.prompt?.includes('s5') ? 'Plan check: slice s5: the tests failed after the worker had reported. Resume that implementer first with SendMessage (to: a1), then launch the review.'
+      : 'The user rejected this tool call',
   }))
   await boot($, on)
   const call = ($ as any).tool.call
   await spawnWith($, 'b1', brief('s1'), IMPL)
   for (const s of ['s9', 's8', 's7', 's6']) await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief(s), description: s })
+  await call({ tool: 'Agent', subagent_type: 'orchestration:reviewer', prompt: 'SLICE: s5\nReview it.', description: 'review s5' }) // the reviewer hold (1.6.1)
   const t = await texts($, 100, 200)
   expect(t.some(x => /⊘ blocked not_in_plan · s9 · implementer$/.test(x))).toBe(true)
   expect(t.some(x => /⊘ blocked no_plan_review · s8 · implementer$/.test(x))).toBe(true)
-  expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(2) // a gave-up form and a person's denial are not gate blocks
+  expect(t.some(x => /⊘ blocked tests_failed_after_report · s5 · reviewer$/.test(x))).toBe(true)
+  expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(3) // a gave-up form and a person's denial are not gate blocks
 })
 
 test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as done; an implementer reply with none still is', async ($, on) => {
@@ -2259,7 +2263,7 @@ test('worker rows: cut by display width, whole characters only (wide CJK and emo
 
 test("worker rows: only this plugin's four workers, plain or under the plugin's name, get a row of the mod", async () => {
   expect(['researcher', IMPL, 'reviewer', 'orchestration:integrator'].map(workerRole)).toEqual(['researcher', 'implementer', 'reviewer', 'integrator'])
-  for (const type of ['Explore', 'general-purpose', 'other-plugin:reviewer', 'orchestration:orchestrator', 'orchestration:reviewer-bot', '', undefined]) {
+  for (const type of ['scout', 'helper-agent', 'other-plugin:reviewer', 'orchestration:orchestrator', 'orchestration:reviewer-bot', '', undefined]) {
     expect(workerRow(row('x', type), RECORDS)).toBe(null)
   }
   expect(workerRow({ type: 'implementer' } as never, RECORDS)).toBe(null)
@@ -2285,7 +2289,7 @@ test("worker rows: the AgentRow hook draws a worker's row with the pane off, and
   await spawnWith($, 'a2', `${brief('s1')}\nRISKY: yes`, IMPL)
   await drawRow($, 'a2', IMPL)
   expect(seen.at(-1)?.body).toBe('implementer s1 #2 risky · opus · 50.0k (25%) · Running the tests')
-  await drawRow($, 'x1', 'Explore')
+  await drawRow($, 'x1', 'scout')
   expect(seen.at(-1)?.id).toBe('x1')
   expect(seen.at(-1)?.body).toBe(undefined)
   await drawRow($, 'a2', IMPL, { body: "the person's own line" })

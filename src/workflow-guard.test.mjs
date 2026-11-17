@@ -2,7 +2,7 @@
 // stored hashes in workflow-hash.mjs) and the nudge's refusal of the workflow keyword (nudge.mjs, UserPromptSubmit).
 // Run as child processes against temp projects; no model call. The input shapes are the ones recorded live in
 // docs/data/live-checks-2026-11-17.md, Check 5 ({"script": ...} for a script written on the spot, {"name": ...,
-// "args": ...} for a saved workflow) and docs/data/probes-1.6.1-k3.md (a resume by name adds "resumeFromRunId"; a
+// "args": ...} for a saved workflow) and docs/data/live-checks-2026-11-17-b.md, K9 (a resume by name adds "resumeFromRunId"; a
 // resume by file is {"args", "scriptPath", "resumeFromRunId"} with scriptPath the persisted copy of the saved file).
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";

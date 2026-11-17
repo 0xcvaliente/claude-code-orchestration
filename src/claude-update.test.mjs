@@ -3,12 +3,12 @@
 import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentsOf, check, HEADLESS_ENV, HEADLESS_FLAGS, HIDDEN_FLAGS, main, missingFlags, parseVersion, writeSource } from "../scripts/claude-update.mjs";
+import { agentsOf, check, HEADLESS_ENV, HEADLESS_FLAGS, HIDDEN_FLAGS, main, missingFlags, parseVersion, sandboxCheck, writeSource } from "../scripts/claude-update.mjs";
 import { BUILTIN_AGENTS } from "../.claude/hooks/builtin-agents.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -346,5 +346,38 @@ test("check sandbox --fix: adds the entry, keeps every other key and the indent;
     assert.match(c?.text ?? "", /could not be read/);
   } finally {
     m.done();
+  }
+});
+
+test("check sandbox: symlinks are resolved; --fix writes through a symlinked settings.json and adds no second entry for one folder", () => {
+  const top = mkdtempSync(join(tmpdir(), "claude-update-link-"));
+  try {
+    // A dotfiles link: settings.json points at a file in another folder. --fix changes that file and keeps the link.
+    const real = join(top, "real");
+    mkdirSync(real);
+    const dots = join(top, "dotfiles");
+    mkdirSync(dots);
+    const target = join(dots, "settings.json");
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true } }, null, 2)}\n`);
+    symlinkSync(target, join(real, "settings.json"));
+    const env = { CLAUDE_CONFIG_DIR: real, HOME: top };
+    assert.equal(sandboxCheck({ fix: true, env }).status, "fixed");
+    assert.ok(lstatSync(join(real, "settings.json")).isSymbolicLink(), "the link stays a link");
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")).sandbox.filesystem.allowWrite, [join(real, "orchestration")], "the linked file changed");
+    assert.equal(sandboxCheck({ env }).status, "ok");
+    // The config folder is a symlink and allowWrite names its real path: covered, and --fix adds nothing.
+    const link = join(top, "link");
+    symlinkSync(real, link);
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true, filesystem: { allowWrite: [join(real, "orchestration")] } } }, null, 2)}\n`);
+    const before = readFileSync(target, "utf8");
+    const viaLink = { CLAUDE_CONFIG_DIR: link, HOME: top };
+    assert.equal(sandboxCheck({ env: viaLink }).status, "ok", "the real path covers the linked folder");
+    assert.equal(sandboxCheck({ fix: true, env: viaLink }).status, "ok");
+    assert.equal(readFileSync(target, "utf8"), before, "no second entry");
+    // The other way round: the entry names the link, the config folder is the real path.
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true, filesystem: { allowWrite: [join(link, "orchestration")] } } }, null, 2)}\n`);
+    assert.equal(sandboxCheck({ env }).status, "ok", "the linked path covers the real folder");
+  } finally {
+    rmSync(top, { recursive: true, force: true });
   }
 });

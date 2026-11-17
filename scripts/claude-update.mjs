@@ -31,7 +31,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BUILTIN_AGENTS, FORK, OWN_AGENTS, learnedBuiltins, learnedFile } from "../.claude/hooks/builtin-agents.mjs";
 
@@ -123,9 +123,29 @@ export function writeSource(root, names) {
 const configDir = (env) => env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
 
 /**
+ * `p` with symlinks resolved: the longest existing leading part goes through realpath and the rest is kept, so a path
+ * that does not exist yet still compares equal to its linked spelling.
+ * @param {string} p an absolute path
+ */
+function realish(p) {
+  let head = p;
+  let tail = "";
+  for (;;) {
+    try {
+      return join(realpathSync(head), tail);
+    } catch {
+      const up = dirname(head);
+      if (up === head) return p;
+      tail = join(basename(head), tail);
+      head = up;
+    }
+  }
+}
+
+/**
  * Whether one sandbox.filesystem.allowWrite entry of the user settings covers `dir`. Entries resolve as Claude Code
  * resolves sandbox.filesystem paths: absolute (`//` too), `~` expanded, or relative to the settings file's folder; a
- * trailing `/**` or `/*` counts as the folder itself.
+ * trailing `/**` or `/*` counts as the folder itself. Both sides are compared with symlinks resolved.
  * @param {unknown} entry @param {string} dir @param {string} base the settings file's folder @param {string} home
  */
 export function coversPath(entry, dir, base, home) {
@@ -133,8 +153,8 @@ export function coversPath(entry, dir, base, home) {
   let p = entry.trim().replace(/\/\*\*?$/, "");
   if (p === "~" || p.startsWith("~/")) p = join(home, p.slice(1));
   else if (p.startsWith("//")) p = p.slice(1);
-  const abs = isAbsolute(p) ? resolve(p) : resolve(base, p);
-  const rel = relative(abs, resolve(dir));
+  const abs = realish(isAbsolute(p) ? resolve(p) : resolve(base, p));
+  const rel = relative(abs, realish(resolve(dir)));
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
@@ -179,8 +199,10 @@ export function sandboxCheck({ fix = false, env = process.env } = {}) {
     sb.filesystem = fs ?? {};
     sb.filesystem.allowWrite = [...(list ?? []), dir];
     const indent = /^[ \t]+(?=")/m.exec(text)?.[0] ?? "  ";
-    writeFileSync(`${file}.tmp`, `${JSON.stringify(settings, null, indent)}${text.endsWith("\n") ? "\n" : ""}`);
-    renameSync(`${file}.tmp`, file);
+    // A symlinked settings.json (a dotfiles link) is written at its target, so the link stays and the linked file changes.
+    const out = realpathSync(file);
+    writeFileSync(`${out}.tmp`, `${JSON.stringify(settings, null, indent)}${text.endsWith("\n") ? "\n" : ""}`);
+    renameSync(`${out}.tmp`, out);
     return { status: "fixed", text: `added ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite in ${file}; restart Claude Code` };
   }
   return { status: "warn", text: `${need}: add ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite${fixable ? ", or run with --fix" : ` (${file} has a sandbox.filesystem block of another shape, so --fix leaves it to you)`}` };
