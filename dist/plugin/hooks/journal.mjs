@@ -31,7 +31,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
-import { duplicate, ensureStateDir, handbackFor, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, handbackFor, latestHandbackId, stateDir } from "./state.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -156,6 +156,8 @@ function filesTouched(entries, hookCwd) {
 if (p.hook_event_name !== "SubagentStop" || !STOP_ROLES.includes(bare(p.agent_type))) process.exit(0);
 const role = bare(p.agent_type);
 const agentId = typeof p.agent_id === "string" && p.agent_id ? p.agent_id : null;
+// The hand-back this stop follows (state.mjs latestHandbackId), as verify.sh and telemetry.mjs read it at this stop.
+const afterHandback = latestHandbackId(p.session_id, agentId);
 
 /** @type {any[]} */
 let entries = [];
@@ -219,5 +221,6 @@ if (p.stop_hook_active === true && agentId) {
     // no earlier record readable: a stop of its own
   }
 }
+if (afterHandback) rec = /** @type {typeof rec} */ ({ ...rec, after_handback: afterHandback });
 append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);

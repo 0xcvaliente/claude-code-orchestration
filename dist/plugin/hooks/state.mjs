@@ -10,6 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
 // Plugin userConfig reaches hooks as CLAUDE_PLUGIN_OPTION_<KEY>; the hooks read ORCH_<KEY>. verify.sh has the same list.
@@ -161,6 +162,28 @@ export function ensureStateDir(state = own) {
 // stop and may run at the same time): it belongs to a stop when it is newer than that hook's own previous stop record
 // of the agent, so a resumed agent whose next run ends without a hand-back falls back to today's sources.
 export const HANDBACK_LOG = "handbacks.jsonl";
+
+/**
+ * The hand-back a stop follows (2.0.0): the tool_use_id of the agent's latest SubagentHandback capture in handbacks.jsonl
+ * (handback-check.mjs writes it at PreToolUse, before the stop) since its latest SubagentStart in telemetry.jsonl, or
+ * null when it has handed nothing back since (a worker that only stops). verify.sh (through test-gate-cache.mjs),
+ * telemetry.mjs and journal.mjs read the same two logs at one stop, so they store the same value as after_handback, and
+ * run.mjs pairs a stop with its test-gate record by it. (A transcript-based key did not work: live, the transcript was
+ * still being written while the stop hooks ran, docs/data/probes-2.0.0-b1.md.)
+ * @param {unknown} sessionId @param {unknown} agentId @param {string} [dir] @returns {string | null}
+ */
+export function latestHandbackId(sessionId, agentId, dir = stateDir) {
+  if (typeof sessionId !== "string" || typeof agentId !== "string" || !agentId) return null;
+  let start = -Infinity;
+  for (const e of agentRecords(dir, "telemetry.jsonl", sessionId, agentId)) {
+    if (e.hook_event_name === "SubagentStart") start = Math.max(start, Date.parse(e.ts) || -Infinity);
+  }
+  const id = agentRecords(dir, HANDBACK_LOG, sessionId, agentId)
+    .filter((c) => typeof c.tool_use_id === "string" && c.tool_use_id && !(Date.parse(c.ts) < start))
+    .at(-1)?.tool_use_id;
+  const clean = typeof id === "string" ? id.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
+  return clean || null;
+}
 
 /** Records of a JSON-lines log in `dir` for one session and agent; [] when unreadable. @param {string} dir @param {string} name @param {string} sessionId @param {string} agentId */
 function agentRecords(dir, name, sessionId, agentId) {

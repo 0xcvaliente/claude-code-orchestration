@@ -580,6 +580,19 @@ test("G-2 Stop gate: a test-gate block after a passing review, with no later sto
   assert.equal(s.last().reason, "implementer_unfinished_gave_up");
 });
 
+test("2.0.0 Stop gate: a hand-back gate's allow after a SubagentStop tests_failed block never clears it (implementer_unfinished)", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "tests_failed");
+  const later = { ts: new Date(Date.now() + 50).toISOString(), gate: "test", decision: "allow", reason: "tests_passed", session_id: "s1", agent_id: id, at: "handback", handback_id: "toolu_z" };
+  appendFileSync(join(s.dir, ".claude", "state", "gates.jsonl"), `${JSON.stringify(later)}\n`);
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+});
+
 test("G-2 Stop gate: a test-gate block followed by a stop of the same implementer is answered; an allow record never gates", () => {
   const s = session({ ORCH_ESCALATION: "off" });
   s.plan();

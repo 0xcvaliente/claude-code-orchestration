@@ -117,8 +117,13 @@ const timeOf = (ts) => Date.parse(String(ts ?? "")) || 0;
  * stopGate: the test-gate record of the agent's latest stop, or null while the gate has not reported on it. The gate
  * writes one record per implementer stop, and the stops' hooks run side by side: telemetry stamps a stop after reading
  * the transcript, so a fast gate record (no_code_changes, no_test_command) can carry an earlier time than its own stop.
- * So records are paired with stops by count, not by time: since the agent's latest start (a resume is a start), the
- * latest stop has its record once there are at least as many test-gate records as stops, and it is the latest of them.
+ * So records are paired with stops by key and count, never by time and never across the agent's latest start
+ * (stopGateOf): a stop that follows a hand-back and its test-gate record carry the same after_handback (2.0.0); a stop
+ * with none (a worker that only stops, or older logs) is paired by count as before. The hand-back gate's records (at
+ * "handback", handback_id) belong to a hand-back and are never a stop's record.
+ * test, testAt, testBlock and testReason come from the SubagentStop gate's records only (a reuse, tests_passed_cached,
+ * is one): a hand-back gate's record is never an agent's test record, so a hand-back allow can never replace or clear
+ * a SubagentStop block, for testBlocked (the review gate's implementer_unfinished) or for the reviewer hold.
  * The review gate keeps comparing times (testBlocked); only the plan check's reviewer hold reads stopGate.
  */
 
@@ -126,7 +131,8 @@ const timeOf = (ts) => Date.parse(String(ts ?? "")) || 0;
  * The implementer agents of a session with their latest start, stop and test-gate record. `telemetry` holds
  * SubagentStart/SubagentStop records (telemetry.jsonl, or loadRecords' `starts`); only bare or namespaced `implementer`
  * agent types count. `gates` holds gates.jsonl records; only test-gate records with an agent_id of one of those agents and
- * this session (or no session_id, older verify.sh) count, and on equal times the later line wins.
+ * this session (or no session_id, older verify.sh) count, never the hand-back gate's, and on equal times the later
+ * line wins.
  * @param {any[]} telemetry @param {any[]} gates @param {string} sessionId @returns {Map<string, ImplementerTestState>}
  */
 export function implementerTestStates(telemetry, gates, sessionId) {
@@ -141,6 +147,7 @@ export function implementerTestStates(telemetry, gates, sessionId) {
   }
   for (const g of gates) {
     if (g.gate !== "test" || typeof g.agent_id !== "string" || (g.session_id !== undefined && g.session_id !== sessionId)) continue;
+    if (handbackRecord(g)) continue; // a hand-back's record: never the agent's test record (see the typedef)
     const a = agents.get(g.agent_id);
     if (!a || timeOf(g.ts) < a.testAt) continue;
     a.testAt = timeOf(g.ts);
@@ -149,14 +156,47 @@ export function implementerTestStates(telemetry, gates, sessionId) {
     a.test = g;
   }
   for (const a of agents.values()) {
-    const stops = telemetry.filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && timeOf(e.ts) >= a.start).length;
-    // Records in line order; a stable sort by time keeps that order for equal times.
-    const mine = gates
-      .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId) && timeOf(g.ts) >= a.start)
+    // Stops since the latest start, in time order (a stable sort keeps line order for equal times).
+    const stops = telemetry
+      .filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && timeOf(e.ts) >= a.start)
       .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
-    a.stopGate = stops > 0 && mine.length >= stops ? mine.at(-1) : null;
+    const mine = gates
+      .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId))
+      .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
+    a.stopGate = stopGateOf(stops, mine, a.start);
   }
   return agents;
+}
+
+/** The hand-back a stop or a stop's test-gate record follows (state.mjs latestHandbackId), or "". @param {any} r @returns {string} */
+const linkOf = (r) => (typeof r?.after_handback === "string" ? r.after_handback : "");
+/** A record of the hand-back gate (verify.sh --handback): it belongs to a hand-back, never to a stop. @param {any} g */
+const handbackRecord = (g) => g?.at === "handback" || (typeof g?.handback_id === "string" && g.handback_id !== "");
+
+/**
+ * The test-gate record of the latest of `stops` (the agent's stops since its latest start, in time order), or null while
+ * the gate has not reported on it. Only records since that start count, never the hand-back gate's. The latest stop's
+ * group is the stops since the start with its after_handback ("" for none); it has its record once the records with
+ * that after_handback are at least as many as the group's stops, and it is the latest of them. So a stop after a
+ * hand-back takes only a record of that hand-back's stop (a late record of an earlier stop names another hand-back), and
+ * stops with none are paired by count as in 1.6.1. When no record since the start names the stop's hand-back at all
+ * (an older verify.sh writes none), the unkeyed records since the start are paired by count against all its stops.
+ * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start @returns {any}
+ */
+export function stopGateOf(stops, gates, start) {
+  const latest = stops.at(-1);
+  if (!latest) return null;
+  const key = linkOf(latest);
+  const since = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start);
+  const recs = since.filter((g) => linkOf(g) === key);
+  if (key && !recs.length) {
+    // No record names the stop's hand-back: an older verify.sh beside newer hooks writes no after_handback. Its
+    // unkeyed records since the start are paired by count against every stop since the start, as in 1.6.1.
+    const unkeyed = since.filter((g) => !linkOf(g));
+    return unkeyed.length && unkeyed.length >= stops.length ? (unkeyed.at(-1) ?? null) : null;
+  }
+  const group = stops.filter((x) => linkOf(x) === key).length;
+  return recs.length >= group ? (recs.at(-1) ?? null) : null;
 }
 
 /** The agent's latest test-gate record is a block later than its latest stop. @param {{ stop: number, testAt: number, testBlock: boolean }} a */

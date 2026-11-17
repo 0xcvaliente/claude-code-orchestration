@@ -85,8 +85,17 @@ const hooks = {
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs"), timeout: 60 }] },
       { matcher: "Bash", hooks: [{ type: "command", command: run("researcher-guard.mjs") }] },
       { matcher: "WebFetch", hooks: [{ type: "command", command: run("egress-guard.mjs") }] },
-      // Before a worker's report is delivered (auto mode): its format, and a researcher's quotes. Both filter by agent type.
-      { matcher: "SubagentHandback", hooks: [{ type: "command", command: run("handback-check.mjs") }, { type: "command", command: run("quote-check.mjs") }] },
+      // Before a worker's report is delivered (auto mode): its format, a researcher's quotes, and the test gate for the
+      // namespaced implementer (verify.sh --handback; the project copy takes the bare type). All filter by agent type.
+      // The test gate gets the SubagentStop gate's 900 s, so its own budget (verify.sh) ends first.
+      {
+        matcher: "SubagentHandback",
+        hooks: [
+          { type: "command", command: run("handback-check.mjs") },
+          { type: "command", command: run("quote-check.mjs") },
+          { type: "command", command: `"\${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh" --handback --plugin`, timeout: 900 },
+        ],
+      },
       // Deny-only: refuses every Workflow launch but this repo's saved orchestrate workflow (a plugin cannot ship
       // permissions.deny, and Claude Code's own workflow switch would remove the saved workflow too).
       { matcher: "Workflow", hooks: [{ type: "command", command: run("workflow-guard.mjs") }] },
