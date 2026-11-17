@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Written by scripts/test-dashboard.mjs from src/fixtures/briefs (the harness lets a test import only its plugin's own code files: no node:fs, no .json).
 import fixtures from '../fixtures/briefs/fixtures'
+import * as mod from './register'
 import { displayWidth, parseHeader, parsePlan, parseReply, parseStatus, shortTokens, workerRole, workerRow } from './register'
 
 const PANE = {
@@ -908,6 +909,7 @@ test('a spawn over two minutes after the last agent, while the main turn is open
 
 test('stale work (no turn.complete, last agent over ten minutes ago) is signed off and a prompt starts clean', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
+  mock.env(on, { ORCH_RUN_STALE_MIN: '10' }) // the gates' stale time, set in the environment as the hooks read it
   await wave($, on, { clock })
   await clock.advance(300_000) // five minutes: still open
   expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
@@ -928,6 +930,7 @@ const liveTexts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((x
 // about 30 s and timed the test out. Unmounted, a pulse only writes the tick.
 test('stale work: the timer draws a last redraw when it stops, so the open pane shows signed off with no other event', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
+  mock.env(on, { ORCH_RUN_STALE_MIN: '10' }) // the gates' stale time, set in the environment as the hooks read it
   await wave($, on, { clock })
   expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
   for (let i = 0; i < 59; i++) await clock.advance(10_000) // 590 s of 250 ms pulses: still open
@@ -965,6 +968,7 @@ test('the timer ticks while work is open with no agents and stops, after a last 
 
 test('known tradeoff: a main turn busy over ten minutes after the last agent counts as stale; a following spawn starts a clean run', SLOW, async ($, on) => {
   const clock = mock.clock(on, { now: 10_000 })
+  mock.env(on, { ORCH_RUN_STALE_MIN: '10' }) // the gates' stale time, set in the environment as the hooks read it
   await wave($, on, { clock })
   await clock.advance(700_000) // a long build, no turn.complete yet
   let t = await texts($)
@@ -2310,4 +2314,196 @@ test("worker rows: a state read that fails keeps Claude Code's own row", SLOW, a
   refuse = false
   expect(seen.at(-1)?.id).toBe('a1')
   expect(seen.at(-1)?.body).toBe(undefined)
+})
+
+
+// ---- 2.0.0: the documented inaccuracies of the pane (docs/dashboard.md, Limits), one case each.
+const sendMessage = ($: any, to: string) => $.tool.call({ tool: 'SendMessage', to, message: 'fix the gaps' })
+
+test('item 1: a retry launched while the failed agent still runs gets its own attempt', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await spawnWith($, 'b2', brief('s1'), IMPL) // a fresh implementer of s1 while b1 still runs
+  await finish($, 'b1', FAIL)
+  const t = await texts($, 100, 200)
+  expect(t.includes('attempt 1/2') && t.includes('attempt 2/2')).toBe(true)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1 ↻2 /.test(x))).toBe(true)
+  expect(t.some(x => /^✖ s1 /.test(x))).toBe(true)
+})
+
+test("item 2: the gates' stale time: the environment wins over the plugin option, else the option, else 30 minutes", async () => {
+  const settingsOf = (mod as any).settingsOf
+  expect(typeof settingsOf).toBe('function')
+  expect(settingsOf({}).staleMs).toBe(30 * 60_000)
+  expect(settingsOf({}, { run_stale_min: 12 }).staleMs).toBe(12 * 60_000)
+  expect(settingsOf({ run: '7' }, { run_stale_min: 12 }).staleMs).toBe(7 * 60_000)
+  expect(settingsOf({ run: '' }, { run_stale_min: 12 }).staleMs).toBe(30 * 60_000) // set but empty: the variable wins and is no number
+  expect(settingsOf({ run: 'x' }).staleMs).toBe(30 * 60_000)
+  expect(settingsOf({}, { gap_min: 60 }).gapMin).toBe(60)
+  expect(settingsOf({ gap: '101' }).gapMin).toBe(80)
+  expect(settingsOf({ gap: '0' }).gapMin).toBe(0)
+  expect(settingsOf({ escalation: ' OFF ' }).escalation).toBe('off')
+  expect(settingsOf({}, { escalation: 'always' }).escalation).toBe('always')
+  expect(settingsOf({ escalation: 'sometimes' }).escalation).toBe('auto')
+})
+
+test('item 2: with no setting the pane keeps a run 30 minutes, not 10, as the gates do', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  await wave($, on, { clock })
+  await clock.advance(700_000) // over ten minutes, under thirty
+  expect((await texts($)).some(x => /dispatching/.test(x))).toBe(true)
+})
+
+test('item 2: the stale time set in the environment is the one the pane uses', SLOW, async ($, on) => {
+  const clock = mock.clock(on, { now: 10_000 })
+  mock.env(on, { ORCH_RUN_STALE_MIN: '5' })
+  await wave($, on, { clock })
+  await clock.advance(400_000) // over five minutes
+  expect((await texts($)).some(x => /all agents passed/.test(x))).toBe(true)
+})
+
+test('item 3: no flicker to signed off while a planned slice is still open, even with nothing running and the main turn ended', async ($, on) => {
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nSLICE: s2 - two', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await s.turn.complete(mainDone('answer')) // between two waves: s2 is not launched yet
+  let t = await texts($, 100, 200)
+  expect(t.some(x => /all agents passed|signed off with/.test(x))).toBe(false)
+  expect(t.filter(x => x === '1 slice not final: s2').length).toBe(2) // the orchestrator box and the sign-off box
+  await spawnWith($, 'b2', brief('s2'), IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s2', REVQ)
+  await finish($, 'r2', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+})
+
+test('item 4: the gap cutoff from the environment decides doubt (a gap of 40 fails a review at a cutoff of 30)', async ($, on) => {
+  mock.env(on, { ORCH_GAP_MIN: '30' })
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 40 a variable name could be clearer\nOPEN: none')
+  const t = await texts($, 100, 200)
+  expect(t.includes('✖ s1 ⇧opus? · one')).toBe(true) // a counted fail: no doubt mark
+  expect(t.some(x => x.includes('doubt'))).toBe(false)
+})
+
+test('item 4: escalation off in the environment: no opus mark and a risky slice is final on a sonnet pass', async ($, on) => {
+  mock.env(on, { ORCH_ESCALATION: 'off' })
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nRISKY: yes', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ · one')).toBe(true)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'the next job' }) // final: the run is closed and the prompt starts clean
+  t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+})
+
+test("items 4 and 7: the test gate's records in gates.jsonl show both reasons, ask for an opus review and keep the run open", async ($, on) => {
+  mock.env(on, { HOME: '/home/t', CLAUDE_PROJECT_DIR: '/proj' })
+  const file = '/proj/.claude/state/gates.jsonl'
+  const lines = [
+    JSON.stringify({ ts: new Date(5000).toISOString(), session_id: 'x', gate: 'test', reason: 'tests_failed_isolated', agent_id: 'b1' }),
+    JSON.stringify({ ts: new Date(6000).toISOString(), session_id: 'x', gate: 'test', reason: 'max_blocks_reached', agent_id: 'b1' }),
+    JSON.stringify({ ts: new Date(6000).toISOString(), gate: 'test', reason: 'max_blocks_reached', agent_id: 'someone-else' }),
+    'not json',
+  ].join('\n') + '\n'
+  on('fs.stat', (_: unknown, e: any) => (e.path === file ? { value: { kind: 'file', size: lines.length, mtimeMs: 0, isLink: false } } : { deny: 'ENOENT' }))
+  on('fs.read', (_: unknown, e: any) => (e.path === file ? { value: lines } : { deny: 'ENOENT' }))
+  on('fs.list', () => ({ deny: 'ENOENT' }))
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await s.turn.complete(mainDone('answer'))
+  const t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚠isolated ⚠gate gave up ⇧opus? · one')).toBe(true)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(false) // not final: an opus review is still due
+})
+
+test('item 5: a failed review a gap validation set aside counts in neither the header nor the review stage', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', 'SLICE: fx\nFILES: README.md\nDEPENDS: none\nPATH: light', IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: fx', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 x')
+  await spawnWith($, 'v1', 'SLICE: fx\nVALIDATE: gaps', REVQ)
+  await finish($, 'v1', PASS)
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /signed off with/.test(x))).toBe(false)
+  expect(t.some(x => /all agents passed/.test(x))).toBe(true)
+  expect(t.some(x => /3 passed · 0 failed/.test(x))).toBe(true)
+  expect(t.includes('✔ review')).toBe(true)
+  expect(t.includes('✖ review')).toBe(false)
+})
+
+test('item 6: a SendMessage resume shows the agent running and moves no review until it stops, as the gates see it', async ($, on) => {
+  on('tool.call', () => ({ result: 'sent', text: 'ok' }))
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 missing check')
+  await sendMessage($, 'b1')
+  let t = await texts($, 100, 200)
+  expect(t.some(x => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1 ↻2 /.test(x))).toBe(true) // the resume runs as attempt 2
+  expect(t.some(x => /retry 2 of s1 · s1 started/.test(x))).toBe(true)
+  expect(t.some(x => /dispatching\.+ 1 running/.test(x))).toBe(true)
+  await finish($, 'b1', PASS) // its turn ends: this record ends, no other is added
+  t = await texts($, 100, 200)
+  expect(t.some(x => /^◆ s1 ↻2 /.test(x))).toBe(true)
+  expect(t.some(x => /4 agents ·/.test(x))).toBe(true)
+})
+
+test('item 7: a hand-back followed by the stop counts one review once (the later end replaces it)', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 no report yet')
+  await finish($, 'r1', PASS) // sent back and ended again: no SendMessage, no spawn
+  const t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 · one')).toBe(true) // no retry signal from the replaced end
+  expect(t.some(x => /3 agents ·/.test(x))).toBe(true)
+})
+
+test('item 8: a reviewer reply with no STATUS line reads failed in the review cell, the review stage and the header', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'I read the diff and ran out of turns')
+  const t = await texts($, 100, 200)
+  expect(t.includes('✖ review')).toBe(true)
+  expect(t.includes('✔ review')).toBe(false)
+  expect(t.some(x => /signed off with 1 failed/.test(x))).toBe(true)
 })
