@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { launchRecord } from "../.claude/hooks/brief.mjs";
-import { findingLine, objectFindings, scanBranch, scanText } from "../.claude/hooks/skill-scan.mjs";
+import { findingLine, MAX_TAG_CHAIN, objectFindings, scanBranch, scanText } from "../.claude/hooks/skill-scan.mjs";
 import { seal } from "../.claude/hooks/skill-seal.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -334,4 +334,119 @@ test("whole objects: a signed-looking commit with an armoured block and no secre
     assert.deepEqual([meta(r), r.problems, r.foreign], [[], [], []]);
   });
   assert.deepEqual(scanText(armour(20000, "bulk").join("\n")), [], "20,000 armour lines: no pattern fires on plain base64");
+});
+
+// ---- Review of attempt 2: tag chains. A tag of a tag is followed to its final target, every tag object of the chain
+// is scanned, a chain deeper than MAX_TAG_CHAIN or one with a missing or malformed object is a problem. A chain whose
+// final target is a blob or a tree is scanned only when the push of the draft carries that object. ----
+
+/** Write a tag object and return its id. @param {ReturnType<typeof setup>} s @param {string} object @param {string} type @param {string} msg @param {string} [tagName] */
+const tagObject = (s, object, type, msg, tagName = "t") =>
+  gitIn(s.draft, ["hash-object", "-t", "tag", "-w", "--stdin"], `object ${object}\ntype ${type}\ntag ${tagName}\ntagger t <${ME}> 1700000000 +0000\n\n${msg}\n`, s.base);
+/** A chain of `n` tag objects over `target` (of `type`), innermost first; `msgs[i]` is the message of the i-th from the inside. Returns the outermost id. @param {ReturnType<typeof setup>} s @param {string} target @param {string} type @param {number} n @param {(i: number) => string} [msg] */
+function chain(s, target, type, n, msg = () => "clean") {
+  let id = target;
+  let t = type;
+  for (let i = 0; i < n; i++) {
+    id = tagObject(s, id, t, msg(i), `l${i}`);
+    t = "tag";
+  }
+  return id;
+}
+/** @param {ReturnType<typeof setup>} s */
+const head = (s) => git(s.draft, ["rev-parse", `refs/heads/${BRANCH}`], s.base);
+
+test("tag chains: a tag of a tag whose inner tag holds a token is found (two deep, only the outer ref exists)", () => {
+  withSetup((s) => {
+    const inner = tagObject(s, head(s), "commit", `key ${TOKEN}`, "inner");
+    const outer = tagObject(s, inner, "tag", "clean", "outer");
+    git(s.draft, ["update-ref", "refs/tags/outer", outer], s.base);
+    const r = scan(s);
+    assert.deepEqual(r.problems, []);
+    assert.deepEqual(meta(r), [["tag", null, "GitHub token"]]);
+    assert.ok(!JSON.stringify(r).includes(TOKEN));
+  });
+});
+
+test("tag chains: a six-deep chain with the token in the innermost tag is found; a clean six-deep chain passes", () => {
+  withSetup((s) => {
+    git(s.draft, ["update-ref", "refs/tags/deep", chain(s, head(s), "commit", 6, (i) => (i === 0 ? `key ${TOKEN}` : "clean"))], s.base);
+    const r = scan(s);
+    assert.deepEqual(r.problems, []);
+    assert.deepEqual(meta(r), [["tag", null, "GitHub token"]]);
+  });
+  withSetup((s) => {
+    git(s.draft, ["update-ref", "refs/tags/deep", chain(s, head(s), "commit", 6)], s.base);
+    const r = scan(s);
+    assert.deepEqual([r.problems, meta(r)], [[], []]);
+  });
+});
+
+test("tag chains: a chain at the bound passes; one tag object deeper is a problem, never a silent stop", () => {
+  withSetup((s) => {
+    const max = chain(s, head(s), "commit", MAX_TAG_CHAIN);
+    git(s.draft, ["update-ref", "refs/tags/max", max], s.base);
+    assert.deepEqual(scan(s).problems, []);
+    git(s.draft, ["update-ref", "refs/tags/over", tagObject(s, max, "tag", "clean")], s.base);
+    const r = scan(s);
+    assert.equal(r.problems.length, 1);
+    assert.match(r.problems[0] ?? "", new RegExp(`more than ${MAX_TAG_CHAIN} tag objects`));
+  });
+});
+
+test("tag chains: a missing or malformed inner object is a problem", () => {
+  withSetup((s) => {
+    const outer = tagObject(s, "0123456789abcdef0123456789abcdef01234567", "tag", "clean");
+    git(s.draft, ["update-ref", "refs/tags/dangling", outer], s.base);
+    const r = scan(s);
+    assert.equal(r.problems.length, 1, JSON.stringify(r.problems));
+    assert.match(r.problems[0] ?? "", /tag/);
+  });
+  for (const bad of ["no object line at all\n", `object ${"a".repeat(39)}\ntype commit\n\nshort id\n`, `type commit\nobject ${"a".repeat(40)}\n\nwrong order\n`]) {
+    withSetup((s) => {
+      const inner = gitIn(s.draft, ["hash-object", "-t", "tag", "-w", "--literally", "--stdin"], bad, s.base);
+      git(s.draft, ["update-ref", "refs/tags/bad", tagObject(s, inner, "tag", "clean")], s.base);
+      const r = scan(s);
+      assert.equal(r.problems.length, 1, `${JSON.stringify(bad)}: ${JSON.stringify(r.problems)}`);
+    });
+  }
+  withSetup((s) => {
+    // A `type` line that is not the named object's type (here `commit` over a tag object).
+    const inner = tagObject(s, head(s), "commit", "clean");
+    git(s.draft, ["update-ref", "refs/tags/mistyped", tagObject(s, inner, "commit", "clean")], s.base);
+    const r = scan(s);
+    assert.equal(r.problems.length, 1, JSON.stringify(r.problems));
+    assert.match(r.problems[0] ?? "", /type/);
+  });
+});
+
+test("tag chains: a blob or tree the draft adds is scanned like a commit; one outside the draft is ignored", () => {
+  withSetup((s) => {
+    const blob = git(s.draft, ["rev-parse", `${BRANCH}:skills/${NAME}/SKILL.md`], s.base);
+    git(s.draft, ["update-ref", "refs/tags/b", chain(s, blob, "blob", 2, (i) => (i === 0 ? `key ${TOKEN}` : "clean"))], s.base);
+    const r = scan(s);
+    assert.deepEqual([r.problems, meta(r)], [[], [["tag", null, "GitHub token"]]]);
+    assert.match(findingLine(/** @type {any} */ (r.findings.find((f) => f.where))), /^a tag on blob [0-9a-f]{12} \(its name or its tag object\): GitHub token$/);
+  });
+  withSetup((s) => {
+    const tree = git(s.draft, ["rev-parse", `${BRANCH}^{tree}`], s.base);
+    git(s.draft, ["update-ref", "refs/tags/t", chain(s, tree, "tree", 2, () => `key ${TOKEN}`)], s.base);
+    assert.deepEqual(meta(scan(s)), [["tag", null, "GitHub token"]]);
+    // A lightweight tag on a draft tree whose name is the secret.
+    git(s.draft, ["update-ref", "refs/tags/t", "-d"], s.base);
+    git(s.draft, ["tag", `x-${TOKEN}`, tree], s.base);
+    assert.deepEqual(meta(scan(s)), [["tag", null, "GitHub token"]]);
+  });
+  withSetup((s) => {
+    // Outside the draft: a loose blob nothing references, main's tree (the merge base has it), README.md's blob on main.
+    const loose = gitIn(s.draft, ["hash-object", "-w", "--stdin"], `loose ${TOKEN}\n`, s.base);
+    const mainTree = git(s.draft, ["rev-parse", "main^{tree}"], s.base);
+    const mainBlob = git(s.draft, ["rev-parse", "main:README.md"], s.base);
+    git(s.draft, ["update-ref", "refs/tags/loose", chain(s, loose, "blob", 2, () => `key ${TOKEN}`)], s.base);
+    git(s.draft, ["update-ref", "refs/tags/maintree", chain(s, mainTree, "tree", 3, () => `key ${TOKEN}`)], s.base);
+    git(s.draft, ["update-ref", "refs/tags/mainblob", tagObject(s, mainBlob, "blob", `key ${TOKEN}`)], s.base);
+    git(s.draft, ["tag", `y-${TOKEN}`, loose], s.base);
+    const r = scan(s);
+    assert.deepEqual([r.problems, meta(r)], [[], []]);
+  });
 });

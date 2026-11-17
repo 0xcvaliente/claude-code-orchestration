@@ -11,13 +11,21 @@
 //                 commit that added it. Paths other than skills/<name>/... and README.md (the catalog file a skill slice
 //                 may change) are `outside`. A branch, base or merge base git cannot find, or a history git cannot list
 //                 within the limits, is a `problem`: callers block on it, never pass. Since 2.0.0 also every byte of
-//                 each raw commit object the push carries and of each raw tag object pointing at one of those commits
-//                 (and the tag's name), read as latin1 whatever its encoding header says, with every pattern; only a
-//                 commit's `tree <id>`/`parent <id>` and a tag's `object <id>`/`type <type>` lines in exactly that form
-//                 are skipped. Addresses: the object's own (first <...> of its first author and committer, or tagger,
-//                 line) and no-reply addresses pass; any other is a finding. With `identity` it lists in `foreign`
-//                 every author or committer address the person's git does not use (the publish step blocks on them,
-//                 as on outside paths).
+//                 each raw commit object the push carries, read as latin1 whatever its encoding header says, with every
+//                 pattern. Tags: every ref under refs/tags is followed through its chain of tag objects (a tag of a tag
+//                 of ...) to the object it finally names, at most MAX_TAG_CHAIN (16) tag objects deep. When that object
+//                 is a commit the push carries, or a blob or tree the push carries (an object `git rev-list --objects`
+//                 lists for the draft's range or for the unpushed base commits), the tag's name and every byte of
+//                 every tag object of the chain are scanned. A tag whose chain ends at any other commit, blob or tree
+//                 is outside the draft and ignored: the publish push sends the branch only (--no-follow-tags), so it
+//                 cannot carry it. A chain deeper than the bound, a loop, a missing or unreadable object, a tag object
+//                 that does not start with `object <id>` and `type <type>` or whose type line is not the named
+//                 object's type is a `problem`, whichever tag it is. Only a commit's `tree <id>`/`parent <id>` and a
+//                 tag object's `object <id>`/`type <type>` lines in exactly that form are skipped. Addresses: the
+//                 object's own (first <...> of its first author and committer, or tagger, line) and no-reply
+//                 addresses pass; any other is a finding. With `identity` it lists in `foreign` every author or
+//                 committer address the person's git does not use (the publish step blocks on them, as on outside
+//                 paths).
 // Git runs read commands only, with optional locks off and repository hooks and fsmonitor off.
 import { spawnSync } from "node:child_process";
 
@@ -157,7 +165,37 @@ function git(dir, args, input) {
  * @param {string} dir @param {string[]} ids @returns {Map<string, string> | null}
  */
 function catFile(dir, ids) {
+  const typed = catFileTyped(dir, ids);
+  return typed && new Map([...typed].map(([id, o]) => [id, o.raw]));
+}
+
+/**
+ * The type of each of `ids` (`git cat-file --batch-check`): null when git fails, an object is missing or a line is
+ * not `<id> <type> <size>` for the id asked.
+ * @param {string} dir @param {string[]} ids @returns {Map<string, string> | null}
+ */
+function objectTypes(dir, ids) {
   /** @type {Map<string, string>} */
+  const out = new Map();
+  const want = [...new Set(ids)];
+  if (!want.length) return out;
+  const r = git(dir, ["cat-file", "--batch-check"], `${want.join("\n")}\n`);
+  if (r.status !== 0) return null;
+  const lines = r.out.split("\n");
+  for (const [i, id] of want.entries()) {
+    const f = (lines[i] ?? "").split(" ");
+    if (f.length !== 3 || f[0] !== id || !/^(?:commit|tree|blob|tag)$/.test(f[1] ?? "")) return null;
+    out.set(id, String(f[1]));
+  }
+  return out;
+}
+
+/**
+ * The raw objects of `ids` with the type git reports for each; null as for catFile.
+ * @param {string} dir @param {string[]} ids @returns {Map<string, { type: string, raw: string }> | null}
+ */
+function catFileTyped(dir, ids) {
+  /** @type {Map<string, { type: string, raw: string }>} */
   const out = new Map();
   const want = [...new Set(ids)];
   if (!want.length) return out;
@@ -180,9 +218,9 @@ function catFile(dir, ids) {
     if (nl < 0) return null;
     const head = b.subarray(i, nl).toString("latin1").split(" ");
     const size = Number(head[2]);
-    if (head.length !== 3 || head[1] === "missing" || !Number.isInteger(size) || nl + 1 + size > b.length) return null;
+    if (head.length !== 3 || head[0] !== id || head[1] === "missing" || !Number.isInteger(size) || nl + 1 + size > b.length) return null;
     // latin1: one character per byte, whatever the object's `encoding` header says, so no byte is lost to decoding.
-    out.set(id, b.subarray(nl + 1, nl + 1 + size).toString("latin1"));
+    out.set(id, { type: String(head[1]), raw: b.subarray(nl + 1, nl + 1 + size).toString("latin1") });
     i = nl + 1 + size + 1;
   }
   return out;
@@ -196,6 +234,83 @@ const EXEMPT = {
   tag: new RegExp(String.raw`^(?:object ${HEX_ID}|type (?:commit|tree|blob|tag))$`),
 };
 const IDENT_KEYS = { commit: ["author", "committer"], tag: ["tagger"] };
+
+/** The most tag objects one chain (a tag of a tag of ...) may hold; a longer chain is a problem, never cut short. */
+export const MAX_TAG_CHAIN = 16;
+const TAG_OBJECT_LINE = new RegExp(String.raw`^object (${HEX_ID})$`);
+const TAG_TYPE_LINE = /^type (commit|tree|blob|tag)$/;
+
+/**
+ * @typedef {{ name: string, tags: string[], target: string, type: string }} TagChain
+ * A tag ref followed to its final target: `tags` the tag objects from the ref inwards (empty for a lightweight tag),
+ * `target` and `type` the object the innermost one names (as git reports its type).
+ */
+
+/**
+ * Every tag ref followed through its chain of tag objects to the final target, at most MAX_TAG_CHAIN tag objects
+ * deep. Each tag object must start with `object <id>` and `type <type>` in exactly that form, the type being the one
+ * git reports for that object. A deeper chain, a loop, a missing or unreadable object, or a malformed or mistyped tag
+ * object is a problem (one text), never a stop that passes.
+ * @param {string} dir @param {{ obj: string, type: string, name: string }[]} refs
+ * @returns {{ chains: TagChain[], raws: Map<string, string>, problem: string | null }}
+ */
+function tagChains(dir, refs) {
+  /** @type {TagChain[]} */
+  const chains = refs.map((r) => ({ name: r.name, tags: [], target: r.obj, type: r.type }));
+  /** @type {Map<string, string>} */
+  const raws = new Map();
+  /** @param {string} problem */
+  const fail = (problem) => ({ chains: [], raws, problem });
+  for (let depth = 0; ; depth++) {
+    const open = chains.filter((c) => c.type === "tag");
+    if (!open.length) return { chains, raws, problem: null };
+    if (depth >= MAX_TAG_CHAIN) return fail(`a tag of the repository is a chain of more than ${MAX_TAG_CHAIN} tag objects (a tag of a tag of ...), deeper than the scan follows`);
+    const objs = catFileTyped(dir, open.map((c) => c.target).filter((id) => !raws.has(id)));
+    if (!objs) return fail("git cannot read a tag object of a tag of the repository (missing or unreadable)");
+    for (const [id, o] of objs) {
+      if (o.type !== "tag") return fail("a tag of the repository names, as a tag, an object git does not read as a tag object");
+      raws.set(id, o.raw);
+    }
+    /** @type {Map<TagChain, string>} */
+    const declared = new Map();
+    for (const c of open) {
+      if (c.tags.includes(c.target)) return fail("a tag of the repository is a chain of tag objects that loops");
+      c.tags.push(c.target);
+      const [first = "", second = ""] = (raws.get(c.target) ?? "").split("\n", 2);
+      const obj = TAG_OBJECT_LINE.exec(first);
+      const type = TAG_TYPE_LINE.exec(second);
+      if (!obj || !type) return fail("a tag of the repository holds a malformed tag object (it does not start with `object <id>` and `type <type>` lines)");
+      c.target = String(obj[1]);
+      declared.set(c, String(type[1]));
+    }
+    const types = objectTypes(dir, open.map((c) => c.target));
+    if (!types) return fail("git cannot read the object a tag object of the repository names (missing or unreadable)");
+    for (const c of open) {
+      c.type = types.get(c.target) ?? "";
+      if (c.type !== declared.get(c)) return fail("a tag of the repository holds a tag object whose `type` line is not the type of the object it names");
+    }
+  }
+}
+
+/**
+ * The ids of the blobs and trees (and commits) a push of the draft carries: every object `rev-list --objects` lists for
+ * the draft's range (`draft`) and for its merge base against each address's known commits (`base`, the unpushed base
+ * commits' objects). null when git cannot list them.
+ * @param {string} dir @param {string} range @param {string} mergeBase @param {string[][]} sets
+ */
+function pushedObjects(dir, range, mergeBase, sets) {
+  const ids = (/** @type {string} */ out) => out.split("\n").filter((l) => /^[0-9a-f]{40,64}$/.test(l));
+  const d = git(dir, ["rev-list", "--objects", "--no-object-names", range]);
+  if (d.status !== 0) return null;
+  /** @type {Set<string>} */
+  const base = new Set();
+  for (const has of sets) {
+    const b = git(dir, ["rev-list", "--objects", "--no-object-names", "--ignore-missing", mergeBase, "--not", ...has]);
+    if (b.status !== 0) return null;
+    for (const id of ids(b.out)) base.add(id);
+  }
+  return { draft: new Set(ids(d.out)), base };
+}
 // An address in a line as the e-mail pattern finds it.
 const ADDRESS = /(?<![\w.%+-])([A-Za-z0-9._%+-]+)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})\b/g;
 
@@ -232,7 +347,8 @@ function ownAddresses(raw, type) {
  * addresses through: the object's own addresses (the first `<...>` of its first author and committer, or tagger, line)
  * and no-reply addresses; any other address, in an identity line, a header, a signature or the message, is a finding.
  * @param {string} raw the object's bytes as latin1 @param {"commit" | "tag"} type
- * @param {{ commit: string, tagName?: string, base?: boolean }} at
+ * @param {{ commit: string, tagName?: string, base?: boolean, on?: string }} at `on`: a tag's final target is a blob
+ *   or tree (its id in `commit`), not a commit
  * @returns {Finding[]}
  */
 export function objectFindings(raw, type, at) {
@@ -248,7 +364,7 @@ export function objectFindings(raw, type, at) {
     const key = `${w}\n${line}\n${kind}`;
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ file: "", line, kind, commit: at.commit, where: w, ...(at.base ? { base: true } : {}) });
+    out.push({ file: "", line, kind, commit: at.commit, where: w, ...(at.base ? { base: true } : {}), ...(at.on ? { on: at.on } : {}) });
   };
   if (at.tagName !== undefined) for (const kind of lineKinds(at.tagName, allowed)) add("tag", null, kind);
   lines.forEach((l, i) => {
@@ -354,11 +470,12 @@ function eachAdded(out, each) {
 }
 
 /**
- * @typedef {{ file: string, line: number | null, kind: string, commit?: string, base?: boolean, where?: string }} Finding
+ * @typedef {{ file: string, line: number | null, kind: string, commit?: string, base?: boolean, where?: string, on?: string }} Finding
  * A finding: `line` in the branch's last version, or `commit` (and no line) when only an earlier commit holds it;
  * `base` when that commit is one of the base's that the remote lacks (not part of the draft, but pushed with it).
  * `where` (no file) for a finding in a commit's metadata: "message" (with the message line), "author", "committer", or
- * "tag" (a tag that points at the commit: its name, tagger or message).
+ * "tag" (a tag that points at the commit: its name, tagger or message). `on` ("blob" or "tree") when the tag's final
+ * target is that object, whose id is then in `commit`.
  */
 
 /** @typedef {{ name: string, email: string, commit: string }} Identity */
@@ -374,7 +491,8 @@ function eachAdded(out, each) {
  *   `identity`: the e-mail addresses the person's git uses (the publish step); each author or committer of the
  *   draft's own commits with another address is listed in `foreign`. Without it `foreign` stays empty.
  * Besides the lines and paths, every commit's metadata is scanned (objectFindings: every line of each raw object but its fixed-form id lines): message, author, committer and the
- * tags that point at it (name, tagger, message), for the draft's commits and the unpushed base commits alike.
+ * tags whose chain of tag objects ends at it (name, and every tag object of the chain), for the draft's commits and the
+ * unpushed base commits alike, and the tags whose chain ends at a blob or tree the push carries (see the file header).
  * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[], foreign: Identity[] }}
  */
 export function scanBranch(dir, { base, branch, name, remote = null, remotes = null, identity = null }) {
@@ -493,34 +611,64 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
     }
     const ownIds = own.out.split("\n").filter((l) => /^[0-9a-f]{40,64}$/.test(l));
     const baseIds = new Set(unpushed);
-    const tagRefs = git(dir, ["for-each-ref", "--format=%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(refname)", "refs/tags"]);
+    const tagRefs = git(dir, ["for-each-ref", "--format=%(objectname)%00%(objecttype)%00%(refname)", "refs/tags"]);
     if (tagRefs.status !== 0) {
       problems.push("git cannot list its tags");
       return { mergeBase, findings, outside, unpushed, problems, foreign };
     }
-    const inPush = new Set([...ownIds, ...unpushed]);
-    /** @type {{ obj: string, annotated: boolean, target: string, tagName: string }[]} */
-    const tags = [];
+    /** @type {{ obj: string, type: string, name: string }[]} */
+    const refs = [];
     for (const l of tagRefs.out.split("\n")) {
       if (!l) continue;
-      const [obj = "", type = "", peeled = "", peeledType = "", ref = ""] = l.split("\0");
-      let target = type === "commit" ? obj : type === "tag" && peeledType === "commit" ? peeled : "";
-      if (type === "tag" && peeledType === "tag") {
-        // A tag of a tag: follow it to its commit.
-        const r = git(dir, ["rev-parse", "--verify", "--quiet", `${obj}^{commit}`]);
-        target = r.status === 0 ? r.out.trim() : "";
+      const [obj = "", type = "", ref = ""] = l.split("\0");
+      if (!/^[0-9a-f]{40,64}$/.test(obj) || !/^(?:commit|tree|blob|tag)$/.test(type)) {
+        problems.push("git cannot list its tags");
+        return { mergeBase, findings, outside, unpushed, problems, foreign };
       }
-      if (inPush.has(target)) tags.push({ obj, annotated: type === "tag", target, tagName: ref.replace(/^refs\/tags\//, "") });
+      refs.push({ obj, type, name: ref.replace(/^refs\/tags\//, "") });
     }
-    const objects = catFile(dir, [...ownIds, ...unpushed, ...tags.filter((t) => t.annotated).map((t) => t.obj)]);
+    // Every tag followed through its chain of tag objects (a tag of a tag of ...) to the object it finally names.
+    const walked = tagChains(dir, refs);
+    if (walked.problem) {
+      problems.push(walked.problem);
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
+    }
+    // A chain whose final target is a blob or a tree counts only when the push of the draft carries that object.
+    const needObjects = walked.chains.some((c) => c.type === "blob" || c.type === "tree");
+    const pushedObjs = needObjects ? pushedObjects(dir, range, mergeBase, sets) : { draft: new Set(), base: new Set() };
+    if (!pushedObjs) {
+      problems.push("git cannot list the objects its commits carry");
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
+    }
+    const inPush = new Set([...ownIds, ...unpushed]);
+    const objects = catFile(dir, [...ownIds, ...unpushed]);
     if (!objects) {
       problems.push("git cannot show its commits' messages and authors");
       return { mergeBase, findings, outside, unpushed, problems, foreign };
     }
     for (const id of [...ownIds, ...unpushed]) findings.push(...objectFindings(objects.get(id) ?? "", "commit", { commit: id, base: baseIds.has(id) && !ownIds.includes(id) }));
-    for (const t of tags) {
-      const raw = t.annotated ? (objects.get(t.obj) ?? "") : "";
-      findings.push(...objectFindings(raw, "tag", { commit: t.target, tagName: t.tagName, base: baseIds.has(t.target) && !ownIds.includes(t.target) }));
+    // Each tag whose chain reaches what the push carries: its name, and every tag object of the chain, each as a tag
+    // object with its own exempt lines (each object scanned once, whichever tags share it).
+    const tagSeen = new Set();
+    const scannedTags = new Set();
+    for (const c of walked.chains) {
+      const t = c.target;
+      const blobOrTree = c.type === "blob" || c.type === "tree";
+      const carried = c.type === "commit" ? inPush.has(t) : blobOrTree && (pushedObjs.draft.has(t) || pushedObjs.base.has(t));
+      if (!carried) continue;
+      const at = { commit: t, base: c.type === "commit" ? baseIds.has(t) && !ownIds.includes(t) : !pushedObjs.draft.has(t), ...(blobOrTree ? { on: c.type } : {}) };
+      const found = objectFindings("", "tag", { ...at, tagName: c.name });
+      for (const id of c.tags) {
+        if (scannedTags.has(id)) continue;
+        scannedTags.add(id);
+        found.push(...objectFindings(walked.raws.get(id) ?? "", "tag", at));
+      }
+      for (const f of found) {
+        const key = `${f.commit}\n${f.kind}\n${f.base ? 1 : 0}`;
+        if (tagSeen.has(key)) continue;
+        tagSeen.add(key);
+        findings.push(f);
+      }
     }
     // Whose names go out: every address on the author and committer lines of the draft's own commits that the
     // person's git does not use.
@@ -548,7 +696,7 @@ export const findingLine = (f) => {
   if (f.where) {
     const c = (f.commit ?? "unknown").slice(0, 12);
     // A tag's name is never shown: it may be what the scan found.
-    const what = f.where === "message" ? `the message of commit ${c}${f.line === null ? "" : ` line ${f.line}`}` : f.where === "tag" ? `a tag on commit ${c} (its name or its tag object)` : f.where === "header" ? `a header line of commit ${c}` : `the ${f.where} line of commit ${c}`;
+    const what = f.where === "message" ? `the message of commit ${c}${f.line === null ? "" : ` line ${f.line}`}` : f.where === "tag" ? `a tag on ${f.on ?? "commit"} ${c} (its name or its tag object)` : f.where === "header" ? `a header line of commit ${c}` : `the ${f.where} line of commit ${c}`;
     return `${what}${f.base ? ", which is not part of the draft" : ""}: ${f.kind}`;
   }
   const at = f.base && f.commit ? `, in commit ${f.commit.slice(0, 12)}, which is not part of the draft` : f.commit ? `, only in earlier commit ${f.commit.slice(0, 12)}` : f.line === null ? "" : ` line ${f.line}`;
