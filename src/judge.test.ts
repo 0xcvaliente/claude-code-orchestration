@@ -1680,8 +1680,11 @@ test("askOpus: the judge's own call takes no account connectors and keeps every 
 
 // Release 2.0.0, slice w2: forms docs/bash-judge.md and CHANGELOG 1.2.0, 1.4.5 and 1.5.0 listed as passing. Each list is
 // one string per line (judge-differential.test.mjs reads them with listIn, both copies must give the same class).
-// Item 1: zsh options that run text as code (globsubst, promptsubst), in every form zsh takes, and zsh's sched.
-// Item 2: PS0/PS1/PS4 with a value that can expand, on any line (a traced script or a later shell sees it).
+// Item 1: zsh options that run text as code (globsubst, promptsubst) in the forms of `set`, `setopt`, `unsetopt`,
+// `emulate`, a zsh command line and the `options` table, with the name separate, attached to -o/+o or bundled, in any
+// case, with underscores and either sense of `no`; and zsh's sched. Not closed: an option turned on in a script file
+// or an rc file the guard never reads.
+// Item 2: PS0/PS1/PS4 with a value that can expand ($(, ${, $name, a backtick, an octal escape), on any line.
 // Item 3: parallel, flock -c, script -c; the difftool, mergetool and browser keys (already denied since 1.4.5/1.5.0).
 // Item 4: further git options and keys that run a program (clone -c, send-email, instaweb, guitool), the env names
 // GIT_ALLOW_PROTOCOL (ext:: transport) and LESSOPEN/LESSCLOSE (git's pager runs them), brace groups with other quoting.
@@ -1753,6 +1756,42 @@ const W2_DENY: string[] = [
   "echo {a,$'b'}",
   "echo {a,\\ b}",
   "echo $[1<<2]",
+  "set -oglobsubst",
+  "setopt -oglobsubst",
+  "set +onoglobsubst",
+  "set -oPROMPT_SUBST",
+  "set -Coglobsubst",
+  "setopt +o noglobsubst",
+  "set -o\"$O\"",
+  "zsh -oglobsubst -c 'echo $x'",
+  "zsh -oPROMPT_SUBST -c 'print -P x'",
+  "zsh -Coglobsubst -c ls",
+  "zsh -c 'set -oglobsubst; echo $x'",
+  "git clone -ccore.fsmonitor=x u d",
+  "git clone --co core.fsmonitor=x u d",
+  "git clone --c core.fsmonitor=x u d",
+  "git clone --confi=core.fsmonitor=x u d",
+  "git clone -qccore.fsmonitor=x u d",
+  "find . -exec parallel 'rm -rf {}' ::: a \\;",
+  "find . -execdir parallel echo ::: a \\;",
+  "find . -ok sem make \\;",
+  "find . -okdir parallel echo \\;",
+  "xargs parallel",
+  "env parallel echo",
+  "nohup sem make",
+  "timeout 5 parallel echo",
+  "time parallel echo",
+  "command parallel echo",
+  "find . -exec su \\;",
+  "git send-email --sendmail 'rm -rf ../v' x.patch",
+  "git send-email --header 'sudo id' x.patch",
+  "git send-email --sendmail-cmd 'rm -rf ../v' x.patch",
+  "git send-email --se='sudo id' x.patch",
+  "git send-email --smtp-server-option \"$O\" x.patch",
+  "git send-email --to-c 'sudo id' x.patch",
+  "export PS1='\\044(id)'",
+  "PS4='${x}' ./t.sh",
+  "PS4='$x' ./t.sh",
 ];
 // Item 2, audit J-11: a fetch or pull whose refspec writes a branch goes to the judge (in a local remote it is a push).
 const W2_JUDGE: string[] = [
@@ -1763,6 +1802,9 @@ const W2_JUDGE: string[] = [
   "git fetch --refmap='+refs/heads/*:refs/heads/*' origin main",
   "git pull ../x main:main",
   "git fetch origin \"$REF\"",
+  "git -C ../origin.git update-ref refs/heads/main FETCH_HEAD",
+  "git update-ref refs/heads/x HEAD",
+  "git -C ../origin.git fetch \"$PWD\" main && git -C ../origin.git update-ref refs/heads/main FETCH_HEAD",
 ];
 // The neighbours that keep passing: options that run nothing, a static prompt, fetches that write no branch, and
 // flock/script/clone/send-email forms that run nothing the guard refuses.
@@ -1797,6 +1839,15 @@ const W2_PASS: string[] = [
   "brew install parallel",
   "grep -c script f",
   "cat options.txt",
+  "set -x",
+  "set -e -o pipefail",
+  "export PS1='$ '",
+  "export PS1='\\u@\\h:\\w\\$ '",
+  "xargs -P 4 -n 1 gzip",
+  "find . -name '*.log' -exec gzip {} \\;",
+  "git -C ../o.git fetch \"$PWD\" main",
+  "git send-email --to a@example.com --cc b@example.com x.patch",
+  "git clone --depth 1 -b main https://example.com/r.git",
 ];
 
 test("classify (w2, items 1-4): zsh exec options, sched, prompts, parallel, flock/script -c and more git exec routes are denied; a fetch that writes a branch is judged", () => {
@@ -1808,7 +1859,7 @@ test("classify (w2, items 1-4): zsh exec options, sched, prompts, parallel, floc
   // The reason names the rule, not an older one that happened to fire.
   assert.match(classifyDetail("setopt GLOB_SUBST", CWD).reason ?? "", /^setopt of globsubst or promptsubst/);
   assert.match(classifyDetail("sched +1 'rm -rf ../victim'", CWD).reason ?? "", /^sched runs a command later/);
-  assert.match(classifyDetail("PS4='$(x)' ./x.sh", CWD).reason ?? "", /^setting PS4 to a value with \$/);
+  assert.match(classifyDetail("PS4='$(x)' ./x.sh", CWD).reason ?? "", /^setting PS4 to a value with an expansion/);
   assert.match(classifyDetail("options[globsubst]=on", CWD).reason ?? "", /^assigning zsh's options table/);
   assert.match(classifyDetail("parallel ::: 'sudo id'", CWD).reason ?? "", /^parallel runs its arguments/);
   assert.match(classifyDetail("git clone -c core.fsmonitor=x u d", CWD).reason ?? "", /^git clone core\.fsmonitor: a config key that runs a program/);
@@ -1817,4 +1868,5 @@ test("classify (w2, items 1-4): zsh exec options, sched, prompts, parallel, floc
 test("judge policy (w2): a fetch whose refspec writes a branch is a push when it runs in another repository", () => {
   assert.match(JUDGE_POLICY, /git fetch or pull whose refspec writes a branch/);
   assert.match(JUDGE_POLICY, /it is a push to that repository/);
+  assert.match(JUDGE_POLICY, /git update-ref writes a ref directly/);
 });

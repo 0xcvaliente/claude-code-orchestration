@@ -677,6 +677,24 @@ const W2_TABLE = [
   ["LESSOPEN='|rm -rf ../v %s' git log", "deny"],
   ["git clone -c user.name=x ../o.git x", "pass"],
   ["git send-email --to a@example.com x.patch", "pass"],
+  // w2 review: attached and bundled options, clone -c attached and abbreviated, parallel after find -exec,
+  // send-email prefixes, update-ref, prompts that only look like expansions
+  ["set -oglobsubst", "deny"],
+  ["set -Coglobsubst", "deny"],
+  ["set +onoglobsubst", "deny"],
+  ["setopt -oPROMPT_SUBST", "deny"],
+  ["zsh -oglobsubst -c 'echo $x'", "deny"],
+  ["git clone -ccore.fsmonitor=x u d", "deny"],
+  ["git clone --co core.fsmonitor=x u d", "deny"],
+  ["find . -exec parallel 'rm -rf {}' ::: a \\;", "deny"],
+  ["find . -execdir parallel echo ::: a \\;", "deny"],
+  ["git send-email --sendmail 'rm -rf ../v' x.patch", "deny"],
+  ["git send-email --header 'sudo id' x.patch", "deny"],
+  ["git -C ../origin.git update-ref refs/heads/main FETCH_HEAD", "judge"],
+  ["set -x", "pass"],
+  ["setopt extendedglob", "pass"],
+  ["export PS1='$ '", "pass"],
+  ["xargs -P 4 -n 1 gzip", "pass"],
 ];
 
 test("parity (w2): both copies give each new row the same decision, and the class the table names", () => {
@@ -709,6 +727,24 @@ test("J-12 (w2): a glob that matches the prompt store's folder is refused with n
     ["cd - && cat orchestration/j*/x", work], // a cd target the guard cannot know
     [`bash -c 'cat ${orch}/judge-*/x'`, work],
     [`echo $(cat ${orch}/judge-*/x)`, work],
+    // w2 review: a directory change wherever a shell performs one
+    [`if cd ${orch}; then cat j*/*/*; fi`, work],
+    [`builtin cd ${orch} && cat j*/*/*`, work],
+    [`command cd ${orch} && cat j*/*/*`, work],
+    [`env -C ${orch} cat j*/*/*`, work],
+    [`env --chdir=${orch} cat j*/*/*`, work],
+    [`HOME=${orch}; cd; cat j*/*/*`, work],
+    [`(cd ${orch}; cat j*/*/*)`, work],
+    [`{ cd ${orch}; cat j*/*/*; }`, work],
+    [`for d in x; do cd ${orch}; cat j*/*/*; done`, work],
+    [`while cd ${orch}; do cat j*/*/*; break; done`, work],
+    [`D=${orch}; cd "$D" && cat j*/*/*`, work],
+    [`CDPATH=${configDir} cd orchestration && cat j*/*/*`, work],
+    [`pushd ${orch} && cat j*/*/*`, work],
+    ["popd && cat j*/*/*", work],
+    [`cd ${orch}; echo $(cat j*/*/*)`, work],
+    [`bash -c 'cd ${orch} && cat j*/*/*'`, work],
+    ['cd "$dir" && ls *.txt', work], // over-block: a relative glob after a cd the guard cannot read
   ];
   for (const [command, cwd] of refused) {
     reset();
@@ -728,6 +764,8 @@ test("J-12 (w2): a glob that matches the prompt store's folder is refused with n
     ['for f in "$dir"/*; do echo "$f"; done', work],
     ["cd build && ls *", work],
     ["ls *", configDir],
+    [`git -C ${orch} status && ls *`, work], // git -C changes no shell folder
+    ["cd build && ls *.js", work],
   ];
   for (const [command, cwd] of allowed) {
     reset();

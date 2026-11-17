@@ -144,13 +144,19 @@ if (namesPromptStore(command)) deny("always blocked: the command names the judge
 // Each glob word of the line, of its substitutions and of the quoted words read again as script text (up to
 // DECODE_LEVELS) is matched against the store folder's path, segment by segment (`*`, `?` and `[...]` within one
 // segment, a `**` segment across segments, case ignored):
-// - a glob with no expansion in it is resolved against the hook input's folder and every literal `cd`/`pushd` target
-//   on the line (a bare `cd` is the home folder); it reaches the store when its leading segments match the store
-//   folder's path (or its real path) to the end, so it names the store folder or something inside it;
-// - a glob whose start the guard cannot know (`~`, `$HOME`, `$D`, or any relative glob on a line with a dynamic or
-//   `cd -` target) reaches it when its segments after the last expansion line up with the end of the store folder's
-//   path and one of those segments has a literal character (`$D/j*`, `~/.claude/orchestration/*`). So `"$dir"/*` alone
-//   is not refused: a name built at run time stays out of reach, as above.
+// - a glob with no expansion in it is resolved against the hook input's folder and every directory a command of the
+//   line may change to; it reaches the store when its leading segments match the store folder's path (or its real
+//   path) to the end, so it names the store folder or something inside it. A directory change is read wherever a
+//   word `cd`, `pushd` or `chdir` stands (behind `if`, `builtin`, `command`, inside `(...)`, `{...}` and loop bodies,
+//   also as an argument: over-inclusive), and from `env -C`/`--chdir`; `git -C` changes no shell folder. A literal
+//   target is resolved against every folder found so far; a bare `cd` is the home folder;
+// - when a directory change's target cannot be read as a literal (`cd "$D"`, `cd ~/x`, `cd -`, `popd`, `pushd +1`, a
+//   bare `cd` on a line that assigns HOME, a relative target with CDPATH set on the line or in the hook's
+//   environment), every relative glob of the line is refused;
+// - a glob whose start the guard cannot know (`~`, `$HOME`, `$D`) reaches it when its segments after the last
+//   expansion line up with the end of the store folder's path and one of those segments has a literal character
+//   (`$D/j*`, `~/.claude/orchestration/*`). So `"$dir"/*` alone is not refused: a name built at run time stays out
+//   of reach, as above.
 // Not refused either: a glob that names only a folder above the store (`ls ~/.claude/*`), and a recursive tool given
 // such a folder (`grep -r x ~/.claude`), which reads the store without naming it.
 const storeRoot = (() => {
@@ -216,66 +222,141 @@ const storePaths = (() => {
   return out;
 })();
 
-/** @param {string} text @param {string} cwd @param {number} level @param {number} subDepth @returns {boolean} */
-function globReachesStore(text, cwd, level, subDepth) {
+/** @typedef {{ pieces: any[], text: string, dynamic: boolean }} HookWord */
+/** @typedef {{ commands: { words: HookWord[] }[], substitutions: string[] }} HookScript */
+
+/** The literal text a word starts with, up to its first expansion or glob. @param {HookWord} w */
+const prefixOf = (w) => {
+  let s = "";
+  for (const p of w.pieces) {
+    if (!("lit" in p)) break;
+    s += p.lit;
+  }
+  return s;
+};
+
+/**
+ * Every text of the line the shell may run: the line, its substitutions (8 deep) and each static word holding a blank,
+ * read again as script text (DECODE_LEVELS deep). `complete` is false past 2000 texts.
+ * @param {string} text @returns {{ scripts: HookScript[], complete: boolean }}
+ */
+function scriptsOf(text) {
+  /** @type {HookScript[]} */
+  const scripts = [];
+  let complete = true;
+  /** @param {string} src @param {number} level @param {number} subDepth */
+  const visit = (src, level, subDepth) => {
+    if (scripts.length >= 2000) {
+      complete = false;
+      return;
+    }
+    /** @type {HookScript} */
+    let t;
+    try {
+      t = tokenize(src);
+    } catch {
+      return; // unreadable: the floor denies it anyway at the top level
+    }
+    scripts.push(t);
+    for (const { words } of t.commands) for (const w of words) if (!w.dynamic && level < DECODE_LEVELS && /\s/.test(w.text)) visit(w.text, level + 1, subDepth);
+    if (subDepth < 8) for (const s of t.substitutions) visit(s, level, subDepth + 1);
+  };
+  visit(text, 0, 0);
+  return { scripts, complete };
+}
+
+const CD_WORDS = new Set(["cd", "pushd", "chdir"]);
+
+/**
+ * The folders the line's commands may run in: the hook input's folder and every directory change (see above).
+ * `unknown`: some change's target cannot be read as a literal.
+ * @param {HookScript[]} scripts @param {string} cwd
+ */
+function foldersOf(scripts, cwd) {
+  const all = scripts.flatMap((t) => t.commands.map((c) => c.words));
+  const homeSet = all.some((ws) => ws.some((w) => /^HOME\+?=/.test(prefixOf(w))));
+  const cdpath = !!process.env.CDPATH || all.some((ws) => ws.some((w) => /^CDPATH\+?=/.test(prefixOf(w))));
+  const bases = new Set([cwd]);
+  let unknown = false;
+  /** @param {HookWord | undefined} target */
+  const change = (target) => {
+    if (!target) {
+      if (homeSet) unknown = true;
+      else bases.add(homedir());
+      return;
+    }
+    const t = target.text;
+    if (target.dynamic || t === "-" || /^[-+]\d+$/.test(t) || (cdpath && !/^\.{0,2}\//.test(t))) {
+      unknown = true;
+      return;
+    }
+    for (const b of [...bases]) bases.add(resolve(b, t));
+    if (bases.size > 64) unknown = true;
+  };
+  for (const ws of all)
+    for (let i = 0; i < ws.length; i++) {
+      const w = ws[i];
+      if (!w || w.dynamic) continue;
+      if (w.text === "popd") unknown = true;
+      else if (CD_WORDS.has(w.text)) {
+        let j = i + 1;
+        while (ws[j] && !ws[j]?.dynamic && /^-[LPe@qsn]+$/.test(ws[j]?.text ?? "")) j++;
+        change(ws[j]);
+      } else if (w.text === "env")
+        for (let j = i + 1; j < ws.length; j++) {
+          const x = ws[j];
+          if (!x) break;
+          const p = prefixOf(x);
+          if (p === "-C" || p === "--chdir") change(ws[++j]);
+          else if (/^(-[A-Za-z]*C|--chdir=)/.test(p)) {
+            const at = p.startsWith("--") ? "--chdir=".length : p.indexOf("C") + 1;
+            change(x.dynamic || p.length === at ? { pieces: [], text: "", dynamic: true } : { pieces: [], text: x.text.slice(at), dynamic: false });
+          } else if (!p.startsWith("-") && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(p)) break;
+        }
+    }
+  return { bases: [...bases], unknown };
+}
+
+/** @param {string} text @param {string} cwd @returns {boolean} */
+function globReachesStore(text, cwd) {
   if (!storePaths.length || !/[*?[]/.test(text)) return false; // no glob character anywhere, nested text included
-  /** @type {{ commands: { words: { pieces: any[], text: string, dynamic: boolean }[] }[], substitutions: string[] }} */
-  let t;
-  try {
-    t = tokenize(text);
-  } catch {
-    return false; // unreadable: the floor denies it anyway at the top level
-  }
-  const bases = [cwd];
-  let unknownBase = false;
-  let cur = cwd;
-  for (const { words } of t.commands) {
-    const w0 = words.find((w) => !w.dynamic && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text));
-    if (!w0 || !["cd", "pushd"].includes(w0.text)) continue;
-    const target = words.slice(words.indexOf(w0) + 1).find((w) => w.dynamic || !w.text.startsWith("-") || w.text === "-");
-    if (!target) cur = homedir();
-    else if (target.dynamic || target.text === "-") {
-      unknownBase = true;
-      continue;
-    } else cur = resolve(cur, target.text);
-    bases.push(cur);
-  }
-  for (const { words } of t.commands)
-    for (const w of words) {
-      const { segs, abs } = segmentsOf(w.pieces);
-      if (segs.some(hasGlob)) {
+  const { scripts, complete } = scriptsOf(text);
+  const { bases, unknown } = foldersOf(scripts, cwd);
+  for (const t of scripts)
+    for (const { words } of t.commands)
+      for (const w of words) {
+        const { segs, abs } = segmentsOf(w.pieces);
+        if (!segs.some(hasGlob)) continue;
         let d = -1;
         segs.forEach((s, i) => {
           if (s.some((p) => "dyn" in p)) d = i;
         });
-        if (d >= 0 || (!abs && unknownBase)) {
+        if (d < 0 && !abs && (unknown || !complete)) return true; // a relative glob after a change to an unknown folder
+        if (d >= 0) {
           const tail = segs.slice(d + 1);
           for (const r of storePaths)
             for (let o = Math.max(0, r.length - tail.length); o < r.length; o++) {
               const n = r.length - o;
               if (tail.slice(0, n).some(hasLit) && tail.slice(0, n).every((s, i) => segMatch(s, r[o + i] ?? ""))) return true;
             }
+          continue;
         }
-        if (d < 0)
-          for (const b of abs ? ["/"] : bases) {
-            /** @type {Seg[]} */
-            const full = b.split("/").filter(Boolean).map((x) => [{ lit: x }]);
-            for (const s of segs) {
-              const only = s.length === 1 && s[0] && "lit" in s[0] ? s[0].lit : undefined;
-              if (only === ".") continue;
-              if (only === "..") full.pop();
-              else if (s.length) full.push(s);
-            }
-            if (storePaths.some((r) => reachesFrom(full, 0, r, 0))) return true;
+        for (const b of abs ? ["/"] : bases) {
+          /** @type {Seg[]} */
+          const full = b.split("/").filter(Boolean).map((x) => [{ lit: x }]);
+          for (const s of segs) {
+            const only = s.length === 1 && s[0] && "lit" in s[0] ? s[0].lit : undefined;
+            if (only === ".") continue;
+            if (only === "..") full.pop();
+            else if (s.length) full.push(s);
           }
+          if (storePaths.some((r) => reachesFrom(full, 0, r, 0))) return true;
+        }
       }
-      // A quoted word may be script text another command runs (`bash -c`, `eval`): read it again.
-      if (!w.dynamic && level < DECODE_LEVELS && /[*?[]/.test(w.text) && /\s/.test(w.text) && globReachesStore(w.text, cwd, level + 1, subDepth)) return true;
-    }
-  return subDepth < 8 && t.substitutions.some((s) => globReachesStore(s, cwd, level, subDepth + 1));
+  return false;
 }
 
-if (globReachesStore(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd(), 0, 0)) deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
+if (globReachesStore(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd())) deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
 
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {

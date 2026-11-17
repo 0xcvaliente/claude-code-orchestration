@@ -447,8 +447,11 @@ const longOpt = (word, name) => word.length > 2 && name.startsWith(word.slice(2)
 const SHELLS = new Set(["sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "busybox"]);
 /** zsh options that make text the guard reads as data run code: `globsubst` (a glob qualifier `*(e{...})` held in a
  * variable's value runs when the value is expanded) and `promptsubst` (`print -P '$(...)'`, `${(%)x}`). zsh ignores
- * case and underscores in an option name, and a leading `no` names the same option negated. */
-const ZSH_EXEC_OPTION = (t) => /^(no)?(globsubst|promptsubst)$/.test(t.toLowerCase().replace(/_/g, ""));
+ * case and underscores in an option name, a leading `no` names the same option negated (`+o noglobsubst` turns it
+ * on), and `set`/`setopt` take the name attached to `-o`/`+o` and bundled after other letters (`-oglobsubst`,
+ * `-Coglobsubst`); neither option has a single-letter form. So a word counts when it holds either name anywhere,
+ * after lower-casing and dropping underscores. */
+const ZSH_EXEC_OPTION = (t) => /globsubst|promptsubst/.test(t.toLowerCase().replace(/_/g, ""));
 /** Words after which the next word is a command word: shell keywords, `!`, `{` and zsh's precommand modifiers. */
 const LEADERS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "noglob", "nocorrect", "-", "coproc"]);
 /** Commands that run another command as another user. */
@@ -550,7 +553,9 @@ function gitRule(ws, k, later) {
   }
   // A fetch or pull that writes a branch through a refspec destination moves that ref with no push word; run in a
   // local remote (`git -C ../origin.git fetch "$PWD" main:main`) it has the effect of a push (audit J-11).
-  if ((subName === "fetch" || subName === "pull") && refspecDestination(ws, j)) return { c: JUDGE_GIT, sub: j };
+  // `git update-ref` writes a ref directly (`git -C ../origin.git update-ref refs/heads/main FETCH_HEAD`, the two-step
+  // form of the same): judged wherever it runs.
+  if (subName === "update-ref" || ((subName === "fetch" || subName === "pull") && refspecDestination(ws, j))) return { c: JUDGE_GIT, sub: j };
   // A quoted argument (a commit message) is text, except the subcommand itself.
   const s = ws[j];
   const pushy = later.pushy()[k] || (!!s && !s.redirect && !s.dynamic && whollyQuoted(s) && pushyText(s.text));
@@ -558,8 +563,8 @@ function gitRule(ws, k, later) {
 }
 
 /**
- * `git clone -c <key>=<value>` / `--config` (also `--config=`, a prefix such as `--conf`, `-c<kv>` and a short cluster
- * ending in c) writes the key into the new repository, whose checkout then runs it: the key, or the option's text
+ * `git clone -c <key>=<value>` / `--config` (also `--config=`, any prefix from `--c` on, `-c<kv>` and a short cluster
+ * holding c) writes the key into the new repository, whose checkout then runs it: the key, or the option's text
  * when the value cannot be read, for an exec key (GIT_EXEC_KEY), else undefined.
  */
 function cloneConfig(ws, sub) {
@@ -569,8 +574,8 @@ function cloneConfig(ws, sub) {
     const p = staticPrefix(w);
     if (p === "--" && !w.dynamic) break;
     let value;
-    const long = /^--(con[a-z]*)(=?)/.exec(p);
-    const short = /^-[A-Za-z]*c/.exec(p);
+    const long = /^--(c[a-z]*)(=?)/.exec(p);
+    const short = /^-[A-Za-z]*?c/.exec(p); // the first c: `-ccore.x=y` is -c with the key attached
     if (long && "config".startsWith(long[1])) value = long[2] ? { text: w.text.slice(w.text.indexOf("=") + 1), dynamic: w.dynamic } : ws[++i];
     else if (!p.startsWith("--") && short) value = w.text.length > short[0].length || w.dynamic ? { text: w.text.slice(short[0].length), dynamic: w.dynamic } : ws[++i];
     else continue;
@@ -620,9 +625,9 @@ const pushyText = (t) => /push|remote|send-pack|receive-pack/i.test(t) || /^(ali
 /** git subcommands with options whose value git runs through a shell: long names (git also takes a unique prefix, so
  * any prefix counts) and a short letter; `attached`: the value is never a separate word (`-O<cmd>`, `--name=<cmd>`). */
 const GIT_SHELL_OPTS = new Map([
-  // send-email (Getopt::Long): `hyphen`, a prefix counts only past the name's first `-`, so `--to`, `--cc` and the other
-  // options that are prefixes of these names are not read as one.
-  ["send-email", { long: ["to-cmd", "cc-cmd", "header-cmd", "sendmail-cmd", "smtp-server"], hyphen: true }],
+  // send-email (Getopt::Long takes any unique prefix, and an exact name before a prefix): `exact`, options whose whole
+  // name is a prefix of these and so never reads as one (`--to`, `--cc`). `--smtp-server` takes a path it runs.
+  ["send-email", { long: ["to-cmd", "cc-cmd", "header-cmd", "sendmail-cmd", "smtp-server", "smtp-server-option"], exact: ["to", "cc"] }],
   ["instaweb", { long: ["httpd"], short: "d" }],
   ["rebase", { long: ["exec"], short: "x" }],
   ["grep", { long: ["open-files-in-pager"], short: "O", attached: true }],
@@ -669,7 +674,7 @@ function gitShellArgs(ws, sub, rest, start, seen) {
       if (p === "--" && !w.dynamic) break;
       const long = /^--([^=]+)(=?)/.exec(p);
       const short = p.startsWith("--") || !shortRe ? null : shortRe.exec(p);
-      if (long && spec.long.some((n) => n.startsWith(long[1].toLowerCase()) && (!spec.hyphen || long[1].length > n.indexOf("-")))) {
+      if (long && spec.long.some((n) => n.startsWith(long[1].toLowerCase()) && !spec.exact?.includes(long[1].toLowerCase()))) {
         if (long[2]) value(w, w.text.indexOf("=") + 1);
         else if (!spec.attached) value(rest[++i], 0);
       } else if (short) {
@@ -699,11 +704,15 @@ function suOptionFollows(next) {
   if (!next || next.dynamic || next.quoted) return false;
   return SU_OPTS.has(next.text) || /^--(command=|shell=|login)/.test(next.text);
 }
+/** find actions whose next word is a command word. */
+const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
 const WRAPPERS = new Set(["timeout", "env", "nice", "time", "command", "exec", "builtin", "nohup", "xargs", "busybox", "stdbuf", "ionice", "setsid", "unbuffer"]);
-/** The word follows a wrapper prefix, skipping the wrapper's options, numbers and assignments (`timeout 5 su`). */
+/** The word follows a wrapper prefix, skipping the wrapper's options, numbers and assignments (`timeout 5 su`), or a
+ * find action that runs a command (`find . -exec su`, `-execdir`, `-ok`, `-okdir`). */
 function afterWrapper(ws, k) {
   for (let j = k - 1; j >= 0; j--) {
     const w = ws[j] ;
+    if (!w.dynamic && !w.redirect && FIND_EXEC.has(w.text)) return true;
     if (w.redirect || (!w.dynamic && (/^-/.test(w.text) || /^\d+(\.\d+)?[smhd]?$/.test(w.text) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text)))) continue;
     return !w.dynamic && WRAPPERS.has(base(w.text));
   }
@@ -992,12 +1001,13 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const leads = (k) => k === at || k <= leaderRun() || afterWrapper(ws, k);
   // setopt/unsetopt: an exec option (ZSH_EXEC_OPTION), a -m pattern, or an option the guard cannot read.
   const setoptFrom = once(() => suffixAny(nr, (x) => x.dynamic || /^[-+][A-Za-z]*m/.test(x.text) || ZSH_EXEC_OPTION(x.text)));
-  // set: an exec option word, or a dynamic word after an -o/+o cluster.
+  // set: an exec option word (also attached or bundled: `-oglobsubst`, `-Coglobsubst`), or a dynamic option name after
+  // or attached to an -o/+o cluster.
   const setFrom = once(() => {
     const out = new Array(nr.length + 1).fill(false);
     for (let i = nr.length - 1; i >= 0; i--) {
       const x = nr[i];
-      out[i] = out[i + 1] || (!x.dynamic && ZSH_EXEC_OPTION(x.text)) || (x.dynamic && i > 0 && /^[-+][A-Za-z]*o$/.test(nr[i - 1].text));
+      out[i] = out[i + 1] || (!x.dynamic && ZSH_EXEC_OPTION(x.text)) || (x.dynamic && ((i > 0 && /^[-+][A-Za-z]*o$/.test(nr[i - 1].text)) || /^[-+][A-Za-z]*o/.test(staticPrefix(x))));
     }
     return out;
   });
@@ -1040,10 +1050,11 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       ctx.env ??= env[1];
       if (/^PS[014]$/.test(env[1])) {
         ctx.prompt ??= env[1];
-        // A prompt that can expand ($, a backtick, a backslash escape, or a value the guard cannot read) is refused on
+        // A prompt that can expand (`$(`, `${`, `$[`, `$name`, a special parameter, a backtick, an octal escape, or a
+        // value the guard cannot read) is refused on
         // any line: exported, it reaches a traced script (`PS4=... ./x.sh`) or a later traced shell the guard never sees.
-        if (!w.redirect && (w.dynamic || /[$`\\]/.test(w.text.slice(w.text.indexOf("=") + 1))) && !(k > at && textOnly())) {
-          push(deny(`setting ${env[1]} to a value with $, a backtick or a backslash is always blocked: a traced or interactive shell expands it, also one a script starts later`));
+        if (!w.redirect && (w.dynamic || /`|\$[A-Za-z0-9_({[!@#?*$-]|\\[0-7]/.test(w.text.slice(w.text.indexOf("=") + 1))) && !(k > at && textOnly())) {
+          push(deny(`setting ${env[1]} to a value with an expansion ($(...), \${...}, $name, a backtick or an octal escape) is always blocked: a traced or interactive shell expands it, also one a script starts later`));
           continue;
         }
       }
@@ -1170,6 +1181,7 @@ function shellRule(cmd, nr, s, commandPosition, name, ctx, depth) {
   for (; i < nr.length; i++) {
     const x = nr[i] ;
     const t = x.text;
+    if (!x.dynamic && /^[-+]/.test(t) && ZSH_EXEC_OPTION(t)) return deny(`${name} ${t} is always blocked: globsubst and promptsubst run text as code`);
     if (x.dynamic) break;
     if (t === "--") {
       i++;
@@ -1404,7 +1416,7 @@ export const NATIVE_POLICY =
   "- git fetch or pull whose refspec writes a branch (`src:dst`): it moves that branch in the repository it runs in. In " +
   "the working folder's own repository a request that asks to fetch or update that branch suffices; run in another " +
   "repository (git -C, --git-dir, a path outside the working folder) it is a push to that repository and needs a " +
-  "request that asks for that push.\n" +
+  "request that asks for that push. git update-ref writes a ref directly and counts the same way.\n" +
   "DENY git aliases or config that would hide a push or a remote change. DENY when the request is general (\"finish " +
   "the task\", \"fix the tests\", \"tidy up\"), asks for something else, or only an agent says it is needed. DENY " +
   "anything you are unsure about.";
