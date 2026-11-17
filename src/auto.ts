@@ -91,20 +91,9 @@ export async function auto(opts: AutoOptions): Promise<AutoResult> {
     result = { decision: escalated, soloReport, escalated: true };
   }
 
-  // With an explicit budget, what was already spent counts against it. Either way it shows up in the report.
-  const runBudgetTokens = opts.runBudgetTokens === undefined ? undefined : Math.max(opts.runBudgetTokens - spentBefore, 1);
-  const report = await orchestrate({ ...opts, runBudgetTokens });
-  if (spentBefore > 0) {
-    report.spentTokens += spentBefore;
-    for (const [role, tokens] of Object.entries(earlier)) report.tokensByRole[role] = (report.tokensByRole[role] ?? 0) + tokens;
-    rewrite(opts.outRoot, report);
-    // Also in the pipeline run's telemetry, one line per role, so a later --resume of this run counts the triage call
-    // and the escalated session against its budget too (earlierSpend in orchestrator.ts reads that file).
-    const ts = new Date().toISOString();
-    const lines = Object.entries(earlier)
-      .filter(([, tokens]) => Number.isFinite(tokens) && tokens > 0)
-      .map(([role, tokens]) => JSON.stringify({ ts, role, label: "before the pipeline (triage, escalated session)", tokens }) + "\n");
-    if (lines.length) appendFileSync(join(opts.outRoot, report.runId, "telemetry.jsonl"), lines.join(""));
-  }
+  // What was already spent (the triage call, a failed session) goes to the pipeline run's telemetry before the pipeline
+  // starts (priorSpend), so it counts against --budget there, once, and a later --resume of an interrupted run still
+  // finds it. Either way it shows up in the report.
+  const report = await orchestrate({ ...opts, ...(spentBefore > 0 && { priorSpend: earlier }) });
   return { ...result, report };
 }

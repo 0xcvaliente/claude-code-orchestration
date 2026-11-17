@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -228,6 +228,30 @@ test("item 3: a resume of an escalated run counts the triage call and the failed
   assert.equal(r2.report!.tokensByRole.triager, 500);
   assert.equal(r2.report!.tokensByRole.solo, 10_000);
   assert.ok(!calledRoles(second.calls).includes("writer"), "no writer starts on a spent budget");
+});
+
+test("item 3: an escalated run interrupted mid-pipeline still counts the triage call and the failed session on --resume", async () => {
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = fake(small);
+  // The process dies right after planning (the journal is saved): the first log line after the plan throws, so the
+  // pipeline function rejects and nothing after it in auto() runs.
+  let planned = false;
+  const dyingLog = (line: string) => {
+    if (planned) throw new Error("interrupted");
+    if (/^plan: \d+ slice/.test(line)) planned = true;
+  };
+  await assert.rejects(auto({ repo, task: "t", outRoot: out, run: withTokens(first.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 100_000, log: dyingLog }), /interrupted/);
+  assert.ok(!calledRoles(first.calls).includes("writer"));
+  const runId = readdirSync(out).find((d) => existsSync(join(out, d, "journal.json")));
+  assert.ok(runId, "the pipeline run left its journal");
+  // Spent: 500 triage + 10000 session + 20000 planning. A resume that missed the first two would see 10500 left.
+  const second = fake(small);
+  const r = await auto({ repo, task: "t", outRoot: out, run: withTokens(second.run, spend), resume: runId, runBudgetTokens: 30_500 });
+  assert.ok(!calledRoles(second.calls).includes("writer"), "no writer starts on a spent budget");
+  assert.equal(r.report!.spentTokens, 30_500);
+  assert.equal(r.report!.tokensByRole.triager, 500);
 });
 
 // Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed): a session the cap stopped counted as failed and escalated to

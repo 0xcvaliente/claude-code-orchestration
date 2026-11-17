@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
 import { count } from "./args.js";
@@ -44,6 +44,11 @@ export interface OrchestrateOptions {
    * Unset: no cap; turns, timeouts and retries still bound the run.
    */
   runBudgetTokens?: number;
+  /**
+   * Tokens spent before this run, by role (auto(): the triage call, a failed plain or reviewed session). A fresh run
+   * writes them to its telemetry before its first call and counts them against runBudgetTokens; a resume reads them back.
+   */
+  priorSpend?: Record<string, number>;
   concurrency?: number;
   maxRetries?: number;
   log?: (line: string) => void;
@@ -231,7 +236,19 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const run = new Run(opts.resume ?? newRunId(), opts.outRoot);
   const journal = opts.resume ? readJournal(run.dir) : undefined;
   // A resume keeps counting from what the run spent before (its telemetry), so the budget is the run's, not this call's.
-  const earlier = journal ? earlierSpend(run.dir) : { total: 0, byRole: {} };
+  const earlier: { total: number; byRole: Record<string, number> } = journal ? earlierSpend(run.dir) : { total: 0, byRole: {} };
+  if (!opts.resume && opts.priorSpend) {
+    // Written before the first call, so an interrupted run keeps it for --resume (earlierSpend reads it back).
+    const ts = new Date().toISOString();
+    const prior = Object.entries(opts.priorSpend).filter(([, n]) => Number.isFinite(n) && n > 0);
+    if (prior.length) {
+      appendFileSync(join(run.dir, "telemetry.jsonl"), prior.map(([role, tokens]) => JSON.stringify({ ts, role, label: "before the pipeline (triage, failed session)", tokens }) + "\n").join(""));
+    }
+    for (const [role, n] of prior) {
+      earlier.total += n;
+      earlier.byRole[role] = (earlier.byRole[role] ?? 0) + n;
+    }
+  }
   run.spentTokens += earlier.total;
   const task = journal?.task ?? opts.task;
   // The judge's authority is only what the user typed on this invocation, never the journal: journal.json sits in the
