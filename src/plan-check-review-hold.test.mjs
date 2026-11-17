@@ -34,8 +34,11 @@ function project() {
 function append(dir, name, rec) {
   writeFileSync(join(dir, ".claude", "state", name), `${JSON.stringify(rec)}\n`, { flag: "a" });
 }
-/** An implementer of `slice` that started at `start` and stopped at `stop` (minutes). @param {string} dir */
-function implementer(dir, id = "impl1", slice = "a", start = 0, stop = 1) {
+/**
+ * An implementer of `slice` that started at `start` and stopped at `stop` (minutes; null: no stop).
+ * @param {string} dir @param {string} [id] @param {string} [slice] @param {number} [start] @param {number | null} [stop]
+ */
+function implementer(dir, id = "impl1", slice = "a", start = 0, stop = /** @type {number | null} */ (1)) {
   append(dir, "journal-launches.jsonl", { ts: at(start), session_id: "s1", agent_id: id, agent_type: "implementer", slice });
   append(dir, "telemetry.jsonl", { ts: at(start), session_id: "s1", agent_type: "implementer", agent_id: id, hook_event_name: "SubagentStart" });
   if (stop !== null) append(dir, "telemetry.jsonl", { ts: at(stop), session_id: "s1", agent_type: "implementer", agent_id: id, hook_event_name: "SubagentStop" });
@@ -142,9 +145,13 @@ test("a pending gate adds the note and allows; a passed gate and an environment 
 
     gate(dir, 5, "block", "bugfix_timeout");
     const env = launch(dir, REVIEW);
-    assert.deepEqual([env.status, env.stdout], [0, ""], "an environment block does not refuse");
+    // A stop with no hand-back id cannot be tied to one of several records (run.mjs stopGateOf, rule 3): pending, so the
+    // review goes through with the note, never refused.
+    assert.equal(env.status, 0, "an environment block does not refuse");
+    assert.match(env.stdout, /test gate has not reported yet/);
     gate(dir, 6, "warn", "tests_failed_isolated");
-    assert.deepEqual([launch(dir, REVIEW).status, launch(dir, REVIEW).stdout], [0, ""], "a warning does not refuse");
+    const warn = launch(dir, REVIEW);
+    assert.equal(warn.status, 0, "a warning does not refuse");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -273,19 +280,33 @@ test("a test-gate record stamped just before its own stop record belongs to that
   }
 });
 
-test("a second stop after a block, with no new start, waits for its own gate record", () => {
+test("a second stop after a block, with no new start: without hand-back ids the block holds; with them the stop's own record decides", () => {
   const dir = project();
   try {
+    // Stops with no hand-back id (an older telemetry hook): no record can be tied to a stop, so the block wins over any
+    // pass (run.mjs stopGateOf, rule 2), before and after the second stop's pass arrives.
     implementer(dir, "impl1", "a", 0, 1);
     gate(dir, 2, "block", "tests_failed");
     append(dir, "telemetry.jsonl", { ts: at(3), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
-    const r = launch(dir, REVIEW);
-    assert.equal(r.status, 0, "the block belongs to the first stop");
-    assert.match(r.stdout, /test gate has not reported yet/);
+    assert.equal(launch(dir, REVIEW).status, 2, "the block holds the review");
     gate(dir, 5, "allow", "tests_passed");
-    assert.deepEqual([launch(dir, REVIEW).status, launch(dir, REVIEW).stdout], [0, ""]);
+    assert.equal(launch(dir, REVIEW).status, 2, "still held: the pass cannot be tied to the second stop");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+  const keyed = project();
+  try {
+    implementer(keyed, "impl1", "a", 0, null);
+    append(keyed, "telemetry.jsonl", { ts: at(1), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop", after_handback: "h1" });
+    gate(keyed, 2, "block", "tests_failed", { after_handback: "h1" });
+    append(keyed, "telemetry.jsonl", { ts: at(3), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop", after_handback: "h2" });
+    const r = launch(keyed, REVIEW);
+    assert.equal(r.status, 0, "the block is certainly the first stop's (h1)");
+    assert.match(r.stdout, /test gate has not reported yet/);
+    gate(keyed, 5, "allow", "tests_passed", { after_handback: "h2" });
+    assert.deepEqual([launch(keyed, REVIEW).status, launch(keyed, REVIEW).stdout], [0, ""], "the second stop's own pass");
+  } finally {
+    rmSync(keyed, { recursive: true, force: true });
   }
 });
 

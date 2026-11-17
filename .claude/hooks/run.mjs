@@ -163,8 +163,8 @@ export function implementerTestStates(telemetry, gates, sessionId) {
     const mine = gates
       .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId))
       .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
-    const keyedTelemetry = telemetry.some((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && linkOf(e));
-    a.stopGate = stopGateOf(stops, mine, a.start, keyedTelemetry);
+    const allStops = telemetry.filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop");
+    a.stopGate = stopGateOf(stops, mine, a.start, allStops);
   }
   return agents;
 }
@@ -182,42 +182,40 @@ const handbackRecord = (g) => g?.at === "handback" || (typeof g?.handback_id ===
  * hand-back takes only a record of that hand-back's stop (a late record of an earlier stop names another hand-back), and
  * stops with none are paired by count as in 1.6.1. When no record since the start names the stop's hand-back at all
  * (an older verify.sh writes none), the unkeyed records since the start are paired by count against all its stops.
- * The other way round: when the agent's telemetry never carries a hand-back id (an older telemetry.mjs beside a newer
- * verify.sh, whose records name the hand-back; `keyedTelemetry` false and no stop since the start keyed), every record
- * since the start, keyed or not, is paired by count against the stops since the start, as in 1.6.1 (25a22ed), except
- * a keyed record whose hand-back the hand-back gate logged before the latest start: that record belongs to a stop
- * before the restart. Never across the latest start. When the agent's telemetry does carry hand-back ids, a stop with
- * none followed no hand-back, so a keyed record is not its own.
+ * That was the first pairing of 2.0.0 (the release-1.6.1 branch). Since then the pairing may only make the reviewer hold
+ * stricter than it, never weaker:
+ * 1. Certain: the latest stop carries a hand-back id and the records with that id since the start are as many as its
+ *    group's stops. Then the latest of them is the stop's record (a pass stands, a block holds).
+ * 2. Otherwise nothing is certain. The candidates are the records since the start except one whose after_handback is
+ *    carried by another stop of the agent (at any time: before the latest start, or another group since it), which is
+ *    certainly that stop's. A failed-tests block among them (tests_failed or no reason; never bugfix_) wins over any
+ *    pass, whatever the order: the latest such block is returned and the hold refuses.
+ * 3. With no such block, a record stands only when it is the only candidate and the first pairing took it too; else the
+ *    stop is pending (the hold lets the review through with its note).
+ * 4. Never across the latest start; never a hand-back gate's record.
+ * The first pairing's pick is always a candidate, so when it is a failed-tests block, rule 2 returns a block too.
  * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start
- * @param {boolean} [keyedTelemetry] some stop of the agent, at any time, carries after_handback @returns {any}
+ * @param {any[]} [allStops] every stop of the agent, at any time (default `stops`) @returns {any}
  */
-export function stopGateOf(stops, gates, start, keyedTelemetry = false) {
+export function stopGateOf(stops, gates, start, allStops = stops) {
   const latest = stops.at(-1);
   if (!latest) return null;
   const key = linkOf(latest);
   const since = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start);
-  if (!keyedTelemetry && !stops.some((x) => linkOf(x))) {
-    /** @type {Map<string, number>} */
-    const handedBack = new Map();
-    for (const g of gates) if (handbackRecord(g) && typeof g.handback_id === "string") handedBack.set(g.handback_id, Math.min(handedBack.get(g.handback_id) ?? Infinity, timeOf(g.ts)));
-    // Certain: unkeyed (the gate saw no hand-back since the latest start), or keyed with a hand-back logged since it.
-    // Uncertain: keyed, with no hand-back record (it may belong to a stop before the restart). Certain records suffice
-    // when there are enough; an uncertain one stands for the stop only as a block (stricter), never as a pass.
-    const certain = since.filter((g) => !linkOf(g) || (handedBack.get(linkOf(g)) ?? -Infinity) >= start);
-    if (certain.length >= stops.length) return certain.at(-1) ?? null;
-    const own = since.filter((g) => !linkOf(g) || !((handedBack.get(linkOf(g)) ?? Infinity) < start));
-    const pick = own.length >= stops.length ? own.at(-1) : null;
-    return pick && (certain.includes(pick) || pick.decision === "block") ? pick : null;
-  }
   const recs = since.filter((g) => linkOf(g) === key);
-  if (key && !recs.length) {
-    // No record names the stop's hand-back: an older verify.sh beside newer hooks writes no after_handback. Its
-    // unkeyed records since the start are paired by count against every stop since the start, as in 1.6.1.
-    const unkeyed = since.filter((g) => !linkOf(g));
-    return unkeyed.length && unkeyed.length >= stops.length ? (unkeyed.at(-1) ?? null) : null;
-  }
   const group = stops.filter((x) => linkOf(x) === key).length;
-  return recs.length >= group ? (recs.at(-1) ?? null) : null;
+  if (key && recs.length >= group) return recs.at(-1) ?? null; // rule 1
+  // The first pairing's pick (release-1.6.1 branch): by key and count, or the unkeyed records when none names the key.
+  let first = null;
+  if (key && !recs.length) {
+    const unkeyed = since.filter((g) => !linkOf(g));
+    first = unkeyed.length && unkeyed.length >= stops.length ? (unkeyed.at(-1) ?? null) : null;
+  } else if (recs.length >= group) first = recs.at(-1) ?? null;
+  const others = new Set(allStops.map(linkOf).filter((k) => k && k !== key));
+  const candidates = since.filter((g) => !others.has(linkOf(g)));
+  const blocks = candidates.filter((g) => g.decision === "block" && !String(g.reason ?? "").startsWith("bugfix_"));
+  if (blocks.length) return blocks.at(-1) ?? null; // rule 2
+  return candidates.length === 1 && first === candidates[0] ? first : null; // rule 3
 }
 
 /** The agent's latest test-gate record is a block later than its latest stop. @param {{ stop: number, testAt: number, testBlock: boolean }} a */

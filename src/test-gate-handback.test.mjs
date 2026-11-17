@@ -659,9 +659,10 @@ describe("test gate at the hand-back", { concurrency: CONCURRENCY }, () => {
     assert.equal(implementerTestStates(telemetry, [...late, g(5, "allow", { after_handback: "h2" })], "s1").get("i1")?.stopGate?.decision, "allow");
     // A record of the same hand-back from before the latest start never counts.
     assert.equal(stopGateOf([tel("SubagentStop", 3, { after_handback: "h1" })], [g(1.5, "block", { after_handback: "h1" })], T + 2 * 60000), null);
-    // Two stops after one hand-back: the second waits for its own record.
+    // Two stops after one hand-back, one block so far: it cannot be told which stop it is, so the block holds (stricter
+    // than waiting; run.mjs stopGateOf, rule 2).
     const two = [tel("SubagentStop", 1, { after_handback: "h1" }), tel("SubagentStop", 2, { after_handback: "h1" })];
-    assert.equal(stopGateOf(two, [g(1.5, "block", { after_handback: "h1" })], T), null);
+    assert.equal(stopGateOf(two, [g(1.5, "block", { after_handback: "h1" })], T)?.decision, "block");
     // Unkeyed (a worker that only stops, or older logs): by count since the start; hand-back records are left out.
     const stop = tel("SubagentStop", 1);
     assert.equal(stopGateOf([stop], [g(0.5, "block", { at: "handback", handback_id: "t1" })], T), null);
