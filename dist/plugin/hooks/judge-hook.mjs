@@ -164,10 +164,50 @@ const storeRoot = (() => {
   return at < 0 ? "" : promptStore.slice(0, at + PROMPT_STORE_NAME.length);
 })();
 
-/** @typedef {({ lit: string } | { glob: string } | { dyn: true })[]} Seg */
+/** @typedef {({ lit: string, ext?: boolean } | { glob: string } | { dyn: true })[]} Seg */
 
-/** A word's pieces split into path segments; `abs`: it starts with `/`. @param {any[]} pieces */
+// Glob characters beyond `*`, `?` and `[`: the hook cannot know the shell's options, so an unquoted `{` or `}` (brace
+// expansion), `^`, `#` and `~` inside a word (zsh's extendedglob) count too. (A `(` attached to a word, as in zsh's
+// `(a|b)` and ksh's `@(`, `!(`, `+(`, `*(`, `?(`, makes the tokenizer give up, and the floor denies the line.)
+const EXT_GLOB = /[{}^#~]/;
+/** Any glob character a shell may expand, for the quick test on the whole line. */
+const ANY_GLOB = /[*?[{}^#~]/;
+/** One path segment that matches any name, and one that matches any run of segments. @type {Seg} */
+const ANY_NAME = [{ glob: "*" }];
+/** @type {Seg} */
+const ANY_DEPTH = [{ glob: "*" }, { glob: "*" }];
+
+/**
+ * A word's pieces split into path segments; `abs`: it starts with `/`. A segment with an extended glob character
+ * (EXT_GLOB) matches any name; when such a construct may span a `/` (a brace group left open in its segment, or a `~`
+ * exclusion with more segments after it) the word matches any run of segments from there on.
+ * @param {any[]} pieces
+ */
 function segmentsOf(pieces) {
+  const { segs, abs } = rawSegmentsOf(pieces);
+  /** @type {Seg[]} */
+  const out = [];
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i] ?? [];
+    const ext = seg.filter((p) => "lit" in p && p.ext).map((p) => ("lit" in p ? p.lit : "")).join("");
+    if (!ext) {
+      out.push(seg);
+      continue;
+    }
+    const opens = (ext.match(/\{/g) ?? []).length;
+    const closes = (ext.match(/\}/g) ?? []).length;
+    if (opens !== closes || (ext.includes("~") && i < segs.length - 1)) {
+      out.push(ANY_DEPTH);
+      break;
+    }
+    out.push(ANY_NAME);
+  }
+  return { segs: out, abs };
+}
+
+/** A word's pieces split into path segments, each literal part marked `ext` when it is unquoted and holds an
+ * extended glob character. @param {any[]} pieces */
+function rawSegmentsOf(pieces) {
   /** @type {Seg[]} */
   const segs = [[]];
   /** @type {Seg} */
@@ -178,7 +218,7 @@ function segmentsOf(pieces) {
       const parts = p.lit.split("/");
       parts.forEach((part, i) => {
         if (i > 0) segs.push((cur = []));
-        if (part) cur.push({ lit: part });
+        if (part) cur.push(p.quoted || !EXT_GLOB.test(part) ? { lit: part } : { lit: part, ext: true });
       });
     } else cur.push(p);
   }
@@ -222,7 +262,7 @@ const storePaths = (() => {
   return out;
 })();
 
-/** @typedef {{ pieces: any[], text: string, dynamic: boolean }} HookWord */
+/** @typedef {{ pieces: any[], text: string, dynamic: boolean, redirect?: boolean }} HookWord */
 /** @typedef {{ commands: { words: HookWord[] }[], substitutions: string[] }} HookScript */
 
 /** The literal text a word starts with, up to its first expansion or glob. @param {HookWord} w */
@@ -286,7 +326,8 @@ function foldersOf(scripts, cwd) {
       return;
     }
     const t = target.text;
-    if (target.dynamic || t === "-" || /^[-+]\d+$/.test(t) || (cdpath && !/^\.{0,2}\//.test(t))) {
+    const plain = target.pieces.every((p) => "lit" in p && (p.quoted || !EXT_GLOB.test(p.lit)));
+    if (target.dynamic || !plain || !t || t === "-" || /^[-+]\d+$/.test(t) || (cdpath && !/^\.{0,2}\//.test(t))) {
       unknown = true;
       return;
     }
@@ -299,9 +340,25 @@ function foldersOf(scripts, cwd) {
       if (!w || w.dynamic) continue;
       if (w.text === "popd") unknown = true;
       else if (CD_WORDS.has(w.text)) {
-        let j = i + 1;
-        while (ws[j] && !ws[j]?.dynamic && /^-[LPe@qsn]+$/.test(ws[j]?.text ?? "")) j++;
-        change(ws[j]);
+        // Skip the command's own options (`-L`, `-P`, `-e`, `-@`, `-q`, `-s`, pushd's `-n`) and one `--`; what is left
+        // is the target. None: the home folder (pushd alone swaps the stack: unknown). More than one (zsh's
+        // `cd old new`), or one that is not a plain literal path, is unknown.
+        /** @type {HookWord[]} */
+        const args = [];
+        let options = true;
+        for (let j = i + 1; j < ws.length; j++) {
+          const x = ws[j];
+          if (!x || x.redirect) continue;
+          if (options && !x.dynamic && x.text === "--") options = false;
+          else if (options && !x.dynamic && /^-[LPe@qsn]+$/.test(x.text)) continue;
+          else {
+            options = false;
+            args.push(x);
+            if (args.length > 1) break; // two are enough to tell (and a long line stays linear)
+          }
+        }
+        if (args.length > 1 || (!args.length && w.text === "pushd")) unknown = true;
+        else change(args[0]);
       } else if (w.text === "env")
         for (let j = i + 1; j < ws.length; j++) {
           const x = ws[j];
@@ -317,9 +374,10 @@ function foldersOf(scripts, cwd) {
   return { bases: [...bases], unknown };
 }
 
-/** @param {string} text @param {string} cwd @returns {boolean} */
+/** "reaches", "unknown" (a relative glob after a change to a folder the guard cannot read) or "". @param {string} text
+ * @param {string} cwd @returns {"reaches" | "unknown" | ""} */
 function globReachesStore(text, cwd) {
-  if (!storePaths.length || !/[*?[]/.test(text)) return false; // no glob character anywhere, nested text included
+  if (!storePaths.length || !ANY_GLOB.test(text)) return ""; // no glob character anywhere, nested text included
   const { scripts, complete } = scriptsOf(text);
   const { bases, unknown } = foldersOf(scripts, cwd);
   for (const t of scripts)
@@ -331,13 +389,13 @@ function globReachesStore(text, cwd) {
         segs.forEach((s, i) => {
           if (s.some((p) => "dyn" in p)) d = i;
         });
-        if (d < 0 && !abs && (unknown || !complete)) return true; // a relative glob after a change to an unknown folder
+        if (d < 0 && !abs && (unknown || !complete)) return "unknown"; // a relative glob after a change to an unknown folder
         if (d >= 0) {
           const tail = segs.slice(d + 1);
           for (const r of storePaths)
             for (let o = Math.max(0, r.length - tail.length); o < r.length; o++) {
               const n = r.length - o;
-              if (tail.slice(0, n).some(hasLit) && tail.slice(0, n).every((s, i) => segMatch(s, r[o + i] ?? ""))) return true;
+              if (tail.slice(0, n).some(hasLit) && tail.slice(0, n).every((s, i) => segMatch(s, r[o + i] ?? ""))) return "reaches";
             }
           continue;
         }
@@ -350,13 +408,16 @@ function globReachesStore(text, cwd) {
             if (only === "..") full.pop();
             else if (s.length) full.push(s);
           }
-          if (storePaths.some((r) => reachesFrom(full, 0, r, 0))) return true;
+          if (storePaths.some((r) => reachesFrom(full, 0, r, 0))) return "reaches";
         }
       }
-  return false;
+  return "";
 }
 
-if (globReachesStore(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd())) deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
+const globVerdict = globReachesStore(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd());
+if (globVerdict === "reaches") deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
+if (globVerdict === "unknown")
+  deny("always blocked: a directory change on this line (cd, pushd, popd, chdir or env -C) goes to a folder the guard cannot read as one plain path (a variable, a substitution, ~, -, a glob or brace, a stack entry, two arguments, or HOME or CDPATH set), and a relative glob follows it, which could reach the judge's record of the user's requests. Run the directory change as its own Bash call and the command in the next call, or give the glob an absolute path.");
 
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {
