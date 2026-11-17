@@ -540,6 +540,50 @@ test("a SOURCES symlink in the project that leads outside it is tiered by extens
   assert.equal(typeof noDir.textPath, "string", "without projectDir nothing changes");
 });
 
+test("w3 item 3: a cache entry that is a symlink, or a cache folder reached through one, is never read or written through", () => {
+  const tools = { pdfinfo: PDFINFO(1), pdftotext: `${prose(900)}\f`, pdfimages: NO_IMAGES };
+  const proj = tmp();
+  const src = join(proj, "a.pdf");
+  writeFileSync(src, "%PDF-1.4\n");
+  const outside = tmp();
+  const secret = join(outside, "secret.txt");
+  writeFileSync(secret, "SECRET planted text\n");
+
+  // 1. The entry the key names is a symlink to a file elsewhere: not read as the conversion, not written through.
+  const cacheDir = tmp();
+  const key = cachePath(cacheDir, realpathSync(src), statSync(src), ".txt");
+  symlinkSync(secret, key);
+  /** @type {string[]} */
+  const calls = [];
+  const run = canned(tools);
+  const p = profileFile(src, { cacheDir, projectDir: proj, run: (c, a, o) => (calls.push(c), run(c, a, o)) });
+  assert.ok(!p.reasons.includes("text from cache"), p.reasons.join("; "));
+  assert.ok(calls.includes("pdftotext"), "the file itself is converted");
+  assert.equal(p.textPath, undefined, "the researcher is not pointed at the symlink");
+  assert.equal(readFileSync(secret, "utf8"), "SECRET planted text\n", "nothing written through the link");
+  assert.match(p.reasons.join("; "), /cache entry is not a regular file/);
+
+  // 2. The cache folder is itself a symlink to another folder: nothing read there or written there.
+  const realCache = tmp();
+  const linkedCache = join(tmp(), "read-cache");
+  symlinkSync(realCache, linkedCache);
+  const planted = cachePath(linkedCache, realpathSync(src), statSync(src), ".txt");
+  writeFileSync(join(realCache, basename(planted)), "PLANTED conversion\n");
+  const q = profileFile(src, { cacheDir: linkedCache, projectDir: proj, run: canned(tools) });
+  assert.ok(!q.reasons.includes("text from cache"), q.reasons.join("; "));
+  assert.equal(q.textPath, undefined);
+  assert.deepEqual(readdirSync(realCache), [basename(planted)], "nothing new written through the linked folder");
+  assert.equal(readFileSync(join(realCache, basename(planted)), "utf8"), "PLANTED conversion\n");
+
+  // 3. A plain cache folder and a regular entry: cached and read as before.
+  const plain = tmp();
+  const first = profileFile(src, { cacheDir: plain, projectDir: proj, run: canned(tools) });
+  assert.equal(typeof first.textPath, "string");
+  const again = profileFile(src, { cacheDir: plain, projectDir: proj, run: canned(tools) });
+  assert.ok(again.reasons.includes("text from cache"));
+  assert.equal(again.textPath, first.textPath);
+});
+
 /** @param {string} p */
 function basename(p) {
   return p.split("/").pop() ?? "";
