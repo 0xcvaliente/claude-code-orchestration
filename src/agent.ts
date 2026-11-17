@@ -1,6 +1,7 @@
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { query as sdkQuery, type HookCallbackMatcher, type Options } from "@anthropic-ai/claude-agent-sdk";
+import { query as sdkQuery, type HookCallbackMatcher, type McpServerConfig, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { LIMITS, rolesFor, type Role } from "./config.js";
 import { askOpus, bashGuard, HOOK_TIMEOUT_S, judgeEnabled, runGit, statPath, workerEnv, type JudgeDeps } from "./judge.js";
 import { totalTokens, usageFromResult, type TokenUsage } from "./tokens.js";
@@ -26,6 +27,8 @@ export interface AgentResult {
   /** Total tokens of the worker: input + output + cache read + cache write, over every model it used. */
   tokens: number;
   usage?: TokenUsage;
+  /** The call's cost in list-price dollars, as its result message reports it (total_cost_usd); absent without a result. */
+  costUsd?: number;
   turns: number;
   subtype: string;
   durationMs: number;
@@ -71,22 +74,77 @@ export function sandboxFor(env: NodeJS.ProcessEnv, cwd: string): Options["sandbo
 }
 
 /**
- * Options for the triage call only. The triager reads the folder with Read, Glob and Grep under dontAsk, so it can never
- * use an MCP tool, yet in a live run the session carried the MCP tools of the person's claude.ai account connectors,
- * which the triager can never use, in every turn (about 110k tokens each) and wrote a session transcript
- * (docs/data/live-checks-2026-11-16.md, Checks 8 and 10). strictMcpConfig with no
- * servers drops every configured MCP server, disableClaudeAiConnectors the account connectors, and persistSession false
- * the transcript, unless ORCH_SESSION_PERSISTENCE=1 (the launcher's switch for keeping transcripts). A request's
- * maxBudgetUsd becomes the call's cap. Every other role's options stay as they were.
+ * MCP servers and account connectors, for every role. A worker's session would otherwise carry the MCP tools of the
+ * person's claude.ai account connectors, which no worker is told to use, in every turn: about 110k tokens per turn in
+ * the live triage run of 2026-11-16 (docs/data/live-checks-2026-11-16.md, Checks 8 and 10), and the same connectors
+ * reach every other role through the same settings. So every role gets disableClaudeAiConnectors in its flag settings,
+ * and strictMcpConfig with the servers named here, which drops every MCP server a project, the user or a plugin
+ * configures. By default that is none.
+ *
+ * ORCH_SDK_MCP=project (an opt-in, read here only) keeps the project's own servers for the working roles (writer, solo,
+ * verifier): the `mcpServers` of the .mcp.json at the worker's folder (the worktree root), passed as written. Claude
+ * Code's approval of a project's .mcp.json servers does not apply to them: setting the switch is that approval. The
+ * planner, the explorer and the triager never get one, and account connectors stay off for every role.
+ *
+ * mcpServersDelivery "initialize" (Agent SDK 0.3.326, sdk.d.ts): the servers reach Claude Code over stdin, so a server's
+ * `env` and `headers` stay off the command line; sending them on the command line ('argv', the SDK's default) is
+ * deprecated. This repo runs the Claude Code bundled with the SDK, which the SDK says can take it.
  */
-function triageOptions(req: AgentRequest, env: NodeJS.ProcessEnv): Partial<Options> {
-  if (req.role !== "triager") return {};
+export const MCP_ROLES: readonly Role[] = ["writer", "solo", "verifier"];
+
+/** ORCH_SDK_MCP=project (any case, spaces ignored); any other value or unset keeps no MCP server. */
+export const keepsProjectMcp = (env: NodeJS.ProcessEnv): boolean => (env.ORCH_SDK_MCP ?? "").trim().toLowerCase() === "project";
+
+/** The `mcpServers` object of <folder>/.mcp.json; none when the file is missing, unreadable or not that shape. */
+export function projectMcpServers(folder: string): Record<string, McpServerConfig> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(folder, ".mcp.json"), "utf8"));
+    const servers = (parsed as { mcpServers?: unknown } | null)?.mcpServers;
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers)) return {};
+    return Object.fromEntries(
+      Object.entries(servers).filter(([, v]) => typeof v === "object" && v !== null && !Array.isArray(v)),
+    ) as Record<string, McpServerConfig>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The options that keep a worker lean: MCP and connectors as above for every role, and for the triager also no hooks,
+ * no transcript and the request's cap.
+ *
+ * The triager reads the folder with Read, Glob and Grep under dontAsk; it still loaded the project's settings, so the
+ * hooks of the folder it reads ran in its session (Check 10: a review-gate record from the triage). disableAllHooks in
+ * its flag settings, which rank above the project's, turns off the hooks of every settings file and installed plugin
+ * (and the status line command, which a headless call never shows); hooks of managed settings still run. The triager
+ * keeps settingSources ["project"], so it still reads the folder's CLAUDE.md and permissions. persistSession false drops
+ * the transcript unless ORCH_SESSION_PERSISTENCE=1 (the launcher's switch for keeping transcripts), and a request's
+ * maxBudgetUsd becomes the call's cap; both stay triage-only.
+ *
+ * The triager also passes a fixed `title`: Claude Code otherwise names each new session with a small side call to haiku
+ * (its debug log says `source=generate_session_title`, about 1,650 input tokens; the SDK documents that a given title
+ * skips it). The triage session writes no transcript by default, so nothing ever shows that title; with
+ * ORCH_SESSION_PERSISTENCE=1 the kept transcript is titled "triage". Probed live in docs/data/live-checks-2026-11-17.md,
+ * Check 2. The other roles keep the generated title.
+ */
+/** The triage session's fixed title, so Claude Code makes no haiku call to name it (see leanOptions). */
+export const TRIAGE_TITLE = "triage";
+
+function leanOptions(req: AgentRequest, env: NodeJS.ProcessEnv): Partial<Options> {
+  const triager = req.role === "triager";
+  const servers = MCP_ROLES.includes(req.role) && keepsProjectMcp(env) ? projectMcpServers(req.cwd) : {};
   return {
     strictMcpConfig: true,
-    mcpServers: {},
-    settings: { agent: "", disableClaudeAiConnectors: true },
-    ...(env.ORCH_SESSION_PERSISTENCE !== "1" && { persistSession: false }),
-    ...(req.maxBudgetUsd !== undefined && { maxBudgetUsd: req.maxBudgetUsd }),
+    mcpServers: servers,
+    mcpServersDelivery: "initialize",
+    // A worker is never the repo's main agent. With project settings loaded, an `agent` setting there (this repo's own
+    // .claude/settings.json names the orchestrator) would run the worker as that agent, with that agent's tools instead
+    // of cfg.tools: a writer with no Edit or Bash. An empty `agent` in the flag settings, which rank above the
+    // project's, gives the default agent back (probed on Claude Code 2.1.322).
+    settings: { agent: "", disableClaudeAiConnectors: true, ...(triager && { disableAllHooks: true }) },
+    ...(triager && { title: TRIAGE_TITLE }),
+    ...(triager && env.ORCH_SESSION_PERSISTENCE !== "1" && { persistSession: false }),
+    ...(triager && req.maxBudgetUsd !== undefined && { maxBudgetUsd: req.maxBudgetUsd }),
   };
 }
 
@@ -150,18 +208,13 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
         disallowedTools: cfg.disallowedTools,
         permissionMode: "dontAsk", // headless: anything not allowed above is denied, never prompted
         settingSources: ["project"],
-        // A worker is never the repo's main agent. With project settings loaded, an `agent` setting there (this
-        // repo's own .claude/settings.json names the orchestrator) would run the worker as that agent, with that
-        // agent's tools instead of cfg.tools: a writer with no Edit or Bash. An empty `agent` in the flag settings,
-        // which rank above the project's, gives the default agent back (probed on Claude Code 2.1.322).
-        settings: { agent: "" },
         env: workerEnv(), // no Claude Code auto memory in a worker (see workerEnv)
         systemPrompt: { type: "preset", preset: "claude_code", append: cfg.system },
         abortController: abort,
         ...(hooks && { hooks }),
         ...(sandbox && { sandbox }),
         ...(req.schema && { outputFormat: { type: "json_schema" as const, schema: req.schema } }),
-        ...triageOptions(req, env),
+        ...leanOptions(req, env), // MCP, connectors and the flag settings (`agent: ""`); see leanOptions
       },
     });
 
@@ -183,6 +236,7 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
         subtype: msg.subtype,
         durationMs: Date.now() - started,
         model: cfg.model,
+        ...(typeof msg.total_cost_usd === "number" && Number.isFinite(msg.total_cost_usd) && { costUsd: msg.total_cost_usd }),
       };
       return msg.subtype === "success"
         ? { ...common, ok: !msg.is_error, text: msg.result, structured: msg.structured_output }

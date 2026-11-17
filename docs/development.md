@@ -17,12 +17,13 @@ npm run typecheck    # the type check only
 
 | Script | What it does |
 |---|---|
+| `npm start`, `npm run orchestrate` | The native orchestrator, the main toolkit, interactive, with the pane loaded (`claude --agent orchestrator --plugin-dir dist/dashboard`) |
 | `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time |
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls; one temp root, removed at the end) and the type check |
 | `npm run check-agents`, `npm run sync-agents` | Find, or fix, drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
 | `npm run auto`, `npm run native`, `npm run route` | Headless run with triage first; headless run of the orchestrator; triage only ([Headless runs](native-mode.md#headless-runs)) |
-| `npm run orchestrate`, `npm run test-dashboard` | The orchestrator with the pane loaded; the pane's own test (needs the `claude` CLI) |
+| `npm run test-dashboard` | The pane's own test (needs the `claude` CLI) |
 | `npm run plain` | A plain interactive session in this repo: `claude --settings '{"agent":"","outputStyle":"Concise"}'`. A session opened here otherwise starts as the orchestrator |
 | `npm run report` | An HTML timeline and per-role tables from the state dir, with an estimated cost at list prices ([Run report](logs.md#run-report)) |
 | `npm run install-statusline` | Copy the status line script and print the setting ([Status lines](dashboard.md#status-lines)) |
@@ -30,7 +31,7 @@ npm run typecheck    # the type check only
 | `npm run skill-publish` | List draft skills; `-- <name>` pushes a draft and opens its pull request, `--merge` merges, installs and removes the draft, `--dry-run` prints the steps ([Publishing](skills.md#publishing)) |
 | `npm run eval` | `claude plugin eval` on `dist/plugin` with the cases in `evals/` (paid, `--max-cost-usd 10`) ([Plugin eval suite](../bench/README.md#plugin-eval-suite)) |
 | `npm run bench`, `bench:validate`, `bench:grade`, `bench:analyze`, `bench:report` | The benchmark ([bench/README.md](../bench/README.md)) |
-| `npm start` | The SDK pipeline, with triage ([docs/sdk-pipeline.md](sdk-pipeline.md)) |
+| `npm run sdk` | The older SDK pipeline, frozen, with triage ([docs/sdk-pipeline.md](sdk-pipeline.md)) |
 
 ## Repository layout
 
@@ -101,10 +102,10 @@ What the build does:
 - **Workflows.** It ships `.claude/workflows/*.js` as plugin workflows, with every `agentType` rewritten to `orchestration:<role>`.
 - **Evals.** It copies the repo-root `evals/` into the plugin, for `claude plugin eval`.
 - **Hooks.** It registers `judge-hook.mjs` (PreToolUse on `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`, and wraps the judge hook for `onFailure: "block"`. It also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`).
-- **Settings.** It writes the 20 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`, and ships `.claude/hooks/subagent-statusline.mjs` through the plugin's `settings.json`.
+- **Settings.** It writes the 21 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`, and ships `.claude/hooks/subagent-statusline.mjs` through the plugin's `settings.json`.
 - **The pane.** It builds `dashboard/` into the plugin (with its state owner renamed to `orchestration`) and alone as `dist/dashboard`.
 
-`npm run check-plugin` skips only `dist/plugin/evals/results`. A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
+`npm run check-plugin` skips only `dist/plugin/evals/results` and the two paths Claude Code writes when it loads the pane from `dist/dashboard`: `tsconfig.json` at that folder's root and `.claude-plugin/types/` (git ignores both). A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
 
 ## Release steps
 

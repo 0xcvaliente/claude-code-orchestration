@@ -87,6 +87,9 @@ const hooks = {
       { matcher: "WebFetch", hooks: [{ type: "command", command: run("egress-guard.mjs") }] },
       // Before a worker's report is delivered (auto mode): its format, and a researcher's quotes. Both filter by agent type.
       { matcher: "SubagentHandback", hooks: [{ type: "command", command: run("handback-check.mjs") }, { type: "command", command: run("quote-check.mjs") }] },
+      // Deny-only: refuses every Workflow launch but this repo's saved orchestrate workflow (a plugin cannot ship
+      // permissions.deny, and Claude Code's own workflow switch would remove the saved workflow too).
+      { matcher: "Workflow", hooks: [{ type: "command", command: run("workflow-guard.mjs") }] },
     ],
     PostToolUse: [
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("journal.mjs") }] },
@@ -113,7 +116,11 @@ const has = (script) => existsSync(join(src, "hooks", script));
 if (has("judge-hook.mjs")) {
   events.PreToolUse?.push({ matcher: "Bash", hooks: [{ type: "command", command: failClosed("judge-hook.mjs"), timeout: 120, onFailure: "block" }] });
 }
-if (has("prompt-capture.mjs")) events.UserPromptSubmit = [{ hooks: [{ type: "command", command: run("prompt-capture.mjs") }] }];
+// UserPromptSubmit: the judge's prompt capture when it ships, then the nudge's one line for a prompt that holds the
+// workflow keyword (nudge.mjs; it exits on duplicate() where the project registers its own copy).
+events.UserPromptSubmit = [
+  { hooks: [...(has("prompt-capture.mjs") ? [{ type: "command", command: run("prompt-capture.mjs") }] : []), { type: "command", command: run("nudge.mjs") }] },
+];
 // The module sits beside the command hooks in the plugin; it imports its state types from ../types.
 // State keys belong to the plugin that holds the module, so inside this plugin the mod's own name becomes ours.
 /** @param {string} file */
@@ -146,6 +153,7 @@ const OPTIONS = [
   ["skill_create", "string", "Skill creation", "Empty: on; off blocks a KIND: skill implementer launch, so a run creates no skill (ORCH_SKILL_CREATE)."],
   ["skills_repo_private", "string", "Private skills repository", "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."],
   ["skills_repo_public", "string", "Public skills repository", "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."],
+  ["workflow_guard", "string", "Workflow guard", "Empty: on; off lets every Workflow launch through, not only the saved orchestrate workflow (ORCH_WORKFLOW_GUARD)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(
@@ -173,9 +181,9 @@ writeFileSync(
 );
 /**
  * The differences between two folders, one line per path: only in one of them, a file against a folder, or different
- * contents (a symbolic link compares by its target). `skip` (a path relative to both, `/`-separated) and everything
- * under it are left out on both sides.
- * @param {string} built @param {string} committed @param {string | null} skip @returns {string[]}
+ * contents (a symbolic link compares by its target). Each path in `skip` (relative to both roots, `/`-separated, matched
+ * as a whole path from the root, never as a name at any depth) and everything under it are left out on both sides.
+ * @param {string} built @param {string} committed @param {string[]} skip @returns {string[]}
  */
 function treeDiff(built, committed, skip) {
   /** @param {string} base @returns {Map<string, string>} relative path -> "dir", "link:<target>" or "file" */
@@ -187,7 +195,7 @@ function treeDiff(built, committed, skip) {
     const visit = (rel) => {
       for (const e of readdirSync(rel ? join(base, rel) : base, { withFileTypes: true })) {
         const r = rel ? `${rel}/${e.name}` : e.name;
-        if (skip && (r === skip || r.startsWith(`${skip}/`))) continue;
+        if (skip.some((k) => r === k || r.startsWith(`${k}/`))) continue;
         if (e.isDirectory()) {
           found.set(r, "dir");
           visit(r);
@@ -217,7 +225,9 @@ if (check) {
   const stale = ["plugin", "dashboard"].flatMap((name) => {
     // `claude plugin eval` writes its reports to dist/plugin/evals/results (ignored by git): not part of the build. Only
     // that one folder is skipped (diff -x would skip every path named results, on both sides and at any depth).
-    const skip = name === "plugin" ? "evals/results" : null;
+    // Claude Code writes tsconfig.json and .claude-plugin/types/ when it loads the pane from dist/dashboard (ignored by
+    // git as well): only those two paths at the dashboard root are skipped.
+    const skip = name === "plugin" ? ["evals/results"] : ["tsconfig.json", ".claude-plugin/types"];
     const d = treeDiff(join(outRoot, name), join(committedRoot, name), skip);
     return d.length === 0 ? [] : [`dist/${name} is out of date; run npm run build-plugin\n${d.join("\n")}\n`];
   });

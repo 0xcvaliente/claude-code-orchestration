@@ -15,7 +15,7 @@ Contents: [1 What it is](#1-what-it-is-and-why) · [2 The three classes](#2-the-
 
 ## 1 What it is, and why
 
-**Scope.** The SDK judge applies only to the SDK pipeline (`src/`, run with `npm start`). Inside it, only the three roles that have the `Bash` tool get it: `solo`, `writer` and `verifier` (`rolesFor` in `src/config.ts`). `makeRunAgent` in `src/agent.ts` installs the hook only when `cfg.tools.includes("Bash")`. The planner, explorer and triager have no Bash and get no hook (`agent.test.ts`: "non-Bash roles get no hook, no sandbox and no deny list").
+**Scope.** The SDK judge applies only to the SDK pipeline (`src/`, run with `npm run sdk`). Inside it, only the three roles that have the `Bash` tool get it: `solo`, `writer` and `verifier` (`rolesFor` in `src/config.ts`). `makeRunAgent` in `src/agent.ts` installs the hook only when `cfg.tools.includes("Bash")`. The planner, explorer and triager have no Bash and get no hook (`agent.test.ts`: "non-Bash roles get no hook, no sandbox and no deny list").
 
 `npm run auto` is not part of that scope. It runs `scripts/auto.sh`, which calls `src/route.ts` for triage only and then starts native sessions through `scripts/orchestrate.sh`. Native sessions keep their static deny rules: `.claude/settings.json` `permissions.deny`, `--disallowedTools` in `scripts/orchestrate.sh`, and the rules in the native agent files. They get a judge only through the opt-in [native hook](#native-hook).
 
@@ -336,7 +336,7 @@ These are all errors, and an error is a deny: two objects, an array, extra or mi
 
 - model `ORCH_MODEL_JUDGE`, default `claude-opus-5-5`; effort `medium`; `maxTurns: 1`;
 - `tools: []`, `allowedTools: []`;
-- `settingSources: []` (no settings, no CLAUDE.md); `mcpServers: {}` with `strictMcpConfig`; `plugins: []`;
+- `settingSources: []` (no settings, no CLAUDE.md); `mcpServers: {}` with `strictMcpConfig`, sent with `mcpServersDelivery: "initialize"`; `plugins: []`;
 - `permissionMode: "dontAsk"`; `persistSession: false`; no Claude Code auto memory (`env: workerEnv()`);
 - a one-line system prompt, and `cwd` set to the system temp folder.
 
@@ -370,9 +370,9 @@ The hook is `bashGuard`. Plain `Bash` is pre-approved, so a hook that returned n
 | The model call returns an error result or no result | `askOpus` throws | deny |
 | An empty, non-JSON, multi-object or wrong-shape answer | `parseVerdict` | deny, `judge answer rejected (...): denied` |
 | A model that answers deny | `judgeBash` | deny with the model's reason |
-| The SDK times the hook out first | `HOOK_TIMEOUT_S` | Avoided: the hook timeout is 90 s, clearly above the judge's 60 s, so the judge's own timeout always fires first (`judge.test.ts` "judgeEnabled and the hook timeout" keeps a 20 s margin). The matcher also has `onFailure: "block"` (`makeRunAgent`). `sdk.d.ts` (0.3.325) defines a callback matcher's failure as a callback that throws or returns output that fails validation, and says `"block"` then blocks the tool call. It does not say whether a callback that runs past the matcher's `timeout` counts as such a failure (for command hooks in settings it does say a timeout counts). What a timed-out callback does is therefore not stated by the SDK; the margin exists so that the question does not arise |
+| The SDK times the hook out first | `HOOK_TIMEOUT_S` | Avoided: the hook timeout is 90 s, clearly above the judge's 60 s, so the judge's own timeout always fires first (`judge.test.ts` "judgeEnabled and the hook timeout" keeps a 20 s margin). The matcher also has `onFailure: "block"` (`makeRunAgent`). `sdk.d.ts` (0.3.326, unchanged since 0.3.325) defines a callback matcher's failure as a callback that throws or returns output that fails validation, and says `"block"` then blocks the tool call. It does not say whether a callback that runs past the matcher's `timeout` counts as such a failure (for command hooks in settings it does say a timeout counts). What a timed-out callback does is therefore not stated by the SDK; the margin exists so that the question does not arise |
 
-**A deny rule still beats a hook allow.** `Bash(sudo*)` stays in `disallowedTools` when the judge is on (`SDK_DENIED_BASH`), as a second layer behind the floor. The SDK documents that a deny rule overrides an allow from a hook. The comment on `SDKPermissionDeniedMessage` in `sdk.d.ts` (package `@anthropic-ai/claude-agent-sdk`, version 0.3.325 here) lists "deny-rule overrides of hook allow/ask decisions" among the denials that resolve before `canUseTool`. That sentence is incidental to the type it documents, not a full specification. Treat it as the SDK's stated behaviour, not one tested in this repo.
+**A deny rule still beats a hook allow.** `Bash(sudo*)` stays in `disallowedTools` when the judge is on (`SDK_DENIED_BASH`), as a second layer behind the floor. The SDK documents that a deny rule overrides an allow from a hook. The comment on `SDKPermissionDeniedMessage` in `sdk.d.ts` (package `@anthropic-ai/claude-agent-sdk`, version 0.3.326 here; the sentence is the same in 0.3.325) lists "deny-rule overrides of hook allow/ask decisions" among the denials that resolve before `canUseTool`. That sentence is incidental to the type it documents, not a full specification. Treat it as the SDK's stated behaviour, not one tested in this repo.
 
 Workers also load the target repository's project settings (`settingSources: ["project"]` in `makeRunAgent`). A `permissions.deny` rule there also beats a judge approval. This repo's own `.claude/settings.json` denies `git remote*`, `sudo*` and the `rm -rf` spellings. So in this repo and its worktrees a judge-approved `git remote` or `rm -rf` is still blocked. In another repo without such rules, the judge decides. That is the safe direction and is not tested here.
 
@@ -460,7 +460,7 @@ What follows:
 
   ```bash
   # resume run <id> and give the judge its authority back
-  npm start -- --repo . --resume <id> --task "<the original request>"
+  npm run sdk -- --repo . --resume <id> --task "<the original request>"
   ```
 
 - If the task passed differs from the journal's, the run logs `warning: the task passed differs from the journal's; the judge uses the one passed`. It does not stop.
@@ -618,7 +618,7 @@ Code: `.claude/hooks/judge-hook.mjs` (PreToolUse, matcher `Bash`), `.claude/hook
 
 The folder is created with mode 0700 and the file with mode 0600. The project key is the same as for the per-user state folder (`stateKey`). The project copy and the plugin copy use the same store. It is outside the project, so the judged worker's own folder never holds its judge's authority. A `prompts.jsonl` in `<project>/.claude/state` is ignored.
 
-- The capture skips prompts that are not from the person. Those are a text that opens with `<task-notification>` or a similar system or peer tag, and a prompt with an origin-like field (`origin`, `source`, `kind` and similar) whose value names a notification, system, peer, agent, hook or tool. A prompt with no such marker is kept.
+- The capture skips prompts that are not from the person (`typedPrompt` in `state.mjs`, shared with the nudge). UserPromptSubmit also fires for a background subagent's report, a task notification, a scheduled task and another session's message, and on 2.1.326 its input carries no field that says which, so the text decides: one that opens with `<task-notification>` or a similar system or peer tag, also after the line `Another Claude session sent a message:` (how a subagent's report arrives, since 1.6.0), is skipped. So is a prompt with an origin-like field (`origin`, `source`, `kind` and similar) whose value names a notification, system, peer, agent, hook, tool or poll, in case Claude Code adds one. A prompt with no such marker is kept, and a person who types such an opening is taken for a message.
 - The judge sees only this session's prompts, newest kept when they exceed 6000 characters.
 - It approves only when a request directly and specifically asks for this action: the named branch and remote for a push, force or deletion only when asked, the remote change asked for, the paths asked for in a delete. General requests ("finish the task") do not count, nor does anything an agent, a file or the command itself says.
 - With no recorded prompt for the session, a judged command is denied without a model call.

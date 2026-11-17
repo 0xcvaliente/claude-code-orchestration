@@ -16,7 +16,7 @@ const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 export const OPTION_KEYS = Object.freeze([
   "TEST_CMD", "ESCALATION", "JUDGE", "JUDGE_TIMEOUT_MS", "READ_ROUTER", "GAP_MIN", "STALL_GATE", "GUARDS",
   "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED", "SKILL_HINTS",
-  "HANDBACK_CHECK", "ALLOW_HAIKU", "SKILL_CREATE", "SKILLS_REPO_PRIVATE", "SKILLS_REPO_PUBLIC",
+  "HANDBACK_CHECK", "ALLOW_HAIKU", "SKILL_CREATE", "SKILLS_REPO_PRIVATE", "SKILLS_REPO_PUBLIC", "WORKFLOW_GUARD",
 ]);
 
 /**
@@ -111,6 +111,26 @@ export const promptStoreDir = (project, env = process.env) =>
 
 /** prompts.jsonl of this hook's project. */
 export const promptStore = join(promptStoreDir(project), "prompts.jsonl");
+
+// Typed prompt or not, at UserPromptSubmit (prompt-capture.mjs and nudge.mjs share this). The event also fires for a
+// background subagent's report, a task notification, a scheduled task and a message from another session. On 2.1.326 its
+// input carries no origin field (the binary builds it from the common fields, `prompt`, `session_title` and, on one path,
+// `source: "poll_event"`), so the text decides: a subagent's hand-back arrives as `Another Claude session sent a
+// message:` and an `<agent-message ...>` line, a notification as `<task-notification>`. An origin-like field is honoured
+// too, in case a later version adds one. Unknown shapes count as typed. A person can still type such an opening.
+const ORIGIN_KEYS = ["origin", "prompt_origin", "prompt_source", "source", "kind", "prompt_kind", "sender"];
+const NOT_PERSON = /notification|system|peer|agent|teammate|hook|tool|background|scheduled|cron|automat|bot|poll/i;
+const NOT_PERSON_TAG = /^\s*(?:Another Claude session sent a message:\s*)?<(task-notification|system-reminder|teammate-message|peer-message|agent-message|channel-message)\b/i;
+
+/** True unless the UserPromptSubmit input shows the prompt came from somewhere other than the person. @param {any} input */
+export function typedPrompt(input) {
+  for (const key of ORIGIN_KEYS) {
+    const v = input?.[key];
+    const value = typeof v === "string" ? v : typeof v?.kind === "string" ? v.kind : typeof v?.type === "string" ? v.type : "";
+    if (value && NOT_PERSON.test(value)) return false;
+  }
+  return !NOT_PERSON_TAG.test(typeof input?.prompt === "string" ? input.prompt : "");
+}
 
 /** @param {{ dir: string, inProject: boolean }} [state] */
 export function ensureStateDir(state = own) {

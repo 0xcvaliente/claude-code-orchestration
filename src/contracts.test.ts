@@ -217,14 +217,14 @@ test("worker agents and the conventions skill describe their 0.4.0 lines", () =>
 });
 
 test("model-facing text names gate reasons but no environment switch", () => {
-  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE|ALLOW_HAIKU|SKILL_CREATE|SKILLS_REPO_PRIVATE|SKILLS_REPO_PUBLIC)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b|\ballow_haiku\b|\bskill_create\b|\bskills_repo_(private|public)\b/;
+  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE|ALLOW_HAIKU|SKILL_CREATE|SKILLS_REPO_PRIVATE|SKILLS_REPO_PUBLIC|WORKFLOW_GUARD)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b|\ballow_haiku\b|\bskill_create\b|\bskills_repo_(private|public)\b|\bworkflow_guard\b/;
   const authoring = [".claude/skills/skill-authoring/SKILL.md", ...["skill-shape", "evaluation", "compliance"].map((f) => `.claude/skills/skill-authoring/references/${f}.md`)];
   const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS, ...authoring];
   for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
   for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) assert.doesNotMatch(nudgeContext(env), switches, "the nudge context names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
   const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
-  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
+  for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "ORCH_WORKFLOW_GUARD", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
   assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
 });
 

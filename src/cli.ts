@@ -11,15 +11,15 @@ const runAgent = withTransientRetry(baseAgent);
 const byRole = (tokens: Record<string, number>) => Object.entries(tokens).map(([role, n]) => `${role} ${formatTokens(n)}`).join(", ");
 
 // The pipeline plans, branches and merges in git worktrees, so it is for code in a git repository only.
-const SCOPE = "The SDK pipeline (npm start) works on code in a git repository.";
+const SCOPE = "The SDK pipeline (npm run sdk) works on code in a git repository.";
 const OTHER_TASKS = "For other tasks (research, writing, analysis, operations) use the plugin's /route, `claude --agent orchestrator` or `npm run auto`.";
 
 function usage(problem?: string): never {
   console.error(
     (problem ? `${problem}\n` : "") +
-      'usage: npm start -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
+      'usage: npm run sdk -- --repo <git repo> --task "<what to do>" [--test-cmd "npm test"] [--setup-cmd "npm ci"] ' +
       "[--mode auto|plain|reviewed|orchestrate] [--no-escalate] [--budget TOKENS] [--concurrency N] [--retries N] [--replans N] " +
-      `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm start -- --repo <git repo> --resume <run id> [--out DIR]\n` +
+      `[--plan-only] [--keep-worktrees] [--out DIR]\n       npm run sdk -- --repo <git repo> --resume <run id> [--out DIR]\n` +
       `A task that starts with a dash goes as --task=<task>.\n${SCOPE} ${OTHER_TASKS}`,
   );
   process.exit(2);
@@ -111,7 +111,7 @@ if (!report) process.exit(1);
 console.log(`\nrun ${report.runId}  ${formatTokens(report.spentTokens)} tokens  by role: ${byRole(report.tokensByRole)}`);
 for (const s of report.slices) console.log(`  ${s.status.padEnd(6)} ${s.id} (${s.attempts} attempt(s)) ${s.issues[0] ?? ""}`);
 if (report.replans > 0) console.log(`  replanned ${report.replans} time(s)`);
-if (report.error || report.slices.some((s) => s.status === "failed")) console.log(`  resume with: npm start -- --repo ${repo} --resume ${report.runId}`);
+if (report.error || report.slices.some((s) => s.status === "failed")) console.log(`  resume with: npm run sdk -- --repo ${repo} --resume ${report.runId}`);
 if (report.resultBranch) {
   console.log(`result branch: ${report.resultBranch} (merged ${report.merged.length}, conflicted ${report.conflicted.length})`);
 }

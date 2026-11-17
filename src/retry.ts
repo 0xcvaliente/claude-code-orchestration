@@ -24,7 +24,7 @@ export interface RetryOptions {
 
 const defaultBackoff = (attempt: number) => LIMITS.transientBackoffMs * 4 ** (attempt - 1) + Math.floor(Math.random() * 500);
 
-/** Rerun a worker that hit a transient service error. Tokens add up across attempts so reports stay honest. */
+/** Rerun a worker that hit a transient service error. Tokens and cost add up across attempts so reports and caps stay honest. */
 export function withTransientRetry(run: RunAgent, opts: RetryOptions = {}): RunAgent {
   const retries = opts.retries ?? LIMITS.transientRetries;
   const backoff = opts.backoffMs ?? defaultBackoff;
@@ -33,6 +33,8 @@ export function withTransientRetry(run: RunAgent, opts: RetryOptions = {}): RunA
     let spent = 0;
     const usage: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     let hasUsage = false;
+    let cost = 0;
+    let hasCost = false;
     for (let attempt = 0; ; attempt++) {
       const r = await run(req);
       spent += Number.isFinite(r.tokens) ? r.tokens : 0;
@@ -40,7 +42,11 @@ export function withTransientRetry(run: RunAgent, opts: RetryOptions = {}): RunA
         hasUsage = true;
         for (const k of Object.keys(usage) as (keyof TokenUsage)[]) usage[k] += Number.isFinite(r.usage[k]) ? r.usage[k] : 0;
       }
-      if (attempt >= retries || !isTransient(r)) return { ...r, tokens: spent, ...(hasUsage && { usage }) };
+      if (typeof r.costUsd === "number" && Number.isFinite(r.costUsd)) {
+        hasCost = true;
+        cost += r.costUsd;
+      }
+      if (attempt >= retries || !isTransient(r)) return { ...r, tokens: spent, ...(hasUsage && { usage }), ...(hasCost && { costUsd: cost }) };
       opts.onRetry?.(attempt + 1, r);
       await sleep(backoff(attempt + 1));
     }

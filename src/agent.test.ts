@@ -1,11 +1,11 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { HookCallback, Options, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
-import { makeRunAgent, sandboxFor, type AgentRequest } from "./agent.js";
+import { makeRunAgent, sandboxFor, TRIAGE_TITLE, type AgentRequest } from "./agent.js";
 import { ROLES, rolesFor, SDK_DENIED_BASH, UNSAFE_BASH, type Role } from "./config.js";
 import { solo } from "./solo.js";
 import { HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, statPath, type JudgeDeps } from "./judge.js";
@@ -85,27 +85,38 @@ test("every worker opts out of a project's main agent: project settings are load
     const o = await optionsFor(req(role), {});
     assert.deepEqual(o.settingSources, ["project"], role);
     assert.equal((o.settings as { agent?: string }).agent, "", role);
-    if (role !== "triager") assert.deepEqual(o.settings, { agent: "" }, role);
+    if (role !== "triager") assert.deepEqual(o.settings, { agent: "", disableClaudeAiConnectors: true }, role);
     assert.equal((o as { agent?: string }).agent, undefined, `${role}: no --agent equivalent either`);
   }
 });
 
 // Live run of 2026-11-16 (docs/data/live-checks-2026-11-16.md, Checks 8 and 10): the triage session of `npm run auto`
 // carried the MCP tools of the person's claude.ai account connectors, which the triager can never use (about 110k tokens
-// per turn), and wrote a session transcript.
-const LEAN_KEYS = ["strictMcpConfig", "mcpServers", "persistSession", "maxBudgetUsd"] as const;
+// per turn), and wrote a session transcript. 1.5.1 fixed the triager only; 1.6.0 gives every role the same MCP options.
+const TRIAGE_ONLY = ["persistSession", "maxBudgetUsd", "title"] as const;
+const settingsOf = (o: Options) => o.settings as Record<string, unknown>;
 
 test("triage call: no MCP server, no claude.ai connector, no session transcript", async () => {
   const o = await optionsFor(req("triager"), {});
   assert.equal(o.strictMcpConfig, true);
   assert.deepEqual(o.mcpServers, {});
-  assert.deepEqual(o.settings, { agent: "", disableClaudeAiConnectors: true });
+  assert.deepEqual(o.settings, { agent: "", disableClaudeAiConnectors: true, disableAllHooks: true });
   assert.equal(o.persistSession, false);
   assert.equal("maxBudgetUsd" in o, false, "no cap unless the request carries one");
   const kept = await optionsFor(req("triager"), { ORCH_SESSION_PERSISTENCE: "1" });
   assert.equal("persistSession" in kept, false, "ORCH_SESSION_PERSISTENCE=1 keeps the transcript (the SDK default)");
   assert.equal(kept.strictMcpConfig, true);
-  assert.deepEqual(kept.settings, { agent: "", disableClaudeAiConnectors: true });
+  assert.deepEqual(kept.settings, { agent: "", disableClaudeAiConnectors: true, disableAllHooks: true });
+});
+
+// 1.5.1 Known and not fixed: a small haiku call in every triage. Live on 2026-11-17 (docs/data/live-checks-2026-11-17.md,
+// Check 2) it was Claude Code's session-title call (`source=generate_session_title`), and a given title removed it.
+test("triage call: a fixed title, so Claude Code makes no haiku call to name the session", async () => {
+  for (const env of [{}, { ORCH_SESSION_PERSISTENCE: "1" }, { ORCH_SDK_MCP: "project" }]) {
+    const o = await optionsFor(req("triager"), env);
+    assert.equal(o.title, TRIAGE_TITLE, JSON.stringify(env));
+  }
+  assert.equal(TRIAGE_TITLE, "triage");
 });
 
 test("triage call: a request's dollar cap reaches query() as maxBudgetUsd", async () => {
@@ -113,14 +124,70 @@ test("triage call: a request's dollar cap reaches query() as maxBudgetUsd", asyn
   assert.equal(o.maxBudgetUsd, 0.3);
 });
 
-test("every other role keeps its options: none of the triage-only keys, the same settings", async () => {
+// 1.5.1 Known and not fixed: the triager loaded the project's settings and so ran the hooks of the folder it reads
+// (Check 10: a review-gate record from the triage). disableAllHooks in the flag settings, which rank above the project's.
+test("triage call: runs no hook of the project it reads, and still reads its settings and CLAUDE.md with `agent` unset", async () => {
+  for (const env of [{}, { ORCH_SESSION_PERSISTENCE: "1" }, { ORCH_SDK_MCP: "project" }]) {
+    const o = await optionsFor(req("triager", { maxBudgetUsd: 0.3 }), env);
+    assert.equal(settingsOf(o).disableAllHooks, true, JSON.stringify(env));
+    assert.equal(settingsOf(o).agent, "");
+    assert.deepEqual(o.settingSources, ["project"]);
+    assert.equal(o.hooks, undefined, "no SDK hook callbacks either");
+  }
+});
+
+// 1.5.1 Known and not fixed: every other role took the account connectors and every configured MCP server.
+test("every non-triage role: no claude.ai connector and, by default, no MCP server; hooks, transcript and cap untouched", async () => {
   for (const role of (Object.keys(ROLES) as Role[]).filter((r) => r !== "triager")) {
-    for (const env of [{}, { ORCH_SESSION_PERSISTENCE: "1" }, { ORCH_SESSION_PERSISTENCE: "0" }]) {
-      const o = await optionsFor(req(role), env);
-      for (const k of LEAN_KEYS) assert.equal(k in o, false, `${role}: ${k}`);
-      assert.deepEqual(o.settings, { agent: "" }, role);
+    for (const env of [{}, { ORCH_SESSION_PERSISTENCE: "1" }, { ORCH_SESSION_PERSISTENCE: "0" }, { ORCH_SDK_MCP: "" }, { ORCH_SDK_MCP: "on" }, { ORCH_SDK_MCP: "1" }]) {
+      const o = await optionsFor(req(role, { maxBudgetUsd: 0.3 }), env);
+      const at = `${role} ${JSON.stringify(env)}`;
+      assert.equal(o.strictMcpConfig, true, at);
+      assert.deepEqual(o.mcpServers, {}, at);
+      assert.equal(o.mcpServersDelivery, "initialize", `${at}: the SDK's non-deprecated delivery`);
+      assert.deepEqual(o.settings, { agent: "", disableClaudeAiConnectors: true }, at);
+      for (const k of TRIAGE_ONLY) assert.equal(k in o, false, `${at}: ${k} is triage-only`);
     }
   }
+});
+
+test("ORCH_SDK_MCP=project keeps the folder's .mcp.json servers for writer, solo and verifier only, never the connectors", async () => {
+  const folder = realpathSync(mkdtempSync(join(tmpdir(), "agent-mcp-")));
+  const servers = { docs: { command: "node", args: ["./mcp.js"], env: { TOKEN: "x" } }, web: { type: "http", url: "http://127.0.0.1:9/mcp" } };
+  writeFileSync(join(folder, ".mcp.json"), JSON.stringify({ mcpServers: servers }));
+  for (const value of ["project", " Project "]) {
+    for (const role of Object.keys(ROLES) as Role[]) {
+      const o = await optionsFor(req(role, { cwd: folder }), { ORCH_SDK_MCP: value });
+      const working = ["writer", "solo", "verifier"].includes(role);
+      assert.deepEqual(o.mcpServers, working ? servers : {}, `${role} ${value}`);
+      assert.equal(o.strictMcpConfig, true, `${role}: no user, plugin or other server either`);
+      assert.equal(o.mcpServersDelivery, "initialize", `${role}: env and headers stay off the command line`);
+      assert.equal(settingsOf(o).disableClaudeAiConnectors, true, role);
+    }
+  }
+  // Off by default even with a .mcp.json there.
+  assert.deepEqual((await optionsFor(req("writer", { cwd: folder }), {})).mcpServers, {});
+  // A missing, broken or odd .mcp.json gives no server.
+  const empty = realpathSync(mkdtempSync(join(tmpdir(), "agent-mcp-none-")));
+  assert.deepEqual((await optionsFor(req("writer", { cwd: empty }), { ORCH_SDK_MCP: "project" })).mcpServers, {});
+  for (const body of ["{", "[]", "null", '{"mcpServers":[1]}', '{"mcpServers":"x"}']) {
+    writeFileSync(join(empty, ".mcp.json"), body);
+    assert.deepEqual((await optionsFor(req("solo", { cwd: empty }), { ORCH_SDK_MCP: "project" })).mcpServers, {}, body);
+  }
+  writeFileSync(join(empty, ".mcp.json"), JSON.stringify({ mcpServers: { ok: { command: "x" }, bad: 3, list: [] } }));
+  assert.deepEqual((await optionsFor(req("verifier", { cwd: empty }), { ORCH_SDK_MCP: "project" })).mcpServers, { ok: { command: "x" } });
+});
+
+test("a result's total_cost_usd comes back as costUsd; no result, no cost", async () => {
+  const query = (() =>
+    (async function* () {
+      yield { type: "result", subtype: "error_max_budget_usd", is_error: true, errors: [], num_turns: 2, usage: {}, modelUsage: {}, total_cost_usd: 0.31 };
+    })()) as unknown as typeof sdkQuery;
+  const r = await makeRunAgent({ query, env: {} })(req("triager", { maxBudgetUsd: 0.3 }));
+  assert.equal(r.subtype, "error_max_budget_usd");
+  assert.equal(r.costUsd, 0.31);
+  const none = (() => (async function* () {})()) as unknown as typeof sdkQuery;
+  assert.equal("costUsd" in (await makeRunAgent({ query: none, env: {} })(req("triager"))), false);
 });
 
 test("judge off: Bash roles keep UNSAFE_BASH and the hook denies the judged classes without asking", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "orchestration",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.",
   "author": {
     "name": "0xcvaliente"
@@ -109,6 +109,11 @@
       "type": "string",
       "title": "Public skills repository",
       "description": "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."
+    },
+    "workflow_guard": {
+      "type": "string",
+      "title": "Workflow guard",
+      "description": "Empty: on; off lets every Workflow launch through, not only the saved orchestrate workflow (ORCH_WORKFLOW_GUARD)."
     }
   }
 }

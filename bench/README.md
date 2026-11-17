@@ -120,6 +120,8 @@ The pilot showed that k1 and h3 saturate within minutes. So the splittable-task 
 - `analyze.mjs` then adds `score_pct_lenient`, `pass_lenient` and `score_median_lenient`, and the report adds a lenient column for k2.
 - The strict score stays official, and hypotheses use it.
 
+**Triage tokens counted before 1.5.1.** `analyze.mjs` adds each logged route's tokens to a run's total as `by_model.triage`. Before release 1.5.1 the triage call also carried the MCP tools of the account's claude.ai connectors (437,331 tokens instead of 14,030 for the same triage in [docs/data/live-checks-2026-11-16.md](../docs/data/live-checks-2026-11-16.md), Check 10), so `AUTO` rows of older campaigns overstate what a triage uses now. A campaign is dated by `plugin_version` in its `manifest.json`: when it is below 1.5.1 or missing, every run with triage tokens gets `triage_pre_fix: true`, and `summary.json` gets a footnote in `notes` that `analyze.mjs` prints and the report lists under Caveats. The tokens themselves are left as logged. To compare `AUTO` with other arms on the current triage, run a new campaign.
+
 **Paired differences and pass^k.** `analyze.mjs` adds two sections to `summary.json`, and prints both after the cells:
 
 - `paired`: for each pair in `PAIRS` (`O-mix-030` → `O-mix-plugin`, `all-haiku` → `all-sonnet`, `all-haiku` → `routed`, `all-sonnet` → `routed`) and each metric (`score_pct`, `pass`, `tokens`), the runs of the two arms that share (task, cell, rep) are paired. The difference B − A is taken, and it reports:

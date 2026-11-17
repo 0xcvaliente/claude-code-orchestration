@@ -1654,6 +1654,7 @@ export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5
           allowedTools: [],
           settingSources: [],
           mcpServers: {},
+          mcpServersDelivery: "initialize", // the SDK's non-deprecated form (0.3.326); see leanOptions in agent.ts
           strictMcpConfig: true,
           plugins: [],
           permissionMode: "dontAsk",
