@@ -175,6 +175,7 @@ log_gate() { # decision reason [extra JSON fields: counts only]
   [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
   [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
   [ -z "${fail_extra:-}" ] || extra="${extra:+$extra,}$fail_extra"
+  [ "${took_over:-0}" = 0 ] || extra="${extra:+$extra,}\"lock_takeover\":1" # this gate removed a stale suite lock
   mkdir -p "$state" 2>/dev/null || return 1
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"%s}\n' \
@@ -203,6 +204,9 @@ run_limited() { # limit infile outfile errfile cmd...
   fi
   pid=$!
   lim_pid="$pid" # for on_signal: a TERM, INT or HUP to the hook ends this group first
+  # Under the suite lock, the lock's companion file names this run's process group, so that a hook killed with SIGKILL
+  # leaves a lock that is not taken over while its suite still runs (lock_stale).
+  [ "$lock_held" != 1 ] || { printf '%s\n%s\n' "$lock_token" "$pid" >"$lock.run"; } 2>/dev/null
   set +m
   # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
   # can be reached limit-1 seconds after the start (a run that took 2.6 s was timed out under a 3 s limit); one more
@@ -321,25 +325,43 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
   [ "$(($(date +%s) - 10#$start))" -le "$LOCK_STALE_S" ] || return 0
   kill -0 "$pid" 2>/dev/null && return 1
   ps -p "$pid" >/dev/null 2>&1 && return 1 # alive under another user (kill -0 is refused)
+  # The holder is gone (killed with SIGKILL: no trap ran). Its suite runs in a process group of its own and may still
+  # run: while a member of the group the lock's companion file names is left, the lock stands.
+  local run_tok="" run_pg=""
+  { IFS= read -r run_tok && IFS= read -r run_pg; } <"$lock.run" 2>/dev/null
+  if [ "$run_tok" = "$1" ]; then
+    case "$run_pg" in '' | *[!0-9]*) ;; *) kill -0 -- "-$run_pg" 2>/dev/null && return 1 ;; esac
+  fi
   return 0
 }
+# One taker at a time (the guard folder). The stale lock is renamed away first, an atomic step, and only then compared
+# with what was judged stale: a lock some other gate made in between is put back with ln (never over another), not
+# removed, so a fresh lock is never deleted.
 take_over() { # 0 when a stale lock was removed
-  local guard="$lock.takeover" seen="" now_seen="" rc=1
+  local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$"
   if ! mkdir "$guard" 2>/dev/null; then
     [ -z "$(find "$guard" -maxdepth 0 -mmin +2 2>/dev/null)" ] || rmdir "$guard" 2>/dev/null
     return 1
   fi
   { IFS= read -r seen <"$lock"; } 2>/dev/null
-  if [ -e "$lock" ] && lock_stale "$seen"; then
-    { IFS= read -r now_seen <"$lock"; } 2>/dev/null
-    [ "$now_seen" = "$seen" ] && rm -f "$lock" 2>/dev/null && rc=0
+  if [ -e "$lock" ] && lock_stale "$seen" && mv "$lock" "$grab" 2>/dev/null; then
+    { IFS= read -r now_seen <"$grab"; } 2>/dev/null
+    if [ "$now_seen" = "$seen" ]; then
+      rc=0 took_over=1
+    else
+      ln "$grab" "$lock" 2>/dev/null
+    fi
+    rm -f "$grab" 2>/dev/null
   fi
   rmdir "$guard" 2>/dev/null
   return "$rc"
 }
+took_over=0
 release_lock() {
-  local cur=""
+  local cur="" run_tok=""
   [ "$lock_held" = 1 ] || return 0
+  { IFS= read -r run_tok; } <"$lock.run" 2>/dev/null
+  [ "$run_tok" != "$lock_token" ] || rm -f "$lock.run" 2>/dev/null
   { IFS= read -r cur <"$lock"; } 2>/dev/null
   [ "$cur" != "$lock_token" ] || rm -f "$lock" 2>/dev/null
   lock_held=0
