@@ -98,6 +98,13 @@ export async function auto(opts: AutoOptions): Promise<AutoResult> {
     report.spentTokens += spentBefore;
     for (const [role, tokens] of Object.entries(earlier)) report.tokensByRole[role] = (report.tokensByRole[role] ?? 0) + tokens;
     rewrite(opts.outRoot, report);
+    // Also in the pipeline run's telemetry, one line per role, so a later --resume of this run counts the triage call
+    // and the escalated session against its budget too (earlierSpend in orchestrator.ts reads that file).
+    const ts = new Date().toISOString();
+    const lines = Object.entries(earlier)
+      .filter(([, tokens]) => Number.isFinite(tokens) && tokens > 0)
+      .map(([role, tokens]) => JSON.stringify({ ts, role, label: "before the pipeline (triage, escalated session)", tokens }) + "\n");
+    if (lines.length) appendFileSync(join(opts.outRoot, report.runId, "telemetry.jsonl"), lines.join(""));
   }
   return { ...result, report };
 }

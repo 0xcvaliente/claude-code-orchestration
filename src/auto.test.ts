@@ -213,6 +213,23 @@ test("budget: an escalated pipeline run also gets the failed solo session's toke
   assert.equal(ok.report!.slices[0]!.status, "passed");
 });
 
+test("item 3: a resume of an escalated run counts the triage call and the failed session against its budget", async () => {
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = fake(small);
+  const r1 = await auto({ repo, task: "t", outRoot: out, run: withTokens(first.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 25_000 });
+  assert.equal(r1.escalated, true);
+  assert.deepEqual(r1.report!.slices[0]!.issues, ["run budget exhausted"]);
+  // A budget of exactly what was spent: counting only the pipeline's own calls (20000) would leave 10500 and start the writer.
+  const second = fake(small);
+  const r2 = await auto({ repo, task: "t", outRoot: out, run: withTokens(second.run, spend), resume: r1.report!.runId, runBudgetTokens: r1.report!.spentTokens });
+  assert.equal(r2.report!.spentTokens, r1.report!.spentTokens, "the resumed report counts triage, session and pipeline");
+  assert.equal(r2.report!.tokensByRole.triager, 500);
+  assert.equal(r2.report!.tokensByRole.solo, 10_000);
+  assert.ok(!calledRoles(second.calls).includes("writer"), "no writer starts on a spent budget");
+});
+
 // Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed): a session the cap stopped counted as failed and escalated to
 // the pipeline with almost no budget left. Now a failed session escalates only with at least 10k of the budget left.
 test("item 2: budget: a failed session with less than 10k of the run budget left is not rerun through the pipeline", async () => {
