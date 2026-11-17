@@ -95,6 +95,22 @@ test("a gate killed with SIGKILL: its lock is not taken over while its suite sti
   }
 });
 
+test("a stale lock without its companion file, and a release without one, add nothing to the hook's stderr", async () => {
+  const project = tmp("orch-glk-quiet-");
+  try {
+    deadLock(project); // no test-gate.lock.run beside it
+    // The suite removes the companion file the gate wrote, so the release finds none either; it fails, so stderr is the
+    // agent's message.
+    const r = await gate(project, { env: { ORCH_TEST_CMD: `rm -f '${lockFile(project)}.run'; echo 'not ok 1 - x'; exit 1` } });
+    assert.equal(r.status, 2);
+    assert.equal(records(project).at(-1).lock_takeover, 1, "the stale lock was taken over");
+    assert.doesNotMatch(r.stderr, /No such file/);
+    assert.match(r.stderr, /Fix the root cause and rerun before finishing\.\n$/, "the message ends as it always did");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("two gates that find the same stale lock side by side: one takes it over, the suites never overlap", async () => {
   const project = tmp("orch-glk-two-");
   const box = tmp("orch-glk-box-");

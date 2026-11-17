@@ -200,8 +200,14 @@ export function stopGateOf(stops, gates, start, keyedTelemetry = false) {
     /** @type {Map<string, number>} */
     const handedBack = new Map();
     for (const g of gates) if (handbackRecord(g) && typeof g.handback_id === "string") handedBack.set(g.handback_id, Math.min(handedBack.get(g.handback_id) ?? Infinity, timeOf(g.ts)));
+    // Certain: unkeyed (the gate saw no hand-back since the latest start), or keyed with a hand-back logged since it.
+    // Uncertain: keyed, with no hand-back record (it may belong to a stop before the restart). Certain records suffice
+    // when there are enough; an uncertain one stands for the stop only as a block (stricter), never as a pass.
+    const certain = since.filter((g) => !linkOf(g) || (handedBack.get(linkOf(g)) ?? -Infinity) >= start);
+    if (certain.length >= stops.length) return certain.at(-1) ?? null;
     const own = since.filter((g) => !linkOf(g) || !((handedBack.get(linkOf(g)) ?? Infinity) < start));
-    return own.length >= stops.length ? (own.at(-1) ?? null) : null;
+    const pick = own.length >= stops.length ? own.at(-1) : null;
+    return pick && (certain.includes(pick) || pick.decision === "block") ? pick : null;
   }
   const recs = since.filter((g) => linkOf(g) === key);
   if (key && !recs.length) {

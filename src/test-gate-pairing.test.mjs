@@ -45,7 +45,6 @@ test("only one side keyed: paired by count since the latest start, the same as 1
   /** @type {[string, any[], any[]][]} */
   const cases = [
     ["unkeyed stop, keyed block", [tel("SubagentStart", 0), tel("SubagentStop", 1)], [g(2, "block", { after_handback: "h1" })]],
-    ["unkeyed stop, keyed allow", [tel("SubagentStart", 0), tel("SubagentStop", 1)], [g(2, "allow", { after_handback: "h1" })]],
     ["two unkeyed stops, one keyed record: the second stop waits", [tel("SubagentStart", 0), tel("SubagentStop", 1), tel("SubagentStop", 3)], [g(2, "block", { after_handback: "h1" })]],
     [
       "two unkeyed stops, two records (one keyed, one not)",
@@ -65,8 +64,10 @@ test("never across a restart: a keyed record from before the latest start is not
   const before = [g(1.5, "block", { after_handback: "h1" })];
   assert.equal(decidedNow(telemetry, before), null);
   assert.equal(decided161(telemetry, before), null);
-  // Its own record arrives: paired.
-  assert.equal(decidedNow(telemetry, [...before, g(4, "allow", { after_handback: "h1" })])?.decision, "allow");
+  // A keyed pass after the restart whose hand-back has no record cannot be told from a late one: pending, never a pass.
+  assert.equal(decidedNow(telemetry, [...before, g(4, "allow", { after_handback: "h1" })]), null);
+  // Its own (unkeyed) record arrives: paired.
+  assert.equal(decidedNow(telemetry, [...before, g(4, "allow")])?.decision, "allow");
   assert.equal(stopGateOf([tel("SubagentStop", 3)], before, T + 2 * 60000), null, "stopGateOf alone: the start bounds the records");
   // Older telemetry: a late block of the stop before the restart, stamped after it, whose hand-back the hand-back gate
   // logged before the restart, is not the new stop's (1.6.1 paired it by time; never across a restart now).
@@ -79,6 +80,20 @@ test("never across a restart: a keyed record from before the latest start is not
   const newer = [tel("SubagentStart", 0), tel("SubagentStop", 1, { after_handback: "h1" }), tel("SubagentStart", 2), tel("SubagentStop", 3)];
   assert.equal(decidedNow(newer, [g(4, "block", { after_handback: "h1" })]), null);
   assert.equal(decidedNow(newer, [g(4, "block", { after_handback: "h1" }), g(5, "block")])?.decision, "block");
+});
+
+test("older telemetry, no hand-back record: a late keyed pass from before the restart never replaces the new stop's block", () => {
+  // Stop 1 (hand-back h1), restart, stop 3 with no hand-back: its gate blocks (unkeyed) at 4, then stop 1's gate, still
+  // running across the restart, writes its pass (keyed h1) at 5. The hand-back gate left no record of h1.
+  const telemetry = [tel("SubagentStart", 0), tel("SubagentStop", 1), tel("SubagentStart", 2), tel("SubagentStop", 3)];
+  const gates = [g(4, "block"), g(5, "allow", { after_handback: "h1" })];
+  assert.equal(decided161(telemetry, gates)?.decision, "allow", "1.6.1 (25a22ed, run in a scratch copy) took the late pass");
+  assert.equal(decidedNow(telemetry, gates)?.decision, "block", "the record certainly written since the restart decides");
+  // Only the uncertain record so far: as a pass it never stands for the stop (pending); as a block it does (stricter).
+  assert.equal(decidedNow(telemetry, [g(5, "allow", { after_handback: "h1" })]), null);
+  assert.equal(decidedNow(telemetry, [g(5, "block", { after_handback: "h1" })])?.decision, "block");
+  // A keyed record whose hand-back the hand-back gate logged since the restart is certain: a pass then counts.
+  assert.equal(decidedNow(telemetry, [g(2.5, "allow", { at: "handback", handback_id: "h2" }), g(5, "allow", { after_handback: "h2" })])?.decision, "allow");
 });
 
 test("hand-back records never pair with a stop, keyed or not", () => {

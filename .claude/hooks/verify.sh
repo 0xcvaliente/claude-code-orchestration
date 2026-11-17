@@ -328,7 +328,7 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
   # The holder is gone (killed with SIGKILL: no trap ran). Its suite runs in a process group of its own and may still
   # run: while a member of the group the lock's companion file names is left, the lock stands.
   local run_tok="" run_pg=""
-  { IFS= read -r run_tok && IFS= read -r run_pg; } <"$lock.run" 2>/dev/null
+  { { IFS= read -r run_tok && IFS= read -r run_pg; } <"$lock.run"; } 2>/dev/null # a missing file prints nothing
   if [ "$run_tok" = "$1" ]; then
     case "$run_pg" in '' | *[!0-9]*) ;; *) kill -0 -- "-$run_pg" 2>/dev/null && return 1 ;; esac
   fi
@@ -360,7 +360,7 @@ took_over=0
 release_lock() {
   local cur="" run_tok=""
   [ "$lock_held" = 1 ] || return 0
-  { IFS= read -r run_tok; } <"$lock.run" 2>/dev/null
+  { IFS= read -r run_tok <"$lock.run"; } 2>/dev/null
   [ "$run_tok" != "$lock_token" ] || rm -f "$lock.run" 2>/dev/null
   { IFS= read -r cur <"$lock"; } 2>/dev/null
   [ "$cur" != "$lock_token" ] || rm -f "$lock" 2>/dev/null
