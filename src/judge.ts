@@ -517,6 +517,65 @@ const SHELLS = new Set(["sh", "bash", "rbash", "zsh", "dash", "ksh", "mksh", "as
 const ZSH_EXEC_OPTION = (t: string) => /globsubst|promptsubst/.test(t.toLowerCase().replace(/_/g, ""));
 /** Words after which the next word is a command word: shell keywords, `!`, `{` and zsh's precommand modifiers. */
 const LEADERS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "time", "noglob", "nocorrect", "-", "coproc"]);
+/**
+ * Option-setting commands (`set`, `setopt`, `unsetopt`, `shopt`, a shell's command line) are read as an allowlist:
+ * every option word must be a literal the guard can read and name an option known to be harmless. An expansion, a
+ * substitution, a glob or an unknown name is refused, so no spelling of globsubst or promptsubst the guard cannot read
+ * gets through (`set -$o`, `set $o`, `set -e$o`, `set $(echo -oglobsubst)`). Single letters that mean a harmless
+ * thing in bash and in zsh: a allexport, e errexit, f noglob (zsh: norcs), h hashall (zsh: histignoredups), n noexec,
+ * u nounset, v verbose, x xtrace, B braceexpand (zsh: beep), C noclobber, E errtrace (zsh: pushdsilent). Names are
+ * compared as zsh does: case and underscores ignored, a leading `no` negates.
+ */
+const SAFE_OPTION_LETTERS = "aefhnuvxBCE";
+const SAFE_OPTIONS = new Set(["errexit", "nounset", "xtrace", "verbose", "pipefail", "noglob", "glob", "noclobber", "clobber", "errtrace", "functrace", "allexport", "noexec", "extendedglob", "extglob", "nullglob", "globstar", "dotglob", "globdots", "nocasematch", "nocaseglob", "failglob", "nomatch", "braceexpand", "hashall", "lastpipe", "inheriterrexit"]);
+const safeOption = (t: string) => {
+  const n = t.toLowerCase().replace(/_/g, "");
+  return SAFE_OPTIONS.has(n) || (n.startsWith("no") && SAFE_OPTIONS.has(n.slice(2)));
+};
+const OPTION_SETTERS = new Set(["set", "setopt", "unsetopt", "shopt"]);
+/**
+ * The first option word of `set`, `setopt`, `unsetopt` or `shopt` (`name`) that the guard cannot read or does not
+ * know as harmless, or undefined. `set` stops reading options at `--` or `-` (the words after them are positional
+ * parameters and may be anything); a literal word that does not start with - or + is a positional parameter of `set`
+ * too, but a word built from an expansion before `--` is refused (it may expand to an option).
+ */
+function badOption(name: string, words: Word[]): string | undefined {
+  for (let i = 0; i < words.length; i++) {
+    const x = words[i]!;
+    if (x.dynamic) return "with an option word built from an expansion";
+    const t = x.text;
+    if (name === "set" && (t === "--" || t === "-")) return undefined;
+    if (/^[-+]./.test(t)) {
+      const letters = t.slice(1);
+      for (let j = 0; j < letters.length; j++) {
+        const c = letters.charAt(j);
+        if (c === "o" && name !== "shopt") {
+          const attached = letters.slice(j + 1);
+          if (attached) {
+            if (!safeOption(attached)) return t;
+          } else {
+            const v = words[++i];
+            if (v && (v.dynamic || !safeOption(v.text))) return `${t} ${v.text || "(an expansion)"}`;
+          }
+          break;
+        }
+        if (!(name === "shopt" ? "supqo" : SAFE_OPTION_LETTERS).includes(c)) return t;
+      }
+    } else if (name !== "set" && !safeOption(t)) return t;
+  }
+  return undefined;
+}
+/** The verdict on an option-setting command's words: an exec option (any word, any spelling the guard reads), or an
+ * option word badOption refuses. */
+function optionVerdict(name: string, words: Word[]): Classification | undefined {
+  if (words.some((x) => !x.dynamic && ZSH_EXEC_OPTION(x.text))) {
+    return deny(name === "setopt" || name === "unsetopt"
+      ? `${name} of globsubst or promptsubst (in any case, with underscores or a no prefix), a -m pattern or an option the guard cannot read is always blocked: those options run text as code`
+      : `${name} -o globsubst or promptsubst (in any case, with underscores or a no prefix) or an option the guard cannot read is always blocked: those options run text as code`);
+  }
+  const bad = badOption(name, words);
+  return bad === undefined ? undefined : deny(`${name} ${bad} is always blocked: the guard allows only option words it can read and knows as harmless (-e, -u, -x, -v, -f, -a, -n, -C, -o pipefail, errexit, nounset, xtrace, extendedglob, nullglob, globstar, dotglob, nocasematch and a few more); write the options literally`);
+}
 /** Commands that run another command as another user. */
 const PRIVILEGE = ["sudo", "doas", "su", "pkexec", "runuser"];
 const DENY_NAMES = ["rm", ...PRIVILEGE];
@@ -530,7 +589,7 @@ const GIT_EXEC_KEY =
   /^(core\.(fsmonitor|sshcommand|pager|editor|hookspath|askpass|gitproxy|alternaterefscommand)|credential\..*|diff\.external|diff\..+\.(command|textconv)|sequence\.editor|gpg\.(.+\.)?program|gpg\..+\.defaultkeycommand|(browser|man)\..+\.(cmd|path)|imap\.tunnel|gc\.recentobjectshook|hook\..+\.command|pager\..+|alias\..+|url\..+\.(push)?insteadof|include\.path|includeif\..+|filter\..+|merge\..+\.driver|remote\..+\.(uploadpack|receivepack|proxy)|uploadpack\..+|protocol\..+|(difftool|mergetool)\..+\.(cmd|path)|trailer\..+\.(cmd|command)|submodule\..+\.update|sendemail\..+|web\.browser|interactive\.difffilter|init\.templatedir|instaweb\..+|guitool\..+\.cmd)$/i;
 /** Environment names that make git, a shell or another tool run a program, or change what a command name finds,
  * followed by `=` or the append form `+=`. Tested on a word's static prefix (see staticPrefix). */
-const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|BASH_FUNC_[^=]*|ZDOTDIR|ENV|PROMPT_COMMAND|PS0|PS1|PS4|IFS|PATH|SHELLOPTS|GIT_ALLOW_PROTOCOL|LESSOPEN|LESSCLOSE)\+?=/;
+const EXEC_ENV = /^(GIT_EXTERNAL_DIFF|GIT_EDITOR|GIT_SSH|GIT_SSH_COMMAND|GIT_PAGER|GIT_ASKPASS|GIT_SEQUENCE_EDITOR|GIT_CONFIG_[A-Z0-9_]*|GIT_PROXY_COMMAND|EDITOR|VISUAL|PAGER|LD_PRELOAD|BASH_ENV|BASH_FUNC_[^=]*|ZDOTDIR|ENV|PROMPT_COMMAND|PS0|PS1|PS4|IFS|PATH|SHELLOPTS|GIT_ALLOW_PROTOCOL|LESSOPEN|LESSCLOSE|GIT_TEMPLATE_DIR)\+?=/;
 
 const deny = (reason: string, kind?: "rm" | "git"): Classification => ({ cls: "deny", reason, ...(kind && { kind }) });
 const PASS: Classification = { cls: "pass" };
@@ -625,6 +684,7 @@ function gitRule(ws: Word[], k: number, later: Later): { c: Classification; sub:
     const bad = cloneConfig(ws, j);
     if (bad) return { c: deny(`git clone ${bad}: a config key that runs a program is always blocked`, "git"), sub: j };
   }
+  if ((subName === "clone" || subName === "init") && templateOption(ws, j)) return { c: deny(`git ${subName} --template is always blocked: git copies the template folder's hooks into the new repository and runs them`, "git"), sub: j };
   // A fetch or pull that writes a branch through a refspec destination moves that ref with no push word; run in a
   // local remote (`git -C ../origin.git fetch "$PWD" main:main`) it has the effect of a push (audit J-11).
   // `git update-ref` writes a ref directly (`git -C ../origin.git update-ref refs/heads/main FETCH_HEAD`, the two-step
@@ -658,6 +718,19 @@ function cloneConfig(ws: Word[], sub: number): string | undefined {
     if (GIT_EXEC_KEY.test(key)) return key;
   }
   return undefined;
+}
+
+/** `git clone`/`git init` `--template` (`=` or the next word, any prefix git accepts from `--t` on) before a `--`. */
+function templateOption(ws: Word[], sub: number): boolean {
+  for (let i = sub + 1; i < ws.length; i++) {
+    const w = ws[i]!;
+    if (w.redirect) continue;
+    const p = staticPrefix(w);
+    if (p === "--" && !w.dynamic) return false;
+    const long = /^--([A-Za-z-]+)/.exec(p);
+    if (long && "template".startsWith((long[1] ?? "").toLowerCase())) return true;
+  }
+  return false;
 }
 
 /**
@@ -786,7 +859,12 @@ function suOptionFollows(next: Word | undefined): boolean {
 }
 /** find actions whose next word is a command word. */
 const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
-const WRAPPERS = new Set(["timeout", "env", "nice", "time", "command", "exec", "builtin", "nohup", "xargs", "busybox", "stdbuf", "ionice", "setsid", "unbuffer"]);
+const WRAPPERS = new Set(["timeout", "env", "nice", "time", "command", "exec", "builtin", "nohup", "xargs", "busybox", "stdbuf", "ionice", "setsid", "unbuffer", "chrt", "taskset"]);
+/** Programs the rules refuse wherever a wrapper may start them. A wrapper's options may take separate values
+ * (`timeout -s KILL 5`, `xargs -d ,`, `env -u X`), and the guard does not model each wrapper's options: so after a
+ * wrapper any later word of the command with one of these base names is refused (over-inclusive: `xargs grep
+ * parallel`, `timeout 5 echo at`). */
+const WRAPPED_DENY = ["parallel", "sem", "su", "pkexec", "runuser", "at", "batch"];
 /** The word follows a wrapper prefix, skipping the wrapper's options, numbers and assignments (`timeout 5 su`), or a
  * find action that runs a command (`find . -exec su`, `-execdir`, `-ok`, `-okdir`). */
 function afterWrapper(ws: Word[], k: number): boolean {
@@ -1079,18 +1157,17 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     return i;
   });
   const leads = (k: number) => k === at || k <= leaderRun() || afterWrapper(ws, k);
-  // setopt/unsetopt: an exec option (ZSH_EXEC_OPTION), a -m pattern, or an option the guard cannot read.
-  const setoptFrom = once(() => suffixAny(nr, (x) => x.dynamic || /^[-+][A-Za-z]*m/.test(x.text) || ZSH_EXEC_OPTION(x.text)));
-  // set: an exec option word (also attached or bundled: `-oglobsubst`, `-Coglobsubst`), or a dynamic option name after
-  // or attached to an -o/+o cluster.
-  const setFrom = once(() => {
-    const out = new Array<boolean>(nr.length + 1).fill(false);
-    for (let i = nr.length - 1; i >= 0; i--) {
-      const x = nr[i]!;
-      out[i] = out[i + 1]! || (!x.dynamic && ZSH_EXEC_OPTION(x.text)) || (x.dynamic && ((i > 0 && /^[-+][A-Za-z]*o$/.test(nr[i - 1]!.text)) || /^[-+][A-Za-z]*o/.test(staticPrefix(x))));
+  // The first wrapper of the command (ws.length when none): a wrapper in command position (also behind keywords) or
+  // one of find's -exec actions.
+  const wrapping = once(() => {
+    for (let i = 0; i < ws.length; i++) {
+      const x = ws[i]!;
+      if (x.redirect || x.dynamic) continue;
+      if (FIND_EXEC.has(x.text) || (WRAPPERS.has(base(x.text)) && (i === at || i <= leaderRun()))) return i;
     }
-    return out;
+    return ws.length;
   });
+  let optionsRead = false; // the first option-setting command word read every later word
   // sched with any argument but the removal of an item (`sched -3`); `sched` alone lists.
   const schedFrom = once(() => suffixAny(nr, (x) => x.dynamic || !/^-\d+$/.test(x.text)));
   // A table word (J-9, J-8) is denied wherever it stands, behind any keyword, modifier or wrapper, except as an
@@ -1172,11 +1249,11 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     else if (name === "find" && findAction()) push(deny(`find ${findAction()} is always blocked; remove specific paths with a plain rm -r <path>`, "rm"));
     else if (k === at && (name === "alias" || name === "function")) push(deny(`${name} definitions are always blocked: a later word could run anything`));
     else if (name === "shopt" && expandAliasesFrom()[s]) push(deny("shopt expand_aliases is always blocked"));
-    else if ((name === "setopt" || name === "unsetopt") && leads(k) && setoptFrom()[s]) push(deny(`${name} of globsubst or promptsubst (in any case, with underscores or a no prefix), a -m pattern or an option the guard cannot read is always blocked: those options run text as code`));
-    else if (name === "set" && leads(k) && setFrom()[s]) push(deny("set -o globsubst or promptsubst (in any case, with underscores or a no prefix) or an option the guard cannot read is always blocked: those options run text as code"));
+    else if (OPTION_SETTERS.has(name) && !optionsRead && leads(k) && (optionsRead = true) && optionVerdict(name, nr.slice(s))) push(optionVerdict(name, nr.slice(s))!);
     else if (name === "emulate" && leads(k) && !nr.slice(s).every((x) => !x.dynamic && ["-L", "-R", "-LR", "-RL", "zsh"].includes(x.text))) push(deny("emulate is always blocked except emulate [-L] [-R] zsh: sh, ksh and csh emulation turn on globsubst, and -c runs a string"));
     else if (name === "sched" && leads(k) && schedFrom()[s]) push(deny("sched runs a command later from a string the guard cannot see: always blocked"));
     else if ((name === "parallel" || name === "sem") && leads(k)) push(deny(`${name} runs its arguments and its input through a shell the guard cannot see: always blocked; use xargs -P with a plain command`));
+    else if (WRAPPED_DENY.includes(name) && k > wrapping()) push(deny(`${name} after a wrapper (xargs, env, timeout, nice, find -exec and the like) is always blocked wherever it stands in the command: the guard does not read which word a wrapper runs; run the command without the wrapper, or keep the word ${name} out of a wrapped command`));
     else if ((name === "flock" || name === "script") && !runRead) {
       runRead = true; // a later flock or script word would read a subset of the same words again
       // util-linux `flock ... -c <cmd>` and `script -c <cmd>` run the string through a shell: read it as a script.
@@ -1280,7 +1357,10 @@ function shellRule(cmd: SimpleCommand, nr: Word[], s: number, commandPosition: b
         if (o !== letters.length - 1) return deny(`${name} option ${t} cannot be parsed with confidence: always blocked`);
         const v = nr[++i];
         if (v && (v.dynamic || ZSH_EXEC_OPTION(v.text))) return deny(`${name} ${t} ${v.dynamic ? "with an option the guard cannot read" : v.text} is always blocked: globsubst and promptsubst run text as code`);
+        if (v && !safeOption(v.text)) return deny(`${name} ${t} ${v.text} is always blocked: the guard allows only options it knows as harmless (pipefail, errexit, nounset, xtrace, extglob, nullglob, globstar and a few more)`);
       }
+      const other = [...letters.slice(0, o >= 0 ? o : letters.length)].find((c) => !`${SAFE_OPTION_LETTERS}cildr`.includes(c));
+      if (other) return deny(`${name} option ${t} is always blocked: the guard allows only option letters it knows as harmless (-c, -e, -u, -x, -v, -f, -a, -n, -C, -l, -i and a few more)`);
     } else if (/^[-+]/.test(t)) return deny(`${name} option ${t} cannot be parsed with confidence: always blocked`);
     else break;
   }
