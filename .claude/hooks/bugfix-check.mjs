@@ -256,6 +256,25 @@ export function stoppedEarly(text) {
  */
 export const failFastCmd = (cmd) => /\bunittest\b/.test(cmd) && /(?:^|\s)(?:--failfast|-[A-Za-z]*f[A-Za-z]*)(?=\s|;|&|\||$)/.test(cmd);
 
+/**
+ * A unittest run whose failfast is set inside a script the command runs (unittest.main(failfast=True),
+ * TextTestRunner(failfast=True), a config file): the command does not show it and the output carries no mark of it, so
+ * for output in unittest's form (its "Ran N tests in" line) the tree is searched: any Python, cfg, toml or ini file,
+ * tracked or untracked, that holds the word failfast counts as a failfast run. A search that cannot run counts too
+ * (fail closed). Not seen: a "-f" put into argv by a script.
+ * @param {string} cwd @param {unknown} output
+ */
+export function failFastInTree(cwd, output) {
+  if (typeof output !== "string" || !/^Ran \d+ tests? in /m.test(output)) return false;
+  const r = spawnSync("git", ["grep", "-I", "-l", "-w", "--untracked", "-e", "failfast", "--", "*.py", "*.cfg", "*.toml", "*.ini"], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    timeout: 30000,
+  });
+  return r.status !== 1; // 0: found; 1: none; anything else: the search failed
+}
+
 // Test files by path: under a test folder, or named like a test in the common runners.
 /** @param {string} path */
 export function isTestFile(path) {
@@ -273,12 +292,19 @@ export function isTestFile(path) {
 
 /**
  * The failure's file or package is one of the copied test files (or, for a go package, a copied file's folder).
- * @param {string} name @param {string[]} files
+ * @param {string} name @param {string[]} files @param {Record<string, string>} [pkgDirs] cargo package name to its folder
  */
-export function inFiles(name, files) {
+export function inFiles(name, files, pkgDirs = {}) {
   const k = name.indexOf("::");
   if (k <= 0) return false;
   const q = name.slice(0, k).replace(/\\/g, "/");
+  // cargo: "<package>/tests/x.rs" of a workspace member whose folder is not named after its package (cargoPackageDirs).
+  const first = q.split("/")[0] ?? "";
+  if (/\.rs$/.test(q) && q.includes("/") && Object.hasOwn(pkgDirs, first)) {
+    const dir = pkgDirs[first] ?? "";
+    const mapped = dir ? `${dir}/${q.slice(first.length + 1)}` : q.slice(first.length + 1);
+    if (files.includes(mapped)) return true;
+  }
   return files.some((t) => {
     if (q === t || q.endsWith(`/${t}`)) return true;
     // unittest: a module path relative to discover's start folder; cargo: a workspace member's "<package>/tests/x.rs".
@@ -286,6 +312,49 @@ export function inFiles(name, files) {
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });
+}
+
+/**
+ * For the copied cargo test files (`.rs`), each one's package name (the [package] name of the nearest Cargo.toml in
+ * its folder or above it, within `top`) mapped to that Cargo.toml's folder, root-relative ("" for the root). cargo's
+ * quiet rerun hint names a workspace member by its package (`-p <package>`), which need not be its folder's name.
+ * A Cargo.toml that cannot be read or names no package adds nothing.
+ * @param {string} top @param {string[]} files @returns {Record<string, string>}
+ */
+export function cargoPackageDirs(top, files) {
+  /** @type {Record<string, string>} */
+  const map = Object.create(null); // a package named __proto__ is a key like any other
+  /** @type {Map<string, string>} folder -> its Cargo.toml's text ("" for none) */
+  const tomls = new Map();
+  /** @param {string} rel */
+  const toml = (rel) => {
+    if (!tomls.has(rel)) {
+      try {
+        tomls.set(rel, readFileSync(join(top, rel, "Cargo.toml"), "utf8"));
+      } catch {
+        tomls.set(rel, "");
+      }
+    }
+    return tomls.get(rel) ?? "";
+  };
+  for (const f of files) {
+    if (!/\.rs$/.test(f)) continue;
+    let d = dirname(f.replace(/\\/g, "/"));
+    for (let depth = 0; depth < 64; depth += 1) {
+      const rel = d === "." ? "" : d;
+      const text = toml(rel);
+      if (text) {
+        // The nearest Cargo.toml decides, whether it names a package or not.
+        const pkg = /^[ \t]*\[package\][ \t]*\r?$([\s\S]*?)(?=^[ \t]*\[|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+        const name = /^[ \t]*name[ \t]*=[ \t]*["']([^"'\r\n]+)["']/m.exec(pkg)?.[1];
+        if (name && !Object.hasOwn(map, name)) map[name] = rel;
+        break;
+      }
+      if (!rel) break;
+      d = dirname(d);
+    }
+  }
+  return map;
 }
 
 /**
@@ -555,7 +624,7 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   if (quick.names.length === 0) return null; // nothing qualified to compare
   const allow = mode === "allow";
   // unqualified names, a crash, a cargo stop at a failing target or a unittest failfast command: keep the block
-  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd))) return null;
+  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd) || failFastInTree(cwd, output))) return null;
   const info = baseInfo(cwd, isolated);
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
@@ -715,7 +784,8 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
   }
   if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
-  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests) && !fileLevel(n));
+  const pkgDirs = cargoPackageDirs(info.top, tests);
+  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests, pkgDirs) && !fileLevel(n));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
   if (fresh.length > 0) return { decision: "allow", reason: "bugfix_verified", extra, message: "" };
   return block(

@@ -105,11 +105,18 @@ hooks_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 
 # Arguments: --plugin (the plugin's copy: its state dir rule, below) and --handback (the hand-back mode, below), any order.
-plugin_flag=0 handback=0
+# --recent-ms=<n> is for tests only (no hook configuration passes it): the result cache's guard against recent changes
+# (test-gate-cache.mjs RECENT_MS, 2000 ms) for this run's store, so a test need not wait out the production guard.
+plugin_flag=0 handback=0 recent_ms=""
 for _a in "$@"; do
-  case "$_a" in --plugin) plugin_flag=1 ;; --handback) handback=1 ;; esac
+  case "$_a" in
+    --plugin) plugin_flag=1 ;;
+    --handback) handback=1 ;;
+    --recent-ms=*) recent_ms="${_a#--recent-ms=}" ;;
+  esac
 done
 unset _a
+case "$recent_ms" in '' | *[!0-9]* | ???????*) recent_ms="" ;; esac
 
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -159,19 +166,22 @@ now_iso() {
 }
 
 # Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or after_handback) and
-# tree_extra (the cache key's first 16 hex digits, and the record it reused). Returns 1 when the line was not written.
+# tree_extra (the cache key's first 16 hex digits, and the record it reused), and after a failed test run fail_extra
+# (what failed: failed_count, failed_tests, failed_crash and output, the file in the state folder that keeps the tail of
+# the run's output; bugfix-check.mjs failureExtra). Returns 1 when the line was not written.
 log_gate() { # decision reason [extra JSON fields: counts only]
   local extra="${link_extra:-}"
   decided=1
   [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
   [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
+  [ -z "${fail_extra:-}" ] || extra="${extra:+$extra,}$fail_extra"
   mkdir -p "$state" 2>/dev/null || return 1
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"%s}\n' \
     "$(now_iso)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" "${extra:+,$extra}" >> "$state/gates.jsonl" 2>/dev/null || return 1
   return 0
 }
-decided=0 link_extra="" tree_extra=""
+decided=0 link_extra="" tree_extra="" fail_extra=""
 
 # Run a command in its own process group, stdin from $2 and stdout to $3 (stderr to $4), for at most $1 seconds; then
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
@@ -657,6 +667,24 @@ list_trees() {
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || rm -f "$work/$1" 2>/dev/null
   return 0
 }
+# What failed (bugfix-check.mjs failureExtra): sets fail_extra to the failed run's record fields (failed_count, at most
+# 10 failing test names as the runner's output shows them, failed_crash, and output: the file under the state folder's
+# test-output/ that keeps the last 64 KiB of the run's output; the newest 10 such files are kept). Its run gets
+# min(10, time left - KEY_RESERVE_S) s and is skipped with less: no fields then (after a test run that used up the time
+# left, as a timed-out stop's run does), never a different decision. The agent's message does not change.
+note_failures() {
+  local lim
+  fail_extra=""
+  lim=$(($(time_left) - KEY_RESERVE_S))
+  [ "$lim" -le 10 ] || lim=10
+  [ "$lim" -ge 1 ] || return 0
+  [ -f "$work/test.out" ] || return 0
+  run_limited "$lim" "$work/test.out" "$work/fail.out" /dev/null node "$hooks_dir/bugfix-check.mjs" failures --state "$state" --tag "${agent_id:-}-$$"
+  [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
+  fail_extra="$(sed -n 1p "$work/fail.out" 2>/dev/null)"
+  case "$fail_extra" in '"failed_count":'*) ;; *) fail_extra="" ;; esac
+  return 0
+}
 # The store's verdict goes into the hand-back's record ("store"): "stored" or why not.
 store_note() { tree_extra="${tree_extra:+$tree_extra,}\"store\":\"$1\""; }
 cache_put() { # result extra message: the hand-back gate only; the helper compares L0 and L1 and may refuse
@@ -671,13 +699,13 @@ cache_put() { # result extra message: the hand-back gate only; the helper compar
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || { store_note no_work; return 0; }
   run_limited "$lim" "$work/put.in" "$work/put.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
-    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json"
+    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json" "$recent_ms" "$fail_extra"
   code="$(sed -n 1p "$work/put.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
   [ "$lim_timed_out" = 0 ] && [ -n "$code" ] || code=put_failed
   store_note "$code"
   return 0
 }
-cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key="" take_reason=""
+cached="" cached_by="" cached_extra="" cached_fail="" cached_msg="" key_stable=0 cache_key="" take_reason=""
 if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
   compute_key
   cache_key="$key_out"
@@ -707,7 +735,9 @@ if [ -n "$cache_key" ]; then
   if [ -n "$cached" ]; then
     cached_by="$(sed -n 2p "$work/cache.out" | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
     cached_extra="$(sed -n 3p "$work/cache.out" | LC_ALL=C tr -cd 'a-z_0-9,:"')"
-    cached_msg="$(sed -n '4,$p' "$work/cache.out")"
+    cached_fail="$(sed -n 4p "$work/cache.out")" # cleaned by the helper (cleanFailureExtra); checked again below
+    case "$cached_fail" in '"failed_count":'*) ;; *) cached_fail="" ;; esac
+    cached_msg="$(sed -n '5,$p' "$work/cache.out")"
     tree_extra="$tree_extra,\"reused\":\"$cached\",\"reused_from\":\"$cached_by\""
   fi
 fi
@@ -722,6 +752,7 @@ if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
   rc=0
   [ "$cached" = pass ] || rc=1
   if [ "$cached" = timeout ]; then rc=137 timed_out=1; fi
+  [ "$cached" = pass ] || fail_extra="$cached_fail" # what failed, as the hand-back's run recorded it
   out=""
 else
   if [ "$cached" = lock_wait ]; then
@@ -774,6 +805,10 @@ else
   list_trees l1.json
   out="$(cat "$work/test.out" 2>/dev/null)"
   [ "$handback" = 0 ] || recheck_key
+  # A failed run (not pytest's "no tests collected", which allows): what failed goes into its records.
+  if [ "$rc" != 0 ] && ! { [ "$rc" = 5 ] && [ "$timed_out" = 0 ] && case "$cmd" in *pytest*) true ;; *) false ;; esac; }; then
+    note_failures
+  fi
   if [ "$timed_out" = 1 ]; then
     [ "$rc" != 0 ] || rc=137
     if [ "$handback" = 1 ]; then
