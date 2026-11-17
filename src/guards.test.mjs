@@ -841,8 +841,8 @@ test("researcher guard (w3 item 1): a glob that can expand to a device path is r
   }
   assert.ok(researcherViolation("sed -n 1p /d?v/zero", w3), "sed takes no glob operand at all");
   // /dev/null reached by a glob, ordinary globs, and commands that never read their operands still pass.
-  // Over-block (w3 follow-up): a glob whose walk meets a symlink to /dev is refused even when nothing matches past it.
-  assert.ok(researcherViolation("grep -n x */*.md", w3), "the walk meets devlink");
+  // w3 second attempt: a walk that meets a symlink to /dev but matches nothing past it is not refused.
+  assert.equal(researcherViolation("grep -n x */*.md", w3), null);
   for (const c of ["cat /de?/null", "wc -l *.txt docs/*.md", "head -n 1 ?.txt", "cat [ab].txt", "grep -n x docs/*.md", "ls /de?/*", "du -sh /*", "stat /de?/zero", "find /d* -maxdepth 0"]) {
     assert.equal(researcherViolation(c, w3), null, c);
   }
@@ -920,7 +920,7 @@ test("researcher guard (w3 follow-up): only a glob that lists more names than th
   for (let i = 0; i < 20001; i++) writeFileSync(join(big, `f${i}.txt`), "");
   const v = researcherViolation("cat *.txt", big);
   assert.ok(v);
-  assert.match(v.reason, /more names than the guard can judge/);
+  assert.match(v.reason, /too wide to judge/);
   assert.match(v.reason, /quote the glob so the command expands it itself/);
   assert.match(v.reason, /name a folder/);
   assert.equal(researcherViolation("rg x -g '*.txt'", big), null);
@@ -1341,4 +1341,55 @@ test("compact-context: a closed run and a stale run are silent", () => {
   assert.match(call().stdout, /- a: building or reviewing/);
   const stale = call({ ORCH_RUN_STALE_MIN: "0.25" });
   assert.deepEqual([stale.status, stale.stdout], [0, ""]);
+});
+
+// w3 second attempt, item 1: one budget (names read and a deadline) for the whole decision, cheap refusals first.
+const wide = join(scratch, "w3-wide");
+mkdirSync(join(wide, ".cache"), { recursive: true });
+mkdirSync(join(wide, "src"), { recursive: true });
+writeFileSync(join(wide, "src", "a.md"), "x\n");
+for (let i = 0; i < 3000; i++) writeFileSync(join(wide, ".cache", `c${i}`), "");
+const widePart = `rg x ${Array(10).fill("**/*.md").join(" ")}`;
+const wideLine = Array(20).fill(widePart).join("; ");
+
+test("researcher guard (w3 second attempt): a literal device after many glob words is refused at once, before any expansion", () => {
+  const t0 = Date.now();
+  const v = researcherViolation(`${wideLine}; cat /dev/zero`, wide, undefined, { totalNames: 0 });
+  assert.ok(v);
+  assert.match(v.reason, /cat \/dev\/zero reads a device/);
+  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+  if (hasFifo) assert.match(researcherViolation(`${wideLine}; cat pipe`, w3, undefined, { totalNames: 0 })?.reason ?? "", /pipe reads a device/);
+});
+
+test("researcher guard (w3 second attempt): the names budget and the deadline hold for the whole command, with the way around", () => {
+  // Default budget: the repeated pattern is expanded once, so the line is judged quickly and passes.
+  const t0 = Date.now();
+  assert.equal(researcherViolation(wideLine, wide), null);
+  assert.ok(Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+  // A budget smaller than the tree (the production default is far larger): refused, saying how to avoid it.
+  const small = researcherViolation(wideLine, wide, undefined, { totalNames: 1000 });
+  assert.ok(small);
+  assert.match(small.reason, /too wide to judge/);
+  assert.match(small.reason, /quote the glob so the command expands it itself/);
+  assert.doesNotMatch(small.reason, /ORCH_/);
+  // A deadline already passed: refused the same way, in no time.
+  const t1 = Date.now();
+  const late = researcherViolation(wideLine, wide, undefined, { deadlineMs: -1 });
+  assert.match(late?.reason ?? "", /too wide to judge/);
+  assert.ok(Date.now() - t1 < 500);
+  // Everyday commands still pass with the default budget.
+  for (const c of ["rg x **/*.md", "cat src/*.md", "head -5 src/a.md"]) assert.equal(researcherViolation(c, wide), null, c);
+});
+
+test("researcher guard (w3 second attempt, item 2): the wide reading judges only names the whole pattern can match", { skip: hasFifo ? false : "mkfifo unavailable" }, () => {
+  const tree = join(scratch, "w3-fifo-match");
+  for (const d of [".q", "src"]) mkdirSync(join(tree, d), { recursive: true });
+  writeFileSync(join(tree, "src", "a.md"), "x\n");
+  spawnSync("mkfifo", [join(tree, ".q", "p")]);
+  for (const c of ["cat **/*.md", "rg x **/*.md"]) assert.equal(researcherViolation(c, tree), null, `${c} with .q/p`);
+  spawnSync("mkfifo", [join(tree, ".q", "x.md")]);
+  assert.match(researcherViolation("cat **/*.md", tree)?.reason ?? "", /x\.md reads a device/, "dotglob could reach .q/x.md");
+  rmSync(join(tree, ".q", "x.md"));
+  spawnSync("mkfifo", [join(tree, "src", "x.md")]);
+  assert.match(researcherViolation("cat **/*.md", tree)?.reason ?? "", /x\.md reads a device/);
 });

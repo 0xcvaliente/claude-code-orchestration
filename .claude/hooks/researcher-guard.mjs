@@ -98,7 +98,24 @@ const SPECIAL_DEVS = SPECIAL_ROOTS.map(statId).flatMap((s) => (s ? [s.dev] : [])
 // `.`/`..` it meets. Past either bound the command is refused, with the way around it.
 const GLOB_ENTRIES = 20000;
 const WIDE_ENTRIES = 200000;
-const TOO_MANY = "a glob that lists more names than the guard can judge (it may expand to a device or a FIFO); quote the glob so the command expands it itself (`rg x -g '*.md'`, `grep -rn x . --include='*.md'`), or name a folder";
+const TOO_MANY = "the command's globs are too wide to judge (they may expand to a device or a FIFO); quote the glob so the command expands it itself (`rg x -g '*.md'`, `grep -rn x . --include='*.md'`), or name a folder";
+// w3 second attempt: one budget for the whole decision, across every segment and every expansion. TOTAL_NAMES names
+// read from disk (a folder is read once per decision, and a pattern repeated on the line is expanded once) and a
+// deadline of DEADLINE_MS from the start of the hook process: Claude Code sets no timeout for this hook and a hook
+// cancelled for time does not block, so the guard refuses before any limit can cancel it.
+const TOTAL_NAMES = 400000;
+const DEADLINE_MS = 4000;
+/** The decision's budget and caches (reset by researcherViolation). */
+const decision = {
+  names: TOTAL_NAMES,
+  deadline: Infinity,
+  cheap: false,
+  /** @type {Map<string, { name: string, dir: boolean, link: boolean, odd: boolean }[]>} */
+  lists: new Map(),
+  /** @type {Map<string, { paths: string[], special: boolean } | null>} */
+  expansions: new Map(),
+};
+const late = () => Date.now() > decision.deadline;
 // The lstat calls one decision may make; past it the command is refused as too complex to judge.
 const WALK_BUDGET = 20000;
 let walkBudget = WALK_BUDGET;
@@ -135,11 +152,26 @@ function insteadOf(word) {
  * @param {string} [project] the project folder; without an absolute one every `cd` is refused
  * @returns {{ reason: string, word?: string } | null}
  */
-export function researcherViolation(command, cwd = process.cwd(), project) {
+export function researcherViolation(command, cwd = process.cwd(), project, opts = {}) {
   // fix-researcher-cd item 3: a decision for any input; whatever cannot be judged is refused, never thrown.
   walkBudget = WALK_BUDGET;
+  const o = /** @type {{ totalNames?: number, deadlineMs?: number, fromProcessStart?: boolean }} */ (opts ?? {});
+  decision.names = typeof o.totalNames === "number" ? o.totalNames : TOTAL_NAMES;
+  // The hook counts from its own start (performance.now() is the time since the process began); a caller from the
+  // first call.
+  decision.deadline = Date.now() + (typeof o.deadlineMs === "number" ? o.deadlineMs : DEADLINE_MS) - (o.fromProcessStart ? performance.now() : 0);
+  decision.lists = new Map();
+  decision.expansions = new Map();
   try {
-    return violation(withoutStderrNull(String(command)), String(cwd), project);
+    const c = withoutStderrNull(String(command));
+    // The cheap decisions first, for every segment: an operand forbidden by its text or by what it names on disk (a
+    // literal device, a FIFO named outright) is refused before any glob is expanded, wherever it stands on the line.
+    decision.cheap = true;
+    const first = violation(c, String(cwd), project);
+    if (first) return first;
+    decision.cheap = false;
+    walkBudget = WALK_BUDGET;
+    return violation(c, String(cwd), project);
   } catch (err) {
     return { reason: `the command cannot be judged (${err instanceof Error ? err.message.slice(0, 80) : "error"})` };
   }
@@ -271,9 +303,6 @@ const literal = (w) => Array.isArray(w?.pieces) && w.pieces.every((/** @type {an
 /** Does the word hold an unquoted glob character? @param {any} w */
 const hasGlob = (w) => Array.isArray(w?.pieces) && w.pieces.some((/** @type {any} */ p) => "glob" in p);
 
-/** Names the glob expansions of this decision may still read (reset per command segment). */
-let globEntries = GLOB_ENTRIES;
-
 /**
  * The strings to judge for one word run from `folder`: its text and, for a word with a glob, every path the shell may
  * expand it to there, plus (for `--name=<glob>`) every path the value alone may name, since an unmatched word reaches
@@ -282,7 +311,7 @@ let globEntries = GLOB_ENTRIES;
  * @param {any} word @param {string} text @param {string} folder @returns {string[] | null}
  */
 function pathsOf(word, text, folder) {
-  if (!hasGlob(word)) return [text];
+  if (!hasGlob(word) || decision.cheap) return [text];
   /** @type {string[]} */
   const out = [text];
   /** @type {any[][]} */
@@ -293,7 +322,9 @@ function pathsOf(word, text, folder) {
   }
   for (const pat of patterns) {
     for (const wide of [false, true]) {
-      const r = expand(pat, folder, wide);
+      const key = `${wide}\0${folder}\0${JSON.stringify(pat)}`;
+      if (!decision.expansions.has(key)) decision.expansions.set(key, expand(pat, folder, wide));
+      const r = decision.expansions.get(key);
       if (!r) return null;
       // A pattern that lists /dev, /proc or /sys itself is refused, /dev/null among its matches or not.
       if (r.special) return [...out, "/dev"];
@@ -308,8 +339,9 @@ function pathsOf(word, text, folder) {
  * Shell reading (`wide` false): the paths bash 4.3+ and zsh list by default, all of them to be judged: no name that
  * starts with a dot unless the segment does, a segment of two or more stars alone matching across folders but never
  * through a symlinked folder (three or more: zsh `***`, through them too), and also read as `*` (globstar off).
- * Wide reading: only what must be judged under any setting (dotglob or GLOB_DOTS, globstar off, `***`): every literal
- * prefix, symlink, FIFO, socket, device, `.` and `..` met, dot names included. Both: `special` when the walk would list
+ * Wide reading: what must be judged under any setting (dotglob or GLOB_DOTS, globstar off, `***`): each match of the
+ * whole pattern, dot names included, whose path passes or ends at a symlink, FIFO, socket, device, `.` or `..` (a
+ * name the last segment cannot match is never judged). Both: `special` when the walk would list
  * /dev, /proc or /sys; a bracket expression matches any one or more characters (the tokenizer keeps no class text, and
  * an unmatched `[...]` names itself); names match without regard to case; `.` and `..` match only a segment that starts
  * with a literal dot, as in every shell.
@@ -353,26 +385,26 @@ function expand(pieces, folder, wide) {
   /** @type {string[]} */
   const found = [];
   const seen = new Set();
-  /** @type {Map<string, { name: string, dir: boolean, link: boolean, odd: boolean }[]>} */
-  const listed = new Map();
   let over = false;
   let special = false;
-  let left = wide ? WIDE_ENTRIES : 0;
-  /** @param {number} n */
-  const spend = (n) => {
-    if (wide) left -= n;
-    else globEntries -= n;
-    if ((wide ? left : globEntries) < 0) over = true;
-    return !over;
-  };
-  /** @param {string} dir the folder reached @param {string} shown the text so far @param {number} i */
-  const walk = (dir, shown, i) => {
+  // This pattern's own bound, counted over every folder it walks (read from disk or from the decision's cache).
+  let left = wide ? WIDE_ENTRIES : GLOB_ENTRIES;
+  let steps = 0;
+  /** The folders already counted toward this pattern's bound (one folder may be listed for several segments). */
+  const counted = new Set();
+  /**
+   * @param {string} dir the folder reached @param {string} shown the text so far @param {number} i
+   * @param {boolean} odd the wide reading: the path so far passed a symlink, FIFO, socket, device, `.` or `..`
+   */
+  const walk = (dir, shown, i, odd = false) => {
     if (over || special) return;
-    const key = `${dir}\0${i}`;
+    const key = `${dir}\0${i}\0${odd}`;
     if (seen.has(key)) return;
     seen.add(key);
     if (i === segs.length) {
-      if (!wide) found.push(shown); // the wide reading keeps only what it must judge (below)
+      // The shell reading judges every match; the wide reading only a match whose path is not plain folders and
+      // regular files from the start folder (a name the whole pattern can match, w3 second attempt, item 2).
+      if (!wide || odd) found.push(shown);
       return;
     }
     const s = /** @type {(typeof segs)[number]} */ (segs[i]);
@@ -381,17 +413,29 @@ function expand(pieces, folder, wide) {
     const join2 = (/** @type {string} */ name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
     if (!s.re) {
       if (absolute && i === 0) return walk("/", "/", 1);
-      // A literal name may be a symlink (to /dev, to /) or `..`: the wide reading judges the path so far.
-      if (wide) found.push(`${shown}${s.text}`);
-      return walk(join2(s.text), `${shown}${s.text}${sep}`, i + 1);
+      // A literal name may be a symlink (to /dev, to /) or `.`/`..`: the matches past it are judged.
+      let litOdd = odd || s.text === "." || s.text === "..";
+      if (wide && !litOdd) {
+        try {
+          litOdd = !lstatSync(join2(s.text)).isDirectory();
+        } catch {
+          litOdd = false; // missing: nothing past it to match
+        }
+      }
+      return walk(join2(s.text), `${shown}${s.text}${sep}`, i + 1, litOdd);
     }
     // Listing /dev, /proc or /sys (by their text) is refused outright.
     if (isDevice(posix.resolve(folder, dir)) || posix.resolve(folder, dir).toLowerCase() === "/dev") {
       special = true;
       return;
     }
-    // Each folder is listed and counted once per reading, whatever segment asks for it.
-    let cached = listed.get(dir);
+    if (late()) {
+      over = true;
+      return;
+    }
+    // Each folder is read from disk once per decision (decision.names counts those reads); every listing counts toward
+    // this pattern's own bound.
+    let cached = decision.lists.get(dir);
     if (!cached) {
       cached = [];
       try {
@@ -404,33 +448,48 @@ function expand(pieces, folder, wide) {
       } catch {
         cached = [];
       }
-      listed.set(dir, cached);
-      if (!spend(cached.length + 1)) return;
+      decision.lists.set(dir, cached);
+      decision.names -= cached.length + 1;
+      if (decision.names < 0) {
+        over = true;
+        return;
+      }
+    }
+    if (!counted.has(dir)) {
+      counted.add(dir);
+      left -= cached.length + 1;
+    }
+    if (left < 0) {
+      over = true;
+      return;
     }
     /** @type {{ name: string, dir: boolean, link: boolean, odd: boolean }[]} */
     const list = [...cached];
     if (s.dot) list.push({ name: ".", dir: true, link: false, odd: true }, { name: "..", dir: true, link: false, odd: true });
     for (const e of list) {
       if (over || special) return;
+      if (++steps % 4096 === 0 && late()) {
+        over = true;
+        return;
+      }
       // Shells match a leading dot only with a segment that starts with one; dotglob and GLOB_DOTS lift that, so the
       // wide reading takes every name.
       if (!wide && !s.dot && e.name.startsWith(".")) continue;
       const path = join2(e.name);
       const matched = s.stars || s.re.test(e.name);
       if (!matched) continue;
-      // The wide reading judges every symlink, FIFO, socket, device, `.` and `..` it meets on the way.
-      if (wide && (e.link || e.odd)) found.push(`${shown}${e.name}`);
+      const next = odd || e.link || e.odd;
       if (s.stars) {
         // `**`: one more folder with the same `**` still to match; never through a symlinked folder (bash 4.3+, zsh),
         // except zsh's `***`. A link is still entered one level by the `*` reading below.
-        if (e.dir && e.name !== "." && e.name !== "..") walk(path, `${shown}${e.name}/`, i);
-        else if (e.link && s.follow) walk(path, `${shown}${e.name}/`, i);
+        if (e.dir && e.name !== "." && e.name !== "..") walk(path, `${shown}${e.name}/`, i, odd);
+        else if (e.link && s.follow) walk(path, `${shown}${e.name}/`, i, true);
       }
       // A plain wildcard, and `**` read as `*` (globstar off): this name matches the segment itself. Only a folder, a
       // link or a `.`/`..` can hold what a later segment names; a file is a match only at the end.
-      if (last || e.dir || e.link || e.odd) walk(path, `${shown}${e.name}${sep}`, i + 1);
+      if (last || e.dir || e.link || e.odd) walk(path, `${shown}${e.name}${sep}`, i + 1, next);
     }
-    if (s.stars) walk(dir, shown, i + 1); // `**` as no folder
+    if (s.stars) walk(dir, shown, i + 1, odd); // `**` as no folder
   };
   try {
     walk(start, "", 0);
@@ -472,7 +531,6 @@ function allowedWords(w) {
 function optionViolation(w, folders, words = []) {
   const first = w[0] ?? "";
   const args = w.slice(1);
-  globEntries = GLOB_ENTRIES;
   /**
    * The word at args[i] reads a device (glob expansions included), "many" past the glob bounds, else null.
    * @param {number} i @returns {string | null}
@@ -482,8 +540,11 @@ function optionViolation(w, folders, words = []) {
       const list = pathsOf(words[i + 1], args[i] ?? "", f);
       if (!list) return "many";
       // Each path gets the whole lstat budget: the listing bound already limits how many there are.
-      const hit = list.find((a) => ((walkBudget = WALK_BUDGET), readsDevice(a, f)));
-      if (hit !== undefined) return hit;
+      for (const a of list) {
+        if (list.length > 1 && late()) return "many";
+        walkBudget = WALK_BUDGET;
+        if (readsDevice(a, f)) return a;
+      }
     }
     return null;
   };
@@ -801,7 +862,7 @@ if (isEntry()) {
   // Relative paths resolve against the folder the command runs in: the payload's cwd, else the project folder.
   // The project folder bounds `cd`; without an absolute CLAUDE_PROJECT_DIR every cd is refused.
   const project = process.env.CLAUDE_PROJECT_DIR;
-  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : project || process.cwd(), project?.startsWith("/") ? project : undefined);
+  const v = researcherViolation(command, typeof input.cwd === "string" && input.cwd.startsWith("/") ? input.cwd : project || process.cwd(), project?.startsWith("/") ? project : undefined, { fromProcessStart: true });
   if (!v) process.exit(0);
   try {
     ensureStateDir();
