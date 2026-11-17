@@ -16,16 +16,18 @@
 // Silent too when the session itself runs as the orchestrator (`claude --agent orchestrator`, or an `agent` setting,
 // as in this repo's own .claude/settings.json): it is already routed, its prompt holds the same rules, and it has no
 // Skill tool to run the route skill with. SessionStart input carries `agent_type` for such a session.
-// UserPromptSubmit (1.6.0; project and plugin, the plugin copy exits on duplicate()): when the typed prompt holds the
-// word `ultracode` (whole word, any case), one context line says that keyword-started workflows are off here and that
-// the task goes through the orchestrator; any other prompt gets nothing. The event also fires for a subagent's report,
-// a task notification and another session's message; `typedPrompt` in state.mjs tells them apart by their text, and
-// they get nothing. It never blocks the prompt, runs for every
-// session (the orchestrator's too) and is not silenced by ORCH_NO_NUDGE: it describes a refusal workflow-guard.mjs makes
-// anyway (the guard's own switch turns the guard off, not this line). Claude Code still highlights the keyword and the
-// prompt still reaches the model.
+// UserPromptSubmit (project and plugin, the plugin copy exits on duplicate()): since 1.6.1 a typed prompt that holds the
+// word `ultracode` (whole word, any case) is refused with {"decision":"block","reason":...}, so it never reaches the
+// model (1.6.0 only added a context line, and the prompt still went through). The reason is shown to the person: it
+// says keyword-started workflows are off here and to type the request again without the word, or use the orchestrator,
+// and names no switch. Every other input gets exactly what it got before: nothing at UserPromptSubmit. The event also
+// fires for a subagent's report, a task notification and another session's message; `typedPrompt` in state.mjs tells
+// them apart by their text, and they are never blocked. It runs for every session (the orchestrator's too) and is not
+// silenced by ORCH_NO_NUDGE; the workflow guard's switch, ORCH_WORKFLOW_GUARD=off (plugin option workflow_guard, the
+// environment wins; `guardOff` of workflow-guard.mjs), turns it off with the guard.
 import { readFileSync } from "node:fs";
 import { duplicate, typedPrompt } from "./state.mjs";
+import { guardOff } from "./workflow-guard.mjs";
 
 /** @type {any} */
 let input = null;
@@ -35,14 +37,14 @@ try {
   // no input, or input that is not JSON: nudge as before
 }
 
-const ULTRACODE_LINE =
-  "Orchestration: workflows started by the ultracode keyword or written on the spot are off in this project, and a Workflow call with a script is refused. Do this task through this project's orchestrator instead, or suggest that the person start the saved orchestrate workflow; never start a workflow yourself.";
+const ULTRACODE_BLOCK =
+  "Workflows started by the ultracode keyword are off in this project, so this prompt was not sent. Type the request again without the word ultracode, or use this project's orchestrator (the orchestrator agent, or the saved orchestrate workflow).";
 
 if (input?.hook_event_name === "UserPromptSubmit") {
   if (duplicate("nudge.mjs")) process.exit(0);
   const prompt = typeof input.prompt === "string" ? input.prompt : "";
-  if (typedPrompt(input) && /(^|[^A-Za-z0-9_])ultracode(?![A-Za-z0-9_])/i.test(prompt)) {
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: ULTRACODE_LINE } }) + "\n");
+  if (!guardOff(process.env) && typedPrompt(input) && /(^|[^A-Za-z0-9_])ultracode(?![A-Za-z0-9_])/i.test(prompt)) {
+    process.stdout.write(JSON.stringify({ decision: "block", reason: ULTRACODE_BLOCK }) + "\n");
   }
   process.exit(0);
 }
