@@ -117,8 +117,9 @@ const timeOf = (ts) => Date.parse(String(ts ?? "")) || 0;
  * stopGate: the test-gate record of the agent's latest stop, or null while the gate has not reported on it. The gate
  * writes one record per implementer stop, and the stops' hooks run side by side: telemetry stamps a stop after reading
  * the transcript, so a fast gate record (no_code_changes, no_test_command) can carry an earlier time than its own stop.
- * So records are paired with stops by count, not by time: since the agent's latest start (a resume is a start), the
- * latest stop has its record once there are at least as many test-gate records as stops, and it is the latest of them.
+ * So records are paired with stops by key, not by time (stopGateOf): a stop and its test-gate record carry the same
+ * stop_key (2.0.0); a stop with no key (older logs) is paired by count since the agent's latest start, as before. The
+ * hand-back gate's records (at "handback", handback_id) belong to a hand-back and are never a stop's record.
  * The review gate keeps comparing times (testBlocked); only the plan check's reviewer hold reads stopGate.
  */
 
@@ -149,14 +150,38 @@ export function implementerTestStates(telemetry, gates, sessionId) {
     a.test = g;
   }
   for (const a of agents.values()) {
-    const stops = telemetry.filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && timeOf(e.ts) >= a.start).length;
-    // Records in line order; a stable sort by time keeps that order for equal times.
-    const mine = gates
-      .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId) && timeOf(g.ts) >= a.start)
+    // Stops since the latest start, in time order (a stable sort keeps line order for equal times).
+    const stops = telemetry
+      .filter((e) => e.agent_id === a.id && e.hook_event_name === "SubagentStop" && timeOf(e.ts) >= a.start)
       .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
-    a.stopGate = stops > 0 && mine.length >= stops ? mine.at(-1) : null;
+    const mine = gates
+      .filter((g) => g.gate === "test" && g.agent_id === a.id && (g.session_id === undefined || g.session_id === sessionId))
+      .sort((x, y) => timeOf(x.ts) - timeOf(y.ts));
+    a.stopGate = stopGateOf(stops, mine, a.start);
   }
   return agents;
+}
+
+/** @param {any} r @returns {string} */
+const keyOf = (r) => (typeof r?.stop_key === "string" ? r.stop_key : "");
+/** A record of the hand-back gate (verify.sh --handback): it belongs to a hand-back, never to a stop. @param {any} g */
+const handbackRecord = (g) => g?.at === "handback" || (typeof g?.handback_id === "string" && g.handback_id !== "");
+
+/**
+ * The test-gate record of the latest of `stops` (since the agent's latest start), or null while the gate has not
+ * reported on it. A stop with a stop_key (telemetry.mjs, 2.0.0) takes the latest record with the same stop_key, so a
+ * record of an earlier stop that lands after a resume (the earlier gate still ran) is never counted for the new stop.
+ * A stop with no key (older logs) is paired by count as before: since the latest start, the latest stop has its record
+ * once there are at least as many records as stops, leaving out the hand-back gate's records.
+ * @param {any[]} stops @param {any[]} gates the agent's test-gate records, in time order @param {number} start @returns {any}
+ */
+export function stopGateOf(stops, gates, start) {
+  const latest = stops.at(-1);
+  if (!latest) return null;
+  const key = keyOf(latest);
+  if (key) return gates.findLast((g) => keyOf(g) === key && !handbackRecord(g)) ?? null;
+  const counted = gates.filter((g) => !handbackRecord(g) && timeOf(g.ts) >= start);
+  return counted.length >= stops.length ? (counted.at(-1) ?? null) : null;
 }
 
 /** The agent's latest test-gate record is a block later than its latest stop. @param {{ stop: number, testAt: number, testBlock: boolean }} a */

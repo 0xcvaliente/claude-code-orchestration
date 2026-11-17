@@ -32,6 +32,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, handbackFor, stateDir } from "./state.mjs";
+import { stopKey } from "./test-gate-cache.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -156,6 +157,8 @@ function filesTouched(entries, hookCwd) {
 if (p.hook_event_name !== "SubagentStop" || !STOP_ROLES.includes(bare(p.agent_type))) process.exit(0);
 const role = bare(p.agent_type);
 const agentId = typeof p.agent_id === "string" && p.agent_id ? p.agent_id : null;
+// The stop key (test-gate-cache.mjs stopKey), read first, as verify.sh and telemetry.mjs read it at this stop.
+const stopKeyValue = stopKey(p.agent_transcript_path);
 
 /** @type {any[]} */
 let entries = [];
@@ -219,5 +222,6 @@ if (p.stop_hook_active === true && agentId) {
     // no earlier record readable: a stop of its own
   }
 }
+if (stopKeyValue) rec = /** @type {typeof rec} */ ({ ...rec, stop_key: stopKeyValue });
 append(slice ? "journal.jsonl" : "journal-pending.jsonl", touched && rec.files_touched ? { ...rec, files_source: touched.source } : rec);
 process.exit(0);

@@ -330,9 +330,10 @@ test("1.2.0: reports are checked at SubagentHandback in the project and the plug
     const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
     assert.ok(e, "a SubagentHandback entry");
     const cmds = e.hooks.map((/** @type {any} */ c) => String(c.command));
-    assert.equal(cmds.length, 2);
-    assert.ok(cmds[0].includes("handback-check.mjs") && cmds[1].includes("quote-check.mjs"));
-    for (const c of cmds) assert.ok(c.endsWith(`.mjs"${tail}`), c);
+    // 2.0.0: the test gate's hand-back mode runs third, after the report checks (its own test below).
+    assert.equal(cmds.length, 3);
+    assert.ok(cmds[0].includes("handback-check.mjs") && cmds[1].includes("quote-check.mjs") && cmds[2].includes("verify.sh"));
+    for (const c of cmds.slice(0, 2)) assert.ok(c.endsWith(`.mjs"${tail}`), c);
     // Deny-only hooks: neither fails closed, so a crash never holds a report back.
     assert.ok(e.hooks.every((/** @type {any} */ c) => c.onFailure === undefined));
   }
@@ -343,6 +344,22 @@ test("1.2.0: reports are checked at SubagentHandback in the project and the plug
   assert.match(readFileSync(join(root, "dist", "plugin", "hooks", "dashboard.tsx"), "utf8"), /on\('ui\.render', \{ component: 'AgentRow' \}/);
   // The project's own settings do not set it: the mod's row, or the person's own row, applies there.
   assert.equal(read(".claude/settings.json").subagentStatusLine, undefined);
+});
+
+test("2.0.0: the test gate runs at SubagentHandback after the report checks, in the project and the plugin, and keeps its SubagentStop entry", () => {
+  for (const [h, args] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), " --handback"], [read("dist/plugin/hooks/hooks.json"), " --plugin --handback"]])) {
+    const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
+    const gate = e.hooks.at(-1);
+    assert.ok(String(gate.command).endsWith(`verify.sh${args.startsWith(" --plugin") ? '"' : ""}${args}`), gate.command);
+    // The SubagentStop gate's 900 s: verify.sh's own budget (540 s by default, 870 s at most) ends first.
+    assert.equal(gate.timeout, 900);
+    // Not fail-closed: a crash or a timeout lets the report through, and the SubagentStop gate decides.
+    assert.equal(gate.onFailure, undefined);
+    // The SubagentStop gate stays registered and stays the authority.
+    const stop = entry(h, "SubagentStop", "verify.sh");
+    assert.ok(stop, "verify.sh stays on SubagentStop");
+  }
+  assert.ok(existsSync(join(root, "dist", "plugin", "hooks", "test-gate-cache.mjs")), "test-gate-cache.mjs ships");
 });
 
 test("--out without a directory fails", () => {

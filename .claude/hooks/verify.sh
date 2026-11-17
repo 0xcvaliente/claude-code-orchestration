@@ -93,6 +93,13 @@ hooks_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test-cmd.sh
 source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 
+# Arguments: --plugin (the plugin's copy: its state dir rule, below) and --handback (the hand-back mode, below), any order.
+plugin_flag=0 handback=0
+for _a in "$@"; do
+  case "$_a" in --plugin) plugin_flag=1 ;; --handback) handback=1 ;; esac
+done
+unset _a
+
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
 
@@ -100,7 +107,7 @@ project="${CLAUDE_PROJECT_DIR:-$PWD}"
 # path, unless the project registers its own telemetry hook (then every copy shares the project's log).
 state="$project/.claude/state"
 in_project=1
-if [ "${1:-}" = --plugin ] && ! { [ -f "$project/.claude/hooks/telemetry.mjs" ] &&
+if [ "$plugin_flag" = 1 ] && ! { [ -f "$project/.claude/hooks/telemetry.mjs" ] &&
   grep -qsF .claude/hooks/telemetry.mjs "$project/.claude/settings.json" "$project/.claude/settings.local.json"; }; then
   in_project=0
   key="$(printf '%s' "$project" | LC_ALL=C tr -c 'A-Za-z0-9' '-')"
@@ -140,12 +147,20 @@ now_iso() {
   node -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+# Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or stop_key) and
+# tree_extra (the cache key's first 16 hex digits, and the record it reused). Returns 1 when the line was not written.
 log_gate() { # decision reason [extra JSON fields: counts only]
-  mkdir -p "$state" 2>/dev/null || return 0
+  local extra="${link_extra:-}"
+  decided=1
+  [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
+  [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
+  mkdir -p "$state" 2>/dev/null || return 1
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"%s}\n' \
-    "$(now_iso)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" "${3:+,$3}" >> "$state/gates.jsonl" 2>/dev/null || true
+    "$(now_iso)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" "${extra:+,$extra}" >> "$state/gates.jsonl" 2>/dev/null || return 1
+  return 0
 }
+decided=0 link_extra="" tree_extra=""
 
 # Run a command in its own process group, stdin from $2 and stdout to $3 (stderr to $4), for at most $1 seconds; then
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
@@ -323,7 +338,16 @@ acquire_lock() { # floor
   done
 }
 
-trap 'rm -rf "$work" 2>/dev/null; release_lock' EXIT
+# In the hand-back mode, a hook that ends with no decision (a crash, an error exit, a TERM at Claude Code's hook timeout)
+# lets the report through (any exit but 2 does) and says so in the log; the SubagentStop gate then decides.
+on_exit() {
+  rm -rf "$work" 2>/dev/null
+  release_lock
+  [ "$handback" = 1 ] && [ "${armed:-0}" = 1 ] && [ "$decided" = 0 ] && log_gate allow handback_gate_error
+  return 0
+}
+armed=0
+trap on_exit EXIT
 # The folder can still be removed from outside while the hook runs (a suite or a cleaner that sweeps TMPDIR). Before
 # each use it is made again; when that fails the caller treats it like no time for the check (never a silent allow).
 ensure_work() { [ -d "$work" ] || mkdir -p "$work" 2>/dev/null; }
@@ -471,6 +495,36 @@ agent_id="$(json_str agent_id)"
 # Only id characters are kept, so the log line stays valid JSON.
 session_id="$(json_str session_id | LC_ALL=C tr -cd 'A-Za-z0-9_.-')"
 
+# Hand-back mode (--handback; PreToolUse on SubagentHandback, after the report checks): the same gate before an
+# implementer's report is delivered, so a test failure goes back to the worker while it still runs. Only this plugin's
+# implementer: the project copy takes the bare type, the plugin copy the namespaced one (disjoint, as at SubagentStop);
+# every other hand-back, and one with no agent id, is left alone. It refuses (exit 2) only for failing tests, within
+# the tests_failed cap it shares with the SubagentStop gate and only while the agent has had fewer than two other
+# hand-backs refused by any gate since its latest start (Claude Code asks a worker to resend a refused report at most
+# three times); every other outcome lets the report through, logged, and the SubagentStop gate still runs and decides.
+# Its records carry "at":"handback" and handback_id (the call's tool_use_id); a stop's records carry stop_key.
+# ORCH_HANDBACK_GATE=off turns the mode off (environment only).
+if [ "$handback" = 1 ]; then
+  [ "$(json_str tool_name)" = SubagentHandback ] || exit 0
+  if [ "$plugin_flag" = 1 ]; then want_type="orchestration:implementer"; else want_type=implementer; fi
+  [ "$agent_type" = "$want_type" ] || exit 0
+  [ -n "$agent_id" ] || exit 0
+  handback_id="$(json_str tool_use_id | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
+  link_extra="\"at\":\"handback\",\"handback_id\":\"$handback_id\""
+  agent_type=implementer
+  if [ "${ORCH_HANDBACK_GATE:-}" = off ]; then
+    log_gate allow handback_gate_off
+    exit 0
+  fi
+  armed=1
+else
+  # The stop key, read first: telemetry.mjs and journal.mjs read the same transcript at this stop (test-gate-cache.mjs).
+  stop_key=""
+  _tp="$(json_str agent_transcript_path)"
+  [ -z "$_tp" ] || stop_key="$(node "$hooks_dir/test-gate-cache.mjs" stopkey "$_tp" </dev/null 2>/dev/null | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
+  [ -z "$stop_key" ] || link_extra="\"stop_key\":\"$stop_key\""
+fi
+
 agent_type="${agent_type##*:}" # plugin agents arrive namespaced ("orchestration:implementer")
 
 # Only gate implementers when the event reports an agent type.
@@ -529,26 +583,91 @@ floor=120
 [ "$floor" -le "$((budget / 4))" ] || floor=$((budget / 4))
 [ "$floor" -le "$test_limit" ] || floor="$test_limit"
 [ "$floor" -ge 1 ] || floor=1
-lock_wait_s=0
-acquire_lock "$floor"
-if [ "$?" = 1 ] && [ "$isolated" = 1 ] && [ "$mode" != block ]; then
-  log_gate warn tests_failed_isolated "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
-  exit 0
+
+# The result cache (test-gate-cache.mjs; its header lists the key's parts). compute_key sets key_out to the tree's key,
+# or "" when none can be proven (then nothing is read or written and the suite runs). A stored pass is reused as a pass
+# and a stored fail as a fail; the records say so (reused, reused_from: the hand-back or stop whose gate wrote it).
+compute_key() {
+  key_out=""
+  ensure_work || return 0
+  run_limited 60 /dev/null "$work/key.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" key "$PWD" "$cmd" "$isolated"
+  [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
+  key_out="$(LC_ALL=C tr -cd '0-9a-f' <"$work/key.out" 2>/dev/null)"
+  [ "${#key_out}" = 64 ] || key_out=""
+  return 0
+}
+cache_put() { # result extra message
+  [ -n "$cache_key" ] && [ -z "$cached" ] && [ "$key_stable" = 1 ] || return 0
+  mkdir -p "$state" 2>/dev/null || return 0
+  [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
+  printf '%s' "$3" | node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$link_by" "$2" "${session_id:-}" "${agent_id:-}" >/dev/null 2>&1 || true
+}
+if [ "$handback" = 1 ]; then link_by="handback:$handback_id"; else link_by="stop:${stop_key:-}"; fi
+cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0
+compute_key
+cache_key="$key_out"
+if [ -n "$cache_key" ]; then
+  tree_extra="\"tree\":\"${cache_key:0:16}\""
+  if ensure_work && node "$hooks_dir/test-gate-cache.mjs" get "$state" "$cache_key" </dev/null >"$work/cache.out" 2>/dev/null; then
+    cached="$(sed -n 1p "$work/cache.out" 2>/dev/null)"
+    case "$cached" in pass | fail) ;; *) cached="" ;; esac
+  fi
+  if [ -n "$cached" ]; then
+    cached_by="$(sed -n 2p "$work/cache.out" | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
+    cached_extra="$(sed -n 3p "$work/cache.out" | LC_ALL=C tr -cd 'a-z_0-9,:"')"
+    cached_msg="$(sed -n '4,$p' "$work/cache.out")"
+    tree_extra="$tree_extra,\"reused\":\"$cached\",\"reused_from\":\"$cached_by\""
+  fi
 fi
 
-# The test run: its own limit, cut to the time left in the hook's budget.
-limit="$(time_left)"
-[ "$limit" -le "$test_limit" ] || limit="$test_limit"
-[ "$limit" -ge 1 ] || limit=1
-ensure_work
-run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
-rc="$lim_rc"
-timed_out="$lim_timed_out"
-out="$(cat "$work/test.out" 2>/dev/null)"
-if [ "$timed_out" = 1 ]; then
-  [ "$rc" != 0 ] || rc=137
+lock_wait_s=0
+timed_out=0 limit=0
+if [ -n "$cached" ]; then
+  # No lock and no run: the result of this very tree.
+  if [ "$cached" = pass ]; then rc=0; else rc=1; fi
+  out=""
+else
+  acquire_lock "$floor"
+  if [ "$?" = 1 ]; then
+    if [ "$handback" = 1 ]; then
+      log_gate allow handback_lock_wait "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
+      exit 0
+    fi
+    if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
+      log_gate warn tests_failed_isolated "\"not_run\":1,\"lock_wait_s\":$lock_wait_s"
+      exit 0
+    fi
+  fi
+
+  # The test run: its own limit, cut to the time left in the hook's budget.
+  limit="$(time_left)"
+  [ "$limit" -le "$test_limit" ] || limit="$test_limit"
+  [ "$limit" -ge 1 ] || limit=1
+  ensure_work
+  run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
+  rc="$lim_rc"
+  timed_out="$lim_timed_out"
+  out="$(cat "$work/test.out" 2>/dev/null)"
+  if [ "$timed_out" = 1 ]; then
+    [ "$rc" != 0 ] || rc=137
+    if [ "$handback" = 1 ]; then
+      log_gate allow handback_timed_out "\"limit_s\":$limit"
+      exit 0
+    fi
+  fi
+  # A result is stored only when the tree is what it was before the run.
+  if [ -n "$cache_key" ] && [ "$timed_out" = 0 ]; then
+    compute_key
+    [ "$key_out" != "$cache_key" ] || key_stable=1
+  fi
 fi
 if [ "$rc" = 0 ]; then
+  cache_put pass "" ""
+  if [ "$handback" = 1 ]; then
+    # The bugfix check stays at the SubagentStop gate, which reuses this pass.
+    if [ -n "$cached" ]; then log_gate allow tests_passed_cached; else log_gate allow tests_passed; fi
+    exit 0
+  fi
   if [ "${ORCH_BUGFIX_CHECK:-}" != off ] && [ "$agent_type" = implementer ]; then
     check bugfix "$input" 2
     # A temp folder that could not be made again leaves the brief unread too: treated as a bugfix agent (blocks).
@@ -582,7 +701,7 @@ if [ "$rc" = 0 ]; then
       exit 0
     fi
   fi
-  log_gate allow tests_passed
+  if [ -n "$cached" ]; then log_gate allow tests_passed_cached; else log_gate allow tests_passed; fi
   exit 0
 fi
 case "$cmd" in
@@ -597,8 +716,11 @@ esac
 # Failures the base commit already has: inform (default) keeps the block and names them in the message; allow
 # (opt-in, heuristic) warns instead of blocking when every failing test also fails on the base. Not after a timeout:
 # the output is cut short, and the budget is spent.
+# A reused fail keeps the counts and the message its own run gave (no base run again).
 base_extra="" base_msg=""
-if [ "$timed_out" = 1 ]; then
+if [ -n "$cached" ]; then
+  base_extra="$cached_extra"
+elif [ "$timed_out" = 1 ]; then
   base_extra="\"timed_out\":1,\"limit_s\":$limit"
 elif [ "${ORCH_BASELINE:-}" != off ]; then
   check baseline "$out" 1
@@ -617,6 +739,24 @@ elif [ "${ORCH_BASELINE:-}" != off ]; then
   fi
 fi
 
+# What failed, as the block message says it; stored with a fail (never after a timeout, and not under the opt-in
+# baseline allow mode, whose warn depends on a base run a reused fail does not repeat).
+if [ -n "$cached" ]; then
+  fail_msg="$cached_msg"
+else
+  fail_msg="$(
+    if [ "$timed_out" = 1 ]; then
+      echo "Acceptance gate failed: the test suite did not finish within $limit seconds and was stopped: $cmd"
+      echo "A test hangs or the suite is too slow. Find the test that does not finish (run the suite with a per-test timeout) and fix it."
+    else
+      echo "Acceptance gate failed: $cmd"
+    fi
+    printf '%s\n' "$out" | tail -n 40
+    [ -z "$base_msg" ] || printf '%s\n' "$base_msg"
+  )"
+  [ "$timed_out" = 1 ] || [ "${ORCH_BASELINE:-}" = allow ] || cache_put fail "$base_extra" "$fail_msg"
+fi
+
 if [ "$isolated" = 1 ] && [ "$mode" != block ]; then
   log_gate warn tests_failed_isolated "$base_extra"
   exit 0
@@ -632,16 +772,30 @@ if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   exit 0
 fi
 
+if [ "$handback" = 1 ]; then
+  # Claude Code asks a refused worker to resend at most three times: with two other hand-backs of this agent already
+  # refused (by any gate, since its latest start), this one goes through and the SubagentStop gate decides.
+  refused="$(node "$hooks_dir/test-gate-cache.mjs" refused "$state" "${session_id:-}" "$agent_id" "$handback_id" </dev/null 2>/dev/null | LC_ALL=C tr -cd '0-9')"
+  if [ -z "$refused" ] || [ "$refused" -ge 2 ]; then
+    log_gate allow handback_resend_cap "$base_extra"
+    exit 0
+  fi
+  # A refusal counts only once its record is written and can be read back: the cap above and at the stop count it.
+  log_gate block tests_failed "$base_extra" || exit 0
+  tail -n 64 "$state/gates.jsonl" 2>/dev/null | grep -F '"decision":"block","reason":"tests_failed"' | grep -qF "\"handback_id\":\"$handback_id\"" || exit 0
+  # Mark the hand-back refused (state.mjs recordHandbackRefusal), so the stop never takes this report's capture.
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","gate":"test"%s}\n' "$(now_iso)" "${session_id:-}" "$agent_id" \
+    "${handback_id:+,\"tool_use_id\":\"$handback_id\"}" >>"$state/handback-refusals.jsonl" 2>/dev/null || true
+  {
+    printf '%s\n' "$fail_msg"
+    echo "Your report was not delivered. Fix the root cause, rerun the failing tests, then send your report again."
+  } >&2
+  exit 2
+fi
+
 log_gate block tests_failed "$base_extra"
 {
-  if [ "$timed_out" = 1 ]; then
-    echo "Acceptance gate failed: the test suite did not finish within $limit seconds and was stopped: $cmd"
-    echo "A test hangs or the suite is too slow. Find the test that does not finish (run the suite with a per-test timeout) and fix it."
-  else
-    echo "Acceptance gate failed: $cmd"
-  fi
-  printf '%s\n' "$out" | tail -n 40
-  [ -z "$base_msg" ] || printf '%s\n' "$base_msg"
+  printf '%s\n' "$fail_msg"
   echo "Fix the root cause and rerun before finishing."
 } >&2
 exit 2
