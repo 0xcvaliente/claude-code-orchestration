@@ -129,7 +129,9 @@ test("baseline inform (default): a test that already fails on HEAD still blocks,
   assert.deepEqual([rec.decision, rec.reason, rec.failing, rec.on_base], ["block", "tests_failed", 1, 1]);
   assert.match(same.stderr, /Acceptance gate failed/);
   assert.match(same.stderr, /also fail on the base [0-9a-f]{8} \(probably pre-existing; do not fix them unless your slice touches them; say so in your report\):\n {2}- tests\/test_a\.py::a\n/);
-  assert.doesNotMatch(gateLog(dir), /FAILED|boom|test_a/, "no test output or names in gates.jsonl");
+  // 2.0.0: the record names the failing tests it parsed (failed_tests), never the runner's raw output.
+  assert.doesNotMatch(gateLog(dir), /FAILED|boom/, "no test output in gates.jsonl");
+  assert.deepEqual(rec.failed_tests, ["tests/test_a.py::a"]);
 
   // A new failure: still a block, and only the shared test is named.
   write(dir, { "failures.txt": FA + FB });

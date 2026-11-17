@@ -36,7 +36,7 @@
 // gate record (counts only, may be empty), then the message for the agent. Any error prints nothing and exits 0.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -726,7 +726,127 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// What failed (2.0.0): the fields a failed test run's gate records carry, and the tail of its output kept in the
+// state folder, so that a block can be explained after verify.sh has removed its temp folder.
+// ---------------------------------------------------------------------------------------------------------------
+/** Output files kept in <state>/test-output (the newest by name, which starts with the time). */
+export const KEEP_OUTPUTS = 10;
+/** Each kept file holds at most the last this many bytes of the run's output, from a line start. */
+export const MAX_OUTPUT_BYTES = 64 * 1024;
+/** Failing test names in a record, each cut to MAX_NAME_CHARS characters. */
+export const MAX_NAMES = 10;
+export const MAX_NAME_CHARS = 200;
+export const OUTPUT_DIR = "test-output";
+const OUTPUT_RE = /^\d{8}T\d{9}Z-[A-Za-z0-9_.-]*\.txt$/;
+
+/**
+ * The record fields for a failed run's output: failed_count (the failing tests the runner's output names, qualified
+ * or not: parseFailures, so node:test, tsx, jest, vitest, pytest, unittest, go and cargo; 0 when none could be read),
+ * failed_tests (at most MAX_NAMES of them, qualified ones first, each at most MAX_NAME_CHARS characters; left out when
+ * none), failed_crash 1 when a runner-level failure shows (a crash marker: parseFailures `crash`). Names are only what
+ * the output prints; a line no pattern reads gives no name, never a guessed one.
+ * @param {unknown} output @returns {{ failed_count: number, failed_tests?: string[], failed_crash?: 1 }}
+ */
+export function failureFields(output) {
+  const f = parseFailures(output);
+  const all = [...f.names, ...f.unqualified];
+  /** @type {{ failed_count: number, failed_tests?: string[], failed_crash?: 1 }} */
+  const res = { failed_count: all.length };
+  // eslint-disable-next-line no-control-regex
+  const cut = (/** @type {string} */ n) => (n.length > MAX_NAME_CHARS ? `${n.slice(0, MAX_NAME_CHARS - 3)}...` : n).replace(/[\u0000-\u001f\u007f]/g, " ");
+  if (all.length) res.failed_tests = all.slice(0, MAX_NAMES).map(cut);
+  if (f.crash) res.failed_crash = 1;
+  return res;
+}
+
+/** The last `max` bytes of `text`, from the first line start inside them (the whole text when it fits). @param {string} text @param {number} [max] */
+export function outputTail(text, max = MAX_OUTPUT_BYTES) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return text;
+  const tail = buf.subarray(buf.length - max);
+  const nl = tail.indexOf(10);
+  return (nl >= 0 && nl < tail.length - 1 ? tail.subarray(nl + 1) : tail).toString("utf8");
+}
+
+/**
+ * Keep the tail of a run's output as <state>/test-output/<time>-<tag>.txt, written whole to a hidden temporary file
+ * in the same folder and renamed into place (a crash leaves no half file under the kept name), then remove all but
+ * the newest KEEP_OUTPUTS files and temporary files older than 10 minutes. Returns the path relative to the state
+ * folder, or "" when nothing could be written.
+ * @param {string} state @param {string} tag @param {string} output @param {number} [now]
+ */
+export function keepOutput(state, tag, output, now = Date.now()) {
+  if (!state) return "";
+  const dir = join(state, OUTPUT_DIR);
+  const stamp = new Date(now).toISOString().replace(/[-:.]/g, "");
+  const name = `${stamp}-${String(tag).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80)}.txt`;
+  if (!OUTPUT_RE.test(name)) return "";
+  const tmp = join(dir, `.${name}.${process.pid}.tmp`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(tmp, outputTail(output));
+    renameSync(tmp, join(dir, name));
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // nothing to remove
+    }
+    return "";
+  }
+  try {
+    const entries = readdirSync(dir);
+    const kept = entries.filter((e) => OUTPUT_RE.test(e)).sort();
+    for (const old of kept.slice(0, Math.max(0, kept.length - KEEP_OUTPUTS))) rmSync(join(dir, old), { force: true });
+    for (const t of entries.filter((e) => e.startsWith(".") && e.endsWith(".tmp"))) {
+      const p = join(dir, t);
+      if (now - statSync(p).mtimeMs > 10 * 60 * 1000) rmSync(p, { force: true });
+    }
+  } catch {
+    // pruning is best effort; the file is written
+  }
+  return `${OUTPUT_DIR}/${name}`;
+}
+
+/**
+ * The extra JSON fields verify.sh adds to a failed run's records: failureFields plus "output", the kept file
+ * (keepOutput; left out when it could not be written). One line, a JSON object's members without the braces.
+ * @param {string} state @param {string} tag @param {string} output
+ */
+export function failureExtra(state, tag, output) {
+  const file = keepOutput(state, tag, output);
+  const obj = { ...failureFields(output), ...(file ? { output: file } : {}) };
+  return JSON.stringify(obj).slice(1, -1);
+}
+
+/**
+ * The same fields read back from a stored line (the result cache keeps them with a fail or a timeout): only the known
+ * members, re-checked and written again, so a damaged or foreign line gives "" (no fields), never other JSON.
+ * @param {unknown} line @returns {string}
+ */
+export function cleanFailureExtra(line) {
+  if (typeof line !== "string" || !line) return "";
+  try {
+    const o = JSON.parse(`{${line}}`);
+    /** @type {Record<string, unknown>} */
+    const res = {};
+    if (!(Number.isInteger(o.failed_count) && o.failed_count >= 0)) return "";
+    res.failed_count = o.failed_count;
+    if (Array.isArray(o.failed_tests)) {
+      const names = o.failed_tests.filter((/** @type {unknown} */ n) => typeof n === "string").slice(0, MAX_NAMES).map((/** @type {string} */ n) => n.slice(0, MAX_NAME_CHARS));
+      if (names.length) res.failed_tests = names;
+    }
+    if (o.failed_crash === 1) res.failed_crash = 1;
+    if (typeof o.output === "string" && /^test-output\/[A-Za-z0-9_.-]+\.txt$/.test(o.output)) res.output = o.output;
+    return JSON.stringify(res).slice(1, -1);
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // CLI: node bugfix-check.mjs <baseline|bugfix> --cmd <cmd> --state <dir> [--isolated 1]
+//      node bugfix-check.mjs failures --state <dir> --tag <tag>   (stdin: the run's output) prints failureExtra
 // ---------------------------------------------------------------------------------------------------------------
 /** @param {string[]} argv */
 function flags(argv) {
@@ -745,6 +865,10 @@ async function main() {
   const chunks = [];
   for await (const c of process.stdin) chunks.push(c);
   const input = Buffer.concat(chunks).toString("utf8");
+  if (mode === "failures") {
+    process.stdout.write(`${failureExtra(f.state ?? "", f.tag ?? "", input)}\n`);
+    return;
+  }
   const common = { cwd: process.cwd(), cmd: f.cmd ?? "", isolated: f.isolated === "1", state: f.state ?? "" };
   if (!common.cmd || !common.state) return;
   let res = null;
