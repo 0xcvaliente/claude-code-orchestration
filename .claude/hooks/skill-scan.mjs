@@ -341,7 +341,7 @@ function eachAdded(out, each) {
  * What a push of the branch would carry: the draft's own commits (merge base with `base` to the tip) and, when
  * `remote` is given, the commits below the merge base that the remote lacks (`unpushed`): a push sends those too.
  * @param {string} dir a work tree of the repository
- * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null, remotes?: string[][] | null }} o
+ * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null, remotes?: string[][] | null, identity?: string[] | null }} o
  *   `remote`: revision arguments naming what the target remote has (commit ids from git ls-remote, or
  *   --remotes=origin); ids this repository lacks are ignored. `remotes`, instead of `remote`: one such list per address
  *   a push goes to; a commit counts as present only when every address has it (the union of what each lacks).
@@ -498,7 +498,7 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
     }
     // Whose names go out: authors and committers of the draft's own commits whose address the person's git does not use.
     if (identity) {
-      const mine = new Set(identity.map((e) => e.toLowerCase()).filter(Boolean));
+      const mine = new Set(identity.map((/** @type {string} */ e) => e.toLowerCase()).filter(Boolean));
       const listed = new Set();
       for (const id of ownIds) {
         for (const h of parseObject(objects.get(id) ?? "").headers) {

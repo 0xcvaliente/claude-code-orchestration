@@ -10,7 +10,12 @@
 //                 in the branch's last version gives file and line; one that a later commit removed gives file and the
 //                 commit that added it. Paths other than skills/<name>/... and README.md (the catalog file a skill slice
 //                 may change) are `outside`. A branch, base or merge base git cannot find, or a history git cannot list
-//                 within the limits, is a `problem`: callers block on it, never pass.
+//                 within the limits, is a `problem`: callers block on it, never pass. Since 2.0.0 also each commit's
+//                 metadata, which a push carries too: message lines (secret, home-path and e-mail patterns; a no-reply
+//                 address and the commit's own identity addresses pass), author and committer (name with every
+//                 pattern, address field with all but the e-mail pattern), and every tag pointing at one of the
+//                 commits (name, tagger, message). With `identity` it lists in `foreign` the authors and committers
+//                 whose address the person's git does not use (the publish step blocks on them, as on outside paths).
 // Git runs read commands only, with optional locks off and repository hooks and fsmonitor off.
 import { spawnSync } from "node:child_process";
 
@@ -59,14 +64,19 @@ function reservedAddress(local, domain) {
   return /\.(?:test|example|invalid|localhost)$/.test(d);
 }
 
-/** The kinds found in one line. @param {string} line @returns {string[]} */
-function kindsIn(line) {
+/**
+ * The kinds found in one line. `allowAddress` (commit metadata only) lets more e-mail addresses through: an identity's
+ * own address field, and in a commit or tag message a no-reply address or the commit's own author or committer address.
+ * @param {string} line @param {(local: string, domain: string) => boolean} [allowAddress] @returns {string[]}
+ */
+function kindsIn(line, allowAddress) {
   /** @type {string[]} */
   const kinds = [];
   for (const [kind, re, excuse] of SECRET_PATTERNS) {
     if (kinds.includes(kind)) continue;
     for (const m of line.matchAll(re)) {
       if (excuse && excuse(m)) continue;
+      if (allowAddress && kind === "e-mail address" && allowAddress(String(m[1]), String(m[2]))) continue;
       kinds.push(kind);
       break;
     }
@@ -87,10 +97,13 @@ export function scanText(text) {
   return out;
 }
 
-/** The kinds in one line, read as it is and once more with NUL bytes removed (text stored as UTF-16). @param {string} line */
-function lineKinds(line) {
-  if (!line.includes("\0")) return kindsIn(line);
-  return [...new Set([...kindsIn(line), ...kindsIn(line.replace(/\0/g, ""))])];
+/**
+ * The kinds in one line, read as it is and once more with NUL bytes removed (text stored as UTF-16).
+ * @param {string} line @param {(local: string, domain: string) => boolean} [allowAddress]
+ */
+function lineKinds(line, allowAddress) {
+  if (!line.includes("\0")) return kindsIn(line, allowAddress);
+  return [...new Set([...kindsIn(line, allowAddress), ...kindsIn(line.replace(/\0/g, ""), allowAddress)])];
 }
 
 /** Text with every secret match (excused addresses aside) replaced by [masked]. @param {string} text */
@@ -134,6 +147,113 @@ function git(dir, args, input) {
   );
   const err = /** @type {NodeJS.ErrnoException | undefined} */ (r.error);
   return { status: err ? null : r.status, out: typeof r.stdout === "string" ? r.stdout : "", big: err?.code === "ENOBUFS" };
+}
+
+/**
+ * The raw objects (commits, tags) of `ids`, by id, through one `git cat-file --batch`; null when git fails, an object
+ * is missing or the output cannot be split by the sizes git gives.
+ * @param {string} dir @param {string[]} ids @returns {Map<string, string> | null}
+ */
+function catFile(dir, ids) {
+  /** @type {Map<string, string>} */
+  const out = new Map();
+  const want = [...new Set(ids)];
+  if (!want.length) return out;
+  const r = spawnSync(
+    "git",
+    ["--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", dir, "cat-file", "--batch"],
+    {
+      timeout: 60_000,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_REPLACE_OBJECTS: "1" },
+      input: `${want.join("\n")}\n`,
+      stdio: ["pipe", "pipe", "pipe"],
+      maxBuffer: MAX_HISTORY_BYTES,
+    },
+  );
+  if (r.error || r.status !== 0 || !Buffer.isBuffer(r.stdout)) return null;
+  const b = r.stdout;
+  let i = 0;
+  for (const id of want) {
+    const nl = b.indexOf(10, i);
+    if (nl < 0) return null;
+    const head = b.subarray(i, nl).toString("latin1").split(" ");
+    const size = Number(head[2]);
+    if (head.length !== 3 || head[1] === "missing" || !Number.isInteger(size) || nl + 1 + size > b.length) return null;
+    out.set(id, b.subarray(nl + 1, nl + 1 + size).toString("utf8"));
+    i = nl + 1 + size + 1;
+  }
+  return out;
+}
+
+/**
+ * A raw commit or tag object split into header fields (continuation lines joined with "\n") and the message.
+ * @param {string} raw @returns {{ headers: { key: string, value: string }[], message: string }}
+ */
+function parseObject(raw) {
+  const sep = raw.indexOf("\n\n");
+  const head = sep < 0 ? raw : raw.slice(0, sep);
+  /** @type {{ key: string, value: string }[]} */
+  const headers = [];
+  for (const l of head.split("\n")) {
+    const prev = headers.at(-1);
+    if (l.startsWith(" ") && prev) prev.value += `\n${l.slice(1)}`;
+    else {
+      const k = l.indexOf(" ");
+      headers.push({ key: k < 0 ? l : l.slice(0, k), value: k < 0 ? "" : l.slice(k + 1) });
+    }
+  }
+  return { headers, message: sep < 0 ? "" : raw.slice(sep + 2) };
+}
+
+/** The name and address of an ident header (`Name <addr> 1700000000 +0000`). @param {string} v */
+function ident(v) {
+  const m = /^(.*?) ?<([^>\n]*)>(?: .*)?$/s.exec(v);
+  return m ? { name: String(m[1]), email: String(m[2]) } : { name: v, email: "" };
+}
+
+/** An address that names no one who would mind: a no-reply address (noreply@..., ...@users.noreply.github.com). @param {string} local @param {string} domain */
+const noReply = (local, domain) => /^no-?reply$/i.test(local) || /^users\.noreply\.github\.com$/i.test(domain);
+
+/**
+ * The findings in a commit's or tag's metadata: its message lines, its author, committer or tagger (the name with every
+ * kind, the address field with every kind but `e-mail address`, since each commit names one), a tag's name, and any
+ * other header but the tree, parent and signature lines (a `mergetag` carries a whole tag). Messages let a no-reply
+ * address and the object's own identity addresses through (a Co-Authored-By trailer); every other address counts.
+ * @param {string} raw @param {{ commit: string, tagName?: string, base?: boolean }} at
+ * @returns {Finding[]}
+ */
+function metaFindings(raw, at) {
+  /** @type {Finding[]} */
+  const out = [];
+  const { headers, message } = parseObject(raw);
+  const own = new Set(headers.filter((h) => ["author", "committer", "tagger"].includes(h.key)).map((h) => ident(h.value).email.toLowerCase()));
+  /** @param {string} l @param {string} d */
+  const inMessage = (l, d) => noReply(l, d) || own.has(`${l}@${d}`.toLowerCase());
+  const where = at.tagName !== undefined ? "tag" : "message";
+  const seen = new Set();
+  /** @param {string} w @param {number | null} line @param {string} kind */
+  const add = (w, line, kind) => {
+    const key = `${w}\n${line}\n${kind}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ file: "", line, kind, commit: at.commit, where: w, ...(at.base ? { base: true } : {}) });
+  };
+  if (at.tagName !== undefined) for (const kind of lineKinds(at.tagName)) add("tag", null, kind);
+  for (const h of headers) {
+    if (["tree", "parent", "object", "type", "gpgsig", "gpgsig-sha256", "encoding"].includes(h.key)) continue;
+    if (["author", "committer", "tagger"].includes(h.key)) {
+      const { name, email } = ident(h.value);
+      const w = h.key === "tagger" ? "tag" : h.key;
+      for (const kind of lineKinds(name)) add(w, null, kind);
+      for (const kind of lineKinds(email, () => true)) add(w, null, kind);
+      continue;
+    }
+    for (const l of h.value.split("\n")) for (const kind of lineKinds(l, inMessage)) add(where === "tag" ? "tag" : "message", null, kind);
+  }
+  message.split("\n").forEach((l, i) => {
+    for (const kind of lineKinds(l, inMessage)) add(where, where === "message" ? i + 1 : null, kind);
+  });
+  return out;
 }
 
 const DIFF_OPTS = ["--no-color", "--no-ext-diff", "--no-textconv", "--text", "--no-renames", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/", "-U0"];
@@ -208,29 +328,39 @@ function eachAdded(out, each) {
 }
 
 /**
- * @typedef {{ file: string, line: number | null, kind: string, commit?: string, base?: boolean }} Finding
+ * @typedef {{ file: string, line: number | null, kind: string, commit?: string, base?: boolean, where?: string }} Finding
  * A finding: `line` in the branch's last version, or `commit` (and no line) when only an earlier commit holds it;
  * `base` when that commit is one of the base's that the remote lacks (not part of the draft, but pushed with it).
+ * `where` (no file) for a finding in a commit's metadata: "message" (with the message line), "author", "committer", or
+ * "tag" (a tag that points at the commit: its name, tagger or message).
  */
+
+/** @typedef {{ name: string, email: string, commit: string }} Identity */
 
 /**
  * What a push of the branch would carry: the draft's own commits (merge base with `base` to the tip) and, when
  * `remote` is given, the commits below the merge base that the remote lacks (`unpushed`): a push sends those too.
  * @param {string} dir a work tree of the repository
- * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null, remotes?: string[][] | null }} o
+ * @param {{ base: string | null, branch: string, name: string, remote?: string[] | null, remotes?: string[][] | null, identity?: string[] | null }} o
  *   `remote`: revision arguments naming what the target remote has (commit ids from git ls-remote, or
  *   --remotes=origin); ids this repository lacks are ignored. `remotes`, instead of `remote`: one such list per address
  *   a push goes to; a commit counts as present only when every address has it (the union of what each lacks).
- * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[] }}
+ *   `identity`: the e-mail addresses the person's git uses (the publish step); each author or committer of the
+ *   draft's own commits with another address is listed in `foreign`. Without it `foreign` stays empty.
+ * Besides the lines and paths, every commit's metadata is scanned (metaFindings): message, author, committer and the
+ * tags that point at it (name, tagger, message), for the draft's commits and the unpushed base commits alike.
+ * @returns {{ mergeBase: string | null, findings: Finding[], outside: string[], unpushed: string[], problems: string[], foreign: Identity[] }}
  */
-export function scanBranch(dir, { base, branch, name, remote = null, remotes = null }) {
+export function scanBranch(dir, { base, branch, name, remote = null, remotes = null, identity = null }) {
   /** @type {Finding[]} */
   const findings = [];
   /** @type {string[]} */
   const problems = [];
   /** @type {string[]} */
   let unpushed = [];
-  const none = () => ({ mergeBase: null, findings, outside: [], unpushed, problems });
+  /** @type {Identity[]} */
+  const foreign = [];
+  const none = () => ({ mergeBase: null, findings, outside: [], unpushed, problems, foreign });
   try {
     const tip = git(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
     if (tip.status !== 0 || !tip.out.trim()) {
@@ -256,7 +386,7 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
     const net = git(dir, ["diff", "--name-only", "-z", "--no-renames", "--no-relative", mergeBase, head]);
     if (names.status !== 0 || net.status !== 0) {
       problems.push(names.big ? tooBig : "git cannot list the paths its commits change");
-      return { mergeBase, findings, outside: [], unpushed, problems };
+      return { mergeBase, findings, outside: [], unpushed, problems, foreign };
     }
     // Names exactly as git gives them (NUL-separated, never trimmed or rewritten): a name with a control character is
     // never allowed.
@@ -268,7 +398,7 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
     const sets = remotes ?? (remote ? [remote] : []);
     if (remotes && !remotes.length) {
       problems.push("there is no remote address to compare its base with");
-      return { mergeBase, findings, outside, unpushed, problems };
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
     }
     /** @type {Set<string>} */
     const lacking = new Set();
@@ -276,7 +406,7 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
       const rl = git(dir, ["rev-list", "--ignore-missing", mergeBase, "--not", ...has]);
       if (rl.status !== 0) {
         problems.push("git cannot tell which commits of its base the remote lacks");
-        return { mergeBase, findings, outside, unpushed, problems };
+        return { mergeBase, findings, outside, unpushed, problems, foreign };
       }
       for (const l of rl.out.split("\n")) if (/^[0-9a-f]{40,64}$/.test(l)) lacking.add(l);
     }
@@ -288,7 +418,7 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
     const baseHist = unpushed.length ? git(dir, ["log", ...DIFF_OPTS, "-p", "--diff-merges=separate", "--format=commit %H", "--no-walk=unsorted", ...unpushed]) : { status: 0, out: "", big: false };
     if (netDiff.status !== 0 || hist.status !== 0 || baseHist.status !== 0) {
       problems.push(netDiff.big || hist.big || baseHist.big ? tooBig : "git cannot show the lines its commits add");
-      return { mergeBase, findings, outside, unpushed, problems };
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
     }
     // Every line an unpushed base commit adds (whether or not the draft still has it): pushed with the branch.
     const bseen = new Set();
@@ -325,7 +455,63 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
       if (!hseen.has(key)) findings.push(f);
       hseen.add(key);
     }
-    return { mergeBase, findings, outside, unpushed, problems };
+
+    // Metadata: what the push carries besides the lines and paths. Every commit's message, author and committer (the
+    // draft's own and the unpushed base commits), and every tag that points at one of them: its name, tagger and
+    // message. The publish push sends no tag (--no-follow-tags), but a tag the scan let through could still leave by
+    // another push; a draft with one is refused like a line. A commit or tag git cannot read is a problem.
+    const own = git(dir, ["rev-list", range]);
+    if (own.status !== 0) {
+      problems.push(own.big ? tooBig : "git cannot list its commits");
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
+    }
+    const ownIds = own.out.split("\n").filter((l) => /^[0-9a-f]{40,64}$/.test(l));
+    const baseIds = new Set(unpushed);
+    const tagRefs = git(dir, ["for-each-ref", "--format=%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(refname)", "refs/tags"]);
+    if (tagRefs.status !== 0) {
+      problems.push("git cannot list its tags");
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
+    }
+    const inPush = new Set([...ownIds, ...unpushed]);
+    /** @type {{ obj: string, annotated: boolean, target: string, tagName: string }[]} */
+    const tags = [];
+    for (const l of tagRefs.out.split("\n")) {
+      if (!l) continue;
+      const [obj = "", type = "", peeled = "", peeledType = "", ref = ""] = l.split("\0");
+      let target = type === "commit" ? obj : type === "tag" && peeledType === "commit" ? peeled : "";
+      if (type === "tag" && peeledType === "tag") {
+        // A tag of a tag: follow it to its commit.
+        const r = git(dir, ["rev-parse", "--verify", "--quiet", `${obj}^{commit}`]);
+        target = r.status === 0 ? r.out.trim() : "";
+      }
+      if (inPush.has(target)) tags.push({ obj, annotated: type === "tag", target, tagName: ref.replace(/^refs\/tags\//, "") });
+    }
+    const objects = catFile(dir, [...ownIds, ...unpushed, ...tags.filter((t) => t.annotated).map((t) => t.obj)]);
+    if (!objects) {
+      problems.push("git cannot show its commits' messages and authors");
+      return { mergeBase, findings, outside, unpushed, problems, foreign };
+    }
+    for (const id of [...ownIds, ...unpushed]) findings.push(...metaFindings(objects.get(id) ?? "", { commit: id, base: baseIds.has(id) && !ownIds.includes(id) }));
+    for (const t of tags) {
+      const raw = t.annotated ? (objects.get(t.obj) ?? "") : "";
+      findings.push(...metaFindings(raw, { commit: t.target, tagName: t.tagName, base: baseIds.has(t.target) && !ownIds.includes(t.target) }));
+    }
+    // Whose names go out: authors and committers of the draft's own commits whose address the person's git does not use.
+    if (identity) {
+      const mine = new Set(identity.map((/** @type {string} */ e) => e.toLowerCase()).filter(Boolean));
+      const listed = new Set();
+      for (const id of ownIds) {
+        for (const h of parseObject(objects.get(id) ?? "").headers) {
+          if (h.key !== "author" && h.key !== "committer") continue;
+          const who = ident(h.value);
+          const key = `${who.name}\n${who.email.toLowerCase()}`;
+          if (mine.has(who.email.toLowerCase()) || listed.has(key)) continue;
+          listed.add(key);
+          foreign.push({ ...who, commit: id });
+        }
+      }
+    }
+    return { mergeBase, findings, outside, unpushed, problems, foreign };
   } catch {
     problems.push("the scan failed");
     return none();
@@ -334,6 +520,12 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
 
 /** One finding as the gate and the publish script print it (never the matched text). @param {Finding} f */
 export const findingLine = (f) => {
+  if (f.where) {
+    const c = (f.commit ?? "unknown").slice(0, 12);
+    // A tag's name is never shown: it may be what the scan found.
+    const what = f.where === "message" ? `the message of commit ${c}${f.line === null ? "" : ` line ${f.line}`}` : f.where === "tag" ? `a tag on commit ${c} (its name, tagger or message)` : `the ${f.where} of commit ${c}`;
+    return `${what}${f.base ? ", which is not part of the draft" : ""}: ${f.kind}`;
+  }
   const at = f.base && f.commit ? `, in commit ${f.commit.slice(0, 12)}, which is not part of the draft` : f.commit ? `, only in earlier commit ${f.commit.slice(0, 12)}` : f.line === null ? "" : ` line ${f.line}`;
   return `${shownPath(f.file)}${at}: ${f.kind}`;
 };
@@ -351,6 +543,25 @@ export const unpushedText = (unpushed, remoteName, advice) => {
 /** What to do about a finding that only an earlier commit holds. @param {string | null} mergeBase */
 export const historyAdvice = (mergeBase) =>
   `A finding marked "only in earlier commit" is gone from the branch's last version but stays in its history, which the publish step pushes whole: removing the line in a new commit leaves it in the history. Recreate the branch's commits without it: in the draft worktree run git reset --soft ${mergeBase ? mergeBase.slice(0, 12) : "<merge base>"} (the merge base with the base branch), check the files, seal again and commit once.`;
+
+/** What to do about a finding in a commit message, an author or committer, or a tag. @param {string | null} mergeBase */
+export const metaAdvice = (mergeBase) =>
+  `A finding in a commit message, author or committer is pushed with the commit, and a later commit does not change it. Recreate the branch's commits: in the draft worktree run git reset --soft ${mergeBase ? mergeBase.slice(0, 12) : "<merge base>"}, seal again and commit once with a clean message and your own identity. A finding in a tag: delete that tag (git tag -d <tag>) or give it a clean name and message.`;
+
+/**
+ * The text for authors and committers whose address the person's git does not use (publish step only). Names and
+ * addresses are shown masked by the secret patterns, so a name the scan flags is not printed.
+ * @param {Identity[]} foreign @param {string[]} mine @param {string | null} mergeBase
+ */
+export const foreignText = (foreign, mine, mergeBase) => {
+  // The address is shown as it is (it is what the person must see), unless it holds a secret or home path.
+  /** @param {string} e */
+  const addr = (e) => (kindsIn(e, () => true).length ? "[masked]" : e);
+  const shown = foreign.slice(0, 10).map((f) => `${mask(f.name)} <${addr(f.email)}> (commit ${f.commit.slice(0, 12)})`).join(", ");
+  const more = foreign.length > 10 ? ` and ${foreign.length - 10} more` : "";
+  const yours = mine.length ? `the address your git uses (${mine.map(addr).join(", ")})` : "an address your git uses (none is set: git config user.email)";
+  return `The branch's commits name authors or committers other than ${yours}: ${shown}${more}. The push publishes these names and addresses with the commits. If they are right, set user.email to that address and rerun; otherwise recreate the commits under your own identity: in the draft worktree run git reset --soft ${mergeBase ? mergeBase.slice(0, 12) : "<merge base>"}, seal again and commit once.`;
+};
 
 /** The text for paths outside the skill folder and README.md. @param {string[]} outside @param {string} name @param {string | null} mergeBase */
 export const outsideText = (outside, name, mergeBase) => {
