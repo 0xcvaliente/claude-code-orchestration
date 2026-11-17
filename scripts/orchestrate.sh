@@ -97,16 +97,59 @@ tools=(
   "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git show*)" "Bash(git rev-parse*)"
   "Bash(git add*)" "Bash(git commit*)" "Bash(git merge*)" "Bash(git branch*)" "Bash(git worktree*)"
   "Bash(git reset --merge)" # the integrator's last resort when git merge --abort fails; exactly this form, no other reset
-  # git -C <dir>: only the subcommands the agents use (reviewer and researcher reads, a worktree implementer's and the
-  # integrator's writes, a skill slice's draft worktree). The `*` for the folder can also stand for other words, so these
-  # rules also match some other git commands; the git denies below stop the plain destructive forms, not every one.
+  # git -C <dir> reads (reviewer and researcher), any folder. The `*` for the folder can also stand for other words, so
+  # these rules also match some other git commands; the git denies below stop the plain destructive forms, not every one.
+  # The git -C writes are pinned to known folders below (git_c_rules).
   "Bash(git -C * status*)" "Bash(git -C * diff*)" "Bash(git -C * log*)" "Bash(git -C * show*)" "Bash(git -C * rev-parse*)"
-  "Bash(git -C * ls-files*)" "Bash(git -C * rev-list*)" "Bash(git -C * branch --show-current)"
-  "Bash(git -C * worktree list*)" "Bash(git -C * worktree add *)"
-  "Bash(git -C * add *)" "Bash(git -C * commit *)" "Bash(git -C * merge *)" "Bash(git -C * reset --merge)"
+  "Bash(git -C * ls-files*)" "Bash(git -C * rev-list*)"
   "Bash(cd *)"
   "Bash(npm *)" "Bash(node *)" "Bash(ls*)" "Bash(mkdir -p *)"
 )
+
+# git -C <dir> with a subcommand that writes (or names the branch): pinned to the folders the callers use, the project
+# folder and its worktrees under <folder>/.claude/worktrees/ (here), a skill slice's skills repositories and draft
+# worktrees (below). Claude Code warns that a `*` before the subcommand also stands for options inserted there (`-c`,
+# `--exec-path`); a literal folder leaves no such gap, and the worktree's name is the only `*` left before a
+# subcommand. A folder is written into a rule only when every character of it is a plain one (letters, digits, bytes of
+# a non-ASCII letter, space and _@%+=:,./-): a `*`, `?`, `[`, quote, backslash, `$` or `(` in a folder would widen or
+# break the rule, so that folder gets no rule and its git -C writes are refused (plain `git add` and the like in the
+# agent's own folder still run). A folder with a space gets the rule twice, as '<dir>' and "<dir>".
+git_dir_ok() {
+  local LC_ALL=C hi=$'\x80'-$'\xff'
+  case "$1" in /*) ;; *) return 1 ;; esac
+  # shellcheck disable=SC2295 # hi is a byte range for the bracket expression, unquoted on purpose
+  [[ "$1" != *[!A-Za-z0-9_@%+=:,./\ ${hi}-]* ]]
+}
+pinned_dirs=() # folders already given rules, so the same folder is not listed twice
+# git_c_rules <dir> <suffix> <subcommand form...>: one allow rule per form for `git -C <dir><suffix> <form>`. The suffix
+# is fixed text from this script (the worktree's `/*`), never a path from outside.
+git_c_rules() {
+  local dir="$1" suffix="$2" d f s
+  shift 2
+  [ -n "$dir" ] || return 0
+  # ${a[@]+...}: bash 3.2 (macOS) with set -u counts an empty array as unbound.
+  for d in ${pinned_dirs[@]+"${pinned_dirs[@]}"}; do [ "$d" = "$dir$suffix" ] && return 0; done
+  pinned_dirs+=("$dir$suffix")
+  if ! git_dir_ok "$dir"; then
+    echo "orchestrate.sh: no git -C write rules for $dir$suffix (a character in it cannot be pinned in a permission rule)" >&2
+    return 0
+  fi
+  local forms=("$dir$suffix")
+  [[ "$dir" == *' '* ]] && forms=("'$dir$suffix'" "\"$dir$suffix\"")
+  for f in "${forms[@]}"; do
+    for s in "$@"; do tools+=("Bash(git -C $f $s)"); done
+  done
+}
+PROJECT_GIT=("branch --show-current" "worktree list*" "worktree add *" "add *" "commit *" "merge *" "reset --merge")
+WORKTREE_GIT=("branch --show-current" "add *" "commit *") # Claude Code still warns about these: the name is a `*`
+if [ -z "${ORCH_ALLOWED_TOOLS:-}" ]; then
+  # The project folder as given and as its real path, and the top of its git work tree when the folder is below it.
+  top="$(git -C "$repo" rev-parse --show-toplevel 2>/dev/null)" || top=""
+  for d in "$repo" "$(pwd -P)" "$top"; do
+    git_c_rules "$d" "" "${PROJECT_GIT[@]}"
+    [ -n "$d" ] && git_c_rules "$d" "/.claude/worktrees/*" "${WORKTREE_GIT[@]}"
+  done
+fi
 if [ -n "${ORCH_ALLOWED_TOOLS:-}" ]; then
   tools=()
   while IFS= read -r rule; do
@@ -138,6 +181,17 @@ if [ "$skill_create" != off ]; then
     mkdir -p "$drafts" 2>/dev/null && skill_dirs+=("$drafts")
     # Skill: the implementer loads the authoring skill; dontAsk denies an unlisted tool.
     tools+=("Skill" "Bash(python3 scripts/validate.py*)" "Bash(python3 */scripts/validate.py*)" "Bash(node */skill-seal.mjs *)")
+    # git -C writes there, pinned as above (the default list only: a replaced list had no git -C rules before either):
+    # the draft worktree is added from a skills repository, and committed in under skill-drafts/<target>/<name>.
+    if [ -z "${ORCH_ALLOWED_TOOLS:-}" ]; then
+      for d in "${skill_dirs[@]}"; do
+        [ "$d" = "$drafts" ] && continue
+        git_c_rules "$d" "" "branch --show-current" "worktree list*" "worktree add *"
+        git_c_rules "$(CDPATH='' cd -- "$d" 2>/dev/null && pwd -P)" "" "branch --show-current" "worktree list*" "worktree add *"
+      done
+      git_c_rules "$drafts" "/*" "${WORKTREE_GIT[@]}"
+      git_c_rules "$(CDPATH='' cd -- "$drafts" 2>/dev/null && pwd -P)" "/*" "${WORKTREE_GIT[@]}"
+    fi
   fi
 fi
 

@@ -165,12 +165,9 @@ writeFileSync(
   `${JSON.stringify({ name: NAME, version, description: "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
 );
 
-// Plugin settings.json: a plugin may set two keys, `agent` and `subagentStatusLine` (every other key is dropped at
-// load). This one rewrites the row of each of this plugin's workers under the prompt (subagent-statusline.mjs); a
-// `subagentStatusLine` in the user's or the project's own settings takes its place.
-if (has("subagent-statusline.mjs")) {
-  writeFileSync(join(out, "settings.json"), `${JSON.stringify({ subagentStatusLine: { type: "command", command: run("subagent-statusline.mjs") } }, null, 2)}\n`);
-}
+// No plugin settings.json since 1.6.1: Claude Code 2.1.326 lists `subagentStatusLine` as deprecated in favour of mods,
+// so the mod (dashboard.tsx, its `AgentRow` render hook) draws the row of each of this plugin's workers under the
+// prompt. hooks/subagent-statusline.mjs still ships, for a person who names it in their own `subagentStatusLine`.
 
 cpSync(join(dashSrc, "register.tsx"), join(dash, "hooks", "register.tsx"));
 cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));
