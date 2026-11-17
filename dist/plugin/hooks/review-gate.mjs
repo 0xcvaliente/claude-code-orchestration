@@ -23,9 +23,11 @@
 //    An implementer whose latest test-gate record (gates.jsonl) is a block with no later SubagentStop counts the same
 //    way (G-2, audit 2026-11-16): the block can land after a passing review, and the agent may never stop again.
 //    The message names the block's reason: tests_failed (or a record with no reason) keeps the test-failure text; a
-//    bugfix_ reason (the tests passed, but the gate could not verify the reproduction test) gets its own text. A
-//    bugfix_ block, and only that, is cleared by a later passing review of the agent's slice (K1, run of 2026-11-17:
-//    nothing but the give-up cleared it). A tests_failed block needs a later stop of the agent or the give-up.
+//    bugfix_ reason (the tests passed, but the gate could not verify the reproduction test) gets its own text. A block
+//    for an environment reason (bugfix_base_unusable, bugfix_no_base, bugfix_timeout, bugfix_tmp_lost: the check never
+//    ran), and only that, is cleared by a later passing opus review of the agent's slice (K1, run of 2026-11-17: nothing
+//    but the give-up cleared it, and the give-up is a doubt signal that needs the same opus pass). tests_failed,
+//    bugfix_no_test, bugfix_test_passes_on_base, an unknown reason or none need a later stop of the agent or the give-up.
 // 2. Per slice of the current run (run.mjs folds journal-launches.jsonl, journal.jsonl, gates.jsonl and telemetry.jsonl
 //    with brief.mjs foldRuns): every slice of the latest run with an implementer attempt, and the slice of the session's
 //    last implementer, needs its latest review after its latest attempt to pass (no_reviewer_after_last_implementer,
@@ -47,7 +49,7 @@
 // unverified, so giving up is never silent. Exits 0 on malformed input.
 import { appendFileSync, existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { countedStatus, currentReviews, doubtSignals, hasOpusPass, staleMinutes, stallGateOn } from "./brief.mjs";
+import { countedStatus, currentReviews, doubtSignals, hasOpusPass, isOpusModel, staleMinutes, stallGateOn } from "./brief.mjs";
 import { readJsonl, sessionRuns, sliceOfAgent } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -154,9 +156,16 @@ for (const g of gatesRaw) {
 /** @param {{ stop: number, testAt: number, testBlock: boolean }} a */
 const testBlocked = (a) => a.testBlock && a.testAt > a.stop;
 // A bugfix_ block comes after the tests passed: the gate could not verify the reproduction test. Anything else (tests_failed,
-// or an older record with no reason) is a test failure.
+// or an older record with no reason) is a test failure and keeps the test-failure text.
 /** @param {{ testReason: string }} a */
 const notTestFailure = (a) => a.testReason.startsWith("bugfix_");
+// The bugfix_ reasons where the check never ran for a cause outside the worker's code (docs/gates.md, "Bugfix check"):
+// no usable base run, no base or no base worktree, no time left in the gate's budget, the temp folder removed. Named one
+// by one, never a prefix: bugfix_no_test and bugfix_test_passes_on_base are the worker's own to fix, and an unknown
+// reason is not cleared. Only these may be cleared by a later passing opus review of the slice.
+const ENVIRONMENT_REASONS = new Set(["bugfix_base_unusable", "bugfix_no_base", "bugfix_timeout", "bugfix_tmp_lost"]);
+/** @param {{ testReason: string }} a */
+const environmentBlock = (a) => ENVIRONMENT_REASONS.has(a.testReason);
 /** What the gate could not do, per bugfix_ reason. @type {Record<string, string>} */
 const BUGFIX_WHAT = {
   bugfix_no_test: "found no changed or added test file that reproduces the bug",
@@ -189,16 +198,18 @@ const sessionGates = gatesRaw.filter((g) => g.gate === "review" && g.session_id 
 const names = (g, id) => Array.isArray(g.unfinished) && g.unfinished.includes(id);
 /** @param {string} id */
 const unfinishedBlocks = (id) => sessionGates.filter((g) => g.decision === "block" && names(g, id)).length;
-/** Slices whose bugfix_ test-gate block a later passing review cleared (logged in skips). @type {string[]} */
+/** Slices whose environment test-gate block a later passing opus review cleared (logged in skips). @type {string[]} */
 const clearedByReview = [];
 // Only an Agent tool launch (it has a launch record) counts, and only while no later implementer stop took the slice over.
 const unfinished = neverStopped.flatMap((a) => {
   if (!records.launches.some((l) => l.agent_id === a.id && !l.workflow)) return [];
   if (sessionGates.some((g) => g.decision === "allow" && names(g, a.id))) return []; // the gate already gave up on it
   const slice = sliceOfAgent(records, a.id);
-  // A block that is not a test failure, after which a reviewer of the slice passed it: the review vouches for the work.
-  if (slice && a.start <= a.stop && testBlocked(a) && notTestFailure(a)) {
-    const reviewed = records.stops.some((st) => role(st) === "reviewer" && (st.slice ?? sliceOfAgent(records, st.agent_id)) === slice && st.status === "pass" && time(st.ts) > a.testAt);
+  // An environment block (the bugfix check never ran), after which an opus reviewer passed the slice: as strong as the
+  // check's give-up, which is a doubt signal and so needs the same opus pass (the test of hasOpusPass, on the fold's reviews).
+  if (slice && a.start <= a.stop && testBlocked(a) && environmentBlock(a)) {
+    const reviews = runs.flatMap((r) => (Object.hasOwn(r.slices, slice) ? (r.slices[slice]?.reviews ?? []) : []));
+    const reviewed = reviews.some((rv) => countedStatus(rv) === "pass" && isOpusModel(rv.model) && rv.ts > a.testAt);
     if (reviewed) {
       clearedByReview.push(`implementer_unfinished:${slice}:${a.testReason}_cleared_by_review`);
       return [];
@@ -234,7 +245,7 @@ for (const u of unfinished) {
     ...(u.slice ? { slice: u.slice } : {}),
     agent: u.id,
     reason: "implementer_unfinished",
-    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) ${testBlocked(u) && u.start <= u.stop ? (notTestFailure(u) ? `was sent back by the test gate with ${u.testReason}: the tests themselves passed, but the gate ${bugfixWhat(u)}. It never finished after that, and no review of the slice has passed since the block (a passing review of the slice clears it)` : "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed") : "started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed"}. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
+    message: `Review gate: ${u.slice ? `slice ${u.slice}` : "an implementer"}: its implementer (agent ${u.id}) ${testBlocked(u) && u.start <= u.stop ? (notTestFailure(u) ? `was sent back by the test gate with ${u.testReason}: the tests themselves passed, but the gate ${bugfixWhat(u)}. ${environmentBlock(u) ? "It never finished after that, and no review of the slice on opus has passed since the block (a passing opus review of the slice clears it)" : "It never finished after that, so its reproduction test was never fixed or reviewed"}` :"was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed") : "started and never finished: it ran out of turns or was stopped, so its work was neither tested nor reviewed"}. Resume it with SendMessage (to: ${u.id}) so it finishes, or start a fresh implementer for the slice, then review the result; or report the slice as failed.`,
   });
 }
 
