@@ -90,12 +90,15 @@ const NULL_ID = statId("/dev/null");
 // path whose text is under one of them, or whose walk passes through the file system of one of them, is refused.
 const SPECIAL_ROOTS = ["/dev", "/proc", "/sys"];
 const SPECIAL_DEVS = SPECIAL_ROOTS.map(statId).flatMap((s) => (s ? [s.dev] : []));
-// w3 item 1: a word with a glob is judged on what the shell can expand it to. The guard lists the folders the pattern
-// names (at most GLOB_ENTRIES names read in one decision) and judges every match (at most GLOB_MATCHES) like an operand;
-// past either bound the command is refused, with the way around it.
+// w3 item 1: a word with a glob is judged on what the shell can expand it to, in two readings (expand). The shell
+// reading lists what bash 4.3+ and zsh expand by default (no dot names unless the segment starts with a dot, `**` not
+// through a symlinked folder) and judges every match like an operand, within GLOB_ENTRIES names listed per command
+// segment. The wide reading asks only whether the pattern could reach a device, FIFO, socket, /dev, /proc or /sys under
+// any setting (dotglob, globstar off, zsh `***`), within WIDE_ENTRIES names; it judges each symlink, special file and
+// `.`/`..` it meets. Past either bound the command is refused, with the way around it.
 const GLOB_ENTRIES = 20000;
-const GLOB_MATCHES = 500;
-const TOO_MANY = "a glob with too many matches to judge (it may expand to a device or a FIFO); name the files, quote the glob for the command to read (`grep -rn x . --include='*.ts'`), or use `find`";
+const WIDE_ENTRIES = 200000;
+const TOO_MANY = "a glob that lists more names than the guard can judge (it may expand to a device or a FIFO); quote the glob so the command expands it itself (`rg x -g '*.md'`, `grep -rn x . --include='*.md'`), or name a folder";
 // The lstat calls one decision may make; past it the command is refused as too complex to judge.
 const WALK_BUDGET = 20000;
 let walkBudget = WALK_BUDGET;
@@ -282,36 +285,46 @@ function pathsOf(word, text, folder) {
   if (!hasGlob(word)) return [text];
   /** @type {string[]} */
   const out = [text];
-  const whole = expand(word.pieces, folder);
-  if (!whole) return null;
-  out.push(...whole);
+  /** @type {any[][]} */
+  const patterns = [word.pieces];
   const first = word.pieces[0];
   if (first && "lit" in first && first.lit.startsWith("--") && first.lit.includes("=")) {
-    const value = [{ lit: first.lit.slice(first.lit.indexOf("=") + 1) }, ...word.pieces.slice(1)];
-    const named = expand(value, folder);
-    if (!named) return null;
-    out.push(...named);
+    patterns.push([{ lit: first.lit.slice(first.lit.indexOf("=") + 1) }, ...word.pieces.slice(1)]);
   }
-  return out.length > GLOB_MATCHES ? null : out;
+  for (const pat of patterns) {
+    for (const wide of [false, true]) {
+      const r = expand(pat, folder, wide);
+      if (!r) return null;
+      // A pattern that lists /dev, /proc or /sys itself is refused, /dev/null among its matches or not.
+      if (r.special) return [...out, "/dev"];
+      out.push(...r.paths);
+    }
+  }
+  return out;
 }
 
 /**
- * Every existing path a glob word may expand to from `folder`, as the shell would write it (relative stays relative),
- * or null past the bounds. Over-inclusive on purpose: `*` and `?` also match names that start with a dot (dotglob,
- * GLOB_DOTS), a bracket expression matches any one or more characters (the tokenizer keeps no class text, and an
- * unmatched `[...]` names itself), names match without regard to case, a segment of two or more stars alone also
- * matches across folders (bash globstar, zsh `**`), and symlinked folders are followed. `.` and `..` match only a
- * segment that starts with a literal dot, as in every shell.
- * @param {any[]} pieces @param {string} folder @returns {string[] | null}
+ * What a glob word may expand to from `folder` (relative stays relative), null past the bound of its reading.
+ * Shell reading (`wide` false): the paths bash 4.3+ and zsh list by default, all of them to be judged: no name that
+ * starts with a dot unless the segment does, a segment of two or more stars alone matching across folders but never
+ * through a symlinked folder (three or more: zsh `***`, through them too), and also read as `*` (globstar off).
+ * Wide reading: only what must be judged under any setting (dotglob or GLOB_DOTS, globstar off, `***`): every literal
+ * prefix, symlink, FIFO, socket, device, `.` and `..` met, dot names included. Both: `special` when the walk would list
+ * /dev, /proc or /sys; a bracket expression matches any one or more characters (the tokenizer keeps no class text, and
+ * an unmatched `[...]` names itself); names match without regard to case; `.` and `..` match only a segment that starts
+ * with a literal dot, as in every shell.
+ * @param {any[]} pieces @param {string} folder @param {boolean} wide the wide reading
+ * @returns {{ paths: string[], special: boolean } | null}
  */
-function expand(pieces, folder) {
-  /** @type {{ re: RegExp | null, text: string, stars: boolean, dot: boolean }[]} */
+function expand(pieces, folder, wide) {
+  /** @type {{ re: RegExp | null, text: string, stars: boolean, follow: boolean, dot: boolean }[]} */
   const segs = [];
   let src = "", text = "", glob = false, dot = false, fresh = true;
   const close = () => {
     // A segment of two or more stars alone (`**`) also matches across folders.
     const stars = glob && text === "" && /^(?:\.\*){2,}$/.test(src);
-    segs.push({ re: glob ? new RegExp(`^${src}$`, "is") : null, text, stars, dot });
+    const follow = glob && text === "" && /^(?:\.\*){3,}$/.test(src); // zsh `***/` follows symlinks
+    segs.push({ re: glob ? new RegExp(`^${src}$`, "is") : null, text, stars, follow, dot });
     src = "";
     text = "";
     glob = false;
@@ -340,55 +353,91 @@ function expand(pieces, folder) {
   /** @type {string[]} */
   const found = [];
   const seen = new Set();
+  /** @type {Map<string, { name: string, dir: boolean, link: boolean, odd: boolean }[]>} */
+  const listed = new Map();
   let over = false;
+  let special = false;
+  let left = wide ? WIDE_ENTRIES : 0;
+  /** @param {number} n */
+  const spend = (n) => {
+    if (wide) left -= n;
+    else globEntries -= n;
+    if ((wide ? left : globEntries) < 0) over = true;
+    return !over;
+  };
   /** @param {string} dir the folder reached @param {string} shown the text so far @param {number} i */
   const walk = (dir, shown, i) => {
-    if (over) return;
+    if (over || special) return;
+    const key = `${dir}\0${i}`;
+    if (seen.has(key)) return;
+    seen.add(key);
     if (i === segs.length) {
-      if (!seen.has(shown)) {
-        seen.add(shown);
-        found.push(shown);
-        if (found.length > GLOB_MATCHES) over = true;
-      }
+      if (!wide) found.push(shown); // the wide reading keeps only what it must judge (below)
       return;
     }
     const s = /** @type {(typeof segs)[number]} */ (segs[i]);
-    const sep = i === segs.length - 1 ? "" : "/";
+    const last = i === segs.length - 1;
+    const sep = last ? "" : "/";
     const join2 = (/** @type {string} */ name) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
     if (!s.re) {
       if (absolute && i === 0) return walk("/", "/", 1);
+      // A literal name may be a symlink (to /dev, to /) or `..`: the wide reading judges the path so far.
+      if (wide) found.push(`${shown}${s.text}`);
       return walk(join2(s.text), `${shown}${s.text}${sep}`, i + 1);
     }
-    /** @type {string[]} */
-    let names = [];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      names = [];
-    }
-    globEntries -= names.length + 1;
-    if (globEntries < 0) {
-      over = true;
+    // Listing /dev, /proc or /sys (by their text) is refused outright.
+    if (isDevice(posix.resolve(folder, dir)) || posix.resolve(folder, dir).toLowerCase() === "/dev") {
+      special = true;
       return;
     }
-    if (s.dot) names.push(".", "..");
-    for (const name of names) {
-      if (over) return;
-      if (s.stars) {
-        // zero folders, then this name as one more folder with the same `**` still to match
-        if (name !== "." && name !== "..") walk(join2(name), `${shown}${name}/`, i);
-        continue;
+    // Each folder is listed and counted once per reading, whatever segment asks for it.
+    let cached = listed.get(dir);
+    if (!cached) {
+      cached = [];
+      try {
+        cached = readdirSync(dir, { withFileTypes: true }).map((e) => ({
+          name: e.name,
+          dir: e.isDirectory(),
+          link: e.isSymbolicLink(),
+          odd: e.isFIFO() || e.isSocket() || e.isCharacterDevice() || e.isBlockDevice(),
+        }));
+      } catch {
+        cached = [];
       }
-      if (s.re.test(name)) walk(join2(name), `${shown}${name}${sep}`, i + 1);
+      listed.set(dir, cached);
+      if (!spend(cached.length + 1)) return;
     }
-    if (s.stars) walk(dir, shown, i + 1);
+    /** @type {{ name: string, dir: boolean, link: boolean, odd: boolean }[]} */
+    const list = [...cached];
+    if (s.dot) list.push({ name: ".", dir: true, link: false, odd: true }, { name: "..", dir: true, link: false, odd: true });
+    for (const e of list) {
+      if (over || special) return;
+      // Shells match a leading dot only with a segment that starts with one; dotglob and GLOB_DOTS lift that, so the
+      // wide reading takes every name.
+      if (!wide && !s.dot && e.name.startsWith(".")) continue;
+      const path = join2(e.name);
+      const matched = s.stars || s.re.test(e.name);
+      if (!matched) continue;
+      // The wide reading judges every symlink, FIFO, socket, device, `.` and `..` it meets on the way.
+      if (wide && (e.link || e.odd)) found.push(`${shown}${e.name}`);
+      if (s.stars) {
+        // `**`: one more folder with the same `**` still to match; never through a symlinked folder (bash 4.3+, zsh),
+        // except zsh's `***`. A link is still entered one level by the `*` reading below.
+        if (e.dir && e.name !== "." && e.name !== "..") walk(path, `${shown}${e.name}/`, i);
+        else if (e.link && s.follow) walk(path, `${shown}${e.name}/`, i);
+      }
+      // A plain wildcard, and `**` read as `*` (globstar off): this name matches the segment itself. Only a folder, a
+      // link or a `.`/`..` can hold what a later segment names; a file is a match only at the end.
+      if (last || e.dir || e.link || e.odd) walk(path, `${shown}${e.name}${sep}`, i + 1);
+    }
+    if (s.stars) walk(dir, shown, i + 1); // `**` as no folder
   };
   try {
     walk(start, "", 0);
   } catch {
     return null;
   }
-  return over ? null : found;
+  return over ? null : { paths: found, special };
 }
 
 /**
@@ -432,7 +481,8 @@ function optionViolation(w, folders, words = []) {
     for (const f of folders) {
       const list = pathsOf(words[i + 1], args[i] ?? "", f);
       if (!list) return "many";
-      const hit = list.find((a) => readsDevice(a, f));
+      // Each path gets the whole lstat budget: the listing bound already limits how many there are.
+      const hit = list.find((a) => ((walkBudget = WALK_BUDGET), readsDevice(a, f)));
       if (hit !== undefined) return hit;
     }
     return null;

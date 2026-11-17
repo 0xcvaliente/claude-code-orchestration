@@ -841,7 +841,9 @@ test("researcher guard (w3 item 1): a glob that can expand to a device path is r
   }
   assert.ok(researcherViolation("sed -n 1p /d?v/zero", w3), "sed takes no glob operand at all");
   // /dev/null reached by a glob, ordinary globs, and commands that never read their operands still pass.
-  for (const c of ["cat /de?/null", "wc -l *.txt docs/*.md", "head -n 1 ?.txt", "cat [ab].txt", "grep -n x */*.md", "ls /de?/*", "du -sh /*", "stat /de?/zero", "find /d* -maxdepth 0"]) {
+  // Over-block (w3 follow-up): a glob whose walk meets a symlink to /dev is refused even when nothing matches past it.
+  assert.ok(researcherViolation("grep -n x */*.md", w3), "the walk meets devlink");
+  for (const c of ["cat /de?/null", "wc -l *.txt docs/*.md", "head -n 1 ?.txt", "cat [ab].txt", "grep -n x docs/*.md", "ls /de?/*", "du -sh /*", "stat /de?/zero", "find /d* -maxdepth 0"]) {
     assert.equal(researcherViolation(c, w3), null, c);
   }
 });
@@ -873,16 +875,57 @@ test("researcher guard (w3 item 1): du --files0-from and find -files0-from read 
   assert.equal(researcherViolation("du --files0-from=a.txt", w3), null);
 });
 
-test("researcher guard (w3 item 1): a glob with too many matches to judge is refused, with the way around it", () => {
-  const many = join(scratch, "w3-many");
-  mkdirSync(many, { recursive: true });
-  for (let i = 0; i < 600; i++) writeFileSync(join(many, `f${i}.txt`), "");
-  const v = researcherViolation("cat *.txt", many);
+// w3 follow-up: the shell reading lists what bash 4.3+ and zsh list (no dot names, `**` not through a symlinked
+// folder) and judges every match; only the listing bound refuses for size. The wide reading still refuses a pattern
+// that reaches a device, FIFO, /dev, /proc or /sys under dotglob, globstar off or zsh `***`.
+const shaped = join(scratch, "w3-shaped");
+for (const d of ["docs", "src", "node_modules/pkg", ".claude/worktrees/x"]) mkdirSync(join(shaped, d), { recursive: true });
+for (const f of ["docs/a.md", "docs/b.md", "src/a.ts", "src/a.test.mjs", "src/b.test.ts", "README.md"]) writeFileSync(join(shaped, f), "x\n");
+for (let i = 0; i < 1500; i++) {
+  writeFileSync(join(shaped, "node_modules", "pkg", `n${i}.md`), "");
+  writeFileSync(join(shaped, ".claude", "worktrees", "x", `w${i}.md`), "");
+}
+symlinkSync(join(shaped, "node_modules"), join(shaped, "linked"));
+
+test("researcher guard (w3 follow-up): everyday globs in a tree shaped like this repository pass", () => {
+  for (const c of ["rg x **/*.md", "ls src/*.test.*", "cat docs/*.md", "head -5 src/*.ts", "wc -l **/*.md", "grep -n x */*.md"]) {
+    assert.equal(researcherViolation(c, shaped), null, c);
+  }
+  // Over the old cap of 500 matches: judged, not refused for size.
+  assert.equal(researcherViolation("wc -l node_modules/pkg/*.md", shaped), null);
+});
+
+test("researcher guard (w3 follow-up): a pattern that reaches /dev, a FIFO, or a device only under dotglob is still refused", () => {
+  const dot = join(scratch, "w3-dotglob");
+  mkdirSync(join(dot, "plain"), { recursive: true });
+  symlinkSync("/dev", join(dot, ".hid"));
+  for (const c of ["cat */zero", "cat **/zero", "head -c 8 ?hid/zero", "cat .h*/zero"]) {
+    const v = researcherViolation(c, dot);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat /dev/*", "cat /d?v/null*", "cat /de?/n*"]) {
+    const v = researcherViolation(c, shaped);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  if (hasFifo) {
+    for (const c of ["head -n 1 pip?", "wc -l ./*", "cat **/pipe"]) assert.ok(researcherViolation(c, w3), c);
+  }
+});
+
+test("researcher guard (w3 follow-up): only a glob that lists more names than the bound is refused for size, saying how to avoid it", () => {
+  const big = join(scratch, "w3-big");
+  mkdirSync(big, { recursive: true });
+  for (let i = 0; i < 20001; i++) writeFileSync(join(big, `f${i}.txt`), "");
+  const v = researcherViolation("cat *.txt", big);
   assert.ok(v);
-  assert.match(v.reason, /too many/);
-  assert.match(v.reason, /quote/);
-  assert.equal(researcherViolation("grep -rn x . --include='*.txt'", many), null);
-  assert.equal(researcherViolation("wc -l f1?.txt", many), null);
+  assert.match(v.reason, /more names than the guard can judge/);
+  assert.match(v.reason, /quote the glob so the command expands it itself/);
+  assert.match(v.reason, /name a folder/);
+  assert.equal(researcherViolation("rg x -g '*.txt'", big), null);
+  assert.equal(researcherViolation("cat f1.txt f2.txt", big), null);
+  assert.ok(researcherViolation("wc -l f1?.txt", big), "the bound counts the names listed, not the matches");
 });
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
