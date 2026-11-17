@@ -593,67 +593,75 @@ for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
 }
 
 // Item 1 of 2.0.0 (CHANGELOG 1.2.0, Known and not fixed): the /route skill quoted $ARGUMENTS in double quotes, so a task
-// holding a double quote broke the command and a backtick or $(...) ran. Claude Code puts the task text where the skill
-// says $ARGUMENTS; the model then runs the block. Here the block runs as written, with the text put in the same way and a
-// fake npm that records the arguments it gets (NUL-separated). The skill now reads the task through a quoted here-document
-// written to a temporary file, then passes it as --task=<task>. ORCH_ROUTE_SKILL_FILE points the test at another copy
-// (the 1.6.1 skill, to show the test fails there).
+// holding a double quote broke the command and a backtick or $(...) ran; a quoted here-document (the first attempt) still
+// ended early on a line equal to its closing word. Now the model writes the task with its file tool and the shell line
+// names only the file (--task-file), so no shell parses the task. Here the skill's exact shell block runs under bash, sh
+// and zsh with a fake npm that copies the file it is given; the file is written by the test, as the model's tool would.
+// ORCH_ROUTE_SKILL_FILE points the test at another copy (an earlier skill, to show the test fails there).
 const SKILL_FILE = process.env.ORCH_ROUTE_SKILL_FILE || join(root, ".claude", "skills", "route", "SKILL.md");
 
 /**
- * The route command block of the skill, with the task put in for $ARGUMENTS and a folder for $TASK_DIR.
- * @param {string} skillText @param {string} task @param {string} taskDir
+ * The route command block of the skill, with the folder put in for $TASK_DIR and the file for $TASK_FILE.
+ * @param {string} skillText @param {string} taskDir @param {string} taskFile
  */
-function routeBlock(skillText, task, taskDir) {
+function routeBlock(skillText, taskDir, taskFile) {
   const m = /```bash\n([^`]*npm run --silent route[^`]*)```/.exec(skillText);
   assert.ok(m, "the route skill has a bash block that runs `npm run --silent route`");
-  return String(m?.[1]).split("$ARGUMENTS").join(task).split("$TASK_DIR").join(taskDir);
+  const block = String(m?.[1]);
+  assert.ok(!block.includes("$ARGUMENTS"), "the task text never appears in the shell block");
+  assert.ok(block.includes("--task-file=\"$TASK_FILE\""), "the block names the task file only");
+  return block.split("$TASK_DIR").join(taskDir).split("$TASK_FILE").join(taskFile);
 }
 
 /**
- * Runs the block with `shell`; returns the exit code, the arguments the fake npm got and the marker files that exist.
+ * Writes the task to a file, runs the block with `shell`; returns the exit code, the bytes the fake npm got through
+ * --task-file, whether the task file is gone and the marker files that exist.
  * @param {string} skillText @param {string} task @param {string} [shell] @param {number} [npmExit]
  */
 function runRouteBlock(skillText, task, shell = "bash", npmExit = 0) {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), "route-skill-")));
   try {
-    for (const d of ["bin", "home", "proj"]) mkdirSync(join(scratch, d));
+    for (const d of ["bin", "home", "proj", "pad"]) mkdirSync(join(scratch, d));
     writeFileSync(join(scratch, "home", "package.json"), "{}\n");
-    writeFileSync(join(scratch, "bin", "npm"), `#!/bin/sh\nprintf '%s\\0' "$@" > "${scratch}/npm-args"\nexit ${npmExit}\n`);
+    const taskFile = join(scratch, "pad", "route-task.txt");
+    writeFileSync(taskFile, task);
+    writeFileSync(join(scratch, "bin", "npm"), `#!/bin/sh\nfor a in "$@"; do case "$a" in --task-file=*) cp "\${a#--task-file=}" "${scratch}/captured" ;; esac; done\nexit ${npmExit}\n`);
     chmodSync(join(scratch, "bin", "npm"), 0o755);
-    const r = spawnSync(shell, ["-c", routeBlock(skillText, task, join(scratch, "proj"))], {
+    const r = spawnSync(shell, ["-c", routeBlock(skillText, join(scratch, "proj"), taskFile)], {
       cwd: scratch,
       env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_HOME: join(scratch, "home"), HOME: scratch },
       encoding: "utf8",
     });
-    const argsFile = join(scratch, "npm-args");
-    const args = existsSync(argsFile) ? readFileSync(argsFile, "utf8").split("\0").slice(0, -1) : [];
-    const files = ["BT", "DS", join("home", "BT"), join("home", "DS")].filter((f) => existsSync(join(scratch, f)));
-    return { status: r.status, args, files, stderr: r.stderr };
+    const cap = join(scratch, "captured");
+    const files = ["X", join("home", "X"), join("pad", "X")].filter((f) => existsSync(join(scratch, f)));
+    return { status: r.status, got: existsSync(cap) ? readFileSync(cap) : null, removed: !existsSync(taskFile), files, stderr: r.stderr };
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
 }
 
 const HOSTILE_TASKS = [
-  'fix the "quoted" part, then `touch BT` and $(touch DS); keep $HOME and ${X:-y} as text',
+  "a\nORCH_ROUTE_TASK_END\ntouch X\n",
+  "a\nEOF\ntouch X",
+  'fix the "double" and \'single\' quotes, then `touch X` and $(touch X); keep $HOME and ${X:-y} as text',
   "-x a task that starts with a dash",
-  "two lines\nwith 'single' quotes, a \\ backslash and a trailing $",
+  "ends with a backslash \\",
+  "two lines\nthen trailing newlines\n\n\n",
 ];
 
-test("item 1: /route passes a task with quotes, backticks, $(...), $, newlines or a leading dash as plain text", () => {
+test("item 1: /route hands the task over as a file: nothing in it runs and it arrives byte for byte", () => {
   const skill = readFileSync(SKILL_FILE, "utf8");
   for (const task of HOSTILE_TASKS) {
     const r = runRouteBlock(skill, task);
     assert.deepEqual(r.files, [], `nothing in the task ran: ${JSON.stringify(task)}`);
     assert.equal(r.status, 0, r.stderr);
-    assert.ok(r.args.includes(`--task=${task}`), `the task arrives whole: ${JSON.stringify(r.args)}`);
-    assert.equal(r.args.filter((a) => a.startsWith("--task")).length, 1);
+    assert.ok(r.got && r.got.equals(Buffer.from(task)), `the task arrives whole, trailing newlines included: ${JSON.stringify(task)}`);
+    assert.ok(r.removed, "the block removes the task file");
   }
-  // The route command's exit code is the block's.
-  assert.equal(runRouteBlock(skill, "plain task", "bash", 2).status, 2);
-  // The closing word must start its line, so the block in the file is not indented.
-  assert.match(skill, /<<'ORCH_ROUTE_TASK_END'\n\$ARGUMENTS\nORCH_ROUTE_TASK_END\n/);
+  // The route command's exit code is the block's, and the file is removed then too.
+  const failed = runRouteBlock(skill, "plain task", "bash", 2);
+  assert.equal(failed.status, 2);
+  assert.ok(failed.removed);
 });
 
 const hasZsh = spawnSync("zsh", ["-c", "true"]).status === 0;
@@ -664,7 +672,7 @@ test("item 1: the /route block also holds in sh and zsh", { skip: !hasZsh && "zs
       const r = runRouteBlock(skill, task, shell);
       assert.deepEqual(r.files, [], shell);
       assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
-      assert.ok(r.args.includes(`--task=${task}`), `${shell}: ${JSON.stringify(r.args)}`);
+      assert.ok(r.got && r.got.equals(Buffer.from(task)), `${shell}: ${JSON.stringify(task)}`);
     }
   }
 });

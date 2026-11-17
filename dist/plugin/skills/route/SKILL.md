@@ -6,16 +6,19 @@ argument-hint: <task description>
 Size the task before doing it.
 
 1. Get the route.
-   - If `${ORCH_HOME:-$HOME/claude-code-orchestration}` contains both `package.json` and `node_modules`, run the triager. `--repo` is the folder the task is about (any folder; a git repository is not required); substitute its absolute path for `$TASK_DIR`:
+   - If `${ORCH_HOME:-$HOME/claude-code-orchestration}` contains both `package.json` and `node_modules`, run the triager. `--repo` is the folder the task is about (any folder; a git repository is not required); substitute its absolute path for `$TASK_DIR`.
 
-```bash
-task_file="$(mktemp)" && cat > "$task_file" <<'ORCH_ROUTE_TASK_END'
+     First write the task to a file with your file-writing tool, never with a shell command: the text between the `<task>` tags below, exactly as given, into a new file named `route-task.txt` in your session's scratchpad folder (if you have none, run `mktemp -d` and use the folder it prints). Substitute that file's absolute path for `$TASK_FILE`; the path never contains any of the task's words. Then run:
+
+     ```bash
+     (cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" npm run --silent route -- --repo "$TASK_DIR" --task-file="$TASK_FILE"); rc=$?; rm -f "$TASK_FILE"; (exit "$rc")
+     ```
+
+     No shell reads the task text: `--task-file` makes the triager read the file itself, so quotes, backticks, `$`, several lines or a leading dash are all just text. The command removes the file when it ends.
+
+     <task>
 $ARGUMENTS
-ORCH_ROUTE_TASK_END
-(cd "${ORCH_HOME:-$HOME/claude-code-orchestration}" && CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" npm run --silent route -- --repo "$TASK_DIR" --task="$(cat "$task_file")"); rc=$?; rm -f "$task_file"; (exit "$rc")
-```
-
-     Keep the task text exactly as given, between the two `ORCH_ROUTE_TASK_END` lines, and keep the quotes around that word on the first line: the shell then reads the task as plain text (quotes, backticks, `$`, several lines), and `--task=` keeps a task that starts with a dash a task. If a line of the task is exactly `ORCH_ROUTE_TASK_END`, use another closing word on both lines. Run the block as it stands, each line from its first column: the closing word ends the text only at the start of a line.
+     </task>
 
      It makes one cheap read-only model call and prints JSON: `mode`, `reason`, and the `facts` behind it (`filesToTouch`, `linesToChange`, `independentSlices`, `risky` and `code`). It also appends the decision to `routes.jsonl` in that folder's state dir: `.claude/state/` when the project registers the orchestration hooks itself, otherwise the plugin's per-user dir, so nothing is written into the folder.
    - Otherwise (no checkout, e.g. a plugin-only install) size the task yourself. Skim the folder, then estimate five facts:

@@ -5,6 +5,9 @@ blocked list."""
 
 import sys
 
+# The re module this mirrors: since Python 3.14 a \B matches the empty string.
+_NBOUND_MATCHES_EMPTY = sys.version_info >= (3, 14)
+
 if sys.getrecursionlimit() < 20000:
     sys.setrecursionlimit(20000)
 
@@ -771,7 +774,8 @@ def _at_pred(kind, flags):
 
         def bound(s, i):
             if not s:
-                return False
+                # CPython 3.14 changed this: \B now matches an empty string (\b still does not); before, neither did.
+                return not want and _NBOUND_MATCHES_EMPTY
             that = i > 0 and _is_word(s[i - 1])
             this = i < len(s) and _is_word(s[i])
             return (this != that) == want
