@@ -1,37 +1,42 @@
 #!/usr/bin/env node
-// The test gate's result cache and its record keys (2.0.0). Not a hook: verify.sh calls its CLI, and telemetry.mjs and
-// journal.mjs use stopKey from state.mjs. Node built-ins and state.mjs only; no side effects at import beyond state.mjs.
+// The test gate's result cache (2.0.0). Not a hook: verify.sh calls its CLI. Node built-ins and state.mjs only; no side
+// effects at import beyond state.mjs reading settings.
 //
-// Result cache. verify.sh runs the suite at an implementer's hand-back (PreToolUse on SubagentHandback, --handback) and
-// again at its SubagentStop. When the tree has not changed in between, the second gate reuses the first one's result
-// instead of running the suite again. A result is stored under a key (treeKey) that proves the same tree and the same
-// facts the gate's decision depends on:
+// One use only. verify.sh runs the suite at an implementer's hand-back (PreToolUse on SubagentHandback, --handback), and
+// the SubagentStop gate follows seconds after a delivered hand-back. That stop gate may reuse the hand-back gate's result
+// instead of running the suite again, and nothing else ever reuses one (cacheTake):
+//   - the result was written by the hand-back gate of the same session and agent, for the agent's latest hand-back since
+//     its latest start (state.mjs latestHandbackId: the tool_use_id the stop follows), so never across agents, sessions,
+//     runs or a later start;
+//   - it is at most REUSE_MAX_S seconds old (live, the stop's record came 1 to 2 s after the hand-back's);
+//   - it was not reused before (an entry is marked used when taken: one reuse per hand-back);
+//   - the tree key (treeKey) still matches.
+// Anything else runs the suite. The hand-back gate itself never reuses a result.
+// The tree key proves the tree and the facts the gate's decision depends on:
 //   - the folder (real path) and its git top level, HEAD, and the main worktree's HEAD (the base an isolated slice is
 //     compared with; for the shared tree it is HEAD);
 //   - the staged changes (git diff --cached HEAD) and the unstaged ones (git diff), both --binary, hashed;
-//   - every untracked file that is not ignored (git ls-files -o --exclude-standard): its path, type and content;
+//   - every untracked file that is not ignored (git ls-files -o --exclude-standard): its path, type and content (a
+//     symlink by its target's name, not the content it points to);
 //   - git status --porcelain (so a change git diff cannot show, a mode or a type, still changes the key);
 //   - the test command, whether the tree is isolated, every ORCH_ variable and PATH, NODE_OPTIONS, NODE_ENV and CI.
+// Not in the key: git-ignored files (node_modules, build output, an ignored input the tests read) and what an untracked
+// symlink points to. A change to them between the hand-back gate's run and its stop, a window of seconds that the limit
+// above bounds, is not seen: the stop reuses the hand-back's result.
 // Any doubt gives no key, and then the suite runs: not a git work tree, a failing git command, a repository with
 // submodules (their content is not in the diff), more than MAX_UNTRACKED files or MAX_UNTRACKED_BYTES bytes untracked,
-// an untracked file that cannot be read. Ignored files (node_modules, build output) are not part of the key.
-// verify.sh writes a result only when the key computed after the run equals the key before it (nothing changed the
-// tree while the suite ran), never for a timed-out run, and only "pass" (exit 0) or "fail" (a test failure); a pass is
-// reused as a pass and a fail as a fail, never one as the other. The file is test-gate-cache.json in the state dir,
-// at most MAX_ENTRIES results, each message cut to MAX_MESSAGE characters, written whole to a temporary file and
+// an untracked file that cannot be read.
+// verify.sh writes a result only at a hand-back, only when the key computed after the run (within the time the gate has
+// left) equals the key before it, never for a timed-out run, and only "pass" (exit 0) or "fail" (a test failure); a
+// pass is reused as a pass and a fail as a fail, never one as the other. The file is test-gate-cache.json in the state
+// dir, at most MAX_ENTRIES results, each message cut to MAX_MESSAGE characters, written whole to a temporary file and
 // renamed into place. Two gates writing at once may lose one entry: a lost entry only means the suite runs again.
-//
-// Record keys. A test-gate record names the hand-back or the stop it belongs to: handback_id, the SubagentHandback
-// call's tool_use_id, or stop_key (stopKey), which every SubagentStop hook of one event computes alike from the agent's
-// transcript (state.mjs stopKey): the uuid of its last assistant entry. Two stops of one agent differ in it, since a block or a
-// resume adds entries in between. telemetry.mjs and journal.mjs store the same stop_key in their stop records, and
-// run.mjs pairs records with stops by it.
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { stopKey } from "./state.mjs";
+import { latestHandbackId } from "./state.mjs";
 
 export const CACHE_FILE = "test-gate-cache.json";
 export const MAX_ENTRIES = 32;
@@ -40,8 +45,8 @@ export const MAX_UNTRACKED = 5000;
 export const MAX_UNTRACKED_BYTES = 64 * 1024 * 1024;
 const ENV_FACTS = ["PATH", "NODE_OPTIONS", "NODE_ENV", "CI"];
 
-// The stop key lives in state.mjs (every hook copy has it); re-exported for verify.sh's CLI and the tests.
-export { stopKey };
+/** How old a hand-back gate's result may be when its stop reuses it, in seconds. */
+export const REUSE_MAX_S = 120;
 
 /** @param {string} cwd @param {string[]} args @returns {Buffer | null} */
 function git(cwd, args) {
@@ -117,7 +122,8 @@ export function treeKey(cwd, cmd, facts = {}) {
 }
 
 /**
- * @typedef {{ key: string, result: "pass" | "fail", ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string }} CacheEntry
+ * by: the tool_use_id of the hand-back whose gate wrote it; used: true once a stop has reused it.
+ * @typedef {{ key: string, result: "pass" | "fail", ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string, used?: boolean }} CacheEntry
  */
 
 /** @param {string} state @returns {CacheEntry[]} */
@@ -130,26 +136,47 @@ export function readCache(state) {
   }
 }
 
-/** The stored result for `key`, or null. @param {string} state @param {string} key @returns {CacheEntry | null} */
-export function cacheGet(state, key) {
-  if (!/^[0-9a-f]{64}$/.test(key)) return null;
-  return readCache(state).findLast((e) => e.key === key) ?? null;
+/**
+ * The result a stop may reuse (see the header), marked used, or null. `handback` is the hand-back the stop follows.
+ * @param {string} state
+ * @param {{ key: string, session: string, agent: string, handback: string, now?: number, maxAgeS?: number }} q
+ * @returns {CacheEntry | null}
+ */
+export function cacheTake(state, q) {
+  if (!/^[0-9a-f]{64}$/.test(q.key) || !q.session || !q.agent || !q.handback) return null;
+  const entries = readCache(state);
+  const i = entries.findLastIndex((e) => e.by === q.handback && e.agent_id === q.agent && e.session_id === q.session);
+  const e = entries[i];
+  if (!e || e.used || e.key !== q.key) return null;
+  const age = (q.now ?? Date.now()) - Date.parse(e.ts);
+  if (!(age >= 0 && age <= (q.maxAgeS ?? REUSE_MAX_S) * 1000)) return null;
+  // Marked before it is returned: when the mark cannot be written, nothing is reused.
+  if (!writeEntries(state, entries.map((x, j) => (j === i ? { ...x, used: true } : x)))) return null;
+  return e;
+}
+
+/** @param {string} state @param {CacheEntry[]} entries @returns {boolean} */
+function writeEntries(state, entries) {
+  try {
+    const tmp = join(state, `.${CACHE_FILE}.${process.pid}.${Date.now()}`);
+    writeFileSync(tmp, `${JSON.stringify({ entries: entries.slice(-MAX_ENTRIES) })}\n`);
+    renameSync(tmp, join(state, CACHE_FILE));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Store a result: replaces an entry with the same key, keeps the newest MAX_ENTRIES, written atomically.
+ * Store a result: replaces an entry of the same hand-back, keeps the newest MAX_ENTRIES, written atomically.
  * @param {string} state @param {CacheEntry} entry @returns {boolean}
  */
 export function cachePut(state, entry) {
   if (!/^[0-9a-f]{64}$/.test(entry.key) || (entry.result !== "pass" && entry.result !== "fail")) return false;
   try {
-    const rest = readCache(state).filter((e) => e.key !== entry.key);
+    const rest = readCache(state).filter((e) => !(e.by && e.by === entry.by && e.agent_id === entry.agent_id && e.session_id === entry.session_id));
     const clean = { ...entry, ...(typeof entry.message === "string" ? { message: entry.message.slice(-MAX_MESSAGE) } : {}) };
-    const entries = [...rest, clean].slice(-MAX_ENTRIES);
-    const tmp = join(state, `.${CACHE_FILE}.${process.pid}.${Date.now()}`);
-    writeFileSync(tmp, `${JSON.stringify({ entries })}\n`);
-    renameSync(tmp, join(state, CACHE_FILE));
-    return true;
+    return writeEntries(state, [...rest, clean]);
   } catch {
     return false;
   }
@@ -195,9 +222,10 @@ export function refusedHandbacks(state, sessionId, agentId, exclude = "") {
 // CLI for verify.sh. Every command prints nothing and exits 0 on any error, so the gate then runs as it would without
 // a cache.
 //   key <cwd> <cmd> <isolated>                prints the tree key, or nothing
-//   get <state> <key>                          prints result, by, extra, then the message; nothing on a miss
-//   put <state> <key> <result> <by> <extra> <session> <agent>   message on stdin
-//   stopkey <transcript>                       prints the stop key, or nothing
+//   take <state> <key> <session> <agent> <handback-id>          prints result, by, extra, then the message; nothing
+//                                                                when no result may be reused (cacheTake)
+//   put <state> <key> <result> <handback-id> <extra> <session> <agent>   message on stdin
+//   link <state> <session> <agent>             prints the hand-back the agent's stop follows, or nothing
 //   refused <state> <session> <agent> <exclude-id>              prints a count
 const isMain = (() => {
   try {
@@ -210,13 +238,13 @@ if (isMain) {
   const [cmd, ...a] = process.argv.slice(2);
   try {
     if (cmd === "key") process.stdout.write(treeKey(a[0] ?? ".", a[1] ?? "", { isolated: a[2] ?? "" }) ?? "");
-    else if (cmd === "get") {
-      const e = cacheGet(a[0] ?? "", a[1] ?? "");
+    else if (cmd === "take") {
+      const e = cacheTake(a[0] ?? "", { key: a[1] ?? "", session: a[2] ?? "", agent: a[3] ?? "", handback: a[4] ?? "" });
       if (e) process.stdout.write(`${e.result}\n${String(e.by ?? "").replace(/[^A-Za-z0-9_.:-]/g, "")}\n${String(e.extra ?? "").replace(/\n/g, "")}\n${e.message ?? ""}`);
     } else if (cmd === "put") {
       const message = readFileSync(0, "utf8");
       cachePut(a[0] ?? "", { key: a[1] ?? "", result: /** @type {any} */ (a[2]), ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", message });
-    } else if (cmd === "stopkey") process.stdout.write(stopKey(a[0]) ?? "");
+    } else if (cmd === "link") process.stdout.write(latestHandbackId(a[1] ?? "", a[2] ?? "", a[0] ?? "") ?? "");
     else if (cmd === "refused") process.stdout.write(String(refusedHandbacks(a[0] ?? "", a[1] ?? "", a[2] ?? "", a[3] ?? "")));
   } catch {
     // nothing printed: no cache

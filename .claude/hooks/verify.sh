@@ -56,6 +56,12 @@
 #               helper is killed when the budget runs out. A baseline that cannot run only loses its note (the block
 #               stays); a bugfix check that has no time or is killed blocks as unverified (bugfix_timeout), counted
 #               with the other bugfix blocks.
+#   tree key    (2.0.0; at a hand-back, before and after the test run, and at a stop that follows a hand-back, before
+#               it) min(60, time left - 10): a key run that hangs is stopped like any limit, by the time left - 2 s at
+#               the latest, and with less than 11 s left none runs (no key: nothing is stored or reused, the suite runs).
+#               The key before the run comes out of the time the test run then gets; the one after it comes out of the
+#               base run's (a baseline then only loses its note) and is never followed by the bugfix check (the
+#               hand-back gate does not run it), so the worst cases below stand.
 #   So lock wait + test run + base run (or bugfix check) <= budget: <= 540 s < 600 s by default, <= 870 s < 900 s at most.
 #   A limit stops a run with SIGTERM to its process group and SIGKILL 5 s later (LIM_GRACE_S) if the leader is still
 #   there, so a stopped bugfix-check.mjs removes its base worktree and its record; the helper's limit is the time left
@@ -147,7 +153,7 @@ now_iso() {
   node -e 'process.stdout.write(new Date().toISOString())' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
-# Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or stop_key) and
+# Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or after_handback) and
 # tree_extra (the cache key's first 16 hex digits, and the record it reused). Returns 1 when the line was not written.
 log_gate() { # decision reason [extra JSON fields: counts only]
   local extra="${link_extra:-}"
@@ -502,7 +508,10 @@ session_id="$(json_str session_id | LC_ALL=C tr -cd 'A-Za-z0-9_.-')"
 # the tests_failed cap it shares with the SubagentStop gate and only while the agent has had fewer than two other
 # hand-backs refused by any gate since its latest start (Claude Code asks a worker to resend a refused report at most
 # three times); every other outcome lets the report through, logged, and the SubagentStop gate still runs and decides.
-# Its records carry "at":"handback" and handback_id (the call's tool_use_id); a stop's records carry stop_key.
+# Its records carry "at":"handback" and handback_id (the call's tool_use_id); a stop's records carry after_handback, the
+# hand-back the stop follows (state.mjs latestHandbackId; telemetry.mjs and journal.mjs store the same value), which
+# run.mjs pairs them by. The event's cwd is the agent's worktree for an isolated implementer (probed on 2.1.326, as at
+# SubagentStop); a hand-back whose cwd is missing or not a folder is let through, logged (handback_no_cwd).
 # ORCH_HANDBACK_GATE=off turns the mode off (environment only).
 if [ "$handback" = 1 ]; then
   [ "$(json_str tool_name)" = SubagentHandback ] || exit 0
@@ -517,12 +526,16 @@ if [ "$handback" = 1 ]; then
     exit 0
   fi
   armed=1
+  _c="$(json_str cwd)"
+  if [ -z "$_c" ] || [ ! -d "$_c" ]; then
+    log_gate allow handback_no_cwd
+    exit 0
+  fi
 else
-  # The stop key, read first: telemetry.mjs and journal.mjs read the same transcript at this stop (test-gate-cache.mjs).
-  stop_key=""
-  _tp="$(json_str agent_transcript_path)"
-  [ -z "$_tp" ] || stop_key="$(node "$hooks_dir/test-gate-cache.mjs" stopkey "$_tp" </dev/null 2>/dev/null | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
-  [ -z "$stop_key" ] || link_extra="\"stop_key\":\"$stop_key\""
+  # The hand-back this stop follows, if any since the agent's latest start (test-gate-cache.mjs link).
+  after_handback=""
+  [ -z "$agent_id" ] || after_handback="$(node "$hooks_dir/test-gate-cache.mjs" link "$state" "${session_id:-}" "$agent_id" </dev/null 2>/dev/null | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
+  [ -z "$after_handback" ] || link_extra="\"after_handback\":\"$after_handback\""
 fi
 
 agent_type="${agent_type##*:}" # plugin agents arrive namespaced ("orchestration:implementer")
@@ -587,28 +600,37 @@ floor=120
 # The result cache (test-gate-cache.mjs; its header lists the key's parts). compute_key sets key_out to the tree's key,
 # or "" when none can be proven (then nothing is read or written and the suite runs). A stored pass is reused as a pass
 # and a stored fail as a fail; the records say so (reused, reused_from: the hand-back or stop whose gate wrote it).
+# The key is computed only where it can be used: at a hand-back (to store the result) and at a stop that follows one
+# (to reuse it); every key run is cut to the time left in the budget less KEY_RESERVE_S, and skipped when none is left.
+KEY_RESERVE_S=10
 compute_key() {
+  local lim
   key_out=""
+  lim=$(($(time_left) - KEY_RESERVE_S))
+  [ "$lim" -le 60 ] || lim=60
+  [ "$lim" -ge 1 ] || return 0
   ensure_work || return 0
-  run_limited 60 /dev/null "$work/key.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" key "$PWD" "$cmd" "$isolated"
+  run_limited "$lim" /dev/null "$work/key.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" key "$PWD" "$cmd" "$isolated"
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
   key_out="$(LC_ALL=C tr -cd '0-9a-f' <"$work/key.out" 2>/dev/null)"
   [ "${#key_out}" = 64 ] || key_out=""
   return 0
 }
-cache_put() { # result extra message
-  [ -n "$cache_key" ] && [ -z "$cached" ] && [ "$key_stable" = 1 ] || return 0
+cache_put() { # result extra message: the hand-back gate only
+  [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ -n "$handback_id" ] && [ "$key_stable" = 1 ] || return 0
   mkdir -p "$state" 2>/dev/null || return 0
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
-  printf '%s' "$3" | node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$link_by" "$2" "${session_id:-}" "${agent_id:-}" >/dev/null 2>&1 || true
+  printf '%s' "$3" | node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" "${session_id:-}" "${agent_id:-}" >/dev/null 2>&1 || true
 }
-if [ "$handback" = 1 ]; then link_by="handback:$handback_id"; else link_by="stop:${stop_key:-}"; fi
-cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0
-compute_key
-cache_key="$key_out"
+cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key=""
+if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
+  compute_key
+  cache_key="$key_out"
+fi
 if [ -n "$cache_key" ]; then
   tree_extra="\"tree\":\"${cache_key:0:16}\""
-  if ensure_work && node "$hooks_dir/test-gate-cache.mjs" get "$state" "$cache_key" </dev/null >"$work/cache.out" 2>/dev/null; then
+  # Only the SubagentStop gate reuses, and only its own hand-back's result (test-gate-cache.mjs cacheTake).
+  if [ "$handback" = 0 ] && ensure_work && node "$hooks_dir/test-gate-cache.mjs" take "$state" "$cache_key" "${session_id:-}" "$agent_id" "$after_handback" </dev/null >"$work/cache.out" 2>/dev/null; then
     cached="$(sed -n 1p "$work/cache.out" 2>/dev/null)"
     case "$cached" in pass | fail) ;; *) cached="" ;; esac
   fi
@@ -655,8 +677,8 @@ else
       exit 0
     fi
   fi
-  # A result is stored only when the tree is what it was before the run.
-  if [ -n "$cache_key" ] && [ "$timed_out" = 0 ]; then
+  # A result is stored only when the tree is what it was before the run (at a hand-back; within the time left).
+  if [ "$handback" = 1 ] && [ -n "$cache_key" ] && [ "$timed_out" = 0 ]; then
     compute_key
     [ "$key_out" != "$cache_key" ] || key_stable=1
   fi
@@ -665,7 +687,7 @@ if [ "$rc" = 0 ]; then
   cache_put pass "" ""
   if [ "$handback" = 1 ]; then
     # The bugfix check stays at the SubagentStop gate, which reuses this pass.
-    if [ -n "$cached" ]; then log_gate allow tests_passed_cached; else log_gate allow tests_passed; fi
+    log_gate allow tests_passed
     exit 0
   fi
   if [ "${ORCH_BUGFIX_CHECK:-}" != off ] && [ "$agent_type" = implementer ]; then

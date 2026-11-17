@@ -289,10 +289,10 @@ test("a second stop after a block, with no new start, waits for its own gate rec
   }
 });
 
-// 2.0.0: stops and test-gate records carry a stop_key; the hold pairs them by it.
+// 2.0.0: a stop after a hand-back and its test-gate record carry after_handback (the hand-back it follows); the hold pairs them by it.
 /** A stop of impl1 at `min` with `key`. @param {string} dir @param {number} min @param {string} key */
 const keyedStop = (dir, min, key) =>
-  append(dir, "telemetry.jsonl", { ts: at(min), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop", stop_key: key });
+  append(dir, "telemetry.jsonl", { ts: at(min), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop", after_handback: key });
 /** impl1 of slice a, launched and started at 0, with no stop yet. @param {string} dir */
 const startOnly = (dir) => {
   append(dir, "journal-launches.jsonl", { ts: at(0), session_id: "s1", agent_id: "impl1", agent_type: "implementer", slice: "a" });
@@ -303,16 +303,16 @@ test("2.0.0: an implementer resumed while its earlier gate still runs: the late 
   const dir = project();
   try {
     startOnly(dir);
-    keyedStop(dir, 1, "uuid:k1");
+    keyedStop(dir, 1, "toolu_k1");
     // Resumed at 2 (SendMessage), stopped again at 3; the first stop's gate reports a block only at 4.
     append(dir, "telemetry.jsonl", { ts: at(2), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStart" });
-    keyedStop(dir, 3, "uuid:k2");
-    gate(dir, 4, "block", "tests_failed", { stop_key: "uuid:k1" });
+    keyedStop(dir, 3, "toolu_k2");
+    gate(dir, 4, "block", "tests_failed", { after_handback: "toolu_k1" });
     const r = launch(dir, REVIEW);
     assert.equal(r.status, 0, "the late block is the earlier stop's: no refusal");
     assert.match(r.stdout, /test gate has not reported yet/, "the latest stop is still pending");
     // Its own record arrives: a block refuses, as it did by count.
-    gate(dir, 5, "block", "tests_failed", { stop_key: "uuid:k2" });
+    gate(dir, 5, "block", "tests_failed", { after_handback: "toolu_k2" });
     assert.equal(launch(dir, REVIEW).status, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -323,13 +323,32 @@ test("2.0.0: a keyed stop with a passing record of its own is not held by the ea
   const dir = project();
   try {
     startOnly(dir);
-    keyedStop(dir, 1, "uuid:k1");
+    keyedStop(dir, 1, "toolu_k1");
     append(dir, "telemetry.jsonl", { ts: at(2), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStart" });
-    keyedStop(dir, 3, "uuid:k2");
-    gate(dir, 3.5, "allow", "tests_passed_cached", { stop_key: "uuid:k2" });
-    gate(dir, 4, "block", "tests_failed", { stop_key: "uuid:k1" });
+    keyedStop(dir, 3, "toolu_k2");
+    gate(dir, 3.5, "allow", "tests_passed_cached", { after_handback: "toolu_k2" });
+    gate(dir, 4, "block", "tests_failed", { after_handback: "toolu_k1" });
     const r = launch(dir, REVIEW);
     assert.deepEqual([r.status, r.stdout], [0, ""], "the latest stop's own record passed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.0.0: a late block of a stop after a hand-back gives pending, not a stale block, for a later stop with no hand-back", () => {
+  const dir = project();
+  try {
+    startOnly(dir);
+    keyedStop(dir, 1, "toolu_k1");
+    // Resumed at 2, stopped at 3 without a new hand-back (no after_handback); the first stop's block lands at 4.
+    append(dir, "telemetry.jsonl", { ts: at(2), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStart" });
+    append(dir, "telemetry.jsonl", { ts: at(3), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
+    gate(dir, 4, "block", "tests_failed", { after_handback: "toolu_k1" });
+    const r = launch(dir, REVIEW);
+    assert.equal(r.status, 0, "not the stale block");
+    assert.match(r.stdout, /test gate has not reported yet/);
+    gate(dir, 5, "block", "tests_failed");
+    assert.equal(launch(dir, REVIEW).status, 2, "its own unkeyed record, by count");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

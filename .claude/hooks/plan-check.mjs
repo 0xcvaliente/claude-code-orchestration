@@ -50,9 +50,9 @@
 // gate has not reported; the reviewer must not rest a pass on the tests) through the allow with updatedInput below.
 // Only the implementers of the run the review lands in count (run.mjs implementersOfRun: the latest run holding the
 // slice, as foldRuns places a review; a slice carried whole keeps its implementers). The latest stop's test-gate record
-// is paired with it by its stop_key (stopGate; by count since the agent's latest start for older records with no key),
-// not by time: a fast gate record can be stamped before telemetry stamps its stop, and an earlier stop's gate can still
-// be running after a resume. The hand-back gate's records are never a stop's record. A gate killed before it logged leaves the stop pending, so the note stays.
+// is paired with it by the hand-back it follows and by count since the agent's latest start (stopGate), not by time: a
+// fast gate record can be stamped before telemetry stamps its stop, and an earlier stop's gate can still be running
+// after a resume. The hand-back gate's records are never a stop's record. A gate killed before it logged leaves the stop pending, so the note stays.
 // Every hold decision goes to review-hold.jsonl in the state dir (never brief text); a refusal needs its record written
 // and read back (appendJsonl), else the launch goes through. Reviewer launches still write no plan-check.jsonl record.
 // The review gate decides as before.

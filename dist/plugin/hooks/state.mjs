@@ -6,48 +6,10 @@
 // When the project registers its own copy of a hook (this repo, or a repo with .claude/ copied in), both copies
 // fire on every event. The plugin copy then exits at once (duplicate) and the project copy does the work; the
 // plugin hooks the project does not register use the project's state, so every gate reads one log.
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-/**
- * The stop key of an agent's transcript (2.0.0): the uuid of its last assistant entry ("uuid:<id>"); null
- * when it cannot be read or holds none. Every SubagentStop hook of one event reads the same transcript, so verify.sh (through
- * test-gate-cache.mjs), telemetry.mjs and journal.mjs store the same value, and two stops of one agent differ in it (a
- * block or a resume adds entries in between). run.mjs pairs a test-gate record with its stop by it. Reads only the last
- * 256 KiB.
- * @param {unknown} path @returns {string | null}
- */
-export function stopKey(path) {
-  if (typeof path !== "string" || !path) return null;
-  /** @type {number | undefined} */
-  let fd;
-  try {
-    fd = openSync(path, "r");
-    const size = fstatSync(fd).size;
-    const len = Math.min(size, 256 * 1024);
-    const buf = Buffer.alloc(len);
-    const got = readSync(fd, buf, 0, len, size - len);
-    // The last assistant entry: live (2.1.326) the transcript grows during the stop hooks (verify.sh and telemetry.mjs
-    // read different last entries), but only with entries that are not the agent's own messages, and an agent never
-    // stops twice without a new assistant message in between.
-    const lines = buf.subarray(0, got).toString("utf8").split("\n").filter(Boolean);
-    for (let i = lines.length - 1; i >= 0; i--) {
-      try {
-        const e = JSON.parse(/** @type {string} */ (lines[i]));
-        const id = e && e.type === "assistant" && typeof e.uuid === "string" ? e.uuid.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
-        if (id) return `uuid:${id}`;
-      } catch {
-        // a line being written, or the window's partial first line
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
 
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
@@ -200,6 +162,28 @@ export function ensureStateDir(state = own) {
 // stop and may run at the same time): it belongs to a stop when it is newer than that hook's own previous stop record
 // of the agent, so a resumed agent whose next run ends without a hand-back falls back to today's sources.
 export const HANDBACK_LOG = "handbacks.jsonl";
+
+/**
+ * The hand-back a stop follows (2.0.0): the tool_use_id of the agent's latest SubagentHandback capture in handbacks.jsonl
+ * (handback-check.mjs writes it at PreToolUse, before the stop) since its latest SubagentStart in telemetry.jsonl, or
+ * null when it has handed nothing back since (a worker that only stops). verify.sh (through test-gate-cache.mjs),
+ * telemetry.mjs and journal.mjs read the same two logs at one stop, so they store the same value as after_handback, and
+ * run.mjs pairs a stop with its test-gate record by it. (A transcript-based key did not work: live, the transcript was
+ * still being written while the stop hooks ran, docs/data/probes-2.0.0-b1.md.)
+ * @param {unknown} sessionId @param {unknown} agentId @param {string} [dir] @returns {string | null}
+ */
+export function latestHandbackId(sessionId, agentId, dir = stateDir) {
+  if (typeof sessionId !== "string" || typeof agentId !== "string" || !agentId) return null;
+  let start = -Infinity;
+  for (const e of agentRecords(dir, "telemetry.jsonl", sessionId, agentId)) {
+    if (e.hook_event_name === "SubagentStart") start = Math.max(start, Date.parse(e.ts) || -Infinity);
+  }
+  const id = agentRecords(dir, HANDBACK_LOG, sessionId, agentId)
+    .filter((c) => typeof c.tool_use_id === "string" && c.tool_use_id && !(Date.parse(c.ts) < start))
+    .at(-1)?.tool_use_id;
+  const clean = typeof id === "string" ? id.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
+  return clean || null;
+}
 
 /** Records of a JSON-lines log in `dir` for one session and agent; [] when unreadable. @param {string} dir @param {string} name @param {string} sessionId @param {string} agentId */
 function agentRecords(dir, name, sessionId, agentId) {
