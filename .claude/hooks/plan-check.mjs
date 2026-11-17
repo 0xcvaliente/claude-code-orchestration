@@ -825,7 +825,9 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
       ...rows,
     ].join("\n");
   }
-  const hardPages = converted.reduce((/** @type {number} */ n, /** @type {any} */ f) => n + (Array.isArray(f.hardPages) ? f.hardPages.length : 0), 0);
+  // Counted over every profiled file, as the pdf_hard_pages reason code is (w3 item 2): a scanned PDF has hard pages but
+  // no conversion, and a count over converted files alone logged hard_pages: 0 next to that code.
+  const hardPages = r.files.reduce((/** @type {number} */ n, /** @type {any} */ f) => n + (Array.isArray(f.hardPages) ? f.hardPages.length : 0), 0);
   const changed = raised || !!note;
   log({
     decision: changed ? "route" : "keep",
