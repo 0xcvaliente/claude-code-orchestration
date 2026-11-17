@@ -1,0 +1,100 @@
+# Fast-forwards the Mac copy of this repository
+# ($HOME/Documents/projects-repo/claude-code-orchestration) to origin/main and
+# prints the plugin version Claude Code now loads from dist/plugin. Runs on the
+# self-hosted runner on the Mac (label mac-sync).
+# It never discards local work: it stops with an error when the copy is not on
+# main or has uncommitted tracked changes, and it only fast-forwards.
+name: Update Mac copy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Daily catch-up for when the Mac was offline during a push.
+    - cron: "35 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-mac-copy
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: [self-hosted, mac-sync]
+    timeout-minutes: 20
+    steps:
+      # No actions/checkout: that would act on the runner's work dir, not the clone.
+      - name: Fast-forward Mac clone
+        id: ff
+        shell: bash
+        env:
+          # The schedule payload has no repository object, so fall back to GITHUB_REPOSITORY.
+          REPO_NAME: ${{ github.event.repository.name }}
+          JOB_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          name="${REPO_NAME:-${GITHUB_REPOSITORY#*/}}"
+          if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Unexpected repository name '$name'"
+            exit 1
+          fi
+          cd "$HOME/Documents/projects-repo/$name"
+
+          branch="$(git symbolic-ref --quiet --short HEAD || echo '(detached HEAD)')"
+          if [[ "$branch" != "main" ]]; then
+            echo "::error::Mac copy is on '$branch', not main. Not updating."
+            exit 1
+          fi
+          changes="$(git status --porcelain --untracked-files=no)"
+          if [[ -n "$changes" ]]; then
+            echo "::error::Mac copy has uncommitted tracked changes. Not updating:"
+            echo "$changes"
+            exit 1
+          fi
+
+          before="$(git rev-parse HEAD)"
+          # GitHub's git endpoint rejects bearer auth for the job token; use basic
+          # x-access-token auth, as actions/checkout does. Not stored in git config.
+          auth="$(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$auth"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth}" fetch origin main
+          if ! git merge --ff-only origin/main; then
+            echo "::error::Mac copy cannot be fast-forwarded to origin/main (local commits?). Not updating."
+            exit 1
+          fi
+          after="$(git rev-parse HEAD)"
+          echo "before: $before"
+          echo "after:  $after"
+          git log -1 --oneline
+          if [[ "$before" != "$after" ]]; then changed=true; else changed=false; fi
+          {
+            echo "before=$before"
+            echo "after=$after"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
+          echo "HEAD changed: $changed"
+
+      - name: Report loaded plugin version
+        shell: bash
+        env:
+          CHANGED: ${{ steps.ff.outputs.changed }}
+        run: |
+          set -euo pipefail
+          cd "$HOME/Documents/projects-repo/claude-code-orchestration"
+          # Pull only: Claude Code reads the plugin straight from dist/plugin in this clone.
+          manifest=dist/plugin/.claude-plugin/plugin.json
+          version="$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$manifest" | head -1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::No version found in $manifest"
+            exit 1
+          fi
+          echo "Loaded orchestration plugin version: $version"
+          if [[ "$CHANGED" == "true" ]]; then
+            echo "::notice::orchestration plugin updated to $version. Run /reload-plugins in open Claude Code sessions."
+          else
+            echo "HEAD unchanged; no reload needed"
+          fi
