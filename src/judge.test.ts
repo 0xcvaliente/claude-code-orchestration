@@ -1870,3 +1870,149 @@ test("judge policy (w2): a fetch whose refspec writes a branch is a push when it
   assert.match(JUDGE_POLICY, /it is a push to that repository/);
   assert.match(JUDGE_POLICY, /git update-ref writes a ref directly/);
 });
+
+// Release 2.0.0, slice w2, third attempt: four rules change shape from "deny the listed forms" to "allow only what can
+// be read as harmless". G1 to G5 are the confirmed gaps of the second review (checked against real zsh, bash and git).
+// R1: an option-setting command (set, setopt, unsetopt, shopt, a shell's command line) takes only option words the
+// guard can read and knows as harmless. R4: after a wrapper, any later word that names a refused program by its base
+// name is denied (a wrapper's options may take separate values). R5: git clone/init --template and GIT_TEMPLATE_DIR.
+const W2R2_DENY: string[] = [
+  // G1: an option the judge cannot read, passed to set
+  "o=oglobsubst; set -$o; x='*(e{echo X})'; echo $x",
+  "o=-oglobsubst; set $o",
+  "set -e$o",
+  "set $(echo -oglobsubst)",
+  "set -o $opt",
+  "set \"-$o\"",
+  "set -e `echo -oglobsubst`",
+  "set a $o",
+  // R1: unknown option names and letters, in every setter
+  "set -o vi",
+  "set -T",
+  "set -k",
+  "set -A arr a b",
+  "set -oautocd",
+  "setopt autocd",
+  "setopt cdablevars",
+  "setopt $o",
+  "setopt \"$o\"",
+  "setopt -J",
+  "unsetopt -m 'x*'",
+  "shopt -s $o",
+  "shopt -s sourcepath",
+  "shopt -s expand_aliases",
+  "builtin set -$o",
+  "if set -o $o; then :; fi",
+  "zsh -o autocd -c ls",
+  "bash -o vi -c ls",
+  "bash -O expand_aliases -c ls",
+  "bash -T -c ls",
+  "zsh -y -c ls",
+  // G3 and R4: a refused program after a wrapper whose options take separate values
+  "timeout -s KILL 5 parallel echo",
+  "timeout --signal KILL 5 parallel echo",
+  "env -u X parallel echo",
+  "env -C /tmp parallel echo",
+  "xargs -a f parallel",
+  "xargs -d , parallel",
+  "stdbuf -o L parallel echo",
+  "nice -n 5 sem make",
+  "ionice -c 2 -n 7 parallel echo",
+  "chrt -f 10 parallel echo",
+  "taskset -c 0 parallel echo",
+  "taskset 0x3 parallel echo",
+  "setsid -w parallel echo",
+  "find . -exec env -u X parallel {} \\;",
+  "timeout -s KILL 5 su -c id",
+  "env -u X pkexec id",
+  "timeout -k 1 5 at now",
+  "env -u X batch",
+  "xargs grep parallel",
+  "timeout 5 echo at",
+  // G5 and R5: a template folder's hooks
+  "git clone --template=/tmp/t u d",
+  "git clone --template /tmp/t u d",
+  "git clone --templ=/tmp/t u d",
+  "git clone -q --template=/tmp/t u d",
+  "git init --template=/tmp/t",
+  "git init --template /tmp/t d",
+  "git init --t=/tmp/t",
+  "git -C x init --template=/tmp/t",
+  "git clone --\"template\"=/tmp/t u d",
+  "GIT_TEMPLATE_DIR=/tmp/t git init",
+  "GIT_TEMPLATE_DIR=/tmp/t git clone u d",
+  "git -c init.templateDir=/tmp/t init",
+  "git clone -c init.templateDir=/tmp/t u d",
+  "git config init.templateDir /tmp/t",
+];
+// The neighbours that keep passing: the options real scripts use, positional parameters, wrappers running ordinary
+// programs, and clones and inits without a template.
+const W2R2_PASS: string[] = [
+  "set -euo pipefail",
+  "set -eu -o pipefail",
+  "set -x",
+  "set +x",
+  "set -e",
+  "set -o errexit",
+  "set -o nounset",
+  "set -o xtrace",
+  "set +o xtrace",
+  "set -Eeuo pipefail",
+  "set -- a b c",
+  "set -- \"$@\"",
+  "set -e -- \"$@\"",
+  "set -- $x",
+  "set a b",
+  "set -",
+  "set",
+  "set -o",
+  "setopt extendedglob",
+  "setopt extended_glob",
+  "setopt nullglob",
+  "setopt no_nomatch",
+  "setopt glob_dots",
+  "unsetopt nomatch",
+  "shopt -s nullglob",
+  "shopt -s globstar dotglob",
+  "shopt -s extglob",
+  "shopt -u nocasematch",
+  "shopt",
+  "emulate -L zsh",
+  "bash -lc 'ls'",
+  "bash -euo pipefail -c 'ls'",
+  "bash -O extglob -c ls",
+  "bash -x script.sh",
+  "sh -e script.sh",
+  "zsh -f -c ls",
+  "export PS1='$ '",
+  "xargs -P 4 -n 1 gzip",
+  "xargs -0 -n 1 grep -l x",
+  "timeout -s KILL 5 make test",
+  "env -u X npm test",
+  "nice -n 5 make",
+  "stdbuf -o L tail -f log",
+  "find . -name '*.ts' -exec grep -l x {} +",
+  "find . -name '*.ts' -exec grep -l \"$pat\" {} +",
+  "grep parallel README.md",
+  "echo at noon",
+  "git clone https://example.com/r.git d",
+  "git clone --depth 1 https://example.com/r.git d",
+  "git clone -- --template d",
+  "git init",
+  "git init --initial-branch=main d",
+  "git fetch origin",
+];
+
+test("classify (w2, third attempt): option setters read as an allowlist (G1, R1), wrapped programs (G3, R4), templates (G5, R5)", () => {
+  assert.deepEqual(misread([
+    ...W2R2_DENY.map((c): [string, BashClass] => [c, "deny"]),
+    ...W2R2_PASS.map((c): [string, BashClass] => [c, "pass"]),
+  ]), []);
+  // The reason names the rule.
+  assert.match(classifyDetail("set -$o", CWD).reason ?? "", /^set with an option word built from an expansion is always blocked: the guard allows only option words it can read/);
+  assert.match(classifyDetail("setopt autocd", CWD).reason ?? "", /^setopt autocd is always blocked: the guard allows only option words/);
+  assert.match(classifyDetail("bash -T -c ls", CWD).reason ?? "", /^bash option -T is always blocked: the guard allows only option letters/);
+  assert.match(classifyDetail("timeout -s KILL 5 parallel echo", CWD).reason ?? "", /^parallel after a wrapper .* is always blocked wherever it stands/);
+  assert.match(classifyDetail("git clone --template=/tmp/t u d", CWD).reason ?? "", /^git clone --template is always blocked: git copies the template folder's hooks/);
+  assert.match(classifyDetail("GIT_TEMPLATE_DIR=/tmp/t git init", CWD).reason ?? "", /^setting GIT_TEMPLATE_DIR/);
+});

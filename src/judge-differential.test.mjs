@@ -59,6 +59,11 @@ function generated() {
 // Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
 // denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
 const HARDENING_REASONS = [
+  // w2, third attempt: the option allowlist (R1), wrapped programs (R4), git templates (R5)
+  /^(set|setopt|unsetopt|shopt) .* is always blocked: the guard allows only option words it can read/,
+  /^[a-z]+ (option )?[-+].* is always blocked: the guard allows only option (letters|s) it knows as harmless/,
+  /^[a-z]+ after a wrapper \(xargs, env, timeout, nice, find -exec and the like\) is always blocked wherever it stands/,
+  /^git (clone|init) --template is always blocked/,
   /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
   /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
   /\(a NUL in \$'\.\.\.'\)/, // J3
@@ -155,6 +160,8 @@ for (const c of AUDIT_1116_3_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
 // now go to the judge (W2_JUDGE).
 const W2_DENY = listIn("judge.test.ts", "W2_DENY");
 for (const c of W2_DENY) HARDENED.push([c, ["deny"]]);
+// Third attempt: the option allowlist, wrapped programs and templates (W2R2_DENY).
+for (const c of listIn("judge.test.ts", "W2R2_DENY")) HARDENED.push([c, ["deny"]]);
 const W2_JUDGE = listIn("judge.test.ts", "W2_JUDGE");
 for (const c of W2_JUDGE) HARDENED.push([c, ["judge", "deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */

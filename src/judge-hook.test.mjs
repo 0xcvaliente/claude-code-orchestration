@@ -753,7 +753,9 @@ test("J-12 (w2): a glob that matches the prompt store's folder is refused with n
     const r = run(HOOK, bash(command, "gl", { cwd }), { ...ON, STUB_MODE: "approve" });
     assert.equal(r.code, 2, `${command}: ${r.stderr}`);
     assertNoDecision(r);
-    assert.match(r.stderr, /record of the user's requests \(through a glob\)/, command);
+    // A relative glob after a change to a folder the guard cannot read gets the message with the way around (w2,
+    // third attempt); a glob that reaches the store gets the older one.
+    assert.match(r.stderr, /record of the user's requests( \(through a glob\)|\. Run the directory change as its own Bash call)/, command);
     assert.equal(stubCalls().length, 0, `${command}: no model call`);
   }
   /** @type {Array<[string, string]>} */
@@ -766,6 +768,116 @@ test("J-12 (w2): a glob that matches the prompt store's folder is refused with n
     ["ls *", configDir],
     [`git -C ${orch} status && ls *`, work], // git -C changes no shell folder
     ["cd build && ls *.js", work],
+  ];
+  for (const [command, cwd] of allowed) {
+    reset();
+    const r = run(HOOK, bash(command, "gl", { cwd }), ON);
+    assert.equal(r.code, 0, `${command}: ${r.stderr}`);
+    assert.equal(r.stdout + r.stderr, "", command);
+  }
+});
+
+// Release 2.0.0, slice w2, third attempt. R1, R4 and R5 in both copies (one table, same decision), and in the native
+// hook R2 (cd, pushd and chdir read as the shells read them: their own options and one `--` skipped, then one plain
+// literal target or the folder is unknown) and R3 (every character a shell may expand counts as a glob: `{`, `}`, and
+// zsh's extendedglob `^`, `#`, `~` inside a word). G1 to G5 are the confirmed gaps of the second review.
+/** @type {Array<[string, string]>} */
+const W2R2_TABLE = [
+  // G1, R1
+  ["o=oglobsubst; set -$o; x='*(e{echo X})'; echo $x", "deny"],
+  ["o=-oglobsubst; set $o", "deny"],
+  ["set -e$o", "deny"],
+  ["set $(echo -oglobsubst)", "deny"],
+  ["setopt autocd", "deny"],
+  ["shopt -s $o", "deny"],
+  ["zsh -o autocd -c ls", "deny"],
+  ["set -euo pipefail", "pass"],
+  ["set -x", "pass"],
+  ["set -- a b c", "pass"],
+  ["set a b", "pass"],
+  ["setopt extendedglob", "pass"],
+  ["shopt -s nullglob globstar", "pass"],
+  // G3, R4
+  ["timeout -s KILL 5 parallel echo", "deny"],
+  ["timeout --signal KILL 5 parallel echo", "deny"],
+  ["env -u X parallel echo", "deny"],
+  ["env -C /tmp parallel echo", "deny"],
+  ["xargs -a f parallel", "deny"],
+  ["xargs -d , parallel", "deny"],
+  ["stdbuf -o L parallel echo", "deny"],
+  ["xargs grep parallel", "deny"],
+  ["xargs -P 4 -n 1 gzip", "pass"],
+  ["find . -name '*.ts' -exec grep -l x {} +", "pass"],
+  ["export PS1='$ '", "pass"],
+  // G5, R5
+  ["git clone --template=/tmp/t u d", "deny"],
+  ["git init --template /tmp/t", "deny"],
+  ["GIT_TEMPLATE_DIR=/tmp/t git init", "deny"],
+  ["git clone https://example.com/r.git d", "pass"],
+  ["git fetch origin", "pass"],
+];
+
+test("parity (w2, third attempt): both copies give each row the same decision, and the class the table names", () => {
+  const wrong = [];
+  for (const [c, want] of W2R2_TABLE) {
+    const core = coreClassify(c, "/w");
+    const sdk = sdkClassify(c, "/w");
+    if (JSON.stringify(core) !== JSON.stringify(sdk)) wrong.push(`${c}: judge-core ${JSON.stringify(core)}, judge.ts ${JSON.stringify(sdk)}`);
+    if (core.cls !== want) wrong.push(`${c}: want ${want}, got ${core.cls}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("J-12 (w2, third attempt): cd targets read as the shells read them (G2, R2) and extended globs (G4, R3) are refused", () => {
+  const orch = join(configDir, "orchestration");
+  const store = join(orch, STORE_NAME);
+  /** @type {Array<[string, string, RegExp]>} */
+  const refused = [
+    // G2: `--` ends cd's options; the word after it is the target
+    [`cd -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    [`pushd -- ${orch} && cat j*/*/*`, work, /through a glob/],
+    [`cd -L -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    [`cd -P -- ${orch} && cat j*/*/*`, work, /through a glob/],
+    [`chdir -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    // R2: targets that are not one plain literal path
+    [`cd ${orch} x; cat j*/*/*`, work, /Run the directory change as its own Bash call/],
+    ["cd a^b; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ["cd --; cat j*/*/*", orch, /through a glob/], // `cd --` alone is the home folder, and the hook's folder stays a base
+    ["pushd; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ["cd ''; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ['cd "$dir" && ls *.txt', work, /directory change on this line .* goes to a folder the guard cannot read as one plain path.*Run the directory change as its own Bash call and the command in the next call, or give the glob an absolute path\./],
+    // G4, R3: zsh's extendedglob and brace expansion reach the store without its name
+    [`setopt extendedglob; cat ${orch}/^x/^x/^x`, work, /through a glob/],
+    [`cat ${orch}/^x`, work, /through a glob/],
+    [`cat ${orch}/judge-prompt#s/x`, work, /through a glob/],
+    // brace expansion with a comma or a range: the floor refuses it first (J2), the glob check would too
+    [`cat ${orch}/{judge-p,x}rompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${configDir}/{orchestration/judge-p,x}rompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${orch}/{j..j}udge-prompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${orch}/x~y`, work, /through a glob/],
+    [`cat ${configDir}/*~x/judge-p*`, work, /through a glob/],
+    ["cat ^x/^x/^x", orch, /through a glob/],
+    ["cat orchestration/^x/x", configDir, /through a glob/],
+  ];
+  for (const [command, cwd, message] of refused) {
+    reset();
+    mkdirSync(store, { recursive: true });
+    capture("gl", "push feature/login to origin");
+    const r = run(HOOK, bash(command, "gl", { cwd }), { ...ON, STUB_MODE: "approve" });
+    assert.equal(r.code, 2, `${command}: ${r.stderr}`);
+    assertNoDecision(r);
+    assert.match(r.stderr, message, command);
+    assert.doesNotMatch(r.stderr, /ORCH_/, `${command}: the message names no switch`);
+    assert.equal(stubCalls().length, 0, `${command}: no model call`);
+  }
+  /** @type {Array<[string, string]>} */
+  const allowed = [
+    ["cd src && ls *.ts", work],
+    ["cd -- src && ls *.ts", work],
+    ["cd -P build && ls *.js", work],
+    ["echo '{a,b}' a#b ^x x~y", work],
+    ["git log --format='%h {x}'", work],
+    [`ls ${configDir}/^x`, work], // one level above the store's parent: lists ~/.claude's children only
   ];
   for (const [command, cwd] of allowed) {
     reset();
