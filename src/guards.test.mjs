@@ -20,6 +20,17 @@ const hook = (/** @type {string} */ name) => join(root, ".claude", "hooks", name
 const RESEARCHER = hook("researcher-guard.mjs");
 const EGRESS = hook("egress-guard.mjs");
 const COMPACT = hook("compact-context.mjs");
+/**
+ * CPU time (user + system, ms) this process spends in fn: the guard's own work, which a loaded machine does not inflate as
+ * it does the wall clock (f5, 2.0.0). Bounds on a deadline firing stay on the wall clock, since a deadline is wall time.
+ * @template T @param {() => T} fn @returns {{ v: T, ms: number }}
+ */
+function cpuTimed(fn) {
+  const start = process.cpuUsage();
+  const v = fn();
+  const d = process.cpuUsage(start);
+  return { v, ms: (d.user + d.system) / 1000 };
+}
 
 const scratch = mkdtempSync(join(tmpdir(), "guards-test-"));
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
@@ -731,9 +742,9 @@ test("researcher guard (cd item 3): odd paths, long words, symlink chains and lo
     symlinkSync(join(links, "loopA"), join(links, "loopB"));
   }
   // A long word first: judged suffix by suffix it took seconds (and a word of a few hundred thousand characters, minutes).
-  const t1 = Date.now();
-  assert.ok(researcherViolation(`grep -${"r".repeat(100000)} x`, proj, proj), "a word too long to judge is refused");
-  assert.ok(Date.now() - t1 < 3000, "a long word is judged quickly");
+  const longWord = cpuTimed(() => researcherViolation(`grep -${"r".repeat(100000)} x`, proj, proj));
+  assert.ok(longWord.v, "a word too long to judge is refused");
+  assert.ok(longWord.ms < 3000, `a long word is judged quickly (${Math.round(longWord.ms)} ms of CPU)`);
   const odd = [
     `cat ${"a/".repeat(5000)}`, `cat /${"x".repeat(300000)}`, `grep -${"r".repeat(100000)} x`, `cat ${"../".repeat(3000)}dev/zero`,
     "cat a\u0000b", "cat 'a\u0000b'", "cat $'\\x00'", "cat \u0001\u0002\u007f", "cat '\n'", "cat \udc00", "cat \ud800x",
@@ -747,14 +758,14 @@ test("researcher guard (cd item 3): odd paths, long words, symlink chains and lo
   for (const c of odd) {
     for (const cwd of cwds) {
       for (const p of projects) {
-        const t0 = Date.now();
         /** @type {unknown} */
         let v;
+        let ms = 0;
         assert.doesNotThrow(() => {
-          v = researcherViolation(c, cwd, p);
+          ({ v, ms } = cpuTimed(() => researcherViolation(c, cwd, p)));
         }, `${JSON.stringify(c.slice(0, 40))} ${JSON.stringify(cwd.slice(0, 20))} ${String(p).slice(0, 20)}`);
         assert.ok(v === null || (typeof v === "object" && typeof (/** @type {any} */ (v).reason) === "string"));
-        assert.ok(Date.now() - t0 < 3000, `slow: ${c.slice(0, 40)}`);
+        assert.ok(ms < 3000, `slow: ${c.slice(0, 40)} (${Math.round(ms)} ms of CPU)`);
       }
     }
   }
@@ -1355,19 +1366,18 @@ const widePart = `rg x ${Array(10).fill("**/*.md").join(" ")}`;
 const wideLine = Array(20).fill(widePart).join("; ");
 
 test("researcher guard (w3 second attempt): a literal device after many glob words is refused at once, before any expansion", () => {
-  const t0 = Date.now();
-  const v = researcherViolation(`${wideLine}; cat /dev/zero`, wide, undefined, { totalNames: 0 });
+  const { v, ms } = cpuTimed(() => researcherViolation(`${wideLine}; cat /dev/zero`, wide, undefined, { totalNames: 0 }));
   assert.ok(v);
   assert.match(v.reason, /cat \/dev\/zero reads a device/);
-  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+  assert.ok(ms < 1000, `${Math.round(ms)} ms of CPU`);
   if (hasFifo) assert.match(researcherViolation(`${wideLine}; cat pipe`, w3, undefined, { totalNames: 0 })?.reason ?? "", /pipe reads a device/);
 });
 
 test("researcher guard (w3 second attempt): the names budget and the deadline hold for the whole command, with the way around", () => {
   // Default budget: the repeated pattern is expanded once, so the line is judged quickly and passes.
-  const t0 = Date.now();
-  assert.equal(researcherViolation(wideLine, wide), null);
-  assert.ok(Date.now() - t0 < 2000, `${Date.now() - t0} ms`);
+  const whole = cpuTimed(() => researcherViolation(wideLine, wide));
+  assert.equal(whole.v, null);
+  assert.ok(whole.ms < 2000, `${Math.round(whole.ms)} ms of CPU`);
   // A budget smaller than the tree (the production default is far larger): refused, saying how to avoid it.
   const small = researcherViolation(wideLine, wide, undefined, { totalNames: 1000 });
   assert.ok(small);
@@ -1441,21 +1451,22 @@ test("researcher guard (w3 third attempt): one segment match takes milliseconds 
   for (const n of [60, 4000]) {
     const name = "a".repeat(n);
     for (const k of [4, 12, 40]) {
-      const t0 = performance.now();
-      assert.equal(guard.matchSegment(pairs(k, "q"), name), false, `${n} letters, ${k} pairs, no match`);
-      assert.equal(guard.matchSegment(pairs(k, "a"), name), k < n, `${n} letters, ${k} pairs, a match`);
-      assert.equal(guard.matchSegment(pairs(k, "q"), `${name}q`), k <= n, `${n} letters, ${k} pairs, q at the end`);
-      const ms = performance.now() - t0;
-      assert.ok(ms < 1000, `${n} letters, ${k} pairs: ${ms} ms`);
+      const { ms } = cpuTimed(() => {
+        assert.equal(guard.matchSegment(pairs(k, "q"), name), false, `${n} letters, ${k} pairs, no match`);
+        assert.equal(guard.matchSegment(pairs(k, "a"), name), k < n, `${n} letters, ${k} pairs, a match`);
+        assert.equal(guard.matchSegment(pairs(k, "q"), `${name}q`), k <= n, `${n} letters, ${k} pairs, q at the end`);
+      });
+      assert.ok(ms < 1000, `${n} letters, ${k} pairs: ${ms} ms of CPU`);
     }
   }
   // In-process, through the whole guard: the 60-letter name matched or not, decided at once.
-  const t1 = Date.now();
-  for (const k of [4, 12, 40]) {
-    assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}q`, redos), null, `${k} pairs, no match`);
-    assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}a`, redos), null, `${k} pairs, a match`);
-  }
-  assert.ok(Date.now() - t1 < 1000, `${Date.now() - t1} ms`);
+  const whole = cpuTimed(() => {
+    for (const k of [4, 12, 40]) {
+      assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}q`, redos), null, `${k} pairs, no match`);
+      assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}a`, redos), null, `${k} pairs, a match`);
+    }
+  });
+  assert.ok(whole.ms < 1000, `${Math.round(whole.ms)} ms of CPU`);
 });
 
 test("researcher guard (w3 third attempt): the segment matcher keeps the old rules (case, dots, newlines, brackets as one or more characters)", () => {
@@ -1494,27 +1505,27 @@ test("researcher guard (w3 third attempt): quoted text is removed in linear time
     assert.equal(guard.withoutQuoted(s), s.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, ""), JSON.stringify(s));
   }
   // Escaped quotes that never close: each start used to rescan the rest of the line (seconds at 60,000 characters).
-  const t0 = Date.now();
-  assert.ok(researcherViolation(`cat x ${'\\"'.repeat(30000)} q`, redos));
-  assert.ok(Date.now() - t0 < 1000, `${Date.now() - t0} ms`);
+  const quotes = cpuTimed(() => researcherViolation(`cat x ${'\\"'.repeat(30000)} q`, redos));
+  assert.ok(quotes.v);
+  assert.ok(quotes.ms < 1000, `${Math.round(quotes.ms)} ms of CPU`);
 });
 
 test("researcher guard (w3 third attempt): a command too long, or with too many brackets and braces, for the tokenizer is refused at once; shorter ones pass", () => {
   for (const c of [`cat ${"[".repeat(20000)}`, `cat ${"{".repeat(20000)}`, `cat ${"a{".repeat(10000)}`, `echo ${"x ".repeat(40000)}`, `find . -files0-from -${"a".repeat(60000)}`, `du --files0-from=-${"a".repeat(60000)}`]) {
-    const t0 = Date.now();
-    const v = researcherViolation(c, redos);
+    const { v, ms } = cpuTimed(() => researcherViolation(c, redos));
     assert.ok(v, c.slice(0, 30));
-    assert.ok(Date.now() - t0 < 1000, `${c.slice(0, 30)}: ${Date.now() - t0} ms`);
+    assert.ok(ms < 1000, `${c.slice(0, 30)}: ${Math.round(ms)} ms of CPU`);
   }
   assert.match(researcherViolation(`echo ${"x ".repeat(40000)}`, redos)?.reason ?? "", /too long to judge/);
   assert.match(researcherViolation(`echo ${"[a] ".repeat(300)}`, redos)?.reason ?? "", /too many/);
   assert.match(researcherViolation(`find . -files0-from ${"a".repeat(5000)}`, redos)?.reason ?? "", /too long to judge/);
   // The narrower rule: a long command of plain words, and a few brackets and braces, still pass.
-  const t1 = Date.now();
-  assert.equal(researcherViolation(`echo ${"x ".repeat(30000)}`, redos), null);
-  assert.equal(researcherViolation(`grep -nE '[a-z]{3}|[0-9]{2,}' docs ${"x ".repeat(100)}`, redos), null);
-  assert.equal(researcherViolation(`echo ${"[a] ".repeat(200)}`, redos), null);
-  assert.ok(Date.now() - t1 < 1000, `${Date.now() - t1} ms`);
+  const plain = cpuTimed(() => {
+    assert.equal(researcherViolation(`echo ${"x ".repeat(30000)}`, redos), null);
+    assert.equal(researcherViolation(`grep -nE '[a-z]{3}|[0-9]{2,}' docs ${"x ".repeat(100)}`, redos), null);
+    assert.equal(researcherViolation(`echo ${"[a] ".repeat(200)}`, redos), null);
+  });
+  assert.ok(plain.ms < 1000, `${Math.round(plain.ms)} ms of CPU`);
 });
 
 test("researcher guard (w3 third attempt): the deadline leaves room for a cold file cache and counts from the hook's start", () => {
@@ -1680,10 +1691,11 @@ test("researcher guard (w8): class brackets over long names stay linear and insi
     assert.match(r.stderr, /fifo reads a device that may never end/, `${k} pairs`);
     assert.ok(r.ms < 3000, `${k} pairs: ${r.ms} ms`);
   }
-  const t0 = performance.now();
-  assert.equal(guard.globMatch(`${"*[[:alpha:]]".repeat(40)}q`, "a".repeat(4000)), false);
-  assert.equal(guard.globMatch(`${"*[![:digit:]]".repeat(40)}a`, "a".repeat(4000)), true);
-  assert.ok(performance.now() - t0 < 1000, `${performance.now() - t0} ms`);
+  const { ms } = cpuTimed(() => {
+    assert.equal(guard.globMatch(`${"*[[:alpha:]]".repeat(40)}q`, "a".repeat(4000)), false);
+    assert.equal(guard.globMatch(`${"*[![:digit:]]".repeat(40)}a`, "a".repeat(4000)), true);
+  });
+  assert.ok(ms < 1000, `${Math.round(ms)} ms of CPU`);
 });
 
 test("researcher guard (w8): everyday commands pass, bracket globs included", () => {

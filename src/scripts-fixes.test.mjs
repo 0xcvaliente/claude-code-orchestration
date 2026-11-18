@@ -240,7 +240,12 @@ test("W-3: known limits, pinned so a change to them is seen (docs/data/audit-202
   assert.equal(permitted(args, 'git commit -m "drop the -c flag"'), false);
   // Under-block: a command built to get around the rules still matches a `git -C * <subcommand>*` rule when an allowed
   // subcommand word follows as an argument. These rules guard against mistakes, not against a command made to pass.
-  for (const cmd of [`git -C ${R} branch -D main status`, `git -C ${R} checkout -- . diff`]) assert.equal(permitted(args, cmd), true, cmd);
+  // The plain forms `branch -D main status` and `checkout -- . diff` were closed in 2.0.0 (GIT_C_DESTRUCTIVE_DENY in
+  // orchestrate.sh, pinned as denied in src/orchestrate-sh.test.mjs, CLOSED); the forms below are LIMITS rows there.
+  for (const cmd of [`git -C ${R} branch -D main status`, `git -C ${R} checkout -- . diff`]) assert.equal(permitted(args, cmd), false, cmd);
+  for (const cmd of [`git -C ${R} branch -qD main status`, `git -C ${R} reset --merge HEAD~3 status`, `git -C ${R} restore ${R}/src log`]) {
+    assert.equal(permitted(args, cmd), true, cmd);
+  }
 });
 
 test("W-3: every rule denied before is still denied, and no git allow rule reaches beyond the old ones", () => {
