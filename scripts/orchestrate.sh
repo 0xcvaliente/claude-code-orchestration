@@ -250,53 +250,65 @@ args+=(--append-system-prompt "This run is unattended: nobody can answer a quest
 # `git -C * status*` rule also matches `git -C /r branch main -D status` (the list below). A guard against mistakes, not a boundary.
 # `git * -c*` also refuses a commit whose message has " -c" in it. `git -C */../*` stops a path that climbs out of a
 # pinned folder (`<repo>/.claude/worktrees/../../x`); it also refuses an argument with `/../` in it. Variadic: keep it before --allowedTools.
-# Every `git -C` allow rule has a `*` before a later fixed word (the folder, or a worktree's name), and that `*` can stand
-# for a whole subcommand: `git -C * status*` also matches `git -C /r branch -D main status`. GIT_C_DESTRUCTIVE_DENY
-# closes the plain destructive forms of that kind (rows in src/orchestrate-sh.test.mjs). Claude Code reads every `*` as
-# any run of characters, spaces included, so a rule cannot tell where the subcommand sits: each rule names the
-# subcommand word directly followed by its destructive token, since a wider pattern refused ordinary commit messages
-# (the test checks a corpus of this repository's commit subjects: each gets the decision it got before f3). A commit
-# message holding a denied form itself (`drop the branch -D shortcut`, `judge update-ref calls`) is refused.
-# Denied: after `git -C <dir>`, the subcommand word directly followed by one of these tokens:
-#   branch: an option holding d, D, m, M, f or C (`-D`, `-qD`, `--delete`, `-m`, `--force`, `-C`);
-#   checkout, switch, rebase, rm, tag, fetch, pull, worktree remove: any option (`checkout -- .`, `checkout -f`,
-#   `switch --discard-changes`, `rebase -i`, `rm -rf`, `tag -d`, `fetch --force`, `pull -f`, `worktree remove --force`);
-#   checkout and restore: a path starting with `.`, `:` or `/`; restore: any option (`restore --staged`);
-#   reset: an option followed by a further word (`reset --merge HEAD~3`, `reset -N x`), so the bare `reset --merge`
-#   stays the integrator's last resort; gc: `--prune`; reflog: expire or delete; stash: drop or clear;
-#   update-ref, symbolic-ref and filter-branch followed by a word;
-#   config: an option (`--add`, `-f`), set or unset, or a key in core, alias, hook, include or url (remote.* is
-#   refused by `git * remote*` below).
+# Seven `git -C` allow rules give the folder as a `*` and end in `*` after their word (`git -C * status*`), and three
+# give a worktree's name as a `*` (`<repo>/.claude/worktrees/* add *`). Claude Code reads a `*` as a run of characters
+# that may hold spaces, so that `*` can also hold a whole subcommand, and an allowed word then matches as a later
+# argument: `git -C * status*` matches `git -C /r branch -D main status`. GIT_C_DESTRUCTIVE_DENY closes the plain
+# destructive forms of that kind (rows in src/orchestrate-sh.test.mjs). Its rules have no `*` inside: the folder's `*`,
+# the subcommand word, one space, a literal token, then the final `*` (for a word that is destructive by itself, a space
+# and the final `*`), because a `*` inside a rule refused ordinary commit messages (the test checks a corpus of commit
+# messages: each gets the decision it got before f3).
+# Denied: the subcommand word, one space, then one of these literal tokens:
+#   branch: -d, -D, -m, -M, -f, -C, --delete, --move, --force, --copy;
+#   checkout: -- (which covers --force and --ours), -f, -B, ., :/;  switch: -f, --force, --discard-changes, -C;
+#   restore: -, ., :/;  reset: --soft, --mixed, --keep, -N, -p, --patch (reset --hard is refused above);
+#   rebase: -;  fetch: --force, -f;  pull: --force, -f, --rebase;  rm: -;  tag: -d, --delete, -f;
+#   worktree remove: -;  stash: drop, clear;  gc: --prune;  reflog: expire, delete;
+#   config: - (which covers --), core., alias., hook., include, url., and set or unset followed by a space (remote.* is
+#   refused by `git * remote*` below); update-ref, symbolic-ref and filter-branch followed by a space.
 # And `git --git-dir` and `git --work-tree` as the first word (after it, the deny list below already refuses both).
+# Also refused (O1): any `git -C` command that holds one of those forms verbatim in an argument, for example a commit
+# message that quotes `branch -D`: reword it.
 # Out of reach (each one a LIMITS row of the test, which asserts it passes):
-#   the destructive token after another word: `branch main -D`, `branch a b -m log`, `checkout main -f`,
-#   `switch main --discard-changes`, `rm src -r -f`, `tag v1 -d`, `gc --aggressive --prune=now`;
-#   a path, or `--` and a path, after a revision or another path: `checkout HEAD . status`, `checkout main :/ status`,
-#   `checkout main /abs/src status`, `checkout HEAD -- src status`, `restore src . status`, `restore src :/ status`,
-#   `restore src /abs status`;
-#   a plain path, revision or branch name: `restore src status`, `reset main status`, `reset HEAD~3 status`,
-#   `reset @~3 status`, `reset ORIG_HEAD status`, `rebase main status`, `rebase HEAD~3 status`, `rebase @{u} diff`,
-#   `checkout main src status`, `rm src status`,
-#   `pull <path> main status`, `worktree remove <worktree> status`;
-#   a fetch or pull with a refspec destination after another word: `fetch <path> main:main status`,
-#   `pull <path> main:main status` (in another repository a destination is a push, audit J-11);
+#   the destructive token inside a cluster or after another word: `branch -qD main status`, `branch main -D status`,
+#   `branch a b -m log`, `checkout -q -f main status`, `checkout -qf main status`, `checkout main -f status`,
+#   `switch main --discard-changes status`, `rm src -r -f status`, `tag v1 -d status`, `gc --aggressive --prune=now log`;
+#   an option the list does not name, or a long option cut short: `reset -q HEAD~3 status`, `reset -- . status`,
+#   `switch -m main status`, `fetch -o status <path> main:main`, `branch --del main log`;
+#   a path after a revision or another path: `checkout HEAD . status`, `checkout main :/ status`,
+#   `checkout HEAD -- src status`, `restore src . status`, `restore src :/ status`;
+#   a plain path, revision or branch name: `restore src status`, `restore /abs/src status`, `reset main status`,
+#   `reset --merge HEAD~3 status`, `rebase main status`, `checkout main src status`, `checkout /abs/src status`,
+#   `rm src status`, `pull <path> main status`, `worktree remove <worktree> status`;
+#   a refspec after a word: `fetch <path> main:main status`, `pull <path> main:main status` (in another repository a
+#   destination is a push, audit J-11);
+#   subcommands not listed above, plumbing included: `read-tree -u --reset HEAD status`, `checkout-index -f -a status`,
+#   `prune --expire=now status`;
 #   a config key of another section or in another case: `config user.name x status`, `config Core.hooksPath x status`.
 # This list stops mistakes, not a command built to pass it.
-# No rule ends in `:*`, which Claude Code reads as its older prefix form, so the pathspec-magic rules end in `:**`.
+# No rule ends in `:*`, which Claude Code reads as its older prefix form.
 GIT_C_DESTRUCTIVE_DENY=(
-  "Bash(git -C * branch -*d*)" "Bash(git -C * branch -*D*)" "Bash(git -C * branch -*m*)" "Bash(git -C * branch -*M*)"
-  "Bash(git -C * branch -*f*)" "Bash(git -C * branch -*C*)"
-  "Bash(git -C * checkout -*)" "Bash(git -C * checkout .*)" "Bash(git -C * checkout :**)" "Bash(git -C * checkout /*)"
-  "Bash(git -C * switch -*)"
-  "Bash(git -C * restore -*)" "Bash(git -C * restore .*)" "Bash(git -C * restore :**)" "Bash(git -C * restore /*)"
-  "Bash(git -C * reset -* *)" "Bash(git -C * rebase -*)"
-  "Bash(git -C * update-ref *)" "Bash(git -C * symbolic-ref *)" "Bash(git -C * filter-branch *)" "Bash(git -C * gc --prune*)"
-  "Bash(git -C * reflog expire*)" "Bash(git -C * reflog delete*)" "Bash(git -C * worktree remove -*)"
-  "Bash(git -C * stash drop*)" "Bash(git -C * stash clear*)"
-  "Bash(git -C * fetch -*)" "Bash(git -C * pull -*)" "Bash(git -C * rm -*)" "Bash(git -C * tag -*)"
-  "Bash(git -C * config -*)" "Bash(git -C * config set *)" "Bash(git -C * config unset *)" "Bash(git -C * config core.*)"
-  "Bash(git -C * config alias.*)" "Bash(git -C * config hook.*)" "Bash(git -C * config include*)"
-  "Bash(git -C * config url.*)"
+  "Bash(git -C * branch -d*)" "Bash(git -C * branch -D*)" "Bash(git -C * branch -m*)" "Bash(git -C * branch -M*)"
+  "Bash(git -C * branch -f*)" "Bash(git -C * branch -C*)" "Bash(git -C * branch --delete*)" "Bash(git -C * branch --move*)"
+  "Bash(git -C * branch --force*)" "Bash(git -C * branch --copy*)"
+  "Bash(git -C * checkout --*)" "Bash(git -C * checkout -f*)" "Bash(git -C * checkout -B*)" "Bash(git -C * checkout .*)"
+  "Bash(git -C * checkout :/*)"
+  "Bash(git -C * switch -f*)" "Bash(git -C * switch --force*)" "Bash(git -C * switch --discard-changes*)"
+  "Bash(git -C * switch -C*)"
+  "Bash(git -C * restore -*)" "Bash(git -C * restore .*)" "Bash(git -C * restore :/*)"
+  "Bash(git -C * reset --soft*)" "Bash(git -C * reset --mixed*)" "Bash(git -C * reset --keep*)" "Bash(git -C * reset -N*)"
+  "Bash(git -C * reset -p*)" "Bash(git -C * reset --patch*)"
+  "Bash(git -C * rebase -*)"
+  "Bash(git -C * fetch --force*)" "Bash(git -C * fetch -f*)"
+  "Bash(git -C * pull --force*)" "Bash(git -C * pull -f*)" "Bash(git -C * pull --rebase*)"
+  "Bash(git -C * rm -*)"
+  "Bash(git -C * tag -d*)" "Bash(git -C * tag --delete*)" "Bash(git -C * tag -f*)"
+  "Bash(git -C * worktree remove -*)"
+  "Bash(git -C * stash drop*)" "Bash(git -C * stash clear*)" "Bash(git -C * gc --prune*)"
+  "Bash(git -C * reflog expire*)" "Bash(git -C * reflog delete*)"
+  "Bash(git -C * config -*)" "Bash(git -C * config core.*)" "Bash(git -C * config alias.*)" "Bash(git -C * config hook.*)"
+  "Bash(git -C * config include*)" "Bash(git -C * config url.*)" "Bash(git -C * config set *)" "Bash(git -C * config unset *)"
+  "Bash(git -C * update-ref *)" "Bash(git -C * symbolic-ref *)" "Bash(git -C * filter-branch *)"
   "Bash(git --git-dir*)" "Bash(git --work-tree*)"
 )
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
