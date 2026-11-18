@@ -21,17 +21,46 @@
 // paths only, never quote, reply or file text). When a quote is unverified and quote-check has not blocked this agent
 // before, it exits 2 with the unverified locators, asking the researcher to correct each quote from its source or drop
 // it and list the claim under OPEN; the next stop always passes. Exits early on duplicate(); exits 0 on malformed input.
+// A refusal at a hand-back is marked in handback-refusals.jsonl with the report's key (report_key, the same key
+// handback-check.mjs puts on its capture). Without a tool_use_id the two hooks, which run side by side, cannot be tied
+// by id, so this hook first waits, at most CAPTURE_WAIT_MS, for that capture and writes the refusal after it (2.0.0, w6
+// item 3); when it does not come in time the refusal is still written, and journal.mjs matches it by key.
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
 import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
-import { duplicate, ensureStateDir, recordHandbackRefusal, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, HANDBACK_LOG, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const LOG = "quotes.jsonl";
 const MAX_TEXT_BYTES = 64 * 1024 * 1024; // larger sources are not read: their quotes count as unverifiable
 /** A page with fewer non-space characters than this has no text to check against (file-profile's scan threshold). */
 const EMPTY_PAGE_CHARS = 100;
+/** How long a refusal without tool_use_id waits for handback-check.mjs's capture of the same report. */
+const CAPTURE_WAIT_MS = 1000;
+
+/** handback-check.mjs reportKey, copied (a test project may hold this hook without that one): keep them equal. @param {string} message */
+const reportKey = (message) => createHash("sha256").update(message, "utf8").digest("hex").slice(0, 16);
+
+/**
+ * Wait, at most `ms`, for the capture of this report (same session, agent and report_key, written in the last 30 s).
+ * @param {string} sessionId @param {string} agentId @param {string} key @param {number} ms
+ */
+function awaitCapture(sessionId, agentId, key, ms) {
+  const end = Date.now() + ms;
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const now = Date.now();
+    try {
+      if (readJsonl(stateDir, HANDBACK_LOG, sessionId).some((c) => c && c.agent_id === agentId && (c.session_id ?? "") === sessionId && c.report_key === key && now - Date.parse(c.ts) <= 30_000)) return true;
+    } catch {
+      // unreadable: keep waiting
+    }
+    if (now >= end) return false;
+    Atomics.wait(cell, 0, 0, 25);
+  }
+}
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -234,7 +263,14 @@ try {
 }
 if (block && (recorded || !atHandback)) {
   // A refused hand-back is not delivered: mark it, so the stop never takes handback-check.mjs's capture of it (G-14).
-  if (atHandback && agentId) recordHandbackRefusal({ session_id: sessionId, agent_id: agentId, tool_use_id: typeof input.tool_use_id === "string" ? input.tool_use_id : null, gate: "quote" });
+  if (atHandback && agentId) {
+    const toolUseId = typeof input.tool_use_id === "string" && input.tool_use_id ? input.tool_use_id : null;
+    const key = reportKey(report);
+    // No id ties this refusal to its capture: write it after the capture (bounded wait), so it is matched in any order.
+    if (!toolUseId) awaitCapture(sessionId, agentId, key, CAPTURE_WAIT_MS);
+    const refusal = { session_id: sessionId, agent_id: agentId, tool_use_id: toolUseId, gate: "quote", report_key: key };
+    recordHandbackRefusal(refusal);
+  }
   const list = unverifiedLocators.map((l) => `- ${l}`).join("\n");
   try {
     process.stderr.write(
