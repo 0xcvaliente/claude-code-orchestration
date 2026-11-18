@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Offline validation of benchmark tasks (no model calls).
-//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N]   (N tasks side by side, default 4)
+//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N] [--deadline-s S]   (N tasks side by side, default 4)
+// --deadline-s (default 270, 0 = none): when the run has not finished by then, it prints the lines of the tasks that did finish,
+// names each task it did not finish or did not reach, and exits 1, instead of being killed silently by an outer timeout.
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
 // scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -116,12 +118,26 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const done = ids.map(() => false);
   let shown = 0;
   const flush = () => { while (shown < ids.length && done[shown]) { for (const l of outputs[shown]) console.log(l); shown++; } };
+  const started = ids.map(() => false);
+  const deadlineS = Number(arg("deadline-s", "270"));
+  const deadlineTimer = deadlineS > 0 ? setTimeout(() => {
+    for (let i = shown; i < ids.length; i++) if (done[i]) for (const l of outputs[i]) console.log(l);
+    const left = ids.filter((_, i) => !done[i]);
+    for (const [i, id] of ids.entries()) if (!done[i]) console.log(`NOT DONE ${id}: ${started[i] ? `still running after ${deadlineS} s` : "not reached"}`);
+    console.log(`\ndeadline of ${deadlineS} s reached: ${left.length} task(s) not validated (${left.join(", ")})`);
+    // the graders still running are this process group's children: end them too, so none is left behind
+    process.on("SIGTERM", () => process.exit(1));
+    try { process.kill(0, "SIGTERM"); } catch { /* no group to signal */ }
+    setTimeout(() => process.exit(1), 2000).unref();
+  }, deadlineS * 1000) : undefined;
   const counts = await pool(ids.map((id, i) => ({ id, i })), lanes, async ({ id, i }) => {
+    started[i] = true;
     const n = await validateTask(id, tasksDir, jobs, (line) => outputs[i].push(line));
     done[i] = true;
     flush();
     return n;
   });
+  clearTimeout(deadlineTimer);
   for (const n of counts) failures += n;
   console.log(failures ? `\n${failures} problem(s)` : `\nall ${ids.length} task(s) valid`);
   process.exit(failures ? 1 : 0);

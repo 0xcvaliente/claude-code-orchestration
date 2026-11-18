@@ -1,14 +1,25 @@
-r"""The Python 3.13 oracle results of the hidden cases whose result changed in Python 3.14.
+r"""Recorded oracle results that grade.py uses, on Python 3.14 or later, in place of the live oracle for eight cases.
 
 task.md grades against Python 3.13's standard library. grade.py re-runs itself under python3.13 when it finds
-one; when it runs under 3.14 or later instead, the oracle of these cases gives the 3.14 result, so their expected
-value is the 3.13 one below (one expected value per version, chosen by the check in `expected`). Generated from
-the oracle under CPython 3.13.18 and 3.14.4, which differ on exactly these cases:
-- fraction: Fraction formats a precision with a leading zero (`.05f`) since 3.14 (3.13: ValueError)
-- ipaddr: a scoped IPv6 address has no `exploded` or `reverse_pointer` since 3.14 (AddressValueError; 3.13: the scope kept)
-- jsonx: an unterminated string after an escape reports another position since 3.14 (3.13: the string's start)
-- regex: `\B` matches an empty string since 3.14 (3.13: no match)
-- urls: urljoin of a base with an empty netloc no longer adds `//` since 3.14 (3.13: `http:///h/`)
+one; when it runs under 3.14 or later instead, `expected` returns the value recorded below for a listed case.
+What each recorded value is, and what is established about it (no CPython 3.13 was available when this was
+last checked, on 2026-11-18, so none of the values was reproduced on 3.13 then):
+- fraction-098-format: ValueError for the three precision formats with a leading zero (`.05f`). CPython 3.14.4
+  formats the third one (`-1234.56700`), CPython 3.12.16 raises ValueError for all four inputs.
+- ipaddr-020-addr, ipaddr-021-addr: the scoped address keeps its scope in `exploded` and `reverse_pointer`.
+  CPython 3.14.4 and CPython 3.12.16 both give AddressValueError there instead; an earlier review measured
+  it on 3.13.5 and 3.14.4 and found that 3.13.5 also gives the 3.14 result. So the recorded value is not
+  what every 3.13 release gives.
+- jsonx-106-loads: an unterminated string reported at pos 0 (the string's start). CPython 3.14.4 and CPython
+  3.12.16 both report pos 2; an earlier review measured it on 3.13.5 and 3.14.4 and found that 3.13.5 also
+  gives the 3.14 result (pos 2).
+- regex-025-search, regex-188-fullmatch: no match (None). CPython 3.12.16 gives no match; CPython 3.14.4
+  matches the empty string (`\B` on an empty string).
+- urls-140-urljoin, urls-142-urljoin: `http:///h/` and `https:///k;p/g/h`. CPython 3.12.16 gives these values;
+  CPython 3.14.4 gives `http:/h/` and `https:/k;p/g/h`.
+Not listed, so graded by the live oracle on any version: wrap-100-fill, wrap-102-wrap and wrap-123-wrap,
+whose results an earlier review measured on 3.13.5 and 3.14.4 and found to differ between 3.13 patch
+releases; CPython 3.12.16 and CPython 3.14.4 also give different results for all three.
 """
 import sys
 

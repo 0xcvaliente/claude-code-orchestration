@@ -1,10 +1,12 @@
-r"""The Python 3.13 oracle results of the hidden cases whose result changed in Python 3.14.
+r"""Recorded oracle results that grade.py uses, on Python 3.14 or later, in place of the live oracle for two cases.
 
 task.md grades against Python 3.13's standard library. grade.py re-runs itself under python3.13 when it finds
-one; when it runs under 3.14 or later instead, the oracle of these cases gives the 3.14 result, so their expected
-value is the 3.13 one below (one expected value per version, chosen by the check in `expected`). Generated from
-the oracle under CPython 3.13.18 and 3.14.4, which differ on exactly these cases:
-- regex: `\B` matches an empty string since 3.14 (3.13: no match)
+one; when it runs under 3.14 or later instead, `expected` returns the value recorded below for a listed case.
+What each recorded value is, and what is established about it (no CPython 3.13 was available when this was
+last checked, on 2026-11-18, so neither value was reproduced on 3.13 then):
+- regex-025-search, regex-188-fullmatch: no match (None). CPython 3.12.16 gives no match; CPython 3.14.4
+  matches the empty string (`\B` on an empty string). An earlier review measured the k2 cases on 3.13.5 and
+  3.14.4 and did not name these two among the values 3.13.5 contradicts.
 """
 import sys
 
