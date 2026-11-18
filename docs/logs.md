@@ -26,14 +26,14 @@ The key is the project path with every byte that is not a letter or digit replac
 
 | File | Written by | One record per | Holds |
 |---|---|---|---|
-| `gates.jsonl` | `verify.sh`, `review-gate.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `handback-check.mjs`, `judge-hook.mjs` | gate decision | `gate` (`test`, `review`, `researcher`, `egress`, `handback`, `judge`), `decision`, `reason`, ids, counts. The researcher guard logs the first word of a refused command; the egress guard the host only; the native judge the command's first 200 characters. |
+| `gates.jsonl` | `verify.sh`, `review-gate.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `handback-check.mjs`, `judge-hook.mjs` | gate decision | `gate` (`test`, `review`, `researcher`, `egress`, `handback`, `judge`), `decision`, `reason`, ids, counts. The researcher guard logs the first word of a refused command; the egress guard the host only; the native judge the command's first 200 characters. Since 2.0.0 a test-gate record of a failed run also names what failed (`failed_count`, `failed_tests`, `failed_crash`, `output`), and one written by a gate that took over a stale suite lock carries `lock_takeover` ([gates.md, Test gate](gates.md#test-gate)). |
 | `plan-check.jsonl` | `plan-check.mjs` | implementer, fork or built-in launch | decision, reason, slice, FILES, DEPENDS, agent type, the run it was scoped to, give-ups and skips |
 | `journal-launches.jsonl` | `journal.mjs`, PostToolUse on `Agent\|Task` | worker launch | the launch record ([Journal](#journal)) |
 | `journal.jsonl` | `journal.mjs`, SubagentStop | implementer or reviewer stop | the stop record ([Journal](#journal)) |
 | `journal-pending.jsonl` | `journal.mjs` | foreground stop waiting for its launch | a stop's status, constraint answers and OPEN, until its launch record arrives |
 | `telemetry.jsonl` | `telemetry.mjs`, SubagentStart and SubagentStop | agent start or stop | [Telemetry](#telemetry) |
-| `handbacks.jsonl` | `handback-check.mjs` | hand-back | the parsed fields of a delivered reply ([Hand-back capture](#hand-back-capture)) |
-| `handback-refusals.jsonl` | `handback-check.mjs`, `quote-check.mjs` | refused hand-back | which hand-back was sent back |
+| `handbacks.jsonl` | `handback-check.mjs` | hand-back | the parsed fields of the handed-back reply, written before any check decides, with `tool_use_id` when the payload has one and, since 2.0.0, `report_key` ([Hand-back capture](#hand-back-capture)) |
+| `handback-refusals.jsonl` | `handback-check.mjs`, `quote-check.mjs`, `verify.sh` (the hand-back gate) | refused hand-back | session, agent, the refusing `gate` (`handback`, `quote` or `test`), `tool_use_id` when the payload has one, and from the report check and the quote check, since 2.0.0, `report_key` |
 | `quotes.jsonl` | `quote-check.mjs` | researcher stop or hand-back | `agent_id`, slice, counts (total, verified, unverified, unverifiable, blocked) and the paths of unverified quotes |
 | `reads.jsonl` | `read-log.mjs` | Read or WebFetch call | [Read log](#read-log) |
 | `reads-route.jsonl` | `plan-check.mjs` (read router) | routed researcher launch | tier, models, reason codes, counts, paths |
@@ -54,6 +54,9 @@ Other files in the state dir:
 - `skill-catalog.json`: the cached list of installed skills.
 - `turn-warnings/`: one marker per worker that got the turn warning.
 - `test-gate.lock`: the test gate's suite lock, while a gate holds it ([gates.md, Time budget and suite lock](gates.md#time-budget-and-suite-lock)).
+- `test-gate.lock.run` (2.0.0): the lock's companion file, two lines: the holder's lock token and the process group of the command it runs under the lock. `verify.sh` writes it at the start of each such command (`run_limited`), reads it when it judges whether a lock whose holder is gone is stale (`lock_stale`: the lock stands while a member of that group is left), and removes it on release while it still holds the hook's own token (`release_lock`).
+- `test-gate-cache.json`: the hand-back gate's stored outcomes, which the SubagentStop gate right after may reuse ([gates.md, Hand-back gate](gates.md#hand-back-gate)).
+- `test-output/` (2.0.0): the last 64 KiB of the output of each failed test run, named in its record's `output`; the newest 10 files are kept, the folder 0700 and each file 0600.
 - `report.html`: the run report, when `npm run report` writes it here.
 
 ## Journal
@@ -61,7 +64,8 @@ Other files in the state dir:
 `journal.mjs` writes the run's [journal](glossary.md#j): parsed fields only, never brief or reply text. The gates fold it into runs ([brief-grammar.md, Log records](brief-grammar.md#log-records) has the exact fields).
 
 - **Launch record** (`journal-launches.jsonl`, at PostToolUse on `Agent|Task`), for every launch of an implementer, reviewer, researcher or integrator: `agent_id`, bare `agent_type`, `slice` (a brief starting with PLAN REVIEW is slice `plan`), the parsed header, the reviewer's model, `isPlanReview`, `replan`, and for a PLAN REVIEW brief the parsed plan.
-- **Stop record** (`journal.jsonl`, at SubagentStop of an implementer or reviewer): `slice`, `status`, the constraint answers, OPEN and `run`. Also `draft`, `skills_used` and `skills_skipped` when the reply has those lines.
+- **Stop record** (`journal.jsonl`, at SubagentStop of an implementer or reviewer): `slice`, `status`, the constraint answers, OPEN and `run`. Also `draft`, `skills_used` and `skills_skipped` when the reply has those lines, and `after_handback` (the `tool_use_id` of the hand-back the stop follows) when there is one.
+- **A refused last hand-back** (2.0.0). When the agent's latest hand-back since its previous stop record was refused and the stop's own last message has no STATUS line, no report was delivered: the stop record has `status` null, `report: "handback_refused"` and `refused_by`, the check that refused it (`handback`, `quote` or `test`), and takes nothing from the refused report, the transcript or an older report ([Hand-back capture](#hand-back-capture)).
 - **`continues: true`** marks a second stop record of one reply: written when `stop_hook_active` is true and the agent already has a stop record. The fold counts that review once.
 - **Order.** A foreground agent stops before its PostToolUse, so a stop with no launch yet waits in `journal-pending.jsonl` and is written when its launch arrives.
 - **Headless runs** keep no subagent transcript, so the slice is taken from the launch record with the same `agent_id`.
@@ -109,9 +113,11 @@ In auto mode a worker delivers its reply through the `SubagentHandback` tool. Th
 - for any agent with an agent id, before it reads its own switch, so with the [report check](gates.md#report-check) off too;
 - the log is never cleared.
 
-At SubagentStop `journal.mjs` and `telemetry.mjs` take the latest capture newer than their own previous stop record of that agent (`handbackFor`), else `last_assistant_message` and the transcript.
+Each capture carries `report_key` (2.0.0): the first 16 hex digits of the report's SHA-256, never report text. The report check and the quote check compute it alike and put it on their refusals too.
 
-**Refused captures are skipped.** A hand-back the report check or the quote check sent back is marked in `handback-refusals.jsonl`. `handbackFor` skips it: matched by `tool_use_id` in either write order, or, without an id, the latest capture written before the refusal. So a worker that is sent back and then stops with a plain text reply is recorded with that text reply, not the one it never delivered.
+At SubagentStop `telemetry.mjs` takes the latest capture that no refusal marks and that is newer than its own previous stop record of that agent (`handbackFor`), else `last_assistant_message` and the transcript. `journal.mjs` (2.0.0, `handbackState`) looks at the latest capture newer than its previous stop record: it takes that capture when no refusal marks it; when one does, it takes a text reply with a STATUS line from the stop's last message, and otherwise writes the refused record ([Journal](#journal)).
+
+**Refused captures are skipped.** A hand-back the report check, the quote check or the hand-back gate sent back is marked in `handback-refusals.jsonl`. A refusal marks the capture with the same `tool_use_id`, in either write order. Without an id it marks the capture with the same `report_key` nearest in time (written before or after the refusal; the quote check also waits up to 1 s for that capture before it writes its refusal), and a refusal with neither marks the agent's latest capture written at or before it (`deliverableCaptures` in `state.mjs`, `handbackState` in `journal.mjs`). So a worker that is sent back and then stops with a plain text reply is recorded with that text reply, not the one it never delivered.
 
 ## Read log
 
@@ -185,5 +191,5 @@ A crashed run is logged with its wall time and the turns seen.
 
 - Headless runs keep no subagent transcripts by default, so telemetry's token, turn and model fields are empty there unless `ORCH_SESSION_PERSISTENCE=1` is set. The cost of setting it is one transcript per session under `~/.claude/projects/`, the triage call's included.
 - A worker that stops at its turn limit fires no SubagentStop, so `max_turns_hit` cannot see it. The report lists agents that started and never stopped instead.
-- A quote-check refusal without a `tool_use_id` in its payload, that finishes before `handback-check.mjs` writes its capture, is not tied to that capture.
+- A refusal without a `tool_use_id` is tied to its capture by `report_key` and time, not by identity: two hand-backs of one agent with the same report text have one key, and the refusal marks the one nearest in time. A refusal the hand-back gate writes without an id carries no `report_key` and marks the agent's latest capture written at or before it.
 - `telemetry.jsonl` keeps clipped payload strings, the worker's last message included, so it can hold up to 300 characters of a reply.

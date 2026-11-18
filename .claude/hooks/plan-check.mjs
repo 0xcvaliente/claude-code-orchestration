@@ -44,7 +44,7 @@
 // the orchestrator holds a report that says pass. For a launch of this plugin's reviewer (bare or orchestration:; never
 // a built-in, fork or another plugin's agent) whose brief names SLICE and is not a PLAN REVIEW, the slice's latest
 // implementer is read the way the review gate reads it (run.mjs implementerTestStates): a test-gate block for failed
-// tests (tests_failed, or no reason; never a bugfix_ reason) later than its latest stop, with no start since, refuses
+// tests (tests_failed, or no reason; never a bugfix_ reason) that stands for its latest stop, with no start since, refuses
 // the launch with tests_failed_after_report, at most twice per slice, agent and block, then lets it through as
 // tests_failed_after_report_gave_up; a stop with no test-gate record after it yet appends one line to the brief (the
 // gate has not reported; the reviewer must not rest a pass on the tests) through the allow with updatedInput below.
@@ -124,7 +124,7 @@
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
 import { execFileSync, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -254,8 +254,11 @@ function holdLog(rec) {
 /**
  * The reviewer hold for a launch of our reviewer whose brief names `slice`. The slice's latest implementer (run.mjs
  * latestImplementerOf, over implementerTestStates, the review gate's own reading of the logs):
- *   - has a test-gate block for failed tests (tests_failed, or a record with no reason; never a bugfix_ reason) later
- *     than its latest stop, and no start since the block: refused with tests_failed_after_report (exit 2), twice per
+ *   - has a test-gate block for failed tests (tests_failed, or a record with no reason; never a bugfix_ reason) that
+ *     stands for its latest stop (run.mjs stopGateOf pairs by hand-back id: a record belongs to a stop for certain only
+ *     when both carry the same hand-back id; otherwise any failed-tests block since the agent's latest start holds the
+ *     review; a pass stands only when it is the only candidate; anything else is pending), and no start since the
+ *     block: refused with tests_failed_after_report (exit 2), twice per
  *     slice, agent and block, then let through and logged as tests_failed_after_report_gave_up;
  *   - stopped, and the test gate has logged nothing for that stop yet: the returned note (test_gate_pending) is appended;
  *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an
@@ -825,7 +828,9 @@ const a = JSON.parse(s); process.stdout.write(JSON.stringify(profileSources(a.li
       ...rows,
     ].join("\n");
   }
-  const hardPages = converted.reduce((/** @type {number} */ n, /** @type {any} */ f) => n + (Array.isArray(f.hardPages) ? f.hardPages.length : 0), 0);
+  // Counted over every profiled file, as the pdf_hard_pages reason code is (w3 item 2): a scanned PDF has hard pages but
+  // no conversion, and a count over converted files alone logged hard_pages: 0 next to that code.
+  const hardPages = r.files.reduce((/** @type {number} */ n, /** @type {any} */ f) => n + (Array.isArray(f.hardPages) ? f.hardPages.length : 0), 0);
   const changed = raised || !!note;
   log({
     decision: changed ? "route" : "keep",
@@ -1100,9 +1105,10 @@ const caseInsensitive = (() => {
  * its target are one name; a dangling link or a path not on disk yet stays as written), then case-folded on a
  * case-insensitive file system. A glob's pattern part is never resolved here; names() adds the symlinks its first
  * wildcard segment matches. Never throws: on any error, the entry.
- * Out of reach (other names for one file this check does not see), with link -> src beside src/a.ts: a symlink
- * reached only through a `**` segment (the entry `**` then link/a.ts) or through a wildcard segment after the first
- * (t*, then l*, then a.ts); a hard link (h.ts); two Unicode normal forms of one name on a file system that folds them.
+ * file_overlap also reads deep() (w3 item 4): a symlink behind `**` or a later wildcard, a hard link and two Unicode
+ * normal forms of one name. not_in_plan reads canon() and names() only. Still out of reach: a link or hard link made
+ * after the launch, a hard link whose other name lies outside every entry's walk, and, in not_in_plan, every name
+ * deep() adds (a launch naming such a name is refused there, as before).
  * @param {string} p
  */
 const canon = (p) => {
@@ -1200,6 +1206,124 @@ const names = (p) => {
   return out;
 };
 names.memo = new Map();
+/** The NFC form of a name (w3 item 4): two Unicode normal forms of one name are one entry in file_overlap. @param {string} s */
+const nfc = (s) => {
+  try {
+    return s.normalize("NFC");
+  } catch {
+    return s;
+  }
+};
+// w3 item 4: what file_overlap reads on disk past names() (one budget per launch, counted in lstat and listed names).
+const DEEP_BUDGET = 100000;
+let deepLeft = DEEP_BUDGET;
+/**
+ * Every name of a normalized entry for file_overlap (w3 item 4): names(), plus what the file system says the entry
+ * reaches. The entry's segments (a plain entry that may be a folder with `**` after it) are walked from `/` on disk:
+ * a symlink met at any segment (behind `**`, behind a later wildcard, at a literal after a wildcard, or inside a folder
+ * entry) adds its real path followed by the rest of the pattern (a symlink to a file, its real path), and the walk goes
+ * on in the target (each folder and segment once, so a loop ends); every regular file the entry matches with more than
+ * one hard link adds its device and inode to `ids`. Every name is also added in NFC. null when it cannot be decided:
+ * over the budget, more than ALIAS_CAP * 4 names, a folder that cannot be listed (other than ENOENT or ENOTDIR), or any
+ * error; the caller treats that as an overlap. not_in_plan never reads this: it covers with names() only, as before.
+ * @param {string} p @returns {{ names: string[], ids: Set<string> } | null}
+ */
+const deep = (p) => {
+  /** @type {Map<string, { names: string[], ids: Set<string> } | null>} */
+  const memo = deep.memo;
+  if (memo.has(p)) return memo.get(p) ?? null;
+  /** @type {{ names: string[], ids: Set<string> } | null} */
+  let result = null;
+  try {
+    const base = names(p);
+    if (base) {
+      const out = new Set(base);
+      /** @type {Set<string>} */
+      const ids = new Set();
+      let undecided = false;
+      if (p.startsWith("/")) {
+        const segs = segsOf(p);
+        const seen = new Set();
+        const fold = (/** @type {string} */ s) => nfc(caseInsensitive ? s.toLowerCase() : s);
+        /** @param {string} real @param {number} j */
+        const alias = (real, j) => {
+          const rest = segs.slice(j);
+          out.add(canon(rest.length ? `${real === "/" ? "" : real}/${rest.join("/")}` : real));
+          if (out.size > ALIAS_CAP * 4) undecided = true;
+        };
+        /** @param {string} at a path that exists @param {number} j the segment after it @returns {void} */
+        const reach = (at, j) => {
+          if (undecided || --deepLeft < 0) return void (undecided = true);
+          /** @type {import("node:fs").Stats} */
+          let l;
+          try {
+            l = lstatSync(at);
+          } catch {
+            return;
+          }
+          if (l.isSymbolicLink()) {
+            let real;
+            try {
+              real = realpathSync(at);
+            } catch {
+              return; // a dangling link names nothing
+            }
+            alias(real, j);
+            return walk(real, j);
+          }
+          walk(at, j);
+        };
+        /** @param {string} at @param {number} i @returns {void} */
+        const walk = (at, i) => {
+          const key = `${at}\0${i}`;
+          if (undecided || seen.has(key)) return;
+          seen.add(key);
+          if (i === segs.length) {
+            try {
+              const st = statSync(at);
+              if (st.isFile() && st.nlink > 1) ids.add(`${st.dev}:${st.ino}`);
+            } catch {
+              // gone: nothing to identify
+            }
+            return;
+          }
+          const seg = segs[i] ?? "";
+          const child = (/** @type {string} */ name) => (at === "/" ? `/${name}` : `${at}/${name}`);
+          if (!isGlob(seg)) return reach(child(seg), i + 1);
+          /** @type {string[]} */
+          let list = [];
+          try {
+            list = readdirSync(at);
+          } catch (err) {
+            const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+            if (code !== "ENOENT" && code !== "ENOTDIR") undecided = true;
+            if (seg === "**") walk(at, i + 1);
+            return;
+          }
+          deepLeft -= list.length;
+          if (deepLeft < 0) return void (undecided = true);
+          if (seg === "**") {
+            walk(at, i + 1); // no folder
+            for (const name of list) reach(child(name), i); // one more folder, `**` still to match
+            return;
+          }
+          const re = segRe(fold(seg));
+          for (const name of list) if (re.test(fold(name))) reach(child(name), i + 1);
+        };
+        walk("/", 0);
+      }
+      if (!undecided) {
+        for (const n of [...out]) out.add(nfc(n));
+        result = { names: [...out], ids };
+      }
+    }
+  } catch {
+    result = null;
+  }
+  memo.set(p, result);
+  return result;
+};
+deep.memo = new Map();
 /** Path segments; a plain entry that may be a folder gets a trailing `**` (what is under it). @param {string} p */
 const segsOf = (p, under = !isGlob(p) && !fileLike(p)) => [...p.split("/").filter(Boolean), ...(under ? ["**"] : [])];
 /** One segment pattern as a regular expression. @param {string} g */
@@ -1373,11 +1497,17 @@ function planOrder(launches, slice, depends) {
 const order = planOrder(launched, slice, depends);
 /** FILES of one launch record, as written. @param {any} e @returns {string[]} */
 const ownedBy = (e) => (Array.isArray(e.files) ? e.files : []).filter((/** @type {unknown} */ g) => typeof g === "string");
-/** Some path could match both entries; an entry whose names cannot be decided overlaps. @param {string} a @param {string} b */
+/**
+ * Some path could match both entries, or both reach one file with several hard links (w3 item 4: deep()); an entry
+ * whose names cannot be decided overlaps. @param {string} a @param {string} b
+ */
 const clash = (a, b) => {
-  const x = names(normalizeFiles([a], dir)[0] ?? a);
-  const y = names(normalizeFiles([b], dir)[0] ?? b);
-  return !x || !y || x.some((n) => y.some((g) => overlaps(n, g)));
+  const x = deep(normalizeFiles([a], dir)[0] ?? a);
+  const y = deep(normalizeFiles([b], dir)[0] ?? b);
+  if (!x || !y) return true;
+  if (x.names.some((n) => y.names.some((g) => overlaps(n, g)))) return true;
+  for (const id of x.ids) if (y.ids.has(id)) return true;
+  return false;
 };
 
 const clashes = [];

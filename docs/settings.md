@@ -11,9 +11,9 @@ A [switch](glossary.md#s) is an environment variable named `ORCH_*`. Switches ar
 3. The hooks copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset (`OPTION_KEYS` and `bridgeOptions` in `.claude/hooks/state.mjs`; `verify.sh` keeps the same list). So an environment variable wins over `/config`.
 4. The project copy of the hooks (registered in `.claude/settings.json`) reads only the environment.
 
-The plugin ships no `settings.json` since 1.6.1 (it held only `subagentStatusLine`; the worker rows now come from the mod, [dashboard.md](dashboard.md#the-row-of-each-worker)).
+The plugin ships no `settings.json` since 1.6.1 (it held only `subagentStatusLine`; the mod now rewrites the worker rows, [dashboard.md](dashboard.md#the-row-of-each-worker); which component drew the rows in the live capture is not established, [limits.md](limits.md), K2).
 
-The node hooks read `off`, `on`, `always` and `native` in any case, with spaces trimmed. `verify.sh` compares `ORCH_GATE_ISOLATED`, `ORCH_BASELINE` and `ORCH_BUGFIX_CHECK` exactly, in lower case. `ORCH_ALLOW_BUILTINS` and `ORCH_ALLOW_HAIKU` act only on `1`.
+The node hooks read `off`, `on`, `always` and `native` in any case, with spaces trimmed. `verify.sh` compares `ORCH_GATE_ISOLATED`, `ORCH_BASELINE`, `ORCH_BUGFIX_CHECK` and `ORCH_HANDBACK_GATE` exactly, in lower case. `ORCH_ALLOW_BUILTINS` and `ORCH_ALLOW_HAIKU` act only on `1`.
 
 ## Plugin settings
 
@@ -61,6 +61,7 @@ These have no plugin setting: set them in the environment.
 
 | Variable | Read by | Default | Effect |
 |---|---|---|---|
+| `ORCH_HANDBACK_GATE` | `verify.sh --handback` | on | `off` turns off the test gate's run at an implementer's hand-back ([gates.md, Hand-back gate](gates.md#hand-back-gate)), logged as `handback_gate_off`; the SubagentStop gate still runs. Compared exactly, in lower case. |
 | `ORCH_SOURCES_NOTE` | `plan-check.mjs` | on | `off` drops the coverage note added to our researcher's launch when its `SOURCES:` names two or more local files. |
 | `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | 15000 | The read router's profiling budget, in ms, at most 40000 (under the hook's 60 s timeout). |
 | `ORCH_TURN_WARNING` | `turn-budget.mjs` | on | `off` turns off the [turn warning](gates.md#turn-warning). |

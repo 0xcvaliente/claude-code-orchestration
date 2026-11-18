@@ -40,6 +40,9 @@ if sys.version_info[:2] != (3, 13) and __name__ == "__main__" and not os.environ
         os.execv(_py, [_py, *sys.argv])
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+_spec313 = importlib.util.spec_from_file_location("k_py313", os.path.join(HERE, "py313.py"))
+_py313 = importlib.util.module_from_spec(_spec313)
+_spec313.loader.exec_module(_py313)  # the 3.13 results of the cases 3.14 changed
 RUNNER = os.path.join(HERE, "runner.py")
 CASE_LIMIT_S = 2.0
 HARD_GRACE_S = 3.0
@@ -85,7 +88,7 @@ def oracle_results(ad):
     out = []
     for c in ad["cases"]:
         try:
-            r = _jsonable(ad["mod"].run_oracle(c))
+            r = _py313.expected(c.get("id"), _jsonable(ad["mod"].run_oracle(c)))
         except Exception as e:  # noqa: BLE001
             r = {"oracle_crash": f"{type(e).__name__}: {e}"}
         out.append(r)

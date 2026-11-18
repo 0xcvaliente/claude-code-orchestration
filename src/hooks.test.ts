@@ -1,7 +1,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -230,7 +230,10 @@ test("plugin hooks keep state in a per-user dir keyed by the project path, never
   assert.equal(existsSync(join(dir, ".claude")), false, "nothing is written into the project");
   const keys = readdirSync(join(data, "state"));
   assert.equal(keys.length, 1, `one dir for all three hooks: ${keys.join(", ")}`);
-  assert.deepEqual(readdirSync(join(data, "state", keys[0] ?? "")).sort(), ["gates.jsonl", "telemetry.jsonl"]);
+  // test-output/ keeps the tail of the failed run's output (the test gate's failure record names the file); it lives
+  // in the per-user state dir like the logs, never in the project.
+  assert.deepEqual(readdirSync(join(data, "state", keys[0] ?? "")).sort(), ["gates.jsonl", "telemetry.jsonl", "test-output"]);
+  assert.equal(readdirSync(join(data, "state", keys[0] ?? "", "test-output")).filter((f) => f.endsWith(".txt")).length, 1, "one kept output file");
   assert.match(readFileSync(join(data, "state", keys[0] ?? "", "gates.jsonl"), "utf8"), /"gate":"test".*\n.*"gate":"review"/);
 
   // Without CLAUDE_PLUGIN_DATA (older Claude Code) the state goes under ~/.claude/orchestration.
@@ -238,6 +241,28 @@ test("plugin hooks keep state in a per-user dir keyed by the project path, never
   pluginHook("telemetry.mjs", dir, "", stopEventFor(dir, "orchestration:implementer"), { HOME: home });
   pluginHook("verify.sh", dir, "", stopEventFor(dir, "orchestration:implementer"), { HOME: home, ORCH_TEST_CMD: "exit 0" });
   assert.deepEqual(readdirSync(join(home, ".claude", "orchestration", "state", keys[0] ?? "")).sort(), ["gates.jsonl", "telemetry.jsonl"]);
+});
+
+test("the test gate keeps failed-run output private: test-output/ is 0700 and each file 0600, also after wider modes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-mode-"));
+  const data = mkdtempSync(join(tmpdir(), "orch-data-"));
+  const fail = () => assert.equal(pluginHook("verify.sh", dir, data, stopEventFor(dir, "orchestration:implementer"), { ORCH_TEST_CMD: "echo secret-token; exit 1" }).status, 2);
+  const mode = (p: string) => statSync(p).mode & 0o777;
+  fail();
+  const [key] = readdirSync(join(data, "state"));
+  const out = join(data, "state", key ?? "", "test-output");
+  const files = () => readdirSync(out).filter((f) => f.endsWith(".txt"));
+  assert.equal(mode(out), 0o700, "a new folder is 0700");
+  assert.deepEqual(files().map((f) => mode(join(out, f))), [0o600], "a new file is 0600");
+  // A folder and a file left with wider modes (an older version, a person's umask) are tightened at the next run.
+  chmodSync(out, 0o755);
+  for (const f of files()) chmodSync(join(out, f), 0o644);
+  writeFileSync(join(out, "20000101T000000000Z-old.txt"), "older output\n", { mode: 0o666 });
+  chmodSync(join(out, "20000101T000000000Z-old.txt"), 0o666);
+  fail();
+  assert.equal(mode(out), 0o700, "an existing folder is tightened to 0700");
+  assert.equal(files().length, 3);
+  for (const f of files()) assert.equal(mode(join(out, f)), 0o600, `${f} is 0600`);
 });
 
 test("project hooks write a .gitignore into .claude/state on first write", () => {

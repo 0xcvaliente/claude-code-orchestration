@@ -36,7 +36,7 @@
 // gate record (counts only, may be empty), then the message for the agent. Any error prints nothing and exits 0.
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -256,6 +256,25 @@ export function stoppedEarly(text) {
  */
 export const failFastCmd = (cmd) => /\bunittest\b/.test(cmd) && /(?:^|\s)(?:--failfast|-[A-Za-z]*f[A-Za-z]*)(?=\s|;|&|\||$)/.test(cmd);
 
+/**
+ * A unittest run whose failfast is set inside a script the command runs (unittest.main(failfast=True),
+ * TextTestRunner(failfast=True), a config file): the command does not show it and the output carries no mark of it, so
+ * for output in unittest's form (its "Ran N tests in" line) the tree is searched: any Python, cfg, toml or ini file,
+ * tracked or untracked, that holds the word failfast counts as a failfast run. A search that cannot run counts too
+ * (fail closed). Not seen: a "-f" put into argv by a script.
+ * @param {string} cwd @param {unknown} output
+ */
+export function failFastInTree(cwd, output) {
+  if (typeof output !== "string" || !/^Ran \d+ tests? in /m.test(output)) return false;
+  const r = spawnSync("git", ["grep", "-I", "-l", "-w", "--untracked", "-e", "failfast", "--", "*.py", "*.cfg", "*.toml", "*.ini"], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    timeout: 30000,
+  });
+  return r.status !== 1; // 0: found; 1: none; anything else: the search failed
+}
+
 // Test files by path: under a test folder, or named like a test in the common runners.
 /** @param {string} path */
 export function isTestFile(path) {
@@ -273,12 +292,19 @@ export function isTestFile(path) {
 
 /**
  * The failure's file or package is one of the copied test files (or, for a go package, a copied file's folder).
- * @param {string} name @param {string[]} files
+ * @param {string} name @param {string[]} files @param {Record<string, string>} [pkgDirs] cargo package name to its folder
  */
-export function inFiles(name, files) {
+export function inFiles(name, files, pkgDirs = {}) {
   const k = name.indexOf("::");
   if (k <= 0) return false;
   const q = name.slice(0, k).replace(/\\/g, "/");
+  // cargo: "<package>/tests/x.rs" of a workspace member whose folder is not named after its package (cargoPackageDirs).
+  const first = q.split("/")[0] ?? "";
+  if (/\.rs$/.test(q) && q.includes("/") && Object.hasOwn(pkgDirs, first)) {
+    const dir = pkgDirs[first] ?? "";
+    const mapped = dir ? `${dir}/${q.slice(first.length + 1)}` : q.slice(first.length + 1);
+    if (files.includes(mapped)) return true;
+  }
   return files.some((t) => {
     if (q === t || q.endsWith(`/${t}`)) return true;
     // unittest: a module path relative to discover's start folder; cargo: a workspace member's "<package>/tests/x.rs".
@@ -286,6 +312,49 @@ export function inFiles(name, files) {
     const d = dirname(t);
     return d !== "." && /\.go$/.test(t) && (q === d || q.endsWith(`/${d}`));
   });
+}
+
+/**
+ * For the copied cargo test files (`.rs`), each one's package name (the [package] name of the nearest Cargo.toml in
+ * its folder or above it, within `top`) mapped to that Cargo.toml's folder, root-relative ("" for the root). cargo's
+ * quiet rerun hint names a workspace member by its package (`-p <package>`), which need not be its folder's name.
+ * A Cargo.toml that cannot be read or names no package adds nothing.
+ * @param {string} top @param {string[]} files @returns {Record<string, string>}
+ */
+export function cargoPackageDirs(top, files) {
+  /** @type {Record<string, string>} */
+  const map = Object.create(null); // a package named __proto__ is a key like any other
+  /** @type {Map<string, string>} folder -> its Cargo.toml's text ("" for none) */
+  const tomls = new Map();
+  /** @param {string} rel */
+  const toml = (rel) => {
+    if (!tomls.has(rel)) {
+      try {
+        tomls.set(rel, readFileSync(join(top, rel, "Cargo.toml"), "utf8"));
+      } catch {
+        tomls.set(rel, "");
+      }
+    }
+    return tomls.get(rel) ?? "";
+  };
+  for (const f of files) {
+    if (!/\.rs$/.test(f)) continue;
+    let d = dirname(f.replace(/\\/g, "/"));
+    for (let depth = 0; depth < 64; depth += 1) {
+      const rel = d === "." ? "" : d;
+      const text = toml(rel);
+      if (text) {
+        // The nearest Cargo.toml decides, whether it names a package or not.
+        const pkg = /^[ \t]*\[package\][ \t]*\r?$([\s\S]*?)(?=^[ \t]*\[|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+        const name = /^[ \t]*name[ \t]*=[ \t]*["']([^"'\r\n]+)["']/m.exec(pkg)?.[1];
+        if (name && !Object.hasOwn(map, name)) map[name] = rel;
+        break;
+      }
+      if (!rel) break;
+      d = dirname(d);
+    }
+  }
+  return map;
 }
 
 /**
@@ -555,7 +624,7 @@ export async function baseline({ cwd, cmd, isolated, state, output, mode = "info
   if (quick.names.length === 0) return null; // nothing qualified to compare
   const allow = mode === "allow";
   // unqualified names, a crash, a cargo stop at a failing target or a unittest failfast command: keep the block
-  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd))) return null;
+  if (allow && (!complete(quick) || stoppedEarly(output) || failFastCmd(cmd) || failFastInTree(cwd, output))) return null;
   const info = baseInfo(cwd, isolated);
   if (!info || !info.changed) return null; // a tree with no changes against its base has nothing to compare
   const cur = parseFailures(output, info.top);
@@ -715,7 +784,8 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
   }
   if (withTests.timedOut) return unusable({ cause: "base_timeout" }, "with the changed test files ");
   const before = new Set(plain.names);
-  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests) && !fileLevel(n));
+  const pkgDirs = cargoPackageDirs(info.top, tests);
+  const fresh = withTests.failures.names.filter((n) => !before.has(n) && inFiles(n, tests, pkgDirs) && !fileLevel(n));
   const extra = `"test_files":${tests.length},"new_failing":${fresh.length}`;
   if (fresh.length > 0) return { decision: "allow", reason: "bugfix_verified", extra, message: "" };
   return block(
@@ -726,7 +796,127 @@ export async function bugfix({ cwd, cmd, isolated, state, event }) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// What failed (2.0.0): the fields a failed test run's gate records carry, and the tail of its output kept in the
+// state folder, so that a block can be explained after verify.sh has removed its temp folder.
+// ---------------------------------------------------------------------------------------------------------------
+/** Output files kept in <state>/test-output (the newest by name, which starts with the time). */
+export const KEEP_OUTPUTS = 10;
+/** Each kept file holds at most the last this many bytes of the run's output, from a line start. */
+export const MAX_OUTPUT_BYTES = 64 * 1024;
+/** Failing test names in a record, each cut to MAX_NAME_CHARS characters. */
+export const MAX_NAMES = 10;
+export const MAX_NAME_CHARS = 200;
+export const OUTPUT_DIR = "test-output";
+const OUTPUT_RE = /^\d{8}T\d{9}Z-[A-Za-z0-9_.-]*\.txt$/;
+
+/**
+ * The record fields for a failed run's output: failed_count (the failing tests the runner's output names, qualified
+ * or not: parseFailures, so node:test, tsx, jest, vitest, pytest, unittest, go and cargo; 0 when none could be read),
+ * failed_tests (at most MAX_NAMES of them, qualified ones first, each at most MAX_NAME_CHARS characters; left out when
+ * none), failed_crash 1 when a runner-level failure shows (a crash marker: parseFailures `crash`). Names are only what
+ * the output prints; a line no pattern reads gives no name, never a guessed one.
+ * @param {unknown} output @returns {{ failed_count: number, failed_tests?: string[], failed_crash?: 1 }}
+ */
+export function failureFields(output) {
+  const f = parseFailures(output);
+  const all = [...f.names, ...f.unqualified];
+  /** @type {{ failed_count: number, failed_tests?: string[], failed_crash?: 1 }} */
+  const res = { failed_count: all.length };
+  // eslint-disable-next-line no-control-regex
+  const cut = (/** @type {string} */ n) => (n.length > MAX_NAME_CHARS ? `${n.slice(0, MAX_NAME_CHARS - 3)}...` : n).replace(/[\u0000-\u001f\u007f]/g, " ");
+  if (all.length) res.failed_tests = all.slice(0, MAX_NAMES).map(cut);
+  if (f.crash) res.failed_crash = 1;
+  return res;
+}
+
+/** The last `max` bytes of `text`, from the first line start inside them (the whole text when it fits). @param {string} text @param {number} [max] */
+export function outputTail(text, max = MAX_OUTPUT_BYTES) {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return text;
+  const tail = buf.subarray(buf.length - max);
+  const nl = tail.indexOf(10);
+  return (nl >= 0 && nl < tail.length - 1 ? tail.subarray(nl + 1) : tail).toString("utf8");
+}
+
+/**
+ * Keep the tail of a run's output as <state>/test-output/<time>-<tag>.txt, written whole to a hidden temporary file
+ * in the same folder and renamed into place (a crash leaves no half file under the kept name), then remove all but
+ * the newest KEEP_OUTPUTS files and temporary files older than 10 minutes. Returns the path relative to the state
+ * folder, or "" when nothing could be written.
+ * @param {string} state @param {string} tag @param {string} output @param {number} [now]
+ */
+export function keepOutput(state, tag, output, now = Date.now()) {
+  if (!state) return "";
+  const dir = join(state, OUTPUT_DIR);
+  const stamp = new Date(now).toISOString().replace(/[-:.]/g, "");
+  const name = `${stamp}-${String(tag).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80)}.txt`;
+  if (!OUTPUT_RE.test(name)) return "";
+  const tmp = join(dir, `.${name}.${process.pid}.tmp`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(tmp, outputTail(output));
+    renameSync(tmp, join(dir, name));
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // nothing to remove
+    }
+    return "";
+  }
+  try {
+    const entries = readdirSync(dir);
+    const kept = entries.filter((e) => OUTPUT_RE.test(e)).sort();
+    for (const old of kept.slice(0, Math.max(0, kept.length - KEEP_OUTPUTS))) rmSync(join(dir, old), { force: true });
+    for (const t of entries.filter((e) => e.startsWith(".") && e.endsWith(".tmp"))) {
+      const p = join(dir, t);
+      if (now - statSync(p).mtimeMs > 10 * 60 * 1000) rmSync(p, { force: true });
+    }
+  } catch {
+    // pruning is best effort; the file is written
+  }
+  return `${OUTPUT_DIR}/${name}`;
+}
+
+/**
+ * The extra JSON fields verify.sh adds to a failed run's records: failureFields plus "output", the kept file
+ * (keepOutput; left out when it could not be written). One line, a JSON object's members without the braces.
+ * @param {string} state @param {string} tag @param {string} output
+ */
+export function failureExtra(state, tag, output) {
+  const file = keepOutput(state, tag, output);
+  const obj = { ...failureFields(output), ...(file ? { output: file } : {}) };
+  return JSON.stringify(obj).slice(1, -1);
+}
+
+/**
+ * The same fields read back from a stored line (the result cache keeps them with a fail or a timeout): only the known
+ * members, re-checked and written again, so a damaged or foreign line gives "" (no fields), never other JSON.
+ * @param {unknown} line @returns {string}
+ */
+export function cleanFailureExtra(line) {
+  if (typeof line !== "string" || !line) return "";
+  try {
+    const o = JSON.parse(`{${line}}`);
+    /** @type {Record<string, unknown>} */
+    const res = {};
+    if (!(Number.isInteger(o.failed_count) && o.failed_count >= 0)) return "";
+    res.failed_count = o.failed_count;
+    if (Array.isArray(o.failed_tests)) {
+      const names = o.failed_tests.filter((/** @type {unknown} */ n) => typeof n === "string").slice(0, MAX_NAMES).map((/** @type {string} */ n) => n.slice(0, MAX_NAME_CHARS));
+      if (names.length) res.failed_tests = names;
+    }
+    if (o.failed_crash === 1) res.failed_crash = 1;
+    if (typeof o.output === "string" && /^test-output\/[A-Za-z0-9_.-]+\.txt$/.test(o.output)) res.output = o.output;
+    return JSON.stringify(res).slice(1, -1);
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // CLI: node bugfix-check.mjs <baseline|bugfix> --cmd <cmd> --state <dir> [--isolated 1]
+//      node bugfix-check.mjs failures --state <dir> --tag <tag>   (stdin: the run's output) prints failureExtra
 // ---------------------------------------------------------------------------------------------------------------
 /** @param {string[]} argv */
 function flags(argv) {
@@ -745,6 +935,10 @@ async function main() {
   const chunks = [];
   for await (const c of process.stdin) chunks.push(c);
   const input = Buffer.concat(chunks).toString("utf8");
+  if (mode === "failures") {
+    process.stdout.write(`${failureExtra(f.state ?? "", f.tag ?? "", input)}\n`);
+    return;
+  }
   const common = { cwd: process.cwd(), cmd: f.cmd ?? "", isolated: f.isolated === "1", state: f.state ?? "" };
   if (!common.cmd || !common.state) return;
   let res = null;

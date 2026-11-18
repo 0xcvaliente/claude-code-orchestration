@@ -24,16 +24,17 @@ Permission rules in Claude Code's settings. A deny rule beats every allow rule.
   - `git -c` and `--config-env` (also after `-C <dir>`);
   - `reset --hard` in any spelling of `--hard`;
   - `git clean` and `git <options> clean -<flag>`;
-  - global options that take a separate value: `--namespace`, `--git-dir`, `--work-tree`, `--exec-path`, `--super-prefix`, `--attr-source` and a second `-C`.
+  - global options that take a separate value: `--namespace`, `--git-dir`, `--work-tree`, `--exec-path`, `--super-prefix`, `--attr-source` and a second `-C`;
+  - since 2.0.0, 70 rules in all (`GIT_C_DESTRUCTIVE_DENY` in `scripts/orchestrate.sh`, the `CLOSED` rows of `src/orchestrate-sh.test.mjs`): 68 for the plain destructive forms of `git -C <dir>`, the subcommand word directly followed by a literal token such as `branch -D`, `checkout --`, `checkout .`, `reset --soft`, `stash drop`, `config core.` or `update-ref`, and 2 for `git --git-dir` or `git --work-tree` as the first word.
 
   `git -C <dir>` is allowed only with the subcommands the workers use (status, diff, log, show, rev-parse, ls-files, rev-list, `branch --show-current`, `worktree list`, `worktree add`, add, commit, merge, `reset --merge`). The write subcommands (`branch --show-current`, `worktree list`, `worktree add`, add, commit, merge, `reset --merge`) are pinned since 1.6.1 to the project folder (as given, its real path and its git top level) and `<repo>/.claude/worktrees/*`, and, with skill repositories set, to each skills repository and `<config dir>/orchestration/skill-drafts/*`; a headless run can no longer `git -C` with them into another folder. The read subcommands stay open for any folder. A folder with a character that cannot be pinned in a rule (`*`, `?`, `[`, a quote, a backslash, `$`, `(`) gets no write rule; one the plan check would quote (a space or a non-ASCII letter) gets its quoted forms. A `git -C` path holding `/../` is denied. Claude Code still warns at startup about the rules that need a `*` for a worktree's name: three, six with skill repositories ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K10 and K2).
 - **The workers are told never to push.** That is a prompt rule.
 
 What the deny lists do not do:
 
-- They guard against mistakes, not against a command built to pass them. A `git -C * status*` allow rule matches any git command with an allowed subcommand word as a later argument: `git -C /r branch -D main status` passes.
-- Plain `git branch -D` and `git worktree remove --force` are still allowed headless.
-- They over-block too: a commit message that contains ` -c` or ` -C ` is refused headless.
+- They guard against mistakes, not against a command built to pass them. A `git -C * status*` allow rule matches any git command with an allowed subcommand word as a later argument. Since 2.0.0 the plain destructive forms of that kind are denied (`git -C /r branch -D main status`, `git -C /r checkout -- . diff`), but `git -C /r branch -qD main status` and `git -C /r branch main -D status` still pass (the comment above `GIT_C_DESTRUCTIVE_DENY` in `scripts/orchestrate.sh`; [Limits, D](limits.md#d-headless-rules)).
+- Without `-C`, `git branch -D` and `git worktree remove --force` are still allowed headless; `git -C <dir> worktree remove -<option>` is denied.
+- They over-block too: a commit message that contains ` -c` or ` -C ` is refused headless, and since 2.0.0 so is a `git -C` commit message that holds a denied form after a space (`commit -m "see branch -D old"`, O1). Reword such a message.
 - Headless runs allow `Bash(npm *)` and `Bash(node *)` (and the Python interpreter for a Python test runner), which can run any code.
 
 Settings: [Headless runs](native-mode.md#headless-runs) and [Settings, Environment variables](settings.md#environment-variables) (`ORCH_ALLOWED_TOOLS`, `ORCH_EXTRA_ALLOWED_TOOLS`).
@@ -58,7 +59,7 @@ What it does not do:
 
 Two deny-only hooks narrow what one role can do. `ORCH_GUARDS=off` turns both off.
 
-- The **researcher guard** holds a researcher's Bash to read-only forms: no redirection except `2>/dev/null` and `2>&1`, no substitution, no device reads. See [Researcher guard](gates.md#researcher-guard).
+- The **researcher guard** holds a researcher's Bash to read-only forms: no redirection except `2>/dev/null` and `2>&1`, no substitution, no reads of a device, a FIFO, `/proc` or `/sys` (since 2.0.0 also through a glob, judged on every path it may expand to). See [Researcher guard](gates.md#researcher-guard).
 - The **egress guard** lets a reviewer's `WebFetch` reach only hosts its brief, its launch record or its slice's planned files name. See [Egress guard](gates.md#egress-guard).
 
 A third guard covers every session, not one role. The **workflow guard** (1.6.0) refuses every Workflow launch except this repo's saved `orchestrate` workflow (a launch or a resume, its file checked by content since 1.6.1), so a workflow the model writes on the spot (Claude Code's `ultracode` keyword, or a plain request for a workflow) does not run outside the gates. `ORCH_WORKFLOW_GUARD=off` turns it off. See [Workflow guard](gates.md#workflow-guard).

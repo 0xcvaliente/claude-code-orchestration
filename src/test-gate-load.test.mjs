@@ -274,8 +274,9 @@ test("gate load: a run that cannot get the lock within its budget writes the war
 // ---- 1. Budget under the stall limit. ----
 
 // The base run's share of a failing gate is (time left - 10) when its own limit is larger, so it shows the budget.
+// Returns that share and the gate's whole run in ms, measured from before the hook process was spawned.
 const FAIL = "FAILED tests/test_a.py::a - boom\n";
-/** @param {Record<string, string>} env */
+/** @param {Record<string, string>} env @returns {Promise<{ share: number, ms: number }>} */
 async function baseShare(env) {
   const dir = tmp("orch-gl-budget-");
   git(dir, "init", "-q");
@@ -285,8 +286,8 @@ async function baseShare(env) {
   write(dir, { "app.js": "y\n" });
   const seen = join(tmp("orch-gl-seen-"), "seen");
   const cmd = `printf '%s\\n' "$ORCH_BASE_TIMEOUT_S" >> '${seen}'; cat failures.txt; ! test -s failures.txt`;
-  await gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASE_TIMEOUT_S: "5000", ORCH_BUGFIX_CHECK: "off", ...env } });
-  return Number(readFileSync(seen, "utf8").trim().split("\n").pop());
+  const r = await gate(dir, { env: { ORCH_TEST_CMD: cmd, ORCH_BASE_TIMEOUT_S: "5000", ORCH_BUGFIX_CHECK: "off", ...env } });
+  return { share: Number(readFileSync(seen, "utf8").trim().split("\n").pop()), ms: r.ms };
 }
 
 test("gate load: the default budget is 540 s with the stall variable unset, follows it when set, and never exceeds 870", async () => {
@@ -304,8 +305,14 @@ test("gate load: the default budget is 540 s with the stall variable unset, foll
   ];
   const shares = await Promise.all(cases.map(([, env]) => baseShare(env)));
   cases.forEach(([name, , budget], i) => {
-    const share = shares[i] ?? NaN;
-    // share = budget - (seconds already spent, 0 to 3) - 10
-    assert.ok(share <= budget - 10 && share >= budget - 15, `${name}: the base run got ${share} s, expected about ${budget - 10}`);
+    const { share, ms } = shares[i] ?? { share: NaN, ms: NaN };
+    // The gate gives share = budget - SECONDS - 10, with SECONDS read when the base run's share is computed. The share
+    // is never more than what is left less 10 s (SECONDS >= 0), and never less than that minus the seconds the gate had
+    // run by then: bash's whole SECONDS is under the elapsed time + 1, so at most ceil(elapsed), and the elapsed time is
+    // at most the gate's whole run, which this test measures. Nine gates start at once here, so under a loaded suite
+    // that run takes several seconds (524 seen: SECONDS was 6).
+    const spent = Math.ceil(ms / 1000);
+    assert.ok(share <= budget - 10, `${name}: the base run got ${share} s, more than the ${budget - 10} s left`);
+    assert.ok(share >= budget - 10 - spent, `${name}: the base run got ${share} s, expected ${budget - 10 - spent} to ${budget - 10} (the gate ran ${ms} ms)`);
   });
 });

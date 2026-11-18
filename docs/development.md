@@ -11,14 +11,18 @@ npm test             # the tests only (fake model, no API calls)
 npm run typecheck    # the type check only
 ```
 
-`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main.
+`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main, then, since 2.0.0, installs the Claude Code CLI (2.1.326) and runs `npm run test-dashboard` (the 2.0.0 changelog notes that this step was not run on a CI runner before the release). `npm run check` must finish in under 5 minutes on the maintainer's machine.
+
+**Test rules (2.0.0).**
+- Tests never read this repository's git history. A comparison with an older version reads stored files under `src/fixtures/`: `judge-core-1.4.0.mjs`, `judge-core-1.6.1.mjs.txt` and `gates-1.6.1/` (`brief.mjs`, `run.mjs`, `state.mjs`). A test under `src/` never skips because history is missing; `bench/arms.test.mjs` still skips one test in a clone without the 0.3.0 ref ([limits.md](limits.md), G).
+- A bound on the in-process work of the code under test is checked in CPU time (`process.cpuUsage`, through the helpers at the top of the two files, `cpuMs` in `src/judge.test.ts` and `cpuTimed` in `src/guards.test.mjs`), so it holds on a loaded machine. Tests of a deadline firing and tests that time a child process (the hook run as a process, the 20,000-word commands) stay on the wall clock. Some in-process checks in `src/judge.test.ts` still use the wall clock: growth ratios taken as the best of three runs, and loose backstops (the attached-value test's 60 s and 5 s bounds).
 
 ## npm scripts
 
 | Script | What it does |
 |---|---|
 | `npm start`, `npm run orchestrate` | The native orchestrator, the main toolkit, interactive, with the pane loaded (`claude --agent orchestrator --plugin-dir dist/dashboard`) |
-| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time |
+| `npm run check` | The first thing CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time; CI then also installs the Claude Code CLI and runs `npm run test-dashboard` |
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls; one temp root, removed at the end) and the type check |
 | `npm run check-agents`, `npm run sync-agents` | Find, or fix, drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
@@ -114,7 +118,7 @@ What the build does:
 How releases 1.2.2 to 1.5.0 were made, and 1.5.1 on. `X.Y.Z` is the new version.
 
 1. Set `version` to `X.Y.Z` in `package.json` and in `package-lock.json`, which names it twice (at the top and under `packages[""]`).
-2. Add one entry `## [X.Y.Z] - <date>` to `CHANGELOG.md`, above the latest one: an opening paragraph that says what the release is and what a person upgrading has to know, then the sections the release needs, out of `### Added`, `### Changed`, `### Fixed` and `### Known and not fixed`. When a changed behaviour asks something of a person, its item says what to do. Add `[X.Y.Z]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/vX.Y.Z` as the first line of the link definitions at the end. Never edit a released entry.
+2. Add one entry `## [X.Y.Z] - <date>` to `CHANGELOG.md`, above the latest one: an opening paragraph that says what the release is and what a person upgrading has to know, then the sections the release needs, out of `### Added`, `### Changed`, `### Fixed` and, since 2.0.0, `### Limits`: one paragraph pointing to [limits.md](limits.md), which lists everything the release does not do with its reason (2.0.0 and later carry no `### Known and not fixed` list). When a changed behaviour asks something of a person, its item says what to do. Add `[X.Y.Z]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/vX.Y.Z` as the first line of the link definitions at the end. Never edit a released entry.
 3. Run `npm run build-plugin`. The plugin manifests in `dist/` take the version from `package.json`.
 4. Run `npm run check`. It must pass.
 5. Commit on a branch, push it and open a pull request into `main`. Wait until CI passes.
@@ -125,13 +129,15 @@ How releases 1.2.2 to 1.5.0 were made, and 1.5.1 on. `X.Y.Z` is the new version.
 
 ## Benchmark and eval suite
 
-Both cost money: they run real model sessions.
+The benchmark and the eval suite cost money: they run real model sessions.
 
 ```bash
-npm run bench:validate                                # check every task's graders, no model calls
+npm run bench:validate                                # check every task's graders, no model calls (free)
 npm run bench -- --matrix bench/matrix/<name>.json    # one benchmark campaign (paid)
 npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # one bounded eval run (paid)
 ```
+
+`npm run bench:validate` makes no model call. It runs half the CPUs' worth of tasks at once (at least 2; `--parallel N` sets it), the three known slow tasks first, and stops at a deadline of 270 s (`--deadline-s S`, 0 for none): it prints the finished tasks, names each unfinished one (`NOT DONE`) and exits 3. `node bench/validate.mjs --task <id>` validates one task.
 
 The eval suite was smoke-run on 2026-11-10 with the bounded command above, twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed. How the benchmark works and every result: [bench/README.md](../bench/README.md).
 

@@ -165,6 +165,30 @@ try {
 } catch {
   foldFailed = true;
 }
+// A reviewer whose latest hand-back a check refused and that stopped without handing back again delivered no report:
+// journal.mjs records that stop with report "handback_refused" and refused_by (the refusing check). The slice blocks
+// as before (last_reviewer_no_status); the message says the report was refused, and by which check.
+/** @type {Record<string, string>} */
+const REFUSED_BY = {
+  handback: "the report check (no STATUS line, or a checked id left unanswered)",
+  quote: "the quote check (a QUOTE line not found in its source)",
+};
+/** The check that refused the agent's last hand-back, from its latest journal stop record, or null. @param {unknown} agentId */
+const refusedBy = (agentId) => {
+  if (typeof agentId !== "string" || !agentId) return null;
+  const rec = records.stops.filter((r) => r && r.agent_id === agentId).at(-1);
+  if (!rec || rec.report !== "handback_refused") return null;
+  const by = typeof rec.refused_by === "string" ? rec.refused_by : "";
+  return Object.hasOwn(REFUSED_BY, by) ? REFUSED_BY[by] : "a check";
+};
+/** The last_reviewer_no_status message. @param {string} prefix @param {unknown} agentId */
+const noStatusMessage = (prefix, agentId) => {
+  const by = refusedBy(agentId);
+  return by
+    ? `Review gate: ${prefix}the last reviewer's report was refused at its hand-back by ${by} and never delivered: the reviewer stopped without sending it again. Rerun the review, or report the slice as failed.`
+    : `Review gate: ${prefix}the last reviewer returned no STATUS line. Rerun the review, or report the slice as failed.`;
+};
+
 // This session's review-gate records. An unfinished implementer is gated for its own lifetime, not per window: two
 // blocks that name it, one give-up that names it, and then it is left alone, so an implementer the person stopped
 // early in a long session does not block every later piece of work again.
@@ -241,7 +265,7 @@ if (lastImpl && !lastState) {
   const last = reviews.at(-1);
   if (!last) problems.push({ reason: "no_reviewer_after_last_implementer", message: "Review gate: an implementer finished but no reviewer has run since. Send the result to a reviewer before replying." });
   else if (last.status === "fail") problems.push({ reason: "last_reviewer_failed", message: "Review gate: the last reviewer reported STATUS: fail. Retry the implementer with the gaps, or report the slice as failed with evidence." });
-  else if (last.status !== "pass") problems.push({ reason: "last_reviewer_no_status", message: "Review gate: the last reviewer returned no STATUS line. Rerun the review, or report the slice as failed." });
+  else if (last.status !== "pass") problems.push({ reason: "last_reviewer_no_status", message: noStatusMessage("", last.agent_id) });
 }
 
 for (const { run, s } of gated.values()) {
@@ -269,7 +293,7 @@ for (const { run, s } of gated.values()) {
     continue;
   }
   if (counted !== "pass") {
-    problems.push({ slice: s.slice, reason: "last_reviewer_no_status", message: `Review gate: ${name}: the last reviewer returned no STATUS line. Rerun the review, or report the slice as failed.` });
+    problems.push({ slice: s.slice, reason: "last_reviewer_no_status", message: noStatusMessage(`${name}: `, review.agent) });
     continue;
   }
   if (review.lowConfidence) skips.push(`last_reviewer_failed:${s.slice}:low_confidence`);

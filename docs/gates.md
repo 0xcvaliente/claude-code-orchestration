@@ -18,7 +18,7 @@ A [gate](glossary.md#g) is a hook that blocks a worker launch, a worker's stop o
 | Gate or guard | Hook file | When it runs | What it blocks | Switch |
 |---|---|---|---|---|
 | [Plan check](#plan-check) | `plan-check.mjs` | PreToolUse on `Agent\|Task` (timeout 60 s) | An implementer launch that breaks the run's plan; a fork or built-in subagent while a run is open; a reviewer of a slice whose implementer has failing tests it never saw (1.6.1) | see the reasons |
-| [Test gate](#test-gate) | `verify.sh` | SubagentStop of an implementer (timeout 900 s) | The implementer's stop while the tests fail, or a `KIND: bugfix` slice without a reproduction test | `ORCH_TEST_CMD`, `ORCH_GATE_ISOLATED`, `ORCH_BASELINE`, `ORCH_BUGFIX_CHECK` |
+| [Test gate](#test-gate) | `verify.sh` | SubagentStop of an implementer (timeout 900 s); with `--handback`, PreToolUse on `SubagentHandback` of an implementer ([Hand-back gate](#hand-back-gate), timeout 900 s) | The implementer's stop while the tests fail, or a `KIND: bugfix` slice without a reproduction test; at a hand-back, a report while the tests fail | `ORCH_TEST_CMD`, `ORCH_GATE_ISOLATED`, `ORCH_BASELINE`, `ORCH_BUGFIX_CHECK`, `ORCH_HANDBACK_GATE` |
 | [Review gate](#review-gate) | `review-gate.mjs` | Stop of the main session | The final reply until every slice of the run has a passing review | `ORCH_ESCALATION`, `ORCH_STALL_GATE`, `ORCH_GAP_MIN` |
 | [Report check](#report-check) | `handback-check.mjs` | PreToolUse on `SubagentHandback` (auto mode) | A [reply](glossary.md#r) with no STATUS line, or a reviewer's pass that leaves a checked id unanswered (once) | `ORCH_HANDBACK_CHECK` |
 | [Quote check](#quote-check) | `quote-check.mjs` | PreToolUse on `SubagentHandback`, and SubagentStop of a researcher | A researcher reply whose `QUOTE:` text is not in its source (once) | `ORCH_QUOTE_CHECK` |
@@ -58,7 +58,7 @@ Reasons, in the order the code checks them:
 | `file_overlap` | A FILES entry overlaps a file another slice of the run owns, and the two slices are in no order in the run's DEPENDS graph, either way. Also when a retry's DEPENDS line drops the only order between two other slices that share a file. | blocks every time |
 | `dependency_cycle` | DEPENDS closes a cycle in the run's order graph. | blocks every time |
 | `worktree_base_not_head` | The launch has `isolation: "worktree"`, the effective `worktree.baseRef` is not `"head"`, and HEAD differs from `refs/remotes/origin/HEAD`. The worktree would start from the remote default branch and miss the checked-out work. | 2 blocks per slice |
-| `tests_failed_after_report` (1.6.1) | A launch of this plugin's reviewer whose brief names `SLICE:` and is not a PLAN REVIEW, while the test-gate record of the latest stop of the slice's latest implementer is a block for failed tests (`tests_failed`, or a record with no reason) and that implementer has not started since (a `SendMessage` resume is a start). The message gives the gate's reason, the failing-test counts its record holds, and the agent id to resume. A `bugfix_` block never refuses. Only the implementers of the run the review lands in count: the latest run that holds the slice, as the run model places a review; a slice carried whole into a new plan keeps its implementers, one that starts clean has none. The latest stop's test-gate record is matched to it by count since the agent's latest start, not by time, since the stop hooks run side by side and a fast gate record can carry an earlier time than telemetry's stop. A refusal is made only when its record in `review-hold.jsonl` was written and reads back; otherwise the launch goes through. Switch `ORCH_REVIEW_HOLD=off` (plugin setting `review_hold`). Records in `review-hold.jsonl`, never in `plan-check.jsonl`. | 2 blocks per slice, agent and block |
+| `tests_failed_after_report` (1.6.1) | A launch of this plugin's reviewer whose brief names `SLICE:` and is not a PLAN REVIEW, while the test-gate record of the latest stop of the slice's latest implementer is a block for failed tests (`tests_failed`, or a record with no reason) and that implementer has not started since (a `SendMessage` resume is a start). The message gives the gate's reason, the failing-test counts its record holds, and the agent id to resume. A `bugfix_` block never refuses. Only the implementers of the run the review lands in count: the latest run that holds the slice, as the run model places a review; a slice carried whole into a new plan keeps its implementers, one that starts clean has none. The latest stop's test-gate record is matched to it by key and count since the agent's latest start, not by time, since the stop hooks run side by side and a fast gate record can carry an earlier time than telemetry's stop; since 2.0.0 the match follows the four rules under [The report comes first](#test-gate) (`stopGateOf` in `run.mjs`). A refusal is made only when its record in `review-hold.jsonl` was written and reads back; otherwise the launch goes through. Switch `ORCH_REVIEW_HOLD=off` (plugin setting `review_hold`). Records in `review-hold.jsonl`, never in `plan-check.jsonl`. | 2 blocks per slice, agent and block |
 
 A launch that passes every check is allowed with `ok`, or `light_path` for a light launch before any plan review. A give-up is allowed and logged as `<reason>_gave_up`.
 
@@ -79,6 +79,7 @@ A launch that passes every check is allowed with `ok`, or `light_path` for a lig
 - On a case-insensitive file system they are case-folded.
 - A glob whose first wildcard segment is neither `**` nor the last also stands for each symlinked folder that segment matches, up to 32 (`ALIAS_CAP`).
 - More links, or a folder that cannot be listed, cannot be decided and count as an overlap.
+- Since 2.0.0 `file_overlap`, not `not_in_plan`, also reads a symlink reached through `**` or a wildcard segment after the first, a hard link, and the NFC and NFD forms of one name.
 - What this does not see is under [Limits](#limits).
 
 **`worktree.baseRef`.** The effective value is the first of these that sets it: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, the user `settings.json` (`<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`). An unreadable settings file or commits it cannot resolve let the launch through.
@@ -98,7 +99,7 @@ The plan check is the only hook that ever returns an allow. It returns `permissi
 | [Read router](#read-router) | Raises a researcher's model to the tier its sources need, and adds a note listing the converted text files | Our researcher, when the brief names `SOURCES:` | `ORCH_READ_ROUTER=on` turns it on |
 | Coverage note | Asks the researcher to read every file in full and end its reply with a `FILES-READ:` line, listing a file not read under OPEN | Our researcher, when `SOURCES:` names two or more local regular files | `ORCH_SOURCES_NOTE=off` turns it off |
 | Skill suggestions | Appends a block naming installed skills; see [skills.md, Suggestions](skills.md#suggestions). Bug words in the goal do not suggest the bugfix skill when every FILES entry is prose or the brief has a KIND other than `bugfix`. | Our implementer (only on `ok` or `light_path`), researcher and reviewer | `ORCH_SKILL_HINTS=off` turns it off |
-| Test gate pending note (1.6.1) | Appends one line: the test gate has not reported yet on the slice's latest implementer stop, so the reviewer must not rest a pass on the tests having passed and says so in its report. Nothing is added once the gate has reported. | Our reviewer, when its brief names `SLICE:` (not a PLAN REVIEW) and the slice's latest implementer of that run stopped and the test gate has no record for that stop yet. A gate killed at its hook timeout leaves no record, so the note stays for that stop: the tests were never judged, which is what the note says. | `ORCH_REVIEW_HOLD=off` turns it off |
+| Test gate pending note (1.6.1) | Appends one line: the test gate has not reported yet on the slice's latest implementer stop, so the reviewer must not rest a pass on the tests having passed and says so in its report. Nothing is added once the gate has reported. | Our reviewer, when its brief names `SLICE:` (not a PLAN REVIEW) and the slice's latest implementer of that run stopped and no test-gate record is paired with that stop yet: the gate has not logged one, or since 2.0.0 the pairing cannot tie one to it (pending, below). A gate killed at its hook timeout leaves no record, so the note stays for that stop: the tests were never judged, which is what the note says. | `ORCH_REVIEW_HOLD=off` turns it off |
 | Skill facts and DRAFTS lines | Appends the draft worktree facts to a skill slice, and one line per draft named on `DRAFTS:`; see [skills.md, What the plan check does](skills.md#what-the-plan-check-does) | Our implementer, researcher and reviewer | `ORCH_SKILL_CREATE=off` blocks skill slices |
 
 Rules that hold for every change:
@@ -131,7 +132,7 @@ Checked live once: a researcher brief naming a scanned PDF was raised from haiku
 
 ## Test gate
 
-The [test gate](glossary.md#t) (`.claude/hooks/verify.sh`) runs the project's tests when an implementer stops, and blocks the stop while they fail. It runs in the implementer's own folder (its worktree, when it has one).
+The [test gate](glossary.md#t) (`.claude/hooks/verify.sh`) runs the project's tests when an implementer stops, and blocks the stop while they fail. It runs in the implementer's own folder (its worktree, when it has one). The same script also runs when an implementer hands its report back ([Hand-back gate](#hand-back-gate)).
 
 What it does at a stop:
 1. Finds the test command ([Runner detection](#runner-detection)). No command: it allows with `no_test_command`.
@@ -156,9 +157,11 @@ A rename or copy is judged by both its old and new path. Any doubt keeps the tes
 
 **Blocks.** A failing run blocks with `tests_failed`. After 2 such blocks for one implementer, counted since its latest SubagentStart, it allows with `max_blocks_reached`. A `SendMessage` resume starts the implementer again, so each attempt gets its own two blocks. With no start recorded, every block counts. pytest exit code 5 (no tests collected) allows with `no_tests_collected`.
 
-**The report comes first (1.6.1).** The journal records the implementer's stop, and its report reaches the orchestrator, when SubagentStop starts; this gate then runs the suite for minutes, so a block lands after the worker has ended. The worker never sees it until it is resumed. The [plan check](#plan-check) therefore refuses the slice's reviewer while such a block stands (`tests_failed_after_report`) and adds a note to a reviewer launched while the gate is still running; the [review gate](#review-gate) still holds the final reply (`implementer_unfinished`), as before. The two hooks match a block to a stop differently: the plan check pairs a gate record with its stop by count since the agent's latest start (`stopGate`), so a record stamped just before its own stop still counts for it, while the review gate keeps comparing times (`testBlocked`). What they share, in `run.mjs`, is the reading of the logs (`implementerTestStates`), the classification of block reasons (failed tests, the four environment reasons, other `bugfix_` reasons) and the choice of the slice's implementers.
+**The report comes first (1.6.1).** The journal records the implementer's stop, and its report reaches the orchestrator, when SubagentStop starts; this gate then runs the suite for minutes, so a block lands after the worker has ended. The worker never sees that block until it is resumed. (Where the worker hands its report back with `SubagentHandback`, the [hand-back gate](#hand-back-gate) runs the suite first and can send a failing run back while the worker still runs; the SubagentStop gate still decides.) The [plan check](#plan-check) therefore refuses the slice's reviewer while such a block stands (`tests_failed_after_report`) and adds a note to a reviewer launched while the gate is still running; the [review gate](#review-gate) still holds the final reply (`implementer_unfinished`), as before. The two hooks match a block to a stop differently: the plan check pairs a gate record with its stop (`stopGate`, `stopGateOf` in `run.mjs`), while the review gate keeps comparing times (`testBlocked`). Since 2.0.0 the pairing has four rules: a record belongs to a stop for certain only when both carry the same hand-back id (`after_handback`); otherwise any failed-tests block since the agent's latest start holds the review, except a record that carries the hand-back id of another of the agent's stops; a pass stands only when it is the only candidate; anything else is pending (the reviewer gets the note). Records of the hand-back gate and records from before the agent's latest start are never a stop's record. What the two hooks share, in `run.mjs`, is the reading of the logs (`implementerTestStates`) and the classification of block reasons (`notTestFailure`; the review gate also `environmentBlock`). The choice of the slice's implementers (`implementersOfRun`, `latestImplementerOf`) is the plan check's alone.
 
-**Whole suite once per stop.** The test gate runs the whole suite at every implementer stop, and the integrator runs it once more after the merge. So a slice's [acceptance check](glossary.md#a) is the narrowest command that proves the slice, and a brief never also asks a worker to run the whole suite.
+**Block records (2.0.0).** A failed run's records carry `failed_count`, up to 10 `failed_tests`, `failed_crash` and `output`: a file under `<state dir>/test-output/` that keeps the last 64 KiB of the run's output. The newest 10 such files are kept; the folder is 0700 and each file 0600, also when an older run left them open. A test suite that prints a secret leaves it there ([Limits](limits.md)).
+
+**Whole suite once per stop.** The test gate runs the whole suite at every implementer stop (or, at a stop right after a hand-back, may reuse the hand-back gate's run of the same unchanged tree), and the integrator runs it once more after the merge. So a slice's [acceptance check](glossary.md#a) is the narrowest command that proves the slice, and a brief never also asks a worker to run the whole suite.
 
 ### Runner detection
 
@@ -204,7 +207,7 @@ The base of an isolated worktree is its fork point from the main worktree's HEAD
 - The gate takes `test-gate.lock` in its [state dir](glossary.md#s) before the test run. It holds it through the base run or bugfix check until the hook ends.
 - The state dir comes from `CLAUDE_PROJECT_DIR`, never from the worker's folder, so every worktree of a project shares one lock.
 - A waiting gate sleeps one second between tries. The wait counts against the budget.
-- The lock is stale when its holder process is gone or it is older than 900 s. One waiter at a time removes a stale lock, then all try again.
+- The lock is stale when its holder process is gone or it is older than 900 s. A holder killed with SIGKILL leaves its lock standing while its suite's process group still runs (2.0.0). One waiter at a time takes a stale lock over (`lock_takeover` in the record). Since 2.0.0 it never frees the lock's name: it hard-links the lock under a private name, checks that this snapshot is still the lock it judged stale, and then renames its own lock, written whole beforehand, over the name in one step and holds it. A takeover whose read of the lock is empty or fails (the name was free, or the file went before the read), or whose snapshot is another lock (the holder released and another gate linked its own), changes nothing and waits like any other round.
 - The lock is released on every way out of the hook, and only while it still holds this hook's own token.
 - A state dir where no lock can be made (missing, not writable, or no hard links) lets the gate run its suite without one.
 
@@ -220,7 +223,7 @@ The base of an isolated worktree is its fork point from the main worktree's HEAD
 - The stop then blocks as `tests_failed` with `timed_out: 1` and `limit_s`, whatever status the suite exits with (`tests_failed_isolated` in an isolated worktree in `warn` mode).
 - No base run follows a suite that timed out.
 
-**The base run or bugfix check.** Each base run gets min(`ORCH_BASE_TIMEOUT_S` (default 300), its share of the time left less 10 s). A baseline that cannot run only loses its note; the block stays. A bugfix check that has no time left, or is stopped, blocks with `bugfix_timeout`.
+**The base run or bugfix check.** Each base run gets min(`ORCH_BASE_TIMEOUT_S` (default 300), its share of the time left less 10 s). A baseline that cannot run only loses its note; the block stays. A bugfix check that has no time left, or is stopped, blocks with `bugfix_timeout`. Its message names where the time went: the wait for another gate's suite when that wait took at least as long as the test run and the check together, else the run and the check.
 
 **Worst cases**, for a budget B. A timed-out test run ends by B + 8 s (548 s by default, 878 s at most). A timed-out bugfix check ends by B + 20 s (560 s by default, 890 s at most). Both stay under the 600 s stall limit by default and under the 900 s hook timeout at most.
 
@@ -283,13 +286,25 @@ The four environment blocks (`bugfix_base_unusable`, `bugfix_no_base`, `bugfix_t
 - When the check has no time, only a `KIND: bugfix` implementer blocks; any other implementer passes.
 - `ORCH_BUGFIX_CHECK=off` turns the check off.
 
+### Hand-back gate
+
+`verify.sh --handback` runs at PreToolUse on `SubagentHandback`, after the report checks (timeout 900 s), so a test failure goes back to the worker while it still runs. It acts only for this plugin's or project's implementer (the project copy takes the bare type, the plugin copy the namespaced one); every other hand-back, and one with no agent id, is left alone with no record.
+
+- It runs the same steps as at a stop (prose-only skip, suite lock, test run, base run), except the bugfix check, which stays at the SubagentStop gate. Its test run keeps 30 s of the budget (`HB_RESERVE_S`) for the result cache.
+- It refuses (exit 2, `tests_failed`) only for failing tests in the shared folder or in `block` mode, within the `tests_failed` cap it shares with the SubagentStop gate, and only while the agent has had fewer than two other hand-backs refused by any gate since its latest start (Claude Code asks a worker to resend a refused report at most three times). A refusal is made only when its record reads back, and it is marked in `handback-refusals.jsonl` (gate `test`), so the stop never takes that report's capture.
+- Every other outcome lets the report through, logged, and the SubagentStop gate still runs and decides. Besides the allows and warns a stop can log (`tests_passed`, `tests_failed_isolated`, `max_blocks_reached` and the others below), these are its own: `handback_resend_cap` (the resend cap above); `handback_timed_out` (the suite ran out of time; stored as a timed-out block for the stop); `handback_lock_wait` (the time left fell to the floor while another gate held the lock; the stop then does not wait again); `handback_no_cwd` (the event's `cwd` is missing or not a folder); `handback_gate_off`; `handback_gate_error` (the hook ended with no decision: a crash, an error exit, a TERM at the hook timeout).
+- Its records carry `"at":"handback"` and `handback_id` (the call's `tool_use_id`). The records of a stop that follows a hand-back carry `after_handback`, the same id.
+- **Result cache.** The hand-back gate stores its outcome in `test-gate-cache.json` only when a listing of every entry of the work tree (and of the main checkout, for a linked worktree) taken right after the run equals the one taken right before it; the record's `store` says `stored` or why not. The SubagentStop gate that follows takes the outcome, once, only when its own listing equals the stored one, the tree key is the same, it belongs to the agent's latest hand-back since its latest start and it is at most 30 s old (`REUSE_MAX_S`). A reused pass logs `tests_passed_cached`; a reused fail or timeout blocks as `tests_failed` with `reused` and `reused_from`; a stop that takes nothing says why in `reuse`. The rule and its limits are in the header of `.claude/hooks/test-gate-cache.mjs`.
+- `ORCH_HANDBACK_GATE=off` turns the hand-back gate off (environment only; logged as `handback_gate_off`).
+
 ### Test gate reasons
 
-Every decision goes to `gates.jsonl` with gate `test`, `agent_id` and `session_id`.
+Every decision goes to `gates.jsonl` with gate `test`, `agent_id` and `session_id`. A failed run's records also carry, since 2.0.0, `failed_count`, `failed_tests` (up to 10), `failed_crash` and `output` ([Block records](#test-gate)), and a gate that took over a stale suite lock adds `lock_takeover`.
 
 | Reason | Decision |
 |---|---|
-| `tests_passed`, `no_test_command`, `no_code_changes`, `no_tests_collected`, `isolated_skipped`, `bugfix_verified` | allow |
+| `tests_passed`, `tests_passed_cached`, `no_test_command`, `no_code_changes`, `no_tests_collected`, `isolated_skipped`, `bugfix_verified` | allow |
+| `handback_resend_cap`, `handback_timed_out`, `handback_lock_wait`, `handback_no_cwd`, `handback_gate_off`, `handback_gate_error` | allow, at a hand-back only ([Hand-back gate](#hand-back-gate)) |
 | `max_blocks_reached`, `bugfix_unverified_gave_up` | allow (give-up; a [doubt signal](#doubt-signals)) |
 | `tests_failed_isolated`, `tests_failed_baseline` | warn (never blocks) |
 | `tests_failed`, `bugfix_no_test`, `bugfix_test_passes_on_base`, `bugfix_base_unusable`, `bugfix_no_base`, `bugfix_timeout`, `bugfix_tmp_lost` | block |
@@ -403,6 +418,7 @@ A [loop guard](glossary.md#l) keeps a gate from blocking forever. After its limi
 | Review gate | 2 blocks per reason since the last implementer stopped (a record with no reason counts for every reason) | `max_blocks_reached` for `no_reviewer_after_last_implementer`, `last_reviewer_failed`, `last_reviewer_no_status` and `run_state_unreadable`; `<reason>_gave_up` for `constraints_unchecked`, `opus_review_required`, `replan_required` and `implementer_unfinished`. The record is named after the first open problem. |
 | Review gate: `implementer_unfinished` | 2 blocks and 1 give-up per implementer for the whole session, then it is left alone | `implementer_unfinished_gave_up` |
 | Report check | 1 refusal per worker | — |
+| Hand-back gate | the `tests_failed` cap above, and no refusal once two other hand-backs of the agent were refused since its latest start | `max_blocks_reached`, `handback_resend_cap` |
 | Quote check | 1 block per researcher; the next stop always passes | — |
 | Skill gate | 3 blocks | `skill_gate_gave_up` |
 | Researcher guard, egress guard | none: deny every time | — |
@@ -424,7 +440,7 @@ The report check (`.claude/hooks/handback-check.mjs`) runs at PreToolUse on `Sub
 - It acts only for the bare worker types `researcher`, `implementer`, `reviewer` and `integrator`. A session in another permission mode has no `SubagentHandback` tool, and the gates read the reply at SubagentStop.
 - It is not registered with `onFailure`: a crash must never hold a reply back.
 - Decisions go to `gates.jsonl` as gate `handback`.
-- A refused hand-back is marked in `handback-refusals.jsonl`. Such a capture is never taken as the stop's reply ([logs.md, Hand-back capture](logs.md#hand-back-capture)).
+- A refused hand-back is marked in `handback-refusals.jsonl`, since 2.0.0 with the report's `report_key`. Such a capture is never taken as the stop's reply; when no other report follows, the stop record says the report was refused ([logs.md, Hand-back capture](logs.md#hand-back-capture)).
 - `ORCH_HANDBACK_CHECK=off` turns the check off. The capture is written either way.
 
 ## Quote check
@@ -482,14 +498,17 @@ A lone `--` never ends the option check, because it can be the value of an optio
 - Later commands' relative paths, the device rule included, are judged from every folder the `cd` may leave the shell in.
 - Refused: `cd src` (write `cd ./src`), `cd /`, `cd ~`, `cd ..` from the project root, a link leading out, a missing path, two words, an option, `-`, `+1`, a variable, a glob, a control character. Without `CLAUDE_PROJECT_DIR` every `cd` is refused.
 
-**The device rule.** A command may not read `/dev` or anything under it, except `/dev/null`. It covers the search and paging commands, `wc`, and the `sed -n` and `cut` forms.
+**The device rule.** A command may not read `/dev` or anything under it, except `/dev/null` (nor, since 2.0.0, `/proc` or `/sys`). It covers the search and paging commands, `wc`, and the `sed -n` and `cut` forms.
 - Each argument is judged: the word itself, a long option's value (`--file=x`), and every suffix of a short-option cluster (`-f/dev/zero`).
 - A bare word counts as a path. `grep` and `rg` also judge `.`, which they search when given no path.
 - The path is judged as text (with `.`, `..` and repeated slashes collapsed) and as the system resolves it, walked with lstat and readlink.
 - A path whose walk passes through `/dev` is refused, whether or not its last part exists (except `/dev/null`).
 - `/dev/null` passes, also through a link.
+- Since 2.0.0 `/proc` and `/sys` are judged like `/dev`, a FIFO, socket or device operand is refused wherever it lies, and a word with a glob is judged on every path it may expand to (`cat /de?/zero` is refused), as well as on the literal path it spells.
 
 **Always a decision.** A word over 4096 characters is refused. A walk over 20000 lstat calls is refused as too complex to judge. A decision never throws.
+
+**Deadline and caps (2.0.0).** One decision has `DEADLINE_MS`, 10000 ms from the start of the hook process, checked at each segment, each listed name and each expanded path; Claude Code sets this hook no timeout, and a hook cancelled for time would not block, so the guard refuses first. Before the tokenizer runs, a command over `MAX_COMMAND` (65,536 characters) or with more than `MAX_BRACKETS` (256) of `[` and `{` is refused. Globs are expanded within 20,000 names per segment (`GLOB_ENTRIES`), 200,000 for the wide reading (`WIDE_ENTRIES`) and 400,000 names per decision (`TOTAL_NAMES`); past any of these, or past the deadline, the command is refused with the way around it (name the files, or quote the glob for the command). A `--files0-from` value of `du` and `-files0-from` of `find` is judged like an operand. The matcher reads bracket expressions as POSIX defines them (classes, collating symbols, equivalence classes, ranges, negation, a leading `]`); what it cannot parse exactly matches wider, and every glob word is also judged as the literal path it spells (`[a/b]`).
 
 Deny-only: it exits 2 with the reason, or 0 with no output; the session's own permission rules then decide. Decisions go to `gates.jsonl` as gate `researcher`, with the first word of the refused command only. `ORCH_GUARDS=off` turns it off. It is not a boundary ([Limits](#limits)); run Bash in Claude Code's sandbox ([safety.md, Sandbox](safety.md#sandbox)).
 
@@ -598,20 +617,22 @@ What each gate and guard does not catch. [safety.md](safety.md) links here.
 
 **Plan check**
 - `file_overlap` and `dependency_cycle` block every time, with no give-up. A plan that cannot be fixed stalls those launches until the orchestrator changes the plan. A retry of a planned slice is judged against the run's DEPENDS order, so a sound retry passes; a broken plan still blocks every time.
-- Path identity does not see every name of one file. It misses a symlink reached only through a `**` segment or a wildcard segment after the first (`**/link/a.ts` or `t*/l*/a.ts` beside `src/a.ts`, where `link` points to `src`), a hard link, and two Unicode normal forms (NFC, NFD) of one name on a file system that folds them. These are pinned by the `out of reach` tests in `src/plan-check-paths.test.mjs`.
+- Path identity does not see every name of one file. Since 2.0.0 `file_overlap` reads a symlink reached through a `**` segment or a wildcard segment after the first (`**/link/a.ts` or `t*/l*/a.ts` beside `src/a.ts`, where `link` points to `src`), a hard link, and two Unicode normal forms (NFC, NFD) of one name (`src/plan-check-paths.test.mjs`, the `w3 item 4` tests). Still out of reach (the comment on `canon()` in `plan-check.mjs`): a link or hard link made after the launch, a hard link whose other name lies outside every entry's walk, and, in `not_in_plan`, every name that reading adds; a launch naming such a name is refused there as before.
 - An `Agent` call without `subagent_type` counts as a built-in subagent, so it is blocked while a run is open.
 - Gated workflow agents make no Agent tool call, so the plan check never sees them: no plan checks, no read router, no skill suggestions. A probe showed a mod's `agent.spawn` hook could route them under `claude -p`; that is not built ([live-checks-workflow.md](data/live-checks-workflow.md)).
 
 **Read router**
 - It is opt-in. It was checked by one live run and benchmarked once, on one task with 2 runs per setup: direction only, with the model raise and the converted-text notes confounded.
-- Its log can show `hard_pages: 0` next to a `pdf_hard_pages` reason code.
 
 **Test gate**
 - An isolated failure in `warn` mode still pays for a base run, although it never blocks.
-- `unittest.main(failfast=True)` inside a script the command runs cannot be seen, so the `allow` baseline may allow there.
-- A cargo workspace member whose folder name differs from its package name does not match, so its bugfix slice still blocks.
-- A gate killed with SIGKILL runs no cleanup. It leaves its lock, and the next gate takes it over as stale. Its suite runs in a process group of its own and may still be running then, so that one suite can overlap the next. A reused pid keeps a dead holder's lock until it is 900 s old.
-- The takeover narrows but does not close one race: a holder that releases between a waiter's two reads, followed by a third gate's new lock, could be removed. That needs three gates within microseconds; the result is two suites at once.
+- Since 2.0.0 the `allow` baseline sees a unittest failfast set inside a script by searching the tree: any `.py`, `.cfg`, `.toml` or `.ini` file that holds the word `failfast`, or a search that cannot run, makes it treat the run as failfast and keep the block (`failFastInTree` in `bugfix-check.mjs`). A tree that only mentions the word loses the allow.
+- A gate killed with SIGKILL runs no cleanup. Since 2.0.0 its lock stands while a process of its suite's process group is left, and is then taken over at once (`lock_takeover`). A reused pid keeps a dead holder's lock until it is 900 s old.
+- In 1.6.1 the takeover read a stale lock twice, removed it with `rm -f` when the two reads matched, and counted an empty read as stale. A lock another gate linked between the second read and the removal was removed, so two suites could run at once: when both reads were empty, when a holder still alive with a lock over 900 s old released it, or when a second taker got in after a guard over 2 minutes old was removed. Since 2.0.0 the takeover never frees the name: an empty or failed read changes nothing; otherwise it snapshots the lock with a hard link, compares the snapshot with what it judged stale, leaves a lock that differs in place, and renames its own lock over the name and holds it; it never moves, puts back or removes a lock (`src/test-gate-lock.test.mjs`: "a fresh lock made between the stale check and the removal is never removed: the taker waits for it" and "a takeover that reads the lock while its name is free never moves the fresh lock that appears there", both failing on 1.6.1's `verify.sh`; "a lock released and replaced by another gate's between a waiter's read and its takeover is left in place"). A holder that is alive and whose lock is under 900 s old is never judged stale, also between `release_lock`'s removal of the companion file and of the lock (the holder's pid answers first). Four cases stay open:
+  - A holder still alive when its lock is more than 900 s old (a machine suspended mid-run, a stopped hook). Its lock is stale by age and is replaced while its suite may still run. If it releases its lock between a taker's snapshot and rename, a gate that links its own lock in that moment has it replaced. And after its lock was replaced it can remove the successor's lock (or companion file): `release_lock` removes them only while they hold the hook's own token, but the check and the removal are two steps.
+  - Two gates in the takeover at once. A guard folder left by a gate killed or stopped inside its takeover is removed by a waiter once it is 2 minutes old; the age test and the removal are two steps, so a waiter can remove a newer taker's guard and let a second taker in. Both can snapshot the stale lock, and the second rename then replaces the first taker's new lock.
+  - A new lock with the very content judged stale: the departed holder's pid reused by a gate that takes the lock within the same second. The comparison is by content, so the snapshot passes and that lock is replaced.
+  - A lock file that is empty for good. A gate never makes one (`take_lock` links a whole file, `take_over` renames a whole file), but if one is there it is never stale: every gate waits until its floor and then gets `not_run` (isolated) or runs without the lock (shared tree), as for a live holder.
 - The lock is per project. Suites of different projects still run at once on one machine.
 - Waiting runs the suites one after another: with many siblings, later stops wait longer, and the last ones may reach the floor and get `not_run` (isolated) or run without the lock (shared). The stall limit, not the gate, bounds how long a stop can wait.
 - The floor of 120 s is a fixed guess for this repository. A project whose suite takes longer than the time left still gets a timed-out run, logged as such.
@@ -627,14 +648,14 @@ What each gate and guard does not catch. [safety.md](safety.md) links here.
 - It is native-only. The gated workflow makes no Agent call, so it never sees this gate, and it does not count a failing review whose gaps are all below the cutoff as a doubt signal.
 
 **Report check and quote check**
-- A quote-check refusal without a `tool_use_id` in the payload, that finishes before `handback-check.mjs` writes its capture, is not tied to that capture.
-- The quote check trusts any file whose real path is inside the read cache, so a symlink placed there would be read as a source.
+- A refusal without a `tool_use_id` in the payload is tied by its `report_key` to the capture with that key nearest in time (2.0.0; `deliverableCaptures` in `state.mjs`, `handbackState` in `journal.mjs`): a match by key and time, not by identity, so of two hand-backs with the same report text the nearer one is marked. A refusal with no `report_key` marks the agent's latest capture written at or before it, in both. They differ for a refusal whose key matches no capture: `state.mjs` falls back to that latest capture, `journal.mjs` marks nothing.
+- Since 2.0.0 the quote check never reads a read-cache entry that is a symlink, or a cache folder that is one; a quote whose source is such an entry passes as unverifiable.
 - It cannot check a value read from a scan.
 
 **Researcher guard**
-- A glob the shell expands to a device path (`cat /dev/zer?`) is not judged: the guard sees the pattern, not what it expands to.
-- A FIFO the shell reaches other than by the command's operands is not judged, nor Linux `/proc/self/fd`.
+- Since 2.0.0 a glob is judged on every path it may expand to (`cat /de?/zero` is refused), and `/proc` and `/sys` like `/dev`. Not judged: a FIFO a command opens on its own (an ignore file rg or ugrep reads while searching, git's own files), a file created or swapped between the check and the run, and zsh's extendedglob operators (`^`, `#`, `~`), which are off in a non-interactive shell.
 - A shell function or alias named `cd` is not seen.
+- Its over-blocks and caps are on [Limits of 2.0.0](limits.md), C.
 
 **Egress guard**
 - It reads planned FILES from the shared folder. Hosts in a planned file that exists only on an isolated branch are denied (it fails safe).

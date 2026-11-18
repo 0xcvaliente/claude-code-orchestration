@@ -10,6 +10,8 @@ import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchRecord, stopRecord } from "../.claude/hooks/brief.mjs";
 import { researcherViolation } from "../.claude/hooks/researcher-guard.mjs";
+// The w3 third-attempt helpers are read off the namespace, so a guard without them fails those tests only.
+import * as guard from "../.claude/hooks/researcher-guard.mjs";
 import { agentTranscript, allowedHosts, egressDecision, hostOf } from "../.claude/hooks/egress-guard.mjs";
 import { MAX_CONTEXT, runContext } from "../.claude/hooks/compact-context.mjs";
 
@@ -18,6 +20,17 @@ const hook = (/** @type {string} */ name) => join(root, ".claude", "hooks", name
 const RESEARCHER = hook("researcher-guard.mjs");
 const EGRESS = hook("egress-guard.mjs");
 const COMPACT = hook("compact-context.mjs");
+/**
+ * CPU time (user + system, ms) this process spends in fn: the guard's own work, which a loaded machine does not inflate as
+ * it does the wall clock (f5, 2.0.0). Bounds on a deadline firing stay on the wall clock, since a deadline is wall time.
+ * @template T @param {() => T} fn @returns {{ v: T, ms: number }}
+ */
+function cpuTimed(fn) {
+  const start = process.cpuUsage();
+  const v = fn();
+  const d = process.cpuUsage(start);
+  return { v, ms: (d.user + d.system) / 1000 };
+}
 
 const scratch = mkdtempSync(join(tmpdir(), "guards-test-"));
 process.on("exit", () => rmSync(scratch, { recursive: true, force: true }));
@@ -729,9 +742,9 @@ test("researcher guard (cd item 3): odd paths, long words, symlink chains and lo
     symlinkSync(join(links, "loopA"), join(links, "loopB"));
   }
   // A long word first: judged suffix by suffix it took seconds (and a word of a few hundred thousand characters, minutes).
-  const t1 = Date.now();
-  assert.ok(researcherViolation(`grep -${"r".repeat(100000)} x`, proj, proj), "a word too long to judge is refused");
-  assert.ok(Date.now() - t1 < 3000, "a long word is judged quickly");
+  const longWord = cpuTimed(() => researcherViolation(`grep -${"r".repeat(100000)} x`, proj, proj));
+  assert.ok(longWord.v, "a word too long to judge is refused");
+  assert.ok(longWord.ms < 3000, `a long word is judged quickly (${Math.round(longWord.ms)} ms of CPU)`);
   const odd = [
     `cat ${"a/".repeat(5000)}`, `cat /${"x".repeat(300000)}`, `grep -${"r".repeat(100000)} x`, `cat ${"../".repeat(3000)}dev/zero`,
     "cat a\u0000b", "cat 'a\u0000b'", "cat $'\\x00'", "cat \u0001\u0002\u007f", "cat '\n'", "cat \udc00", "cat \ud800x",
@@ -745,14 +758,14 @@ test("researcher guard (cd item 3): odd paths, long words, symlink chains and lo
   for (const c of odd) {
     for (const cwd of cwds) {
       for (const p of projects) {
-        const t0 = Date.now();
         /** @type {unknown} */
         let v;
+        let ms = 0;
         assert.doesNotThrow(() => {
-          v = researcherViolation(c, cwd, p);
+          ({ v, ms } = cpuTimed(() => researcherViolation(c, cwd, p)));
         }, `${JSON.stringify(c.slice(0, 40))} ${JSON.stringify(cwd.slice(0, 20))} ${String(p).slice(0, 20)}`);
         assert.ok(v === null || (typeof v === "object" && typeof (/** @type {any} */ (v).reason) === "string"));
-        assert.ok(Date.now() - t0 < 3000, `slow: ${c.slice(0, 40)}`);
+        assert.ok(ms < 3000, `slow: ${c.slice(0, 40)} (${Math.round(ms)} ms of CPU)`);
       }
     }
   }
@@ -814,6 +827,119 @@ test("researcher guard hook (cd item 3): odd payloads exit 0 or 2, never anythin
   }
 });
 
+// w3 item 1: a glob is judged on what it can expand to, a FIFO, socket or device operand is refused, and /proc and /sys
+// are refused like /dev (their files can wait for ever, and /proc/self is the guard's own process, not the shell's).
+const w3 = join(scratch, "w3-glob");
+mkdirSync(join(w3, "docs"), { recursive: true });
+for (const f of ["a.txt", "b.txt", "docs/c.md"]) writeFileSync(join(w3, f), "x\n");
+symlinkSync("/dev", join(w3, "devlink"));
+symlinkSync("/", join(w3, "rootlink"));
+const hasFifo = spawnSync("mkfifo", [join(w3, "pipe")]).status === 0;
+
+test("researcher guard (w3 item 1): a glob that can expand to a device path is refused", () => {
+  for (const c of [
+    "cat /de?/zero",
+    "cat /d*/zero",
+    "head -c 8 /[d]ev/urandom",
+    "wc -c /*/zero",
+    "grep --file=/de?/zero x",
+    "tail -c 8 devl?nk/zero", // through a symlinked folder
+    "cat rootl?nk/../dev/zero", // through a symlink to / and ..
+    "cat rootlink/../de?/zero",
+    "cut -f1 ./../w3-glob/devl*/zero",
+  ]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  assert.ok(researcherViolation("sed -n 1p /d?v/zero", w3), "sed takes no glob operand at all");
+  // /dev/null reached by a glob, ordinary globs, and commands that never read their operands still pass.
+  // w3 second attempt: a walk that meets a symlink to /dev but matches nothing past it is not refused.
+  assert.equal(researcherViolation("grep -n x */*.md", w3), null);
+  for (const c of ["cat /de?/null", "wc -l *.txt docs/*.md", "head -n 1 ?.txt", "cat [ab].txt", "grep -n x docs/*.md", "ls /de?/*", "du -sh /*", "stat /de?/zero", "find /d* -maxdepth 0"]) {
+    assert.equal(researcherViolation(c, w3), null, c);
+  }
+});
+
+test("researcher guard (w3 item 1): a FIFO operand, also behind a glob, is refused; listing it is not", { skip: hasFifo ? false : "mkfifo unavailable" }, () => {
+  for (const c of ["cat pipe", "head -n 1 pip?", "grep x p*", "wc -l ./*", "tail -n 1 [p]ipe", "cut -f1 pipe", "grep -f pipe x a.txt", "rg --file=pip* x ."]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["ls -la pipe", "stat pipe", "find . -name pipe", "ls p*", "du -a ."]) assert.equal(researcherViolation(c, w3), null, c);
+});
+
+test("researcher guard (w3 item 1): /proc and /sys are refused like /dev, in every spelling", () => {
+  for (const c of ["cat /proc/self/fd/0", "head /proc/kmsg", "cat /sys/kernel/notes", "cat /pro?/self/environ", "cat //proc/../proc/cpuinfo", "cat rootlink/../proc/self/fd/0", "grep x /proc", "wc -l /PROC/x"]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat ../notes/proc.md", "grep -rn proc docs", "ls /proc", "stat /sys"]) assert.equal(researcherViolation(c, w3), null, c);
+});
+
+test("researcher guard (w3 item 1): du --files0-from and find -files0-from read their file and are judged", () => {
+  for (const c of ["du --files0-from=/dev/zero", "du --files0-from /dev/zero", "du --files0=/dev/zero", "find -files0-from /dev/zero", "du --files0-from=/de?/zero"]) {
+    const v = researcherViolation(c, w3);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  assert.equal(researcherViolation("du --files0-from=a.txt", w3), null);
+});
+
+// w3 follow-up: the shell reading lists what bash 4.3+ and zsh list (no dot names, `**` not through a symlinked
+// folder) and judges every match; only the listing bound refuses for size. The wide reading still refuses a pattern
+// that reaches a device, FIFO, /dev, /proc or /sys under dotglob, globstar off or zsh `***`.
+const shaped = join(scratch, "w3-shaped");
+for (const d of ["docs", "src", "node_modules/pkg", ".claude/worktrees/x"]) mkdirSync(join(shaped, d), { recursive: true });
+for (const f of ["docs/a.md", "docs/b.md", "src/a.ts", "src/a.test.mjs", "src/b.test.ts", "README.md"]) writeFileSync(join(shaped, f), "x\n");
+for (let i = 0; i < 1500; i++) {
+  writeFileSync(join(shaped, "node_modules", "pkg", `n${i}.md`), "");
+  writeFileSync(join(shaped, ".claude", "worktrees", "x", `w${i}.md`), "");
+}
+symlinkSync(join(shaped, "node_modules"), join(shaped, "linked"));
+
+test("researcher guard (w3 follow-up): everyday globs in a tree shaped like this repository pass", () => {
+  for (const c of ["rg x **/*.md", "ls src/*.test.*", "cat docs/*.md", "head -5 src/*.ts", "wc -l **/*.md", "grep -n x */*.md"]) {
+    assert.equal(researcherViolation(c, shaped), null, c);
+  }
+  // Over the old cap of 500 matches: judged, not refused for size.
+  assert.equal(researcherViolation("wc -l node_modules/pkg/*.md", shaped), null);
+});
+
+test("researcher guard (w3 follow-up): a pattern that reaches /dev, a FIFO, or a device only under dotglob is still refused", () => {
+  const dot = join(scratch, "w3-dotglob");
+  mkdirSync(join(dot, "plain"), { recursive: true });
+  symlinkSync("/dev", join(dot, ".hid"));
+  for (const c of ["cat */zero", "cat **/zero", "head -c 8 ?hid/zero", "cat .h*/zero"]) {
+    const v = researcherViolation(c, dot);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  for (const c of ["cat /dev/*", "cat /d?v/null*", "cat /de?/n*"]) {
+    const v = researcherViolation(c, shaped);
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, c);
+  }
+  if (hasFifo) {
+    for (const c of ["head -n 1 pip?", "wc -l ./*", "cat **/pipe"]) assert.ok(researcherViolation(c, w3), c);
+  }
+});
+
+test("researcher guard (w3 follow-up): only a glob that lists more names than the bound is refused for size, saying how to avoid it", () => {
+  const big = join(scratch, "w3-big");
+  mkdirSync(big, { recursive: true });
+  for (let i = 0; i < 20001; i++) writeFileSync(join(big, `f${i}.txt`), "");
+  const v = researcherViolation("cat *.txt", big);
+  assert.ok(v);
+  assert.match(v.reason, /too wide to judge/);
+  assert.match(v.reason, /quote the glob so the command expands it itself/);
+  assert.match(v.reason, /name a folder/);
+  assert.equal(researcherViolation("rg x -g '*.txt'", big), null);
+  assert.equal(researcherViolation("cat f1.txt f2.txt", big), null);
+  assert.ok(researcherViolation("wc -l f1?.txt", big), "the bound counts the names listed, not the matches");
+});
 
 test("researcher guard hook: exit 2 with the allowed prefixes for the session-6.5 cases, exit 0 silently for allowed", () => {
   for (const c of ["cat > x.py <<EOF\nprint(1)\nEOF", "python3 x.py", "cd src && ls"]) {
@@ -1228,4 +1354,355 @@ test("compact-context: a closed run and a stale run are silent", () => {
   assert.match(call().stdout, /- a: building or reviewing/);
   const stale = call({ ORCH_RUN_STALE_MIN: "0.25" });
   assert.deepEqual([stale.status, stale.stdout], [0, ""]);
+});
+
+// w3 second attempt, item 1: one budget (names read and a deadline) for the whole decision, cheap refusals first.
+const wide = join(scratch, "w3-wide");
+mkdirSync(join(wide, ".cache"), { recursive: true });
+mkdirSync(join(wide, "src"), { recursive: true });
+writeFileSync(join(wide, "src", "a.md"), "x\n");
+for (let i = 0; i < 3000; i++) writeFileSync(join(wide, ".cache", `c${i}`), "");
+const widePart = `rg x ${Array(10).fill("**/*.md").join(" ")}`;
+const wideLine = Array(20).fill(widePart).join("; ");
+
+test("researcher guard (w3 second attempt): a literal device after many glob words is refused at once, before any expansion", () => {
+  const { v, ms } = cpuTimed(() => researcherViolation(`${wideLine}; cat /dev/zero`, wide, undefined, { totalNames: 0 }));
+  assert.ok(v);
+  assert.match(v.reason, /cat \/dev\/zero reads a device/);
+  assert.ok(ms < 1000, `${Math.round(ms)} ms of CPU`);
+  if (hasFifo) assert.match(researcherViolation(`${wideLine}; cat pipe`, w3, undefined, { totalNames: 0 })?.reason ?? "", /pipe reads a device/);
+});
+
+test("researcher guard (w3 second attempt): the names budget and the deadline hold for the whole command, with the way around", () => {
+  // Default budget: the repeated pattern is expanded once, so the line is judged quickly and passes.
+  const whole = cpuTimed(() => researcherViolation(wideLine, wide));
+  assert.equal(whole.v, null);
+  assert.ok(whole.ms < 2000, `${Math.round(whole.ms)} ms of CPU`);
+  // A budget smaller than the tree (the production default is far larger): refused, saying how to avoid it.
+  const small = researcherViolation(wideLine, wide, undefined, { totalNames: 1000 });
+  assert.ok(small);
+  assert.match(small.reason, /too wide to judge/);
+  assert.match(small.reason, /quote the glob so the command expands it itself/);
+  assert.doesNotMatch(small.reason, /ORCH_/);
+  // A deadline already passed: refused the same way, in no time.
+  const t1 = Date.now();
+  const late = researcherViolation(wideLine, wide, undefined, { deadlineMs: -1 });
+  assert.match(late?.reason ?? "", /too wide to judge/);
+  assert.ok(Date.now() - t1 < 500);
+  // Everyday commands still pass with the default budget.
+  for (const c of ["rg x **/*.md", "cat src/*.md", "head -5 src/a.md"]) assert.equal(researcherViolation(c, wide), null, c);
+});
+
+test("researcher guard (w3 second attempt, item 2): the wide reading judges only names the whole pattern can match", { skip: hasFifo ? false : "mkfifo unavailable" }, () => {
+  const tree = join(scratch, "w3-fifo-match");
+  for (const d of [".q", "src"]) mkdirSync(join(tree, d), { recursive: true });
+  writeFileSync(join(tree, "src", "a.md"), "x\n");
+  spawnSync("mkfifo", [join(tree, ".q", "p")]);
+  for (const c of ["cat **/*.md", "rg x **/*.md"]) assert.equal(researcherViolation(c, tree), null, `${c} with .q/p`);
+  spawnSync("mkfifo", [join(tree, ".q", "x.md")]);
+  assert.match(researcherViolation("cat **/*.md", tree)?.reason ?? "", /x\.md reads a device/, "dotglob could reach .q/x.md");
+  rmSync(join(tree, ".q", "x.md"));
+  spawnSync("mkfifo", [join(tree, "src", "x.md")]);
+  assert.match(researcherViolation("cat **/*.md", tree)?.reason ?? "", /x\.md reads a device/);
+});
+
+// w3 third attempt: a glob segment was a backtracking regular expression (`*` as `.*`, a bracket as `.+`), so one
+// name of 60 letters against `*[a]*[a]*[a]*[a]q` kept the guard busy past any limit, and a hook cancelled for time does
+// not block: the FIFO read after it ran. Names are now matched by a two-pointer matcher, the command's length and its
+// `[`/`{` count are bounded before the tokenizer reads it, and the deadline is checked at every listed name.
+const redos = join(scratch, "w3-redos");
+mkdirSync(join(redos, "longn"), { recursive: true });
+writeFileSync(join(redos, "longn", "a".repeat(60)), "x\n");
+const redosFifo = spawnSync("mkfifo", [join(redos, "fifo")]).status === 0;
+/** The hook run as Claude Code runs it, killed after 10 s. @param {string} command @param {string} cwd */
+function hookTimed(command, cwd) {
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [RESEARCHER], { input: JSON.stringify({ ...bash(command), cwd }), env: env(), cwd: project, encoding: "utf8", timeout: 10000, killSignal: "SIGKILL" });
+  return { code: r.status, signal: r.signal, stderr: r.stderr ?? "", ms: Date.now() - t0 };
+}
+/** k bracket-star pairs as tokenizer pieces, then a literal. @param {number} k @param {string} tail */
+const pairs = (k, tail) => [...Array.from({ length: k }, () => [{ glob: "*" }, { glob: "[]" }]).flat(), { lit: tail }];
+/** The regular expression the guard built for a segment before the third attempt (small inputs only). @param {any[]} pieces */
+const oldSegmentRe = (pieces) =>
+  new RegExp(`^${pieces.map((p) => ("lit" in p ? p.lit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : p.glob === "*" ? ".*" : p.glob === "?" ? "." : ".+")).join("")}$`, "is");
+/** A seeded generator, so a failing case can be replayed. @param {number} seed */
+function prng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test("researcher guard (w3 third attempt): a bracket-star glob over a 60-letter name is judged at once, and the FIFO after it is refused", { skip: redosFifo ? false : "mkfifo unavailable" }, () => {
+  for (const k of [4, 12, 40]) {
+    const r = hookTimed(`cat longn/${"*[a]".repeat(k)}q ; cat fif?`, redos);
+    assert.deepEqual([r.code, r.signal], [2, null], `${k} pairs: ${r.ms} ms ${r.stderr.slice(0, 160)}`);
+    assert.match(r.stderr, /fifo reads a device that may never end/, `${k} pairs`);
+    assert.ok(r.ms < 3000, `${k} pairs: ${r.ms} ms`);
+  }
+});
+
+test("researcher guard (w3 third attempt): one segment match takes milliseconds for 60- and 4,000-letter names and 4, 12 or 40 bracket-star pairs", () => {
+  assert.equal(typeof guard.matchSegment, "function", "the guard exports its segment matcher");
+  for (const n of [60, 4000]) {
+    const name = "a".repeat(n);
+    for (const k of [4, 12, 40]) {
+      const { ms } = cpuTimed(() => {
+        assert.equal(guard.matchSegment(pairs(k, "q"), name), false, `${n} letters, ${k} pairs, no match`);
+        assert.equal(guard.matchSegment(pairs(k, "a"), name), k < n, `${n} letters, ${k} pairs, a match`);
+        assert.equal(guard.matchSegment(pairs(k, "q"), `${name}q`), k <= n, `${n} letters, ${k} pairs, q at the end`);
+      });
+      assert.ok(ms < 1000, `${n} letters, ${k} pairs: ${ms} ms of CPU`);
+    }
+  }
+  // In-process, through the whole guard: the 60-letter name matched or not, decided at once.
+  const whole = cpuTimed(() => {
+    for (const k of [4, 12, 40]) {
+      assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}q`, redos), null, `${k} pairs, no match`);
+      assert.equal(researcherViolation(`cat longn/${"*[a]".repeat(k)}a`, redos), null, `${k} pairs, a match`);
+    }
+  });
+  assert.ok(whole.ms < 1000, `${Math.round(whole.ms)} ms of CPU`);
+});
+
+test("researcher guard (w3 third attempt): the segment matcher keeps the old rules (case, dots, newlines, brackets as one or more characters)", () => {
+  assert.equal(typeof guard.matchSegment, "function");
+  const rand = prng(20261117);
+  const alphabet = ["a", "A", "b", ".", "\n", "\r", "ß", "ſ", "S", "s", "K", "\u212a", "k", "İ", "i", "ı", "\ud800", "é", "É", "-", "[", "*", "\\", "$"];
+  const pick = () => alphabet[Math.floor(rand() * alphabet.length)] ?? "a";
+  for (let n = 0; n < 1500; n++) {
+    /** @type {any[]} */
+    const pieces = [];
+    for (let k = Math.floor(rand() * 6); k > 0; k--) {
+      const r = rand();
+      if (r < 0.45) pieces.push({ lit: Array.from({ length: 1 + Math.floor(rand() * 3) }, pick).join("") });
+      else pieces.push({ glob: r < 0.7 ? "*" : r < 0.85 ? "?" : "[]" });
+    }
+    const name = Array.from({ length: Math.floor(rand() * 8) }, pick).join("");
+    assert.equal(guard.matchSegment(pieces, name), oldSegmentRe(pieces).test(name), `${JSON.stringify(pieces)} ${JSON.stringify(name)}`);
+  }
+});
+
+test("researcher guard (w3 third attempt): everyday commands in a tree shaped like this repository still pass", () => {
+  const tree = join(scratch, "w3-everyday");
+  for (const d of ["src", "docs", ".claude/hooks", "node_modules/p"]) mkdirSync(join(tree, d), { recursive: true });
+  for (const f of ["src/a.ts", "src/a.test.mjs", "src/b.test.ts", "docs/a.md", "docs/b.md", ".claude/hooks/x.mjs", "node_modules/p/i.ts", "README.md"]) writeFileSync(join(tree, f), "x\n");
+  for (const c of ["rg -n x src", "rg x **/*.md", "grep -rn x docs", "ls src/*.test.*", "cat docs/*.md", "head -5 src/*.ts", "wc -l .claude/hooks/*.mjs", "find . -name '*.ts' -not -path './node_modules/*'"]) {
+    assert.equal(researcherViolation(c, tree), null, c);
+  }
+});
+
+test("researcher guard (w3 third attempt): quoted text is removed in linear time, with the old regular expression's result", () => {
+  assert.equal(typeof guard.withoutQuoted, "function", "the guard exports its quote stripper");
+  const rand = prng(7);
+  const alphabet = ["'", '"', "\\", "<", ">", "a", " ", "\n", "\r", "\u2028", "\u2029"];
+  for (let n = 0; n < 5000; n++) {
+    const s = Array.from({ length: Math.floor(rand() * 24) }, () => alphabet[Math.floor(rand() * alphabet.length)]).join("");
+    assert.equal(guard.withoutQuoted(s), s.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, ""), JSON.stringify(s));
+  }
+  // Escaped quotes that never close: each start used to rescan the rest of the line (seconds at 60,000 characters).
+  const quotes = cpuTimed(() => researcherViolation(`cat x ${'\\"'.repeat(30000)} q`, redos));
+  assert.ok(quotes.v);
+  assert.ok(quotes.ms < 1000, `${Math.round(quotes.ms)} ms of CPU`);
+});
+
+test("researcher guard (w3 third attempt): a command too long, or with too many brackets and braces, for the tokenizer is refused at once; shorter ones pass", () => {
+  for (const c of [`cat ${"[".repeat(20000)}`, `cat ${"{".repeat(20000)}`, `cat ${"a{".repeat(10000)}`, `echo ${"x ".repeat(40000)}`, `find . -files0-from -${"a".repeat(60000)}`, `du --files0-from=-${"a".repeat(60000)}`]) {
+    const { v, ms } = cpuTimed(() => researcherViolation(c, redos));
+    assert.ok(v, c.slice(0, 30));
+    assert.ok(ms < 1000, `${c.slice(0, 30)}: ${Math.round(ms)} ms of CPU`);
+  }
+  assert.match(researcherViolation(`echo ${"x ".repeat(40000)}`, redos)?.reason ?? "", /too long to judge/);
+  assert.match(researcherViolation(`echo ${"[a] ".repeat(300)}`, redos)?.reason ?? "", /too many/);
+  assert.match(researcherViolation(`find . -files0-from ${"a".repeat(5000)}`, redos)?.reason ?? "", /too long to judge/);
+  // The narrower rule: a long command of plain words, and a few brackets and braces, still pass.
+  const plain = cpuTimed(() => {
+    assert.equal(researcherViolation(`echo ${"x ".repeat(30000)}`, redos), null);
+    assert.equal(researcherViolation(`grep -nE '[a-z]{3}|[0-9]{2,}' docs ${"x ".repeat(100)}`, redos), null);
+    assert.equal(researcherViolation(`echo ${"[a] ".repeat(200)}`, redos), null);
+  });
+  assert.ok(plain.ms < 1000, `${Math.round(plain.ms)} ms of CPU`);
+});
+
+test("researcher guard (w3 third attempt): the deadline leaves room for a cold file cache and counts from the hook's start", () => {
+  assert.ok(typeof guard.DEADLINE_MS === "number" && guard.DEADLINE_MS >= 10000, String(guard.DEADLINE_MS));
+  assert.match(readFileSync(RESEARCHER, "utf8"), /researcherViolation\([^\n]*\{ fromProcessStart: true \}\)/);
+  // A deadline that has passed refuses with the way around, also for a command with no glob to expand.
+  assert.match(researcherViolation("cat a.txt; cat b.txt", redos, undefined, { deadlineMs: -1 })?.reason ?? "", /too wide to judge/);
+  // Checked at each operand, so a line of 30,000 operands (about a second of stat calls) stops at the deadline.
+  const t0 = Date.now();
+  assert.match(researcherViolation(`cat${" a".repeat(30000)}`, redos, undefined, { deadlineMs: 50 })?.reason ?? "", /took too long to judge/);
+  // The reason above shows the deadline fired (without it the line is judged in full and refused for another reason).
+  // The wall-time bound only catches a check that runs far past it: about 430 ms of this call come before the first
+  // operand on an idle machine, and a loaded one took 906 ms against the old 600 ms bound, so it leaves room for load.
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
+});
+
+// w8: bracket expressions read as POSIX and the shells read them. The tokenizer closes a bracket at its first `]`, so
+// `[[:alpha:]]` was matched as one or more characters followed by a literal `]`: in a folder holding a FIFO named `x`
+// the guard passed `cat [[:alpha:]]` and bash expanded it to `x`. A bracket holding a slash is no bracket for bash, which
+// passes `[a/b]` through as the literal path. The guard now reads each raw word itself, and judges every glob word
+// also as the literal path it spells.
+// One FIFO per folder (g1: `x`, gp: `%`, gb: `]`), beside one regular file, so no case is refused for another's name.
+const w8 = join(scratch, "w8-brackets");
+for (const d of ["g1", "gp", "gb"]) {
+  mkdirSync(join(w8, d), { recursive: true });
+  writeFileSync(join(w8, d, "notes.md"), "x\n");
+}
+mkdirSync(join(w8, "g2", "[a"), { recursive: true });
+mkdirSync(join(w8, "gu"), { recursive: true });
+const w8Fifo = [["g1", "x"], ["gp", "%"], ["gb", "]"], ["g2", "[a/b]"], ["gu", "é"]].every(([d, n]) => spawnSync("mkfifo", [join(w8, String(d), String(n))]).status === 0);
+
+test("researcher guard (w8, G1 and G2): POSIX classes and a bracket holding a slash cannot reach a FIFO or a device", { skip: w8Fifo ? false : "mkfifo unavailable" }, () => {
+  const g1 = join(w8, "g1");
+  const g2 = join(w8, "g2");
+  const gp = join(w8, "gp");
+  const gb = join(w8, "gb");
+  for (const [c, cwd] of [
+    ["cat [[:alpha:]]", g1],
+    ["cat [[:punct:]]", gp],
+    ["cat /d[[:alpha:]]v/zero", g1],
+    ["head -c 8 /de[[:lower:]]/zero", g1],
+    ["cat [![:digit:]]", g1],
+    ["cat [[:alpha:][:digit:]]", g1],
+    ["cat [[=x=]]", g1],
+    ["cat [[.x.]]", g1],
+    ["cat []]", gb],
+    ["cat [[:punct:]]", gb],
+    ['cat [" "x]', g1], // a quoted space inside the bracket: the tokenizer saw no glob here
+    // A name outside ASCII: in the C locale `??` is two bytes of `é`, and classes follow the locale.
+    ["cat ??", join(w8, "gu")],
+    ["cat [[:alpha:]]", join(w8, "gu")],
+    ["cat [a/b]", g2],
+    ["cat ./[a/b]", g2],
+    ["cat [[]a/b]", g2],
+    ["wc -l [a/b]", g2],
+    ["grep x [a/b]", g2],
+  ]) {
+    const v = researcherViolation(String(c), String(cwd));
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, String(c));
+  }
+  // A backslash or a quote inside an unquoted bracket: the tokenizer steps over it, so the two readings disagree and the
+  // command is refused as unreadable (a stated over-block: `cat '[\]]'`, or naming the file, passes).
+  for (const c of ["cat [\\]]", "cat [\\]x]", 'cat ["]"]', "cat x[\\]]", "head -1 [!\\]]"]) {
+    assert.match(researcherViolation(c, gb)?.reason ?? "", /cannot be read with confidence/, c);
+  }
+  // A glob in the command's name, and a glob in a sed or cd operand, are refused too.
+  assert.match(researcherViolation("ca[t] notes.md", gb)?.reason ?? "", /not an allowed command/);
+  assert.match(researcherViolation("ls* notes.md", gb)?.reason ?? "", /not an allowed command/);
+  assert.match(researcherViolation('sed -n 1p [" "x]', g1)?.reason ?? "", /`sed` is allowed only/);
+  // A glob in an option's name, also one only the raw word shows.
+  assert.match(researcherViolation('tail -[" "f] notes.md', g1)?.reason ?? "", /glob in an option/);
+  // Through the hook: exit 2, at once.
+  for (const c of ["cat [[:alpha:]]", "cat /d[[:alpha:]]v/zero"]) {
+    const r = hookTimed(c, g1);
+    assert.deepEqual([r.code, r.signal], [2, null], `${c}: ${r.stderr.slice(0, 160)}`);
+    assert.ok(r.ms < 3000, `${c}: ${r.ms} ms`);
+  }
+  const r2 = hookTimed("cat [a/b]", g2);
+  assert.deepEqual([r2.code, r2.signal], [2, null], r2.stderr.slice(0, 160));
+  // Listing them is not reading them; a class that matches only the regular file passes.
+  for (const c of ["ls [[:alpha:]]", "stat [a/b]", "ls [[:punct:]]"]) assert.equal(researcherViolation(c, c.includes("[a/b]") ? g2 : gp), null, c);
+  for (const d of [g1, gp, gb]) assert.equal(researcherViolation("cat [[:lower:]][[:lower:]]tes.md [!x]otes.md", d), null, d);
+});
+
+// [pattern, path, bash in the C locale, bash in C.UTF-8], recorded with GNU bash 5.3.9 (`compgen -G` in a folder holding
+// only that path). The pattern is glob text: a backslash escapes the next character, nothing else quotes.
+const W8_TABLE = [
+  ["[[:alpha:]]", "x", true, true], ["[[:alpha:]]", "1", false, false], ["[[:digit:]]", "7", true, true],
+  ["[[:digit:]]", "a", false, false], ["[[:alnum:]]", "Q", true, true], ["[[:upper:]]", "Q", true, true],
+  ["[[:lower:]]", "q", true, true], ["[[:space:]]", " ", true, true], ["[[:blank:]]", "\t", true, true],
+  ["[[:punct:]]", "%", true, true], ["[[:punct:]]", ",", true, true], ["[[:print:]]", "a", true, true],
+  ["[[:graph:]]", "~", true, true], ["[[:cntrl:]]", "\u0001", true, true], ["[[:xdigit:]]", "f", true, true],
+  ["[[:xdigit:]]", "g", false, false], ["[[:word:]]", "_", true, true], ["[![:alpha:]]", "5", true, true],
+  ["[^[:digit:]]", "z", true, true], ["[![:alpha:]]", "x", false, false], ["[]a]", "]", true, true],
+  ["[]a]", "a", true, true], ["[!]a]", "b", true, true], ["[!]a]", "]", false, false], ["[a-]", "-", true, true],
+  ["[a-]", "a", true, true], ["[a-]", "b", false, false], ["[\\]]", "]", true, true], ["[!\\]]", "a", true, true],
+  ["[a\\]b]", "]", true, true], ["[[.a.]]", "a", true, true], ["[[.-.]]", "-", true, true],
+  ["[[.space.]]", " ", true, true], ["[[=a=]]", "a", true, true], ["[[=a=]b]", "b", true, true],
+  ["[[.a.]-c]", "b", true, true], ["[[:digit:]a-f]", "3", true, true], ["[[:digit:]a-f]", "e", true, true],
+  ["[[:digit:]a-f]", "g", false, false], ["[[:alpha:][:digit:]]", "5", true, true], ["[[:alpha:]-z]", "-", true, true],
+  ["[]-a]", "^", true, true], ["[a", "[a", true, true], ["x[", "x[", true, true], ["[]", "[]", true, true],
+  ["[!]", "[!]", true, true], ["[[:alpha:]", "[a", true, true], ["[[:alpha:]", "[:", true, true],
+  ["[[:alpha]]", "p]", true, true], ["[[:alpha\\:]]", "a", true, true], ["[\\[:alpha:]]", ":]", true, true],
+  ["[a\\]", "[a]", true, true], ["[a/b]", "[a/b]", true, true], ["[a/b]", "a", false, false],
+  ["d[[:alpha:]]v/zero", "dev/zero", true, true], ["[.]x", ".x", false, false], [".[[:alpha:]]x", ".ax", true, true],
+  ["*[[:alpha:]]", "1a", true, true], ["[[:alpha:]][[:digit:]]", "a1", true, true], ["[[:alpha:]]*.md", "notes.md", true, true],
+  ["?[[:upper:]]", "aB", true, true], ["[[:alpha:]]", "é", false, true], ["?", "é", false, true], ["??", "é", true, false],
+  ["[[:bogus:]]", "b", false, false], ["[z-a]", "m", false, false], ["[a-c]", "B", false, false], ["[*]", "*", true, true],
+  ["\\[a]", "[a]", true, true], ["[\\!a]", "!", true, true],
+];
+const hasBash = spawnSync("timeout", ["5", "bash", "-c", "compgen -G / >/dev/null"], { encoding: "utf8" }).status === 0;
+
+test("researcher guard (w8): the segment matcher matches every pattern and name bash matches (wider is safe, narrower never)", () => {
+  assert.equal(typeof guard.globMatch, "function", "the guard exports its pattern matcher");
+  assert.ok(W8_TABLE.length >= 40, String(W8_TABLE.length));
+  const tableDir = join(w8, "table");
+  // Real bash, one call per locale for the whole table: each pair's folder holds only its path.
+  /** @type {boolean[][]} */
+  const answers = [];
+  if (hasBash) {
+    /** @type {string[]} */
+    const argv = [];
+    W8_TABLE.forEach(([pattern, path], k) => {
+      const d = join(tableDir, String(k));
+      mkdirSync(dirname(join(d, String(path))), { recursive: true });
+      writeFileSync(join(d, String(path)), "");
+      argv.push(d, String(pattern));
+    });
+    const script = 'for ((i=1; i<$#; i+=2)); do j=$((i+1)); (cd "${!i}" && compgen -G "${!j}"); echo "--w8-end--"; done';
+    for (const loc of ["C", "C.UTF-8"]) {
+      const r = spawnSync("timeout", ["10", "bash", "-c", script, "_", ...argv], { encoding: "utf8", env: { ...process.env, LC_ALL: loc } });
+      const blocks = String(r.stdout ?? "").split("--w8-end--\n");
+      assert.equal(blocks.length, W8_TABLE.length + 1, `bash answered every pair in ${loc}`);
+      answers.push(W8_TABLE.map(([, path], k) => (blocks[k] ?? "").split("\n").includes(String(path))));
+    }
+  }
+  let asked = 0;
+  W8_TABLE.forEach(([pattern, path, c, utf8], k) => {
+    let matches = Boolean(c || utf8);
+    if (hasBash) {
+      matches = answers.some((a) => a[k]);
+      asked++;
+    }
+    if (matches) assert.equal(guard.globMatch(String(pattern), String(path)), true, `bash matches ${JSON.stringify(path)} with ${JSON.stringify(pattern)}`);
+  });
+  if (hasBash) {
+    assert.equal(asked, W8_TABLE.length);
+    // The recorded expectations are what this bash says too (a different bash may differ; the check above uses its own).
+    const differ = W8_TABLE.filter(([, , c, utf8], k) => answers[0]?.[k] !== c || answers[1]?.[k] !== utf8).length;
+    assert.ok(differ <= 3, `${differ} recorded answers differ from this bash`);
+  }
+  // Narrow where the reading is exact: these neither bash nor the guard match.
+  for (const [pattern, path] of [["[[:digit:]]", "a"], ["[[:xdigit:]]", "g"], ["[![:alpha:]]", "x"], ["[!]a]", "]"], ["[a-]", "b"], ["[[:digit:]a-f]", "g"], ["[a/b]", "a"], ["[[:alpha:]]", "1"]]) {
+    assert.equal(guard.globMatch(String(pattern), String(path)), false, `${pattern} ${path}`);
+  }
+});
+
+test("researcher guard (w8): class brackets over long names stay linear and inside the deadline", { skip: redosFifo ? false : "mkfifo unavailable" }, () => {
+  for (const k of [4, 40]) {
+    const r = hookTimed(`cat longn/${"*[[:alpha:]]".repeat(k)}q ; cat fif[[:alpha:]]`, redos);
+    assert.deepEqual([r.code, r.signal], [2, null], `${k} pairs: ${r.ms} ms ${r.stderr.slice(0, 160)}`);
+    assert.match(r.stderr, /fifo reads a device that may never end/, `${k} pairs`);
+    assert.ok(r.ms < 3000, `${k} pairs: ${r.ms} ms`);
+  }
+  const { ms } = cpuTimed(() => {
+    assert.equal(guard.globMatch(`${"*[[:alpha:]]".repeat(40)}q`, "a".repeat(4000)), false);
+    assert.equal(guard.globMatch(`${"*[![:digit:]]".repeat(40)}a`, "a".repeat(4000)), true);
+  });
+  assert.ok(ms < 1000, `${Math.round(ms)} ms of CPU`);
+});
+
+test("researcher guard (w8): everyday commands pass, bracket globs included", () => {
+  const tree = join(w8, "everyday");
+  for (const d of ["src", "docs", ".claude/hooks"]) mkdirSync(join(tree, d), { recursive: true });
+  for (const f of ["src/a.ts", "src/a.test.mjs", "src/b.test.ts", "docs/a.md", "docs/b.md", ".claude/hooks/x.mjs", "README.md", "a1.txt", "b2.txt", "c3.txt"]) writeFileSync(join(tree, f), "x\n");
+  for (const c of ["rg -n x src", "rg x **/*.md", "grep -rn '[[:alpha:]]' docs", "ls src/*.test.*", "cat docs/*.md", "ls [a-c]*", "head -5 src/*.ts", "wc -l .claude/hooks/*.mjs", "cat [ab]1.txt [[:lower:]][[:digit:]].txt", "grep -n x [!.]*.txt"]) {
+    assert.equal(researcherViolation(c, tree), null, c);
+  }
 });

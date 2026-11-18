@@ -80,7 +80,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Fix slice.** An implementer slice of the 2026-11-16 audit that fixed findings, named `fix-...`. Each wrote a `fix-notes-*.md` file under `docs/data/audit-2026-11-16/`. [docs/research-2026-11-16.md "Scope"]
 
-**Floor (judge).** The commands the Bash judge denies with no model call: `sudo` and similar, catastrophic or non-plain recursive `rm`, and anything the tokenizer cannot read. Also called: the `deny` class. [docs/bash-judge.md 2.1]
+**Floor (judge).** The commands the Bash judge denies with no model call: `sudo` and similar, catastrophic or non-plain recursive `rm`, anything the tokenizer cannot read, and the other `deny` rules of bash-judge.md 2.1. Also called: the `deny` class. [docs/bash-judge.md 2.1]
 
 **Floor (test gate).** The time a suite run must still have after the wait for the suite lock: min(120 s, budget / 4, the test run's own limit), at least 1 s. When the time left falls to it while another gate holds the lock, an isolated worktree in `warn` mode logs `tests_failed_isolated` with `not_run`; otherwise the suite runs anyway, without the lock. [docs/gates.md "Time budget and suite lock"]
 
@@ -108,7 +108,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 ## H
 
-**Hand-back.** A worker delivering its reply through Claude Code's `SubagentHandback` tool (in auto mode). The report check and the quote check read the reply there, before it is delivered. [`.claude/hooks/handback-check.mjs`]
+**Hand-back.** A worker delivering its reply through Claude Code's `SubagentHandback` tool (in auto mode). The report check and the quote check read the reply there, before it is delivered, and for an implementer the test gate runs there too (the hand-back gate). [`.claude/hooks/handback-check.mjs`; docs/gates.md "Hand-back gate"]
 
 **Headless run.** A run with no interactive session: `npm run native`, `npm run auto` or the benchmark, through `claude -p`. [docs/native-mode.md "Headless runs"]
 
@@ -128,7 +128,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Journal.** The run's log of parsed brief and reply fields: launch records in `journal-launches.jsonl`, stop records in `journal.jsonl`. Never brief or reply text. Also called: run journal. [`.claude/hooks/journal.mjs`]
 
-**Judge.** The Bash judge. It denies the floor at once and passes everything else. It sends `git push`, git remote changes and a plain recursive `rm` to an opus model, with the user's request as the only authority. It runs in SDK workers by default and in native sessions only with `ORCH_JUDGE=native` (the native judge hook). [docs/bash-judge.md]
+**Judge.** The Bash judge. It denies the floor at once and passes everything else. It sends `git push`, git remote changes, a plain recursive `rm` and, since 2.0.0, a fetch or pull whose refspec writes a branch to an opus model, with the user's request as the only authority. It runs in SDK workers by default and in native sessions only with `ORCH_JUDGE=native` (the native judge hook). [docs/bash-judge.md]
 
 ## L
 
@@ -186,7 +186,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Researcher.** The worker that answers one narrow question with evidence (file paths or URLs). Sonnet, low effort, at most 15 turns; read-only tools held by the researcher guard. [`.claude/agents/researcher.md`]
 
-**Researcher guard.** The guard that holds a researcher's Bash to its read-only list: no redirection except `2>/dev/null` and `2>&1`, no substitution, no device reads. [`.claude/hooks/researcher-guard.mjs`]
+**Researcher guard.** The guard that holds a researcher's Bash to its read-only list: no redirection except `2>/dev/null` and `2>&1`, no substitution, no reads of devices, FIFOs, `/proc` or `/sys` (globs judged on what they may expand to). [`.claude/hooks/researcher-guard.mjs`]
 
 **Review gate.** The Stop gate. It gates every slice of the latest run that an implementer worked on, plus the slice of the session's last implementer. It blocks the final reply until each of them has a passing review after its latest attempt (or failed for good), with its checked ids answered and any needed opus review and replan done. [`.claude/hooks/review-gate.mjs`; docs/gates.md "Review gate"]
 
@@ -220,7 +220,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Slice state.** What the gates know about one slice of a run, computed from the logs by `foldRuns`: its launches, attempts and reviews, whether it passed, is final or is stalled, and its doubt signals. [docs/brief-grammar.md "Run model"; `foldRuns` in `.claude/hooks/brief.mjs`]
 
-**Stale run.** An open run with nothing running and no launch, stop or agent start for `ORCH_RUN_STALE_MIN` minutes (30 by default). The plan check treats it as closed; the review gate still gates its unreviewed slices. The pane uses 10 minutes. [docs/brief-grammar.md "Run model"]
+**Stale run.** An open run with nothing running and no launch, stop or agent start for `ORCH_RUN_STALE_MIN` minutes (30 by default). The plan check treats it as closed; the review gate still gates its unreviewed slices. The pane reads the same setting, with the same default of 30 (`RUN_STALE_MIN_DEFAULT` in `dashboard/register.tsx`). [docs/brief-grammar.md "Run model"]
 
 **Stall limit (Claude Code).** Claude Code ends a subagent that makes no progress for 600 seconds; it reports it as stalled. Not the same as a stalled slice. [Check 7 in docs/data/live-checks-2026-11-16.md; `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, docs/settings.md "Test gate time"]
 
@@ -244,7 +244,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Test baseline.** When the tests fail at an implementer's stop, the test gate runs the same command on a clean copy of the base and names the failures that also fail there. [docs/gates.md "Test baseline"; `.claude/hooks/bugfix-check.mjs`]
 
-**Test gate.** The gate that runs the project's tests when an implementer stops (`.claude/hooks/verify.sh`) and blocks while they fail. It judges the files from `git status`, never the worker's word. [docs/gates.md "Test gate"; `.claude/rules/agents.md`]
+**Test gate.** The gate that runs the project's tests when an implementer stops (`.claude/hooks/verify.sh`) and blocks while they fail; it also runs at an implementer's hand-back. It judges the files from `git status`, never the worker's word. [docs/gates.md "Test gate"; `.claude/rules/agents.md`]
 
 **Tier.** The model a file needs to be read well, as the read router decides: haiku, sonnet or opus. [`READ_TIERS` in `src/config.ts`]
 

@@ -41,7 +41,7 @@ The pane uses the gates' [run](glossary.md#r) model ([brief-grammar.md, Run mode
 - **What the run model reads.** The pane keeps its latest 80 agent records. It keeps older records only when the run model reads them: every agent with a slice, a `REPLAN` plan review and a running agent. The total is at most 500 records (`KEPT`, `KEPT_MAX`).
   - The cards, the tasks table and the counts draw the latest 80.
   - The run boundary and the marks read every kept record, so a retry signal or an earlier attempt does not fall off in a large run.
-- **Stale**: agents ran, none runs, and the last one ended more than 10 minutes ago (`STALE_MS`). The gates use a longer limit ([Limits](#limits)).
+- **Stale**: agents ran, none runs, and the last one ended longer ago than the gates' stale time, `ORCH_RUN_STALE_MIN` minutes (default 30), which the pane reads as the gates do ("Where the data comes from").
 
 What starts a new run (`newRun`). The old agents, log, verdict, input, plan and run are dropped; what the session used is kept.
 
@@ -53,7 +53,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
 - A `PLAN REVIEW` that names no slices keeps the agents, so the replan loop shows. So does the fixed plan after a failed plan review, while no slice has launched yet.
 - On a spawn reset, the input line stays while the main turn still works on it, or when it is newer than the old run's last agent. The verdict stays when it is that new or came with the kept input. An older verdict or input is dropped.
 - A prompt while the main session still works on an earlier prompt, before its final report, drops nothing and keeps the first input. So does any prompt while an agent runs or a run is open.
-- A main turn that never reports its end (killed or interrupted) counts as ended once agents ran, none runs and the last one ended more than 10 minutes ago (`STALE_MS`). The run is stale too, and the next typed prompt or spawn starts a clean run. A main turn that is truly busy for over 10 minutes after the last agent ended is treated the same way.
+- A main turn that never reports its end (killed or interrupted) counts as ended once agents ran, none runs and the last one ended longer ago than the stale time (above). The run is stale too, and the next typed prompt or spawn starts a clean run. A main turn that is truly busy for longer than that after the last agent ended is treated the same way.
 
 ## Scrolling and resizing
 
@@ -76,8 +76,9 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
    - Up to 8 slice lines (`<glyph> <id> <marks> · <goal>`, cut to the width), then `+N more`. Marks follow the id only when they apply, so an old-style plan and reply show none (`marksOf`):
      - `⚑`: the slice is [risky](glossary.md#r) (its planned slice or an implementer brief says `RISKY: yes`).
      - `↻replan`: a [stalled slice](glossary.md#s). It needs a `PLAN REVIEW` with `REPLAN:` before another attempt. The pane mirrors the gates' stalled-slice rule in `sliceRunOf` ([brief-grammar.md, Stall](brief-grammar.md#stall)). The plan check and the Stop gate block such a slice with `replan_required`.
-     - `doubt`: a review of the latest attempt said `STATUS: fail` but counts as a pass, because every one of its `GAP:` lines is below the cutoff and no checked id failed (`countedOf`). A `GAP:` line with no number counts as 100. Such a review shows as passed on its card and in the tasks table.
-     - `⇧opus?` when a doubt signal asks for an opus review and none has passed after the latest attempt; `⇧opus✔` once one has. The pane's signals are: RISKY, an earlier failed review, a `(read)` answer or OPEN items in the passing review, and a low-confidence fail (the `doubt` mark).
+     - `doubt`: a review of the latest attempt said `STATUS: fail` but counts as a pass, because every one of its `GAP:` lines is below the gates' cutoff (`ORCH_GAP_MIN`, default 80) and no checked id failed (`countedOf`). A `GAP:` line with no number counts as 100. Such a review shows as passed on its card and in the tasks table.
+     - `⚠isolated`: the test gate logged an isolated test failure (`tests_failed_isolated`) for an implementer of the slice since the review before its latest attempt. `⚠gate gave up`: it logged a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`). Both come from `gates.jsonl` ("Where the data comes from").
+     - `⇧opus?` when a doubt signal asks for an opus review and none has passed after the latest attempt; `⇧opus✔` once one has. The pane's signals are the gates' (`doubtSignals` in `brief.mjs`): RISKY, an earlier failed review, a `(read)` answer or OPEN items in the passing review, an isolated test failure, a test gate that gave up, and a low-confidence fail (the `doubt` mark). With `ORCH_ESCALATION=off` there are none; with `always` every slice has one.
      - One tick per checked constraint id, from the latest review. The ids are the slice's planned and brief `CHECKS:`, plus any id that review answered. `C1✔` passed by a command, `C1✓` passed by reading, `C1✖` failed, `C1·` not answered.
    - The orchestrator is told to write each planned slice in the PLAN REVIEW brief as the `SLICE:`, `FILES:`, `DEPENDS:` and `GOAL:` lines its brief will start with. The rule is in `.claude/agents/orchestrator.md` step 2a, the route skill and the SessionStart nudge. Without those lines the bar follows the slices as they start, and the total grows as they do.
 
@@ -99,7 +100,8 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
 4. **Orchestrator box.** The orchestrator's model, a state line, the agent count, total tokens and elapsed time. The state line reads:
    - "waiting for N agents" when the main turn has ended while background agents still run;
    - "dispatching" with the count of running agents (also "0 running" between two waves while the main turn works);
-   - at sign-off: "N failed", "passed with N fixed on the way", or "all agents passed";
+   - "N slices not final: <ids>" (for one, "1 slice not final: s2") when nothing runs and the main turn has ended, but a slice of the open run is not final yet;
+   - at sign-off: "signed off with N failed", "passed · N fixed on the way", or "all agents passed";
    - with no agents: "working in this session" while the main turn runs, then "answered in this session", or "stopped before an answer" when the main turn ended for a reason other than an answer.
 5. **Triage box.** Shows the [route](glossary.md#r) (plain, reviewed or orchestrate), from one of three sources:
    - A recorded route verdict, from the `route` tool or from a captured `npm run route`: the mode, the facts (files, lines, slices, risky, code) and the reason. The Bash capture takes any main-session Bash call that matches `npm run route` (also `npm run --silent route`).
@@ -153,16 +155,18 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
    - A dependency not yet launched appears as a queued card while the run is going. Once nothing runs and the main turn has ended, those cards are left out (`nodesOf` with `ghosts` false), and the `◀` line stays, grey.
 
    **Attempts.** A card is one attempt of a slice (`nodesOf`).
-   - A new attempt starts when a non-reviewer agent of the slice starts at or after the end of a failed agent of that slice. Reviewers stay in the attempt they review.
+   - A new attempt starts when a non-reviewer agent of the slice starts at or after the end of a failed agent of that slice. An implementer with another agent id than the attempt's implementer also starts a new attempt, even while that one still runs. Reviewers stay in the attempt they review.
    - The first attempt keeps the slice id; later ones are `X ↻2`, `X ↻3`.
    - Each retry sits in the layer right of the attempt before it, joined to it by a retry connector with a `↻` next to the arrowhead. The connector is amber while the retry runs, green once it passed, and red while it failed or is unresolved (`retryTone`).
    - A slice that depends on a retried slice waits for its latest attempt and connects from it. Its `◀` line names the slice.
    - A card of a retried slice carries a line `attempt k/n`, and a `◀ retry of X` line first among the `◀` lines, in the colour of the retry connector.
    - A first attempt that starts at or after the first failure end in the run (any agent) carries `✚ new` on that line: a slice added by a replan.
-   - A resumed agent is a new attempt too. An `agent.spawn` for an id that already has a record adds a new record. A turn that completes for a record that already ended adds a new record too; its start is the old end, or the latest end of another agent of the slice if that is later. The old record stays as history.
-   - Tool updates and completions go to the latest still-running record of an id, else the latest record. Because the new record starts after the failed one ended, it becomes a retry attempt.
+   - A resumed agent gets a new record; the old record stays as history. An `agent.spawn` for an id that already has a record adds one. A `SendMessage` from the main session to an agent that has ended adds a running record at once, starting at the resume: the agent is found by id, else by the name its Agent call gave (the latest started of that name), as Claude Code resolves it. Until that record stops, the run model ignores it when it decides which reviews count, since the gates see a resume only at its stop (`pendingResume`).
+   - A turn that completes for a record that already ended, with no such resume seen, adds a new record too; its start is the old end, or the latest end of another agent of the slice if that is later. A reviewer is the exception: its turn ending again with no resume between (the stop after a [hand-back](glossary.md#h)) replaces its review, unless an implementer of the slice launched or stopped after it, so one review counts once.
+   - Tool updates and completions go to the latest still-running record of an id, else the latest record. A new record that starts after a failed agent of its attempt ended becomes a retry attempt.
 8. **Sign-off box.** It reads:
    - "waiting for N agents" while the main turn has ended and background agents still run;
+   - "N slices not final: <ids>", as in the orchestrator box;
    - otherwise "waiting for agents · verified findings only" until the run is signed off ("Sign-off" below), then the passed, failed and fixed counts;
    - with no agents, "waiting for the reply", then "answered in this session" or "stopped".
 
@@ -171,7 +175,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
    - a later slice that depends on the failed slice started after it ended and passed;
    - for an agent with no slice (a plan review), a later slice-less agent with the same role and label passed.
 
-   Fixed failures are not counted as failed in the stages or in the orchestrator box.
+   Fixed failures are not counted as failed in the stages or in the orchestrator box. Nor are reviews that a [gap validation](glossary.md#g) set aside: they count as done. A reviewer reply with no STATUS line gave no verdict and counts as failed in every cell, the header and the review stage, as on its card.
 9. **Tasks table.** One row per attempt of a slice (the first keeps the slice id, a retry is `X ↻2`), or per agent without a slice.
    - Each row has a glyph, label, share bar, tokens and time.
    - A second line holds the reported result: the [reply](glossary.md#r)'s `Answer:` line, else its first non-heading line. A bare `GAPS:` heading (plain or in bold) is skipped, so the finding under it shows. While the agent runs, the line holds its latest tool.
@@ -181,7 +185,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
     - A start entry ends with the model the agent was spawned with (`spawned.model` from the `agent.spawn` event), the same model its card and the usage bar use. For a researcher, this is where a model chosen at launch shows. Whether that value reflects a model the [read router](glossary.md#r) set through the plan check's `updatedInput` has not been checked live. The router's own check read the model from telemetry; see [gates.md, Read router](gates.md#read-router).
     - Triage verdicts are logged too.
     - A started agent that opens a retry attempt is logged as `retry k of X · <label> started …`. A plan review that starts after a failed one ended is logged as `re-plan · …`.
-    - A resumed run that fires no spawn event logs its start entry when its turn completes.
+    - A `SendMessage` resume logs its start entry at once (`resumed · <label> started …`, or the retry note when it opens a retry attempt). A resumed run the pane sees by neither a spawn nor a `SendMessage` logs a start entry, when its turn completes, only when it opens a retry attempt (the retry note) or is a plan review after a failed one (`re-plan`; `startNote`); otherwise it logs only its end entry.
     - An `Agent` launch a gate denied is logged as `⊘ blocked <reason>`, then ` · <slice>` and ` · <role>` when known. The plan check blocks before the agent exists, so no spawn follows. The reason is the gate's code when its message names one (`not_in_plan`, `builtin_agent_in_run`, `missing_lines`, `no_plan_review`, `light_path_multi`, `file_overlap`, `dependency_cycle` and the rest), else the code the plan check's message stands for.
     - A `<reason>_gave_up` launch went through and is not logged as blocked.
 12. **Used in this session.** What the whole session used, like the Claude desktop app's list. One row per kind, with as many names as fit, then `+N`. It is kept across runs (a new run does not reset it) and drawn once anything was used, also before any agent.
@@ -209,10 +213,10 @@ Under the stage row (`loops` in `register.tsx`) a connector is drawn for each of
 
 ## Sign-off
 
-- **With a typed prompt** (the run has a `work` line), the pane signs off only when no agent runs and the main turn has ended (`signed`, `workOpen`). Until then the orchestrator and sign-off boxes show the waiting states of sections 4 and 8.
-- Sign-off is about the screen. The run itself stays open until every slice is final ("Run boundary"), so a prompt typed after sign-off joins the open run instead of starting a new one.
-- **With no typed prompt** (agents without one, or background agents that wake the main session), the pane signs off as soon as no agent runs. It can flicker to signed off between waves; see "Limits".
-- A main turn that counts as ended after 10 minutes without a report of its end ("Run boundary") also signs off: the pane redraws once more and shows signed off.
+- **With a typed prompt** (the run has a `work` line), the pane signs off only when no agent runs, the main turn has ended and every slice of the open run is final (`signed`, `workOpen`, `openSlicesOf`). Until then the orchestrator and sign-off boxes show the waiting states of sections 4 and 8, including "N slices not final: <ids>".
+- A run that is closed or stale, or no run at all (no plan review, no light path), holds nothing back: the pane then signs off once nothing runs and the main turn has ended.
+- **With no typed prompt** (agents without one, or background agents that wake the main session), the pane signs off as soon as no agent runs and no slice of an open run is still not final. With no run it can flicker to signed off between waves; see "Limits".
+- A main turn that counts as ended after the stale time without a report of its end ("Run boundary") also signs off: the pane redraws once more and shows signed off.
 
 **A run with no agents** (research or simple work that stays in the main session) shows the input, orchestrator, triage and sign-off boxes. It also shows the stage boxes drawn so far: triage, the dim entry stage, and build as "this session". The tasks table, usage bar and slice diagram need agents.
 
@@ -225,7 +229,7 @@ Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, tr
 | `●` or a spinner | running | amber |
 | `✔` | passed | green |
 | `✖` | failed | red |
-| `◆` | finished with no STATUS line | grey |
+| `◆` | finished with no STATUS line (a reviewer with none reads as failed), or a failure fixed later | grey |
 | `◌` | queued | grey |
 | `━` | the progress bar, one share per slice | green done, amber running, red failed, grey to do |
 | `◉` | the route triage chose | status colour |
@@ -238,6 +242,8 @@ Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, tr
 | `↻ replan N` | the plan was extended by a `PLAN REVIEW` with `REPLAN: N` (progress heading) | bold |
 | `↻replan` | a stalled slice that needs a REPLAN plan review (progress line) | as the line |
 | `doubt` | a review failed only on gaps below the cutoff and counts as a pass (progress line) | as the line |
+| `⚠isolated`, `⚠gate gave up` | the test gate logged an isolated test failure, or gave up, for the slice (progress line) | as the line |
+| `⚠` | older test-gate records were not read (a line under the slices) | dim |
 | `⊘` | an Agent launch a gate blocked (session log) | red |
 
 - Flow lines are amber while work moves through them, green once what feeds them is done, grey before that.
@@ -251,8 +257,10 @@ Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, tr
 - **Brief lines.** The `SLICE:`, `FILES:` and `DEPENDS:` lines of each agent brief give a slice's id, its file count and its dependencies. The first matching line wins, as in the plan check. `RISKY:`, `CHECKS:` and `PATH: light` are kept for the marks and the run boundary.
 - **Plan reviews.** A brief that starts with `PLAN REVIEW` (only this line must be at the start) is labelled "plan review" and belongs to the plan review stage, whatever `SLICE:` line it also carries. It is never a slice card.
 - **Agent events.** The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the reply, the token usage and the end time.
-- **Reply status** follows the one [STATUS rule](glossary.md#s); a reply with no STATUS line counts as done. A reviewer's status is its [counted status](glossary.md#c). The reply's constraint answers, OPEN items and `GAP:` lines feed the marks.
-- **Tool calls** give a running agent's latest tool. A denied `Agent` call gives a blocked log entry.
+- **Reply status** follows the one [STATUS rule](glossary.md#s); a reply with no STATUS line counts as done, except a reviewer's, which gave no verdict and is drawn as failed. A reviewer's status is its [counted status](glossary.md#c). The reply's constraint answers, OPEN items and `GAP:` lines feed the marks.
+- **Test-gate records.** At each agent start and end and at each prompt the pane reads the last MiB of each `gates.jsonl` the hooks may write (the project's `.claude/state/`, and the per-user and plugin state dirs for this project), read only. It keeps the records of the implementers it knows whose reason is `tests_failed_isolated`, `max_blocks_reached` or `bugfix_unverified_gave_up`, for the `⚠` marks and the doubt signals. When a file is longer than that, it skips the first, possibly cut, line and shows `⚠ older test-gate records not read (gates.jsonl over 1 MiB)` under the slices.
+- **The gates' settings.** At each session start the pane reads `ORCH_RUN_STALE_MIN`, `ORCH_GAP_MIN` and `ORCH_ESCALATION` as the hooks read them: the environment variable when it is set (even empty), else the plugin setting when it is not empty, else the default (30 minutes, 80, the escalation rule). The standalone `dist/dashboard` declares no plugin settings, so there only the environment and the defaults apply.
+- **Tool calls** give a running agent's latest tool. A denied `Agent` call gives a blocked log entry. A main-session `SendMessage` to an agent that has ended opens its resumed record ("Attempts").
 - **The route verdict** comes from the `route` tool, or from the result of a main-session `npm run route` call.
 - **The plan** comes from the `SLICE:` and `GOAL:` lines of the latest `PLAN REVIEW` brief that names a slice ("Progress" above).
 - **"Used in this session"** comes from `skill.prompt`, `agent.spawn` and every `tool.call` (after it ran, from its result).
@@ -299,7 +307,7 @@ implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
 - **Width.** A row is cut by display width over graphemes, whole graphemes only, ending in "…". Wide East Asian characters and emoji count two columns.
 - **Other agents** (built-ins, other plugins) keep the rows Claude Code draws.
 - **Your own setting wins.** A `subagentStatusLine` in your own or the project's settings draws the row first, and the mod leaves a row that arrives already drawn. `.claude/hooks/subagent-statusline.mjs` is kept for that use: name it in your own `subagentStatusLine` to get the same rows from the launch records (`journal-launches.jsonl`).
-- **Checked** on the mod's test host only (`npm run test-dashboard`), not in a live interactive session ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K10 and K2).
+- **Checked** on the mod's test host (`npm run test-dashboard`, which CI runs since 2.0.0). Rows in this format were captured once in a live interactive session ([probes b2](data/probes-2.0.0-b2.md), Probe 1), but which component drew them there was not established ([Limits](limits.md), A, K2).
 
 ### statusline.sh
 
@@ -336,17 +344,16 @@ curl -fsSL https://raw.githubusercontent.com/0xcvaliente/claude-code-orchestrati
 - Claude Code reports no live token count for a running agent, so a task's tokens appear when the agent finishes.
 - The orchestrator's own tokens are not counted.
 - A dependency that skips a layer shows only as a `◀` line on its card, not as a drawn edge.
-- Attempts are told apart by timing ("Attempts" above), so a retry that starts while the failed agent still runs joins that card.
+- Attempts are told apart by timing ("Attempts" above). A fresh implementer always starts its own attempt, but a retry by another role that starts while the failed agent still runs joins that card.
 - Headless runs (`npm run native`, `npm run auto`, the benchmark) have no screen and draw nothing.
 - The progress total is the plan's only when the PLAN REVIEW brief lists the slices as `SLICE:` lines. Free-form plans fall back to the slices seen so far.
-- The run goes stale after 10 minutes with no agent running (`STALE_MS`), not after the gates' `ORCH_RUN_STALE_MIN` (default 30). So the pane can start a clean run while the gates still hold the old one.
-- With no typed prompt, the pane can flicker to signed off between two waves of agents.
-- The pane cannot read `ORCH_ESCALATION` and uses its default. Its `⇧opus?` cannot see an isolated test failure (`tests_failed_isolated`) or a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`: the doubt signal `test_gate_gave_up`). The gates read those in `gates.jsonl`, which the pane does not read. So the gate may require an opus review the pane does not mark, and the pane can call such a slice, and its run, final while the gate holds it.
-- The pane does not mirror the second stop of a [hand-back](glossary.md#h). `brief.mjs` reads `continues` on the stop record (set from `stop_hook_active`) and counts the two stops as one review. `turn.complete` carries no `stop_hook_active`. So when a worker's reply is sent back and it ends its turn again, the pane records that turn end as a resumed record. One review can then count twice: in the header's counts, and as a retry signal when the first of the two failed.
+- The pane reads the gates' settings once per session start (a reload reads them again). The standalone `dist/dashboard` declares no plugin settings, so it reads only the environment and the defaults.
+- With no typed prompt and no run (no plan review, no light path), the pane can flicker to signed off between two waves of agents.
+- Since 2.0.0 the pane reads the last MiB of each `gates.jsonl` for an isolated test failure (`tests_failed_isolated`, mark `⚠isolated`) and a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`, mark `⚠gate gave up`). When a `gates.jsonl` is longer than that, a line under the slices says older test-gate records were not read, and the pane may then miss a doubt signal the gates see.
+- A `SendMessage` resume is matched to its agent by id, else by the name the Agent call gave (the latest started of that name), as Claude Code resolves it.
+- The second stop of a [hand-back](glossary.md#h) is mirrored for reviewers only. `brief.mjs` reads `continues` on the stop record (set from `stop_hook_active`) and counts the two stops as one, for any worker. `turn.complete` carries no `stop_hook_active`, so the pane goes by the shape instead: a reviewer's turn that ends again with no resume between replaces its review ("Attempts"). For another worker that turn end is recorded as a resumed record, which counts once more in the header's counts.
 - The run model reads at most 500 agent records ("Run boundary"). A run with more can lose an early attempt or failed review.
-- The `doubt` and `↻replan` marks use the default gap cutoff 80. With `ORCH_GAP_MIN` set to another value, the pane and the gates can disagree.
-- A failed review that a gap validation has set aside still counts in the header's failed count and in the review stage's colour.
-- While a resumed implementer still runs, the pane can briefly disagree with the gate about which review counts.
+- A `SendMessage` resume counts on the pane only from its stop, as in the gates (`pendingResume`). A resume that fires `agent.spawn` again counts from its launch; that this matches the gates is not established, so while it runs the pane and the gate may briefly disagree about which review counts.
 - The mod does not route [workflow agents](glossary.md#w): its `agent.spawn` handler only records the spawn, so workflow researchers are still not routed. A probe showed that routing them there is feasible; it is not built ([native-mode.md, Checked live](native-mode.md#checked-live), Check G; [live checks: workflow agents](data/live-checks-workflow.md#answers)).
 - "Used in this session" keeps the last 300 skills, connectors and files of each list, and shows file base names, so two files with the same name show twice.
 - The stacked bar is at most 40 cells wide and at least 10, and each model with tokens needs one cell. It would overflow only with more such models than cells, which in practice means a very large number of distinct models.

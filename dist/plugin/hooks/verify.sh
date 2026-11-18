@@ -105,11 +105,18 @@ hooks_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$(dirname "${BASH_SOURCE[0]}")/test-cmd.sh"
 
 # Arguments: --plugin (the plugin's copy: its state dir rule, below) and --handback (the hand-back mode, below), any order.
-plugin_flag=0 handback=0
+# --recent-ms=<n> is for tests only (no hook configuration passes it): the result cache's guard against recent changes
+# (test-gate-cache.mjs RECENT_MS, 2000 ms) for this run's store, so a test need not wait out the production guard.
+plugin_flag=0 handback=0 recent_ms=""
 for _a in "$@"; do
-  case "$_a" in --plugin) plugin_flag=1 ;; --handback) handback=1 ;; esac
+  case "$_a" in
+    --plugin) plugin_flag=1 ;;
+    --handback) handback=1 ;;
+    --recent-ms=*) recent_ms="${_a#--recent-ms=}" ;;
+  esac
 done
 unset _a
+case "$recent_ms" in '' | *[!0-9]* | ???????*) recent_ms="" ;; esac
 
 input="$(cat)"
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -159,19 +166,23 @@ now_iso() {
 }
 
 # Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or after_handback) and
-# tree_extra (the cache key's first 16 hex digits, and the record it reused). Returns 1 when the line was not written.
+# tree_extra (the cache key's first 16 hex digits, and the record it reused), and after a failed test run fail_extra
+# (what failed: failed_count, failed_tests, failed_crash and output, the file in the state folder that keeps the tail of
+# the run's output; bugfix-check.mjs failureExtra). Returns 1 when the line was not written.
 log_gate() { # decision reason [extra JSON fields: counts only]
   local extra="${link_extra:-}"
   decided=1
   [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
   [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
+  [ -z "${fail_extra:-}" ] || extra="${extra:+$extra,}$fail_extra"
+  [ "${took_over:-0}" = 0 ] || extra="${extra:+$extra,}\"lock_takeover\":1" # this gate replaced a stale suite lock
   mkdir -p "$state" 2>/dev/null || return 1
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"%s}\n' \
     "$(now_iso)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" "${extra:+,$extra}" >> "$state/gates.jsonl" 2>/dev/null || return 1
   return 0
 }
-decided=0 link_extra="" tree_extra=""
+decided=0 link_extra="" tree_extra="" fail_extra=""
 
 # Run a command in its own process group, stdin from $2 and stdout to $3 (stderr to $4), for at most $1 seconds; then
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
@@ -193,6 +204,9 @@ run_limited() { # limit infile outfile errfile cmd...
   fi
   pid=$!
   lim_pid="$pid" # for on_signal: a TERM, INT or HUP to the hook ends this group first
+  # Under the suite lock, the lock's companion file names this run's process group, so that a hook killed with SIGKILL
+  # leaves a lock that is not taken over while its suite still runs (lock_stale), until the lock is LOCK_STALE_S old.
+  [ "$lock_held" != 1 ] || { printf '%s\n%s\n' "$lock_token" "$pid" >"$lock.run"; } 2>/dev/null
   set +m
   # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
   # can be reached limit-1 seconds after the start (a run that took 2.6 s was timed out under a 3 s limit); one more
@@ -245,7 +259,8 @@ lim_pid="" lim_wd=""
 # runs in a group of its own and would outlive the hook) is ended the way a limit ends it, SIGTERM and SIGKILL after
 # LIM_GRACE_S while its leader is still there, before the EXIT trap releases the lock, so the next gate's suite never
 # overlaps it. bash runs the trap at once while it waits for the job. A hook killed with SIGKILL runs no trap: its lock
-# is then taken over as stale, and its suite may still be running.
+# stays, and lock_stale counts it stale only once no process is left in the group test-gate.lock.run names (or once the
+# lock is older than LOCK_STALE_S, when that group may still run); the next waiter then takes it over (lock_takeover).
 on_signal() { # exit status
   local g=0
   trap '' TERM INT HUP
@@ -273,10 +288,12 @@ fi
 # never from the agent's cwd), so a lock file there makes the gates of one wave run their suites, and the base run or
 # bugfix check that follows, one after the other instead of all at once (four at once took 554 to 590 s each, live).
 # The lock is "<pid> <start epoch seconds>" of its holder, made whole in a private file and hard-linked into place (ln
-# fails when the name exists: atomic, and never seen half written). A lock whose holder is gone, or that is older than
-# the hook timeout (LOCK_STALE_S), is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) removes
-# it and all try again. The EXIT trap releases it on every way out (exit, the test run's limit, SIGTERM), and only
-# while it still holds this hook's own token; a hook killed with SIGKILL leaves it to the stale rule.
+# fails when the name exists: atomic, and never seen half written). A lock that is older than the hook timeout
+# (LOCK_STALE_S), or whose holder is gone and whose companion file (test-gate.lock.run) names no process group that
+# still has a member, is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) replaces it with its
+# own lock in one rename (take_over) and holds it. The EXIT trap releases it on every way out (exit, the test run's
+# limit, SIGTERM), and only while it still holds this hook's own token; a hook killed with SIGKILL leaves it to the
+# stale rule.
 lock="$state/test-gate.lock"
 lock_token="" lock_held=0
 LOCK_STALE_S=900 # the hook timeout in the settings
@@ -304,6 +321,8 @@ take_lock() { # 0: taken; 1: held by another; 2: no lock can be made here (the g
   return 2
 }
 lock_stale() { # $1: the lock's content as read; true when its holder is gone or it is older than the hook timeout
+  # (holder gone: only once no member of the process group its companion file names is left, below; content that does
+  # not read as "<pid> <start>" is stale too)
   local pid start
   pid="${1%% *}" start="${1#* }"
   case "$pid" in '' | *[!0-9]*) return 0 ;; esac
@@ -311,25 +330,65 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
   [ "$(($(date +%s) - 10#$start))" -le "$LOCK_STALE_S" ] || return 0
   kill -0 "$pid" 2>/dev/null && return 1
   ps -p "$pid" >/dev/null 2>&1 && return 1 # alive under another user (kill -0 is refused)
+  # The holder is gone (killed with SIGKILL: no trap ran). Its suite runs in a process group of its own and may still
+  # run: while a member of the group the lock's companion file names is left, the lock stands.
+  local run_tok="" run_pg=""
+  { { IFS= read -r run_tok && IFS= read -r run_pg; } <"$lock.run"; } 2>/dev/null # a missing file prints nothing
+  if [ "$run_tok" = "$1" ]; then
+    case "$run_pg" in '' | *[!0-9]*) ;; *) kill -0 -- "-$run_pg" 2>/dev/null && return 1 ;; esac
+  fi
   return 0
 }
-take_over() { # 0 when a stale lock was removed
-  local guard="$lock.takeover" seen="" now_seen="" rc=1
+# One taker at a time (the guard folder; a waiter that finds it older than 2 minutes removes it and does not take over
+# that round). The takeover never frees the lock's name, so no other gate can link a lock there while it works:
+#  1. it reads the lock; an empty or unreadable read (the name was free, or the file went before the read) means the
+#     lock changed under this gate, and a lock that is not stale stands: either way it returns 1 and the caller waits;
+#  2. it hard-links the lock under a private name in the same folder (a snapshot; the name keeps its file) and reads the
+#     snapshot: a lock other than the one judged stale (its holder released it and another gate linked its own after the
+#     read) is left alone, the snapshot removed, and it returns 1;
+#  3. otherwise it writes its own lock whole into a private file in the same folder and renames that over the name (one
+#     atomic step), removes the snapshot and holds the lock from then on, as take_lock's link would (return 0).
+# No lock is ever moved away, put back or removed by a taker, so a fresh lock is never lost to a takeover that read the
+# name while it was free (src/test-gate-lock.test.mjs, "a takeover that reads the lock while its name is free never
+# moves the fresh lock that appears there") or that read a lock its holder then released (src/test-gate-lock.test.mjs,
+# "a lock released and replaced by another gate's between a waiter's read and its takeover is left in place"). What
+# stays open (docs/limits.md, C): a holder still alive when its lock is more than LOCK_STALE_S old (a machine suspended
+# mid-run) has its lock replaced while its suite may still run, a gate that links its lock while such a holder releases
+# between a taker's snapshot and rename has it replaced, and its release_lock can remove the successor's lock (or
+# companion file) between its token check and its rm; a holder alive with a lock under LOCK_STALE_S is never stale, also
+# between release_lock's removal of the companion file and of the lock (lock_stale asks the pid first); two gates are in the takeover at once once a guard left by a gate
+# killed or stopped inside its takeover is 2 minutes old (the age test and the rmdir are two steps, so a waiter can
+# remove a newer taker's guard), and then the second rename can replace the first taker's new lock; a new lock with the
+# very content judged stale (the departed holder's pid reused by a gate within the same second) passes the comparison;
+# a lock file that is empty for good (take_lock never makes one) is never stale, so every gate waits until its floor.
+take_over() { # 0 when this gate replaced a stale lock with its own: the lock is then held
+  local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$" tmp="$state/.test-gate.lock.$$"
   if ! mkdir "$guard" 2>/dev/null; then
     [ -z "$(find "$guard" -maxdepth 0 -mmin +2 2>/dev/null)" ] || rmdir "$guard" 2>/dev/null
     return 1
   fi
+  rm -f "$grab" "$tmp" 2>/dev/null # this gate's own private names (its pid), left by a killed gate with the same pid
   { IFS= read -r seen <"$lock"; } 2>/dev/null
-  if [ -e "$lock" ] && lock_stale "$seen"; then
-    { IFS= read -r now_seen <"$lock"; } 2>/dev/null
-    [ "$now_seen" = "$seen" ] && rm -f "$lock" 2>/dev/null && rc=0
+  if [ -n "$seen" ] && lock_stale "$seen" && ln "$lock" "$grab" 2>/dev/null; then
+    { IFS= read -r now_seen <"$grab"; } 2>/dev/null
+    if [ "$now_seen" = "$seen" ]; then
+      lock_token="$$ $(date +%s)"
+      if printf '%s\n' "$lock_token" 2>/dev/null >"$tmp" && mv -f "$tmp" "$lock" 2>/dev/null; then
+        rc=0 took_over=1 lock_held=1
+      fi
+      rm -f "$tmp" 2>/dev/null
+    fi
+    rm -f "$grab" 2>/dev/null
   fi
   rmdir "$guard" 2>/dev/null
   return "$rc"
 }
+took_over=0
 release_lock() {
-  local cur=""
+  local cur="" run_tok=""
   [ "$lock_held" = 1 ] || return 0
+  { IFS= read -r run_tok <"$lock.run"; } 2>/dev/null
+  [ "$run_tok" != "$lock_token" ] || rm -f "$lock.run" 2>/dev/null
   { IFS= read -r cur <"$lock"; } 2>/dev/null
   [ "$cur" != "$lock_token" ] || rm -f "$lock" 2>/dev/null
   lock_held=0
@@ -343,7 +402,10 @@ acquire_lock() { # floor
     r=$?
     lock_wait_s=$((SECONDS - t0))
     [ "$r" = 1 ] || return "$r"
-    take_over && continue
+    if take_over; then # the stale lock was replaced by this gate's own: held
+      lock_wait_s=$((SECONDS - t0))
+      return 0
+    fi
     [ "$(time_left)" -gt "$1" ] || return 1
     sleep 1
   done
@@ -657,6 +719,39 @@ list_trees() {
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || rm -f "$work/$1" 2>/dev/null
   return 0
 }
+# What failed (bugfix-check.mjs failureExtra): sets fail_extra to the failed run's record fields (failed_count, at most
+# 10 failing test names as the runner's output shows them, failed_crash, and output: the file under the state folder's
+# test-output/ that keeps the last 64 KiB of the run's output; the newest 10 such files are kept). Its run gets
+# min(10, time left - KEY_RESERVE_S) s and is skipped with less: no fields then (after a test run that used up the time
+# left, as a timed-out stop's run does), never a different decision. The agent's message does not change.
+note_failures() {
+  local lim
+  fail_extra=""
+  lim=$(($(time_left) - KEY_RESERVE_S))
+  [ "$lim" -le 10 ] || lim=10
+  [ "$lim" -ge 1 ] || return 0
+  [ -f "$work/test.out" ] || return 0
+  # The kept output may hold secrets a test printed: the folder is 0700 and each file 0600, also when an older run or
+  # a wider umask left them open (tightened here, before and after the write; a symlink is never followed by chmod).
+  # The helper runs under umask 077, so the folder it makes and the file it writes are private from the start.
+  local um out f
+  out="$state/test-output"
+  mkdir -p "$out" 2>/dev/null
+  [ -L "$out" ] || chmod 700 "$out" 2>/dev/null
+  um="$(umask)"
+  umask 077
+  run_limited "$lim" "$work/test.out" "$work/fail.out" /dev/null node "$hooks_dir/bugfix-check.mjs" failures --state "$state" --tag "${agent_id:-}-$$"
+  umask "$um"
+  if [ -d "$out" ] && [ ! -L "$out" ]; then
+    for f in "$out"/* "$out"/.[!.]*; do
+      [ -f "$f" ] && [ ! -L "$f" ] && chmod 600 "$f" 2>/dev/null
+    done
+  fi
+  [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
+  fail_extra="$(sed -n 1p "$work/fail.out" 2>/dev/null)"
+  case "$fail_extra" in '"failed_count":'*) ;; *) fail_extra="" ;; esac
+  return 0
+}
 # The store's verdict goes into the hand-back's record ("store"): "stored" or why not.
 store_note() { tree_extra="${tree_extra:+$tree_extra,}\"store\":\"$1\""; }
 cache_put() { # result extra message: the hand-back gate only; the helper compares L0 and L1 and may refuse
@@ -671,13 +766,13 @@ cache_put() { # result extra message: the hand-back gate only; the helper compar
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || { store_note no_work; return 0; }
   run_limited "$lim" "$work/put.in" "$work/put.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
-    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json"
+    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json" "$recent_ms" "$fail_extra"
   code="$(sed -n 1p "$work/put.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
   [ "$lim_timed_out" = 0 ] && [ -n "$code" ] || code=put_failed
   store_note "$code"
   return 0
 }
-cached="" cached_by="" cached_extra="" cached_msg="" key_stable=0 cache_key="" take_reason=""
+cached="" cached_by="" cached_extra="" cached_fail="" cached_msg="" key_stable=0 cache_key="" take_reason=""
 if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
   compute_key
   cache_key="$key_out"
@@ -707,13 +802,15 @@ if [ -n "$cache_key" ]; then
   if [ -n "$cached" ]; then
     cached_by="$(sed -n 2p "$work/cache.out" | LC_ALL=C tr -cd 'A-Za-z0-9_.:-')"
     cached_extra="$(sed -n 3p "$work/cache.out" | LC_ALL=C tr -cd 'a-z_0-9,:"')"
-    cached_msg="$(sed -n '4,$p' "$work/cache.out")"
+    cached_fail="$(sed -n 4p "$work/cache.out")" # cleaned by the helper (cleanFailureExtra); checked again below
+    case "$cached_fail" in '"failed_count":'*) ;; *) cached_fail="" ;; esac
+    cached_msg="$(sed -n '5,$p' "$work/cache.out")"
     tree_extra="$tree_extra,\"reused\":\"$cached\",\"reused_from\":\"$cached_by\""
   fi
 fi
 [ -z "$take_reason" ] || tree_extra="${tree_extra:+$tree_extra,}\"reuse\":\"$take_reason\""
 
-lock_wait_s=0
+lock_wait_s=0 run_s=0 chk_s=0 # where the budget went, for the bugfix_timeout message
 timed_out=0 limit=0
 reused=0
 if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
@@ -722,6 +819,7 @@ if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
   rc=0
   [ "$cached" = pass ] || rc=1
   if [ "$cached" = timeout ]; then rc=137 timed_out=1; fi
+  [ "$cached" = pass ] || fail_extra="$cached_fail" # what failed, as the hand-back's run recorded it
   out=""
 else
   if [ "$cached" = lock_wait ]; then
@@ -767,13 +865,19 @@ else
     [ "$limit" -ge 1 ] || limit=1
   fi
   ensure_work
+  run_s="$SECONDS"
   run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
+  run_s=$((SECONDS - run_s))
   rc="$lim_rc"
   timed_out="$lim_timed_out"
   # At a hand-back: L1 at once, then the key again, so that an outcome is stored only for the trees the run began with.
   list_trees l1.json
   out="$(cat "$work/test.out" 2>/dev/null)"
   [ "$handback" = 0 ] || recheck_key
+  # A failed run (not pytest's "no tests collected", which allows): what failed goes into its records.
+  if [ "$rc" != 0 ] && ! { [ "$rc" = 5 ] && [ "$timed_out" = 0 ] && case "$cmd" in *pytest*) true ;; *) false ;; esac; }; then
+    note_failures
+  fi
   if [ "$timed_out" = 1 ]; then
     [ "$rc" != 0 ] || rc=137
     if [ "$handback" = 1 ]; then
@@ -796,7 +900,9 @@ if [ "$rc" = 0 ]; then
     exit 0
   fi
   if [ "${ORCH_BUGFIX_CHECK:-}" != off ] && [ "$agent_type" = implementer ]; then
+    chk_s="$SECONDS"
     check bugfix "$input" 2
+    chk_s=$((SECONDS - chk_s))
     # A temp folder that could not be made again leaves the brief unread too: treated as a bugfix agent (blocks).
     if [ "$chk_no_time" = 1 ] && { is_bugfix_agent || { [ "$chk_tmp_lost" = 1 ] && ! ensure_work; }; }; then
       # No time left to check the reproduction test, or the check was killed: unverified, so it blocks like the
@@ -816,7 +922,17 @@ if [ "$rc" = 0 ]; then
         exit 2
       fi
       log_gate block bugfix_timeout
-      echo "KIND: bugfix: unverified. The check of the reproduction test against the base did not finish within the test gate's time budget ($budget seconds for the whole gate). Make the test suite faster, or report the bug as unverified." >&2
+      # What the budget went to, from the times this gate measured: the wait for the suite lock (another gate running
+      # this project's suite), the test run (none when the hand-back's outcome was reused) and the check itself. The
+      # wait is named as the cause when it took at least as long as the run and the check together.
+      if [ "$reused" = 1 ]; then ran="the test outcome was the hand-back's run (none here)"; else ran="the test run took $run_s s"; fi
+      if [ "$lock_wait_s" -gt 0 ] && [ "$lock_wait_s" -ge $((run_s + chk_s)) ]; then
+        echo "KIND: bugfix: unverified. The check of the reproduction test against the base could not finish within the test gate's time budget ($budget seconds for the whole gate): $lock_wait_s s of it went to waiting for another test gate that was running this project's suite (one suite runs at a time), $ran and the check $chk_s s. The wait, not your suite, used the time: stop again once the other gate has finished (your next stop runs the gate again), or report the bug as unverified." >&2
+      else
+        waited=""
+        [ "$lock_wait_s" -le 0 ] || waited=", waiting for another test gate's run of this project's suite $lock_wait_s s"
+        echo "KIND: bugfix: unverified. The check of the reproduction test against the base did not finish within the test gate's time budget ($budget seconds for the whole gate): $ran$waited and the check $chk_s s. Make the test suite faster, or report the bug as unverified." >&2
+      fi
       exit 2
     fi
     if [ "$chk_decision" = block ]; then
