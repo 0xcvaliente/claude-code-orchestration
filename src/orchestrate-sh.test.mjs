@@ -11,18 +11,19 @@ import { fileURLToPath } from "node:url";
 
 const orchestrateSh = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "orchestrate.sh");
 
+// One folder for every dry run here (the test root removes it): since 1.6.1 the git -C write rules name the repo folder,
+// so two runs compare equal only in the same folder.
+const dryRepo = mkdtempSync(join(tmpdir(), "orch-sh-"));
 /** @param {Record<string, string>} env */
 function dryRunArgs(env) {
-  const repo = mkdtempSync(join(tmpdir(), "orch-sh-"));
-  try {
+  const repo = dryRepo;
+  {
     const r = spawnSync("bash", [orchestrateSh, "t", repo], {
       env: { ...process.env, ORCH_DRY_RUN: "1", ORCH_AGENT: "none", ORCH_TEST_CMD: "", ORCH_BUDGET_TOKENS: "", ORCH_BUDGET_USD: "", ORCH_SESSION_PERSISTENCE: "", ...env },
       encoding: "utf8",
     });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.split("\n");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
   }
 }
 

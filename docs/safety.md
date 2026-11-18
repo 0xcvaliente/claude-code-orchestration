@@ -26,7 +26,7 @@ Permission rules in Claude Code's settings. A deny rule beats every allow rule.
   - `git clean` and `git <options> clean -<flag>`;
   - global options that take a separate value: `--namespace`, `--git-dir`, `--work-tree`, `--exec-path`, `--super-prefix`, `--attr-source` and a second `-C`.
 
-  `git -C <dir>` is allowed only with the subcommands the workers use (status, diff, log, show, rev-parse, ls-files, rev-list, `branch --show-current`, `worktree list`, `worktree add`, add, commit, merge, `reset --merge`).
+  `git -C <dir>` is allowed only with the subcommands the workers use (status, diff, log, show, rev-parse, ls-files, rev-list, `branch --show-current`, `worktree list`, `worktree add`, add, commit, merge, `reset --merge`). The write subcommands (`branch --show-current`, `worktree list`, `worktree add`, add, commit, merge, `reset --merge`) are pinned since 1.6.1 to the project folder (as given, its real path and its git top level) and `<repo>/.claude/worktrees/*`, and, with skill repositories set, to each skills repository and `<config dir>/orchestration/skill-drafts/*`; a headless run can no longer `git -C` with them into another folder. The read subcommands stay open for any folder. A folder with a character that cannot be pinned in a rule (`*`, `?`, `[`, a quote, a backslash, `$`, `(`) gets no write rule; one the plan check would quote (a space or a non-ASCII letter) gets its quoted forms. A `git -C` path holding `/../` is denied. Claude Code still warns at startup about the rules that need a `*` for a worktree's name: three, six with skill repositories ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K10 and K2).
 - **The workers are told never to push.** That is a prompt rule.
 
 What the deny lists do not do:
@@ -61,7 +61,7 @@ Two deny-only hooks narrow what one role can do. `ORCH_GUARDS=off` turns both of
 - The **researcher guard** holds a researcher's Bash to read-only forms: no redirection except `2>/dev/null` and `2>&1`, no substitution, no device reads. See [Researcher guard](gates.md#researcher-guard).
 - The **egress guard** lets a reviewer's `WebFetch` reach only hosts its brief, its launch record or its slice's planned files name. See [Egress guard](gates.md#egress-guard).
 
-A third guard covers every session, not one role. The **workflow guard** (1.6.0) refuses every Workflow launch except this repo's saved `orchestrate` workflow, so a workflow the model writes on the spot (Claude Code's `ultracode` keyword, or a plain request for a workflow) does not run outside the gates. `ORCH_WORKFLOW_GUARD=off` turns it off. See [Workflow guard](gates.md#workflow-guard).
+A third guard covers every session, not one role. The **workflow guard** (1.6.0) refuses every Workflow launch except this repo's saved `orchestrate` workflow (a launch or a resume, its file checked by content since 1.6.1), so a workflow the model writes on the spot (Claude Code's `ultracode` keyword, or a plain request for a workflow) does not run outside the gates. `ORCH_WORKFLOW_GUARD=off` turns it off. See [Workflow guard](gates.md#workflow-guard).
 
 What they do not do: they are not a boundary. Bash can still reach the network. Web search and fetch are read-only, and fetched pages are data, not instructions: that is a prompt rule plus the egress guard for reviewers, not a sandbox.
 

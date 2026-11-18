@@ -753,7 +753,7 @@ const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed rev
 // the stall check. The pane cannot read ORCH_GAP_MIN, so it uses the default cutoff. `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
 // launched with VALIDATE: gaps.
 const GAP_MIN = 80
-type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; replan?: boolean; validate?: boolean }
+type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean }
 const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
 export const countedOf = (reply: Reply): { status: 'pass' | 'fail' | null; doubt: boolean; keys: string[] } => {
   const high = reply.gaps.filter(g => (g.confidence ?? 100) >= GAP_MIN)
@@ -906,11 +906,12 @@ async function newRun($: Ctx, t: number, keepVerdict: boolean) {
 // Blocked Agent launches: the gate's reason code when its message names one, else the reason the plan check's message stands for.
 const GATE_REASONS = [
   'not_in_plan', 'builtin_agent_in_run', 'agents_running', 'constraints_unchecked', 'opus_review_required', 'missing_lines', 'no_plan_review', 'light_path_multi',
-  'file_overlap', 'dependency_cycle',
+  'file_overlap', 'dependency_cycle', 'tests_failed_after_report',
 ]
 const GATE_PHRASES: [RegExp, string][] = [
   [/every implementer brief starts with SLICE/i, 'missing_lines'], [/PATH: light is only for/i, 'light_path_multi'], [/no plan review has finished/i, 'no_plan_review'],
   [/would change files another slice owns/i, 'file_overlap'], [/forms a cycle/i, 'dependency_cycle'],
+  [/tests failed after the worker had reported/i, 'tests_failed_after_report'],
 ]
 const denialOf = (ran: unknown) => {
   const text = stringsOf(ran).join('\n').slice(0, 20_000)
@@ -940,6 +941,142 @@ function startTimer($: Ctx, slot: { timer?: Timer }) {
   } catch {
     // no redraw timer: the pane still redraws on every state write
   }
+}
+
+// ---- Worker rows: the row Claude Code draws under the prompt for each running subagent (`ui.render` on `AgentRow`), rewritten for this plugin's
+// workers as `<role> <slice> #<attempt> · <model> · <tokens> (<context %>) · <progress>`. A port of .claude/hooks/subagent-statusline.mjs (the
+// `subagentStatusLine` command 1.2.0 to 1.6.0 shipped as the plugin's settings.json), with the slice, attempt and flags read from this mod's own
+// agent records instead of journal-launches.jsonl; register.test.tsx holds the same cases as src/subagent-statusline.test.mjs. Other agents'
+// rows, and a row the person's own `subagentStatusLine` already drew (`body` arrives set), are left as they come. Drawn whether the pane is on
+// or off: the records are kept either way.
+const PLUGIN = 'orchestration' // the plugin's name, which prefixes its agents' types (`orchestration:reviewer`)
+/** The worker role of an agent type: one of ROLES, plain or prefixed with the plugin's name; else null. */
+export const workerRole = (type: unknown) => {
+  const t = typeof type === 'string' ? type : ''
+  const role = t.startsWith(`${PLUGIN}:`) ? t.slice(PLUGIN.length + 1) : t
+  return ROLES.includes(role) ? role : null
+}
+/**
+ * "941", "12.3k", "128k", "1.2M". Each tier is chosen by the value as it would print, so 99,950 prints "100k" (not "100.0k") and 999,500 prints
+ * "1.0M" (not "1000k").
+ */
+export function shortTokens(n: number) {
+  if (!(n >= 0)) return '0'
+  if (Math.round(n) < 1000) return String(Math.round(n))
+  const tenthsK = Math.round(n / 100)
+  if (tenthsK < 1000) return `${(tenthsK / 10).toFixed(1)}k`
+  const k = Math.round(n / 1000)
+  if (k < 1000) return `${k}k`
+  return `${(Math.round(n / 100_000) / 10).toFixed(1)}M`
+}
+const rowFamily = (model: unknown) => String(model ?? '').toLowerCase().match(/fable|mythos|opus|sonnet|haiku/)?.[0] ?? ''
+
+// Two columns: emoji presentation (by default, or forced by U+FE0F, which covers keycaps), and East Asian Wide or Fullwidth text. Text presentation
+// (U+FE0E) is one column. WIDE: the code points whose East_Asian_Width is W or F, as start, end pairs, generated from Unicode 17.0.0; the same table
+// as subagent-statusline.mjs (regenerate both together; src/subagent-statusline.test.mjs checks that one against Python's unicodedata).
+const EMOJI = /\p{Emoji_Presentation}|\p{Emoji}️/u
+const WIDE = [
+  0x1100, 0x115f, 0x231a, 0x231b, 0x2329, 0x232a, 0x23e9, 0x23ec, 0x23f0, 0x23f0, 0x23f3, 0x23f3, 0x25fd, 0x25fe,
+  0x2614, 0x2615, 0x2630, 0x2637, 0x2648, 0x2653, 0x267f, 0x267f, 0x268a, 0x268f, 0x2693, 0x2693, 0x26a1, 0x26a1,
+  0x26aa, 0x26ab, 0x26bd, 0x26be, 0x26c4, 0x26c5, 0x26ce, 0x26ce, 0x26d4, 0x26d4, 0x26ea, 0x26ea, 0x26f2, 0x26f3,
+  0x26f5, 0x26f5, 0x26fa, 0x26fa, 0x26fd, 0x26fd, 0x2705, 0x2705, 0x270a, 0x270b, 0x2728, 0x2728, 0x274c, 0x274c,
+  0x274e, 0x274e, 0x2753, 0x2755, 0x2757, 0x2757, 0x2795, 0x2797, 0x27b0, 0x27b0, 0x27bf, 0x27bf, 0x2b1b, 0x2b1c,
+  0x2b50, 0x2b50, 0x2b55, 0x2b55, 0x2e80, 0x2e99, 0x2e9b, 0x2ef3, 0x2f00, 0x2fd5, 0x2ff0, 0x303e, 0x3041, 0x3096,
+  0x3099, 0x30ff, 0x3105, 0x312f, 0x3131, 0x318e, 0x3190, 0x31e5, 0x31ef, 0x321e, 0x3220, 0x3247, 0x3250, 0xa48c,
+  0xa490, 0xa4c6, 0xa960, 0xa97c, 0xac00, 0xd7a3, 0xf900, 0xfaff, 0xfe10, 0xfe19, 0xfe30, 0xfe52, 0xfe54, 0xfe66,
+  0xfe68, 0xfe6b, 0xff01, 0xff60, 0xffe0, 0xffe6, 0x16fe0, 0x16fe4, 0x16ff0, 0x16ff6, 0x17000, 0x18cd5,
+  0x18cff, 0x18d1e, 0x18d80, 0x18df2, 0x1aff0, 0x1aff3, 0x1aff5, 0x1affb, 0x1affd, 0x1affe, 0x1b000, 0x1b122,
+  0x1b132, 0x1b132, 0x1b150, 0x1b152, 0x1b155, 0x1b155, 0x1b164, 0x1b167, 0x1b170, 0x1b2fb, 0x1d300, 0x1d356,
+  0x1d360, 0x1d376, 0x1f004, 0x1f004, 0x1f0cf, 0x1f0cf, 0x1f18e, 0x1f18e, 0x1f191, 0x1f19a, 0x1f200, 0x1f202,
+  0x1f210, 0x1f23b, 0x1f240, 0x1f248, 0x1f250, 0x1f251, 0x1f260, 0x1f265, 0x1f300, 0x1f320, 0x1f32d, 0x1f335,
+  0x1f337, 0x1f37c, 0x1f37e, 0x1f393, 0x1f3a0, 0x1f3ca, 0x1f3cf, 0x1f3d3, 0x1f3e0, 0x1f3f0, 0x1f3f4, 0x1f3f4,
+  0x1f3f8, 0x1f43e, 0x1f440, 0x1f440, 0x1f442, 0x1f4fc, 0x1f4ff, 0x1f53d, 0x1f54b, 0x1f54e, 0x1f550, 0x1f567,
+  0x1f57a, 0x1f57a, 0x1f595, 0x1f596, 0x1f5a4, 0x1f5a4, 0x1f5fb, 0x1f64f, 0x1f680, 0x1f6c5, 0x1f6cc, 0x1f6cc,
+  0x1f6d0, 0x1f6d2, 0x1f6d5, 0x1f6d8, 0x1f6dc, 0x1f6df, 0x1f6eb, 0x1f6ec, 0x1f6f4, 0x1f6fc, 0x1f7e0, 0x1f7eb,
+  0x1f7f0, 0x1f7f0, 0x1f90c, 0x1f93a, 0x1f93c, 0x1f945, 0x1f947, 0x1f9ff, 0x1fa70, 0x1fa7c, 0x1fa80, 0x1fa8a,
+  0x1fa8e, 0x1fac6, 0x1fac8, 0x1fac8, 0x1facd, 0x1fadc, 0x1fadf, 0x1faea, 0x1faef, 0x1faf8, 0x20000, 0x2fffd,
+  0x30000, 0x3fffd,
+]
+/** East Asian Wide or Fullwidth: a binary search over WIDE. */
+function wideCodePoint(cp: number) {
+  let lo = 0
+  let hi = WIDE.length / 2 - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (cp < (WIDE[2 * mid] ?? 0)) hi = mid - 1
+    else if (cp > (WIDE[2 * mid + 1] ?? 0)) lo = mid + 1
+    else return true
+  }
+  return false
+}
+const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+/** Terminal columns of one grapheme: 0 when it is only marks, joiners, variation selectors or controls; 2 for emoji presentation or wide text; else 1. */
+function graphemeWidth(g: string) {
+  if (/^[\p{M}\p{Cc}\p{Cf}]+$/u.test(g)) return 0
+  if (g.includes('︎')) return 1
+  if (EMOJI.test(g)) return 2
+  return wideCodePoint(g.codePointAt(0) ?? 0) ? 2 : 1
+}
+/** Terminal columns of a string, grapheme by grapheme. */
+export function displayWidth(s: string) {
+  let width = 0
+  for (const { segment } of graphemes.segment(s)) width += graphemeWidth(segment)
+  return width
+}
+/** The row cut to `columns` terminal columns by display width, whole graphemes only, ending in "…" when cut. */
+function fitColumns(row: string, columns: number) {
+  if (displayWidth(row) <= columns) return row
+  let out = ''
+  let used = 0
+  for (const { segment: g } of graphemes.segment(row)) {
+    const w = graphemeWidth(g)
+    if (used + w > columns - 1) break
+    out += g
+    used += w
+  }
+  return `${out}…`
+}
+
+/** What a worker row reads of the `AgentRow` props. */
+export type RowProps = { id: string; type: string; model?: string; tokenCount?: number; contextWindowSize?: number; status?: string; label?: string; description?: string; columns?: number }
+/**
+ * The row body for one agent, or null to keep Claude Code's own row. `records` are this mod's agent records (oldest first): the latest one of the
+ * agent's id gives its slice and flags, and an implementer's attempt is the number of distinct implementer ids of its slice that started up to its
+ * own first start (a resume keeps its number; a new plan's run starts the records over, as the gates start a run over). An agent with no record
+ * shows its role without them.
+ */
+export function workerRow(p: RowProps, records: readonly Agent[]): string | null {
+  const role = workerRole(p?.type)
+  if (!role || typeof p.id !== 'string') return null
+  let rec: Rec | undefined
+  for (const r of records as readonly Rec[]) if (r.id === p.id) rec = r
+  const head = [role]
+  const plan = rec && (rec.plan || (!rec.slice && rec.label === 'plan review'))
+  if (rec && plan) head.push(rec.replan ? 'replan' : 'plan')
+  else if (rec?.slice) {
+    head.push(rec.slice)
+    if (role === 'implementer') {
+      const first = new Map<string, number>()
+      for (const r of records) if (r.role === 'implementer' && r.slice === rec.slice && !first.has(r.id)) first.set(r.id, r.startedAt)
+      const mine = first.get(rec.id) ?? rec.startedAt
+      const nth = [...first.values()].filter(t => t <= mine).length
+      if (nth > 1) head.push(`#${nth}`)
+    }
+    if (rec.validate) head.push('validate')
+  }
+  if (rec?.risky) head.push('risky')
+  const parts = [head.join(' ')]
+  const fam = rowFamily(p.model)
+  if (fam) parts.push(fam)
+  if (typeof p.tokenCount === 'number') {
+    const pct = typeof p.contextWindowSize === 'number' && p.contextWindowSize > 0 ? ` (${Math.round((100 * p.tokenCount) / p.contextWindowSize)}%)` : ''
+    parts.push(`${shortTokens(p.tokenCount)}${pct}`)
+  }
+  if (typeof p.status === 'string' && p.status && p.status !== 'running') parts.push(p.status)
+  const label = typeof p.label === 'string' && p.label.trim() ? p.label.trim() : typeof p.description === 'string' ? p.description.trim() : ''
+  if (label) parts.push(label.replace(/\s+/g, ' '))
+  const row = parts.join(' · ')
+  return typeof p.columns === 'number' && p.columns > 8 ? fitColumns(row, p.columns) : row
 }
 
 export const register: Register = on => {
@@ -1050,7 +1187,7 @@ export const register: Register = on => {
         deps: plan ? [] : depsOf(e.prompt), files: filesOf(e.prompt), startedAt: await $.clock.now(), status: 'running',
         tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
         ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
-        ...(parsed && parsed.replan !== null ? { replan: true } : {}),
+        ...(plan ? { plan: true } : {}), ...(parsed && parsed.replan !== null ? { replan: true } : {}),
         ...(!plan && role === 'reviewer' && header.validate ? { validate: true } : {}),
       }
       const t = agent.startedAt
@@ -1269,6 +1406,17 @@ export const register: Register = on => {
       }
     }
     return next(e)
+  })
+
+  // The row under the prompt of each of this plugin's workers (workerRow above). Any failure keeps Claude Code's own row.
+  on('ui.render', { component: 'AgentRow' }, async ($, e, next) => {
+    let body: string | null = null
+    try {
+      if (e.props.body === undefined && workerRole(e.props.type)) body = workerRow(e.props, await read($, agents))
+    } catch {
+      body = null
+    }
+    return body ? next({ ...e, props: { ...e.props, body } }) : next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

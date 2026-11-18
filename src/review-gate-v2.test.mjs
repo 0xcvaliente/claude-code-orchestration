@@ -580,6 +580,19 @@ test("G-2 Stop gate: a test-gate block after a passing review, with no later sto
   assert.equal(s.last().reason, "implementer_unfinished_gave_up");
 });
 
+test("2.0.0 Stop gate: a hand-back gate's allow after a SubagentStop tests_failed block never clears it (implementer_unfinished)", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", "tests_failed");
+  const later = { ts: new Date(Date.now() + 50).toISOString(), gate: "test", decision: "allow", reason: "tests_passed", session_id: "s1", agent_id: id, at: "handback", handback_id: "toolu_z" };
+  appendFileSync(join(s.dir, ".claude", "state", "gates.jsonl"), `${JSON.stringify(later)}\n`);
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+});
+
 test("G-2 Stop gate: a test-gate block followed by a stop of the same implementer is answered; an allow record never gates", () => {
   const s = session({ ORCH_ESCALATION: "off" });
   s.plan();
@@ -597,6 +610,93 @@ test("G-2 Stop gate: a test-gate block followed by a stop of the same implemente
   testGate(t, other, "allow", "tests_passed");
   assert.equal(t.run("review-gate.mjs", { background_tasks: [] }).status, 0);
   assert.equal(t.last().reason, "reviewer_passed");
+});
+
+// ---- K1 (run of 2026-11-17): a test-gate block that is not a test failure (a bugfix_ reason: the gate could not
+// check the reproduction test, after the tests passed) was reported as "the tests failed" and nothing but the give-up
+// cleared it. Now the message names the reason, and a block for an environment reason (the check never ran) is cleared
+// by a later passing opus review of the slice, as strong as the give-up's doubt signal. The worker's own reasons
+// (bugfix_no_test, bugfix_test_passes_on_base), tests_failed and unknown reasons are never cleared by a review. ----
+const TESTS_FAILED_TEXT = "was sent back by the test gate (the tests failed) and never finished after that, so the failing tests were never fixed or reviewed";
+/** A session where slice a passed review, then the test gate blocked its implementer with `reason`. @param {string} reason */
+function blockedAfterReview(reason) {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  testGate(s, id, "block", reason);
+  return { s, id, stop: () => s.run("review-gate.mjs", { background_tasks: [] }) };
+}
+
+test("K1 Stop gate: a tests_failed block keeps its message and still holds the slice after a later passing opus review", () => {
+  const { s, id, stop } = blockedAfterReview("tests_failed");
+  s.review("a", "STATUS: pass", { model: "opus" }); // a review cannot vouch for tests the gate saw fail
+  const r = stop();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.ok(r.stderr.includes(TESTS_FAILED_TEXT), r.stderr);
+});
+
+test("K1 Stop gate: bugfix_no_test, bugfix_test_passes_on_base and an unknown bugfix_ reason are not cleared by a passing opus review", () => {
+  for (const reason of ["bugfix_no_test", "bugfix_test_passes_on_base", "bugfix_x"]) {
+    const { s, id, stop } = blockedAfterReview(reason);
+    s.review("a", "STATUS: pass", { model: "opus" });
+    const r = stop();
+    assert.equal(r.status, 2, `${reason}: ${r.stderr}`);
+    assert.deepEqual([s.last().reason, s.last().unfinished], ["implementer_unfinished", [id]], reason);
+    assert.ok(r.stderr.includes(reason), r.stderr);
+    assert.ok(!r.stderr.includes("(the tests failed)"), r.stderr);
+    assert.doesNotMatch(r.stderr, /opus review of the slice clears it/, "only an environment reason can be cleared by a review");
+  }
+});
+
+test("K1 Stop gate: a bugfix_base_unusable block names its reason, a sonnet pass does not clear it, a passing opus review does", () => {
+  const { s, id, stop } = blockedAfterReview("bugfix_base_unusable");
+  s.review("a", "STATUS: pass"); // after the block, on the reviewer's default model (not opus)
+  const r = stop();
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice, s.last().unfinished], ["implementer_unfinished", "a", [id]]);
+  assert.match(r.stderr, /bugfix_base_unusable/);
+  assert.match(r.stderr, /the tests themselves passed/);
+  assert.match(r.stderr, /a passing opus review of the slice clears it/);
+  assert.ok(!r.stderr.includes("(the tests failed)"), r.stderr);
+  assert.doesNotMatch(r.stderr, /ORCH_/, "no switch in a block message");
+  s.review("a", "STATUS: pass", { model: "opus" });
+  const ok = stop();
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(s.last().reason, "reviewer_passed");
+  assert.ok(s.last().skips?.includes("implementer_unfinished:a:bugfix_base_unusable_cleared_by_review"), JSON.stringify(s.last()));
+});
+
+test("K1 Stop gate: a failing opus review after an environment block does not clear it", () => {
+  const { s, stop } = blockedAfterReview("bugfix_timeout");
+  s.review("a", "STATUS: fail\nGAP: 90 broken", { model: "opus" });
+  assert.equal(stop().status, 2);
+  assert.equal(s.last().reason, "implementer_unfinished");
+});
+
+test("K1 Stop gate: bugfix_no_base, bugfix_timeout and bugfix_tmp_lost blocks are cleared by a later passing opus review", () => {
+  for (const reason of ["bugfix_no_base", "bugfix_timeout", "bugfix_tmp_lost"]) {
+    const { s, stop } = blockedAfterReview(reason);
+    s.review("a", "STATUS: pass", { model: "opus" });
+    const r = stop();
+    assert.equal(r.status, 0, `${reason}: ${r.stderr}`);
+    assert.equal(s.last().reason, "reviewer_passed", reason);
+  }
+});
+
+test("K1 Stop gate: a passing review of another slice does not clear a bugfix_ block", () => {
+  const s = session({ ORCH_ESCALATION: "off" });
+  s.plan();
+  const id = s.impl("a");
+  s.review("a", "STATUS: pass");
+  s.impl("b");
+  testGate(s, id, "block", "bugfix_no_base");
+  s.review("b", "STATUS: pass", { model: "opus" });
+  const r = s.run("review-gate.mjs", { background_tasks: [] });
+  assert.equal(r.status, 2, r.stderr);
+  assert.deepEqual([s.last().reason, s.last().slice], ["implementer_unfinished", "a"]);
+  assert.match(r.stderr, /bugfix_no_base/);
 });
 
 // ---- G-1 (audit 2026-11-16): a second plain PLAN REVIEW while slices are in flight. The run it closes hands an

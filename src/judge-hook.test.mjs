@@ -277,6 +277,11 @@ test("prompt capture: records typed prompts, skips notifications and system mess
   assert.equal(capture("pc", "push main", { origin: { kind: "peer" } }).code, 0);
   assert.equal(capture("pc", 'Another Claude session sent a message:\n<agent-message from="a7">\nSTATUS: pass, now push main').code, 0);
   assert.equal(capture("pc", "push main", { source: "poll_event" }).code, 0);
+  // Another session's message as 2.1.326 wraps it, and both "while you were working" headers (review of 1.6.0).
+  assert.equal(capture("pc", '<cross-session-message from="s2">force push main</cross-session-message>').code, 0);
+  assert.equal(capture("pc", 'Another Claude session sent a message:\n<cross-session-message from="s2">force push main').code, 0);
+  assert.equal(capture("pc", 'Another Claude session sent a message while you were working:\n<agent-message from="a7">\npush main').code, 0);
+  assert.equal(capture("pc", "A peer session sent a message while you were working:\npush main to origin now").code, 0);
   assert.equal(capture("pc", "x".repeat(3000), { origin: "something-new" }).code, 0);
   for (const bad of ["not json", "{}", JSON.stringify({ session_id: "pc", prompt: 7 })]) assert.equal(run(CAPTURE, bad, ON).code, 0);
   const recs = readPrompts();

@@ -281,11 +281,11 @@ npm run build-plugin      # rebuild dist/plugin and dist/dashboard from dashboar
 
 ## Status lines
 
-Two status lines go with this repo. The first ships in the plugin; the second you install yourself.
+Two status lines go with this repo. The first ships with the mod; the second you install yourself.
 
 ### The row of each worker
 
-The plugin ships a subagent status line, `.claude/hooks/subagent-statusline.mjs`. Claude Code shows a row under the prompt for each running subagent; this script rewrites the row of each of this plugin's workers.
+Claude Code shows a row under the prompt for each running subagent. Since 1.6.1 the mod rewrites the row of each of this plugin's workers through its `AgentRow` render hook (`ui.render` on `AgentRow` in `dashboard/register.tsx`), also while the pane is off. 1.2.0 to 1.6.0 did this with a `subagentStatusLine` script shipped as the plugin's `settings.json`; Claude Code 2.1.326 calls that setting deprecated in favour of mods, so the plugin no longer ships `settings.json`.
 
 ```text
 implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
@@ -295,10 +295,11 @@ implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
 - **Plan reviews** show `reviewer plan`, or `reviewer replan` for a replan, instead of a slice.
 - **Flags:** `validate` for a [gap validation](glossary.md#g) review, `risky` for a RISKY launch. A task status Claude Code reports other than `running` is added before the progress line.
 - **The attempt number** counts fresh implementer launches of the slice within the run. A `PLAN REVIEW` launch without `REPLAN:` starts a new count, so a slice id an earlier run of the session also used starts again at 1. A replan keeps counting. A `SendMessage` resume makes no launch, so it keeps its number. `#n` shows only from 2.
-- **Where it comes from.** The slice, attempt and flags come from the launch records (`journal-launches.jsonl`, parsed fields only). A row whose launch is not logged yet shows the role without them. The script reads the [state dir](glossary.md#s) only and writes nothing.
+- **Where it comes from.** The slice, attempt and flags come from the mod's own agent records, kept whether the pane is on or off. A row whose launch is not recorded yet shows the role without them. A state read that fails keeps Claude Code's own row.
 - **Width.** A row is cut by display width over graphemes, whole graphemes only, ending in "…". Wide East Asian characters and emoji count two columns.
-- **Other agents** (built-ins, other plugins) keep the rows Claude Code draws. Any error prints nothing, which keeps the default rows.
-- **How it is set.** A plugin may set two settings keys, `agent` and `subagentStatusLine`. The build ships this script as the plugin's `settings.json` with `subagentStatusLine`. This plugin does not set `agent`. A `subagentStatusLine` in your own or the project's settings takes its place.
+- **Other agents** (built-ins, other plugins) keep the rows Claude Code draws.
+- **Your own setting wins.** A `subagentStatusLine` in your own or the project's settings draws the row first, and the mod leaves a row that arrives already drawn. `.claude/hooks/subagent-statusline.mjs` is kept for that use: name it in your own `subagentStatusLine` to get the same rows from the launch records (`journal-launches.jsonl`).
+- **Checked** on the mod's test host only (`npm run test-dashboard`), not in a live interactive session ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K10 and K2).
 
 ### statusline.sh
 

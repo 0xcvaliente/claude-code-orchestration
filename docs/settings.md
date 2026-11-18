@@ -6,10 +6,12 @@ A [switch](glossary.md#s) is an environment variable named `ORCH_*`. Switches ar
 
 ## How a setting reaches the hooks
 
-1. The plugin declares 21 [plugin settings](glossary.md#p) as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`). They show in `/config`.
+1. The plugin declares 22 [plugin settings](glossary.md#p) as `userConfig` (`OPTIONS` in `scripts/build-plugin.mjs`). They show in `/config`.
 2. Claude Code passes each one to the hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` (the key in upper case).
 3. The hooks copy it to `ORCH_<KEY>` only when `ORCH_<KEY>` is unset (`OPTION_KEYS` and `bridgeOptions` in `.claude/hooks/state.mjs`; `verify.sh` keeps the same list). So an environment variable wins over `/config`.
 4. The project copy of the hooks (registered in `.claude/settings.json`) reads only the environment.
+
+The plugin ships no `settings.json` since 1.6.1 (it held only `subagentStatusLine`; the worker rows now come from the mod, [dashboard.md](dashboard.md#the-row-of-each-worker)).
 
 The node hooks read `off`, `on`, `always` and `native` in any case, with spaces trimmed. `verify.sh` compares `ORCH_GATE_ISOLATED`, `ORCH_BASELINE` and `ORCH_BUGFIX_CHECK` exactly, in lower case. `ORCH_ALLOW_BUILTINS` and `ORCH_ALLOW_HAIKU` act only on `1`.
 
@@ -39,7 +41,8 @@ In the order of `OPTIONS` in `scripts/build-plugin.mjs`:
 | `skill_create` | `ORCH_SKILL_CREATE` | empty: on | `off` blocks every skill slice (`skill_create_off`), so a run drafts no skill ([skills.md](skills.md)). |
 | `skills_repo_private` | `ORCH_SKILLS_REPO_PRIVATE` | unset | Absolute path of the private skills repository, where a new skill goes by default. Unset, a skill slice is blocked with `skill_repo_missing`. |
 | `skills_repo_public` | `ORCH_SKILLS_REPO_PUBLIC` | unset | Absolute path of the public skills repository, for a skill slice with `TARGET: public`. |
-| `workflow_guard` | `ORCH_WORKFLOW_GUARD` | empty: on | `off` turns the [workflow guard](gates.md#workflow-guard) off, so every Workflow launch goes through, a script written on the spot (the `ultracode` keyword) included. On, only the saved `orchestrate` workflow starts (1.6.0). The nudge's line for the keyword stays either way. |
+| `workflow_guard` | `ORCH_WORKFLOW_GUARD` | empty: on | `off` turns the [workflow guard](gates.md#workflow-guard) off, so every Workflow launch goes through, a script written on the spot (the `ultracode` keyword) included. On, only the saved `orchestrate` workflow starts (1.6.0), checked by its content since 1.6.1. The switch also covers the refusal of a typed prompt holding the word `ultracode` (1.6.1): `off` lets such a prompt through. |
+| `review_hold` | `ORCH_REVIEW_HOLD` | empty: on | `off` turns off the plan check's reviewer hold (1.6.1): a slice's reviewer is no longer refused with `tests_failed_after_report` while its implementer has a failed-tests block it never saw, and gets no note while the test gate is still running ([gates.md, Plan check](gates.md#plan-check)). The review gate still holds the final reply. |
 
 ## Environment variables
 
@@ -64,7 +67,7 @@ These have no plugin setting: set them in the environment.
 | `ORCH_BUILTINS_FILE` | `plan-check.mjs`, `scripts/claude-update.mjs` | `~/.claude/orchestration/builtin-agents.json` | The file of built-in agent types learned on this machine. An empty value means no file. |
 | `ORCH_JUDGE_MODEL` | `judge-hook.mjs` | `opus` | The native judge's model. |
 | `ORCH_JUDGE_CLAUDE_BIN` | `judge-hook.mjs` | `claude` | The `claude` binary the native judge runs. |
-| `ORCH_NO_NUDGE` | `nudge.mjs` | unset | Any value silences the [nudge](gates.md#nudge)'s SessionStart text. Headless runs set it. Its one line for a typed prompt with the word `ultracode` (1.6.0) stays. |
+| `ORCH_NO_NUDGE` | `nudge.mjs` | unset | Any value silences the [nudge](gates.md#nudge)'s SessionStart text. Headless runs set it. It does not affect the refusal of a typed prompt with the word `ultracode` (1.6.1), which `ORCH_WORKFLOW_GUARD` controls. |
 | `ORCH_CLAUDE_BIN` | `scripts/claude-update.mjs` | `claude` | The `claude` binary the update check runs. |
 
 The native judge sets `ORCH_JUDGE_INNER=1` on its own `claude -p` call, so the judge hooks stay quiet inside it. It is not a setting.
@@ -81,7 +84,7 @@ Read by `scripts/orchestrate.sh` (so by `npm run native`) and by `scripts/auto.s
 | `ORCH_AGENT_PREFIX` | unset | For example `orchestration:`: always runs the plugin's agents, without checking the folder or the installed plugins. A missing trailing colon is added. An `ORCH_AGENT` that already has a namespace is used as it is. |
 | `ORCH_OUTPUT_STYLE` | Concise | The plain session's [output style](glossary.md#o) (`ORCH_AGENT=none` only, so also `npm run auto`'s plain session). Unset: Concise. `default` or empty: no style. A word of letters, digits, `_` and `-`: that style. Anything else exits 1 before any model call. |
 | `ORCH_MODEL` | unset | Passes `--model`. `npm run auto` runs its plain session on `opus` unless this names another model; `npm run native` passes it only when set. |
-| `ORCH_BUDGET_TOKENS` | unset: no cap | A token cap (`500k`, `2M`; at least 10k). Approximate: converted at 1M tokens per list-price dollar into `--max-budget-usd`. `npm run native` is one session, which gets the cap. In `npm run auto` it caps the whole run: the triage call gets it (`src/route.ts --budget`), and before each later session (plain, reviewer, orchestrator, escalated orchestrator) what the run has spent so far is subtracted, from the cost each call reports, and the session gets the rest (`scripts/run-budget.mjs`). With less than 10k left, or after a triage call the cap stopped, no session starts: the run says so on stderr and exits 3. Raise the cap to give the run more. |
+| `ORCH_BUDGET_TOKENS` | unset: no cap | A token cap (`500k`, `2M`; at least 10k). Approximate: converted at 1M tokens per list-price dollar into `--max-budget-usd`. `npm run native` is one session, which gets the cap. In `npm run auto` it caps the whole run: the triage call gets it (`src/route.ts --budget`), and before each later session (plain, reviewer, orchestrator, escalated orchestrator) what the run has spent so far is subtracted, from the cost each call reports, and the session gets the rest (`scripts/run-budget.mjs`). With less than 10k left, or after a triage call the cap stopped, no session starts: the run says so on stderr and exits 3. A session that leaves no readable result (a crash with no output) spent an unknown amount, so the run treats the cap as spent: no later session starts, and it exits 3 with a message (1.6.1). A plain-only route has no later session and exits with that session's own code. Raise the cap to give the run more. |
 | `ORCH_BUDGET_USD` | — | Rejected: the script exits 1 and says to use `ORCH_BUDGET_TOKENS`. |
 | `ORCH_ALLOWED_TOOLS` | the default allowlist | Replaces the tool allowlist, one permission rule per line. |
 | `ORCH_EXTRA_ALLOWED_TOOLS` | unset | Appends rules to the default allowlist, one per line. The default list has no web tools; `auto.sh` adds `WebSearch` and `WebFetch` itself when the task changes no code. |

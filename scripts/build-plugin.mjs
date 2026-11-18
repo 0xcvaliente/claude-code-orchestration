@@ -85,8 +85,17 @@ const hooks = {
       { matcher: "Agent|Task", hooks: [{ type: "command", command: run("plan-check.mjs"), timeout: 60 }] },
       { matcher: "Bash", hooks: [{ type: "command", command: run("researcher-guard.mjs") }] },
       { matcher: "WebFetch", hooks: [{ type: "command", command: run("egress-guard.mjs") }] },
-      // Before a worker's report is delivered (auto mode): its format, and a researcher's quotes. Both filter by agent type.
-      { matcher: "SubagentHandback", hooks: [{ type: "command", command: run("handback-check.mjs") }, { type: "command", command: run("quote-check.mjs") }] },
+      // Before a worker's report is delivered (auto mode): its format, a researcher's quotes, and the test gate for the
+      // namespaced implementer (verify.sh --handback; the project copy takes the bare type). All filter by agent type.
+      // The test gate gets the SubagentStop gate's 900 s, so its own budget (verify.sh) ends first.
+      {
+        matcher: "SubagentHandback",
+        hooks: [
+          { type: "command", command: run("handback-check.mjs") },
+          { type: "command", command: run("quote-check.mjs") },
+          { type: "command", command: `"\${CLAUDE_PLUGIN_ROOT}/hooks/verify.sh" --handback --plugin`, timeout: 900 },
+        ],
+      },
       // Deny-only: refuses every Workflow launch but this repo's saved orchestrate workflow (a plugin cannot ship
       // permissions.deny, and Claude Code's own workflow switch would remove the saved workflow too).
       { matcher: "Workflow", hooks: [{ type: "command", command: run("workflow-guard.mjs") }] },
@@ -154,6 +163,7 @@ const OPTIONS = [
   ["skills_repo_private", "string", "Private skills repository", "Absolute path of the private skills repository, where new skills go by default (ORCH_SKILLS_REPO_PRIVATE)."],
   ["skills_repo_public", "string", "Public skills repository", "Absolute path of the public skills repository, used by a skill slice with TARGET: public (ORCH_SKILLS_REPO_PUBLIC)."],
   ["workflow_guard", "string", "Workflow guard", "Empty: on; off lets every Workflow launch through, not only the saved orchestrate workflow (ORCH_WORKFLOW_GUARD)."],
+  ["review_hold", "string", "Reviewer hold", "Empty: on; off lets a slice's review start while its implementer has a test-gate block it never saw (ORCH_REVIEW_HOLD)."],
 ];
 /** @type {Record<string, { type: string, title: string, description: string, default?: string | number }>} */
 const userConfig = Object.fromEntries(
@@ -165,12 +175,9 @@ writeFileSync(
   `${JSON.stringify({ name: NAME, version, description: "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
 );
 
-// Plugin settings.json: a plugin may set two keys, `agent` and `subagentStatusLine` (every other key is dropped at
-// load). This one rewrites the row of each of this plugin's workers under the prompt (subagent-statusline.mjs); a
-// `subagentStatusLine` in the user's or the project's own settings takes its place.
-if (has("subagent-statusline.mjs")) {
-  writeFileSync(join(out, "settings.json"), `${JSON.stringify({ subagentStatusLine: { type: "command", command: run("subagent-statusline.mjs") } }, null, 2)}\n`);
-}
+// No plugin settings.json since 1.6.1: Claude Code 2.1.326 lists `subagentStatusLine` as deprecated in favour of mods,
+// so the mod (dashboard.tsx, its `AgentRow` render hook) draws the row of each of this plugin's workers under the
+// prompt. hooks/subagent-statusline.mjs still ships, for a person who names it in their own `subagentStatusLine`.
 
 cpSync(join(dashSrc, "register.tsx"), join(dash, "hooks", "register.tsx"));
 cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));

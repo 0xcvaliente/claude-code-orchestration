@@ -39,6 +39,23 @@
 //                         start from the remote default branch. Anything it cannot establish lets the launch through.
 // Coverage note: a launch of our researcher whose SOURCES name two or more local regular files gets a coverage note
 // appended through the allow with updatedInput below (ORCH_SOURCES_NOTE=off turns it off).
+// Reviewer hold (1.6.1). On unless ORCH_REVIEW_HOLD=off (or the plugin option REVIEW_HOLD=off). The test gate runs at an
+// implementer's SubagentStop after the journal has recorded its report, so its block lands after the worker ended and
+// the orchestrator holds a report that says pass. For a launch of this plugin's reviewer (bare or orchestration:; never
+// a built-in, fork or another plugin's agent) whose brief names SLICE and is not a PLAN REVIEW, the slice's latest
+// implementer is read the way the review gate reads it (run.mjs implementerTestStates): a test-gate block for failed
+// tests (tests_failed, or no reason; never a bugfix_ reason) later than its latest stop, with no start since, refuses
+// the launch with tests_failed_after_report, at most twice per slice, agent and block, then lets it through as
+// tests_failed_after_report_gave_up; a stop with no test-gate record after it yet appends one line to the brief (the
+// gate has not reported; the reviewer must not rest a pass on the tests) through the allow with updatedInput below.
+// Only the implementers of the run the review lands in count (run.mjs implementersOfRun: the latest run holding the
+// slice, as foldRuns places a review; a slice carried whole keeps its implementers). The latest stop's test-gate record
+// is paired with it by the hand-back it follows and by count since the agent's latest start (stopGate), not by time: a
+// fast gate record can be stamped before telemetry stamps its stop, and an earlier stop's gate can still be running
+// after a resume. The hand-back gate's records are never a stop's record. A gate killed before it logged leaves the stop pending, so the note stays.
+// Every hold decision goes to review-hold.jsonl in the state dir (never brief text); a refusal needs its record written
+// and read back (appendJsonl), else the launch goes through. Reviewer launches still write no plan-check.jsonl record.
+// The review gate decides as before.
 // Same slice id again (a retry) keeps its own files. Every decision goes to plan-check.jsonl in the state dir with
 // the run it was scoped to (`run`); entries of older versions carry no `run` and count in a scope only when newer than
 // the latest run's opening (in every scope when the session has no runs).
@@ -113,7 +130,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { agentModel, isPlanReview, isSkillName, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
 import { builtinAgents, OWN_AGENTS } from "./builtin-agents.mjs";
-import { readJsonl, sessionRuns } from "./run.mjs";
+import { appendJsonl, implementerTestStates, implementersOfRun, latestImplementerOf, notTestFailure, readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // loop guard: two blocks per reason and scope, then the launch goes through as <reason>_gave_up
@@ -146,6 +163,13 @@ const FLOOR_MODEL = "sonnet";
 const FLOOR_LOG = "model-floor.jsonl";
 const CREATE_LOG = "skill-create.jsonl";
 const OWN_IMPLEMENTER = new Set(["implementer", "orchestration:implementer"]);
+// The reviewer hold acts only on this plugin's reviewer: the project's copy or the plugin's namespaced one.
+const REVIEWER_TYPES = new Set(["reviewer", "orchestration:reviewer"]);
+const HOLD_LOG = "review-hold.jsonl";
+const HOLD_REASON = "tests_failed_after_report";
+// Appended to our reviewer's brief while the slice's implementer has stopped and the test gate has not reported yet.
+const PENDING_NOTE =
+  "\n\nTest gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, so its tests may still fail. Do not rest a pass on the tests having passed; say in your report that the test gate had not reported.";
 const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
 // The authoring skill a skill slice loads: the plugin's namespaced copy for the plugin's hook, else the project's.
 const AUTHORING = process.argv.includes("--plugin") ? "orchestration:skill-authoring" : "skill-authoring";
@@ -200,14 +224,102 @@ if (role === "implementer") {
       routed = null; // an unexpected error leaves the launch as it was
     }
   }
+  // Review hold: our reviewer of a slice (not a PLAN REVIEW) may be refused (exit 2 inside) or get the pending note.
+  const pending = !builtin && REVIEWER_TYPES.has(type) && holdOn(process.env) && typeof tool.prompt === "string" && h.slice && !isPlanReview(prompt) ? reviewHold(h.slice) : "";
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
   const drafts = !builtin && HINTED_TYPES.has(type) ? draftsText(null) : "";
   const coverage = !builtin && ROUTED_TYPES.has(type) && sourcesNoteOn(process.env) && typeof tool.prompt === "string" && localSources() >= 2 ? COVERAGE_NOTE : "";
-  if (routed || block || drafts || coverage || floored) {
+  if (routed || block || drafts || coverage || pending || floored) {
     const raised = !!routed?.raised;
-    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${block}${drafts}${coverage}` });
+    allowWith({ ...tool, ...(raised && routed ? { model: routed.tier } : {}), prompt: `${prompt}${routed?.note ?? ""}${pending}${block}${drafts}${coverage}` });
   }
   process.exit(0);
+}
+
+/** ORCH_REVIEW_HOLD (else the plugin option): the reviewer hold is on unless "off" (any case). @param {Record<string, string | undefined>} env */
+function holdOn(env) {
+  return String(env.ORCH_REVIEW_HOLD ?? env.CLAUDE_PLUGIN_OPTION_REVIEW_HOLD ?? "").trim().toLowerCase() !== "off";
+}
+
+/** One record in review-hold.jsonl (parsed fields only, never brief text); true when it was written and reads back. @param {Record<string, unknown>} rec */
+function holdLog(rec) {
+  try {
+    ensureStateDir();
+    return appendJsonl(stateDir, HOLD_LOG, { ts: new Date().toISOString(), session_id: typeof input.session_id === "string" ? input.session_id : "", agent_type: type, ...rec });
+  } catch {
+    return false; // logging must never change the decision, except that a refusal needs its record (reviewHold)
+  }
+}
+
+/**
+ * The reviewer hold for a launch of our reviewer whose brief names `slice`. The slice's latest implementer (run.mjs
+ * latestImplementerOf, over implementerTestStates, the review gate's own reading of the logs):
+ *   - has a test-gate block for failed tests (tests_failed, or a record with no reason; never a bugfix_ reason) later
+ *     than its latest stop, and no start since the block: refused with tests_failed_after_report (exit 2), twice per
+ *     slice, agent and block, then let through and logged as tests_failed_after_report_gave_up;
+ *   - stopped, and the test gate has logged nothing for that stop yet: the returned note (test_gate_pending) is appended;
+ *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an
+ *     unreadable log): "" and no record.
+ * @param {string} slice @returns {string}
+ */
+function reviewHold(slice) {
+  const sid = typeof input.session_id === "string" ? input.session_id : "";
+  /** @type {import("./run.mjs").ImplementerTestState | null} */
+  let a = null;
+  try {
+    const { runs, records } = sessionRuns(sid, { env: process.env });
+    const agents = implementerTestStates(records.starts, records.gates, sid);
+    a = latestImplementerOf(agents, records, slice, implementersOfRun(runs, agents, records, slice));
+  } catch {
+    return ""; // unreadable logs: decide as if nothing ran
+  }
+  // Still running (a resume is a start), or never stopped: nothing to hold or note.
+  if (!a || a.stop === -Infinity || a.start > a.stop) return "";
+  const g = a.stopGate; // the test-gate record of the latest stop, paired by count (run.mjs), or null while pending
+  const reason = g && typeof g.reason === "string" ? g.reason : "";
+  if (g && g.decision === "block" && !notTestFailure({ testReason: reason })) {
+    const blockAt = new Date(Date.parse(String(g.ts ?? "")) || 0).toISOString();
+    const same = (/** @type {any} */ e) => e.session_id === sid && e.slice === slice && e.agent_id === a?.id && e.block_at === blockAt;
+    const prior = readJsonl(stateDir, HOLD_LOG, sid).filter((e) => same(e) && e.decision === "block").length;
+    const fields = { slice, agent_id: a.id, block_at: blockAt, gate_reason: reason || null };
+    if (prior >= MAX_BLOCKS) {
+      holdLog({ decision: "allow", reason: `${HOLD_REASON}_gave_up`, ...fields });
+      return "";
+    }
+    // Refuse only when the block's record was written and reads back (run.mjs appendJsonl, as the report check does):
+    // with an unwritable log the count would stay 0 and the refusal would never give up, so the launch goes through.
+    if (!holdLog({ decision: "block", reason: HOLD_REASON, ...fields })) return "";
+    try {
+      writeSync(2, `${holdMessage(slice, a.id, g)}\n`);
+    } catch {
+      // a closed stream must not change the decision
+    }
+    process.exit(2);
+  }
+  if (!g) {
+    holdLog({ decision: "note", reason: "test_gate_pending", slice, agent_id: a.id });
+    return PENDING_NOTE;
+  }
+  return "";
+}
+
+/**
+ * The refusal: what the test gate recorded (its reason, bounded, and the counts its record has: failing tests, how many
+ * also fail on the base, a timeout), and what to do. Names no switch.
+ * @param {string} slice @param {string} id the implementer's agent id @param {any} g its test-gate record
+ */
+function holdMessage(slice, id, g) {
+  const num = (/** @type {unknown} */ v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
+  const reason = (typeof g.reason === "string" && g.reason ? g.reason : "tests_failed").replace(/[^\w.-]/g, "").slice(0, 64) || "tests_failed";
+  const failing = num(g.failing);
+  const onBase = num(g.on_base);
+  const limit = num(g.limit_s);
+  const details = [
+    failing !== null ? `${failing} failing test${failing === 1 ? "" : "s"}` : "",
+    onBase !== null && onBase > 0 ? `${onBase} of them also failing on the base commit` : "",
+    g.timed_out === 1 || g.timed_out === true ? `the suite was stopped after ${limit !== null ? `${limit} seconds` : "its time limit"}` : "",
+  ].filter(Boolean);
+  return `Plan check: slice ${slice}: the tests failed after the worker had reported. The test gate ran when its implementer (agent ${id}) stopped and recorded ${reason}${details.length ? ` (${details.join("; ")})` : ""}, after the report reached you, so the worker never saw it and its report does not cover the tests. Resume that implementer first with SendMessage (to: ${id}) so it fixes the failing tests and reports again, then launch the review.`;
 }
 
 /** ORCH_SOURCES_NOTE: the researcher coverage note is on unless "off" (any case). @param {Record<string, string | undefined>} env */

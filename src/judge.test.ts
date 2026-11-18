@@ -7,7 +7,7 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
-  bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
+  askOpus, bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
   type BashClass, type JudgeContext, type JudgeDeps, type PathStat,
 } from "./judge.js";
 
@@ -1079,22 +1079,36 @@ test("classify (audit 2026-11-16, fix-judge-3): a table name after ${ with any =
   ]), []);
 });
 
-test("classify (fix-judge-3): the table-expansion scan is linear: 400,000 characters classify well under a second", () => {
-  const n = 100000;
+// Linear, judged by growth rather than a wall-clock limit: a fixed 1 s limit failed under a machine load of 22-27
+// (release 1.6.1, O3). Each shape at n and 8n: linear work takes about 8 times as long, quadratic about 64 times. Best
+// of three runs after a warm-up; the small run counts as at least 2 ms, so timer noise cannot make a fast run look bad.
+test("classify (fix-judge-3): the table-expansion scan is linear: eight times the input takes under 24 times as long", () => {
   const shapes = [
-    `: ${"${#}".repeat(n)} x=1`,
-    `echo ${"'${functions'".repeat(n / 3)}; x=1`,
-    `echo "${"${#x}".repeat(n)}"; y=1`,
-    `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
-    `echo ${"${functions_x}".repeat(n / 4)} z=1`,
-    `echo ${"${#\\\n".repeat(n / 2)}`,
-    `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
+    (n: number) => `: ${"${#}".repeat(n)} x=1`,
+    (n: number) => `echo ${"'${functions'".repeat(n / 3)}; x=1`,
+    (n: number) => `echo "${"${#x}".repeat(n)}"; y=1`,
+    (n: number) => `echo $${"\\\n".repeat(2 * n)}{x} y=1`,
+    (n: number) => `echo ${"${functions_x}".repeat(n / 4)} z=1`,
+    (n: number) => `echo ${"${#\\\n".repeat(n / 2)}`,
+    (n: number) => `echo ${"$'a\\'b'".repeat(n / 2)} x=1`,
   ];
-  for (const cmd of shapes) {
-    const t = performance.now();
-    classifyDetail(cmd, CWD);
-    const ms = performance.now() - t;
-    assert.ok(ms < 1000, `${cmd.slice(0, 20)}... (${cmd.length} characters): ${Math.round(ms)} ms`);
+  const best = (cmd: string) => {
+    let ms = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = performance.now();
+      classifyDetail(cmd, CWD);
+      ms = Math.min(ms, performance.now() - t);
+    }
+    return ms;
+  };
+  const n = 12000;
+  for (const shape of shapes) {
+    const small = shape(n);
+    const large = shape(8 * n);
+    classifyDetail(small, CWD); // warm-up
+    const s = Math.max(best(small), 2);
+    const l = best(large);
+    assert.ok(l < 24 * s, `${large.slice(0, 20)}... (${large.length} characters): ${Math.round(l)} ms against ${Math.round(s)} ms at ${small.length}`);
   }
 });
 
@@ -1629,4 +1643,37 @@ test("bashGuard: a missing or non-string command is a deny", async () => {
   for (const ti of [{}, { command: 42 }, { command: ["git", "push"] }, null, undefined]) {
     assert.equal(decision(await run(guard(deps), input("Bash", ti))), "deny", JSON.stringify(ti));
   }
+});
+
+test("askOpus: the judge's own call takes no account connectors and keeps every other option", async () => {
+  let seen: Record<string, unknown> | undefined;
+  const fakeQuery = ((args: { prompt: string; options: Record<string, unknown> }) => {
+    seen = args.options;
+    return (async function* () {
+      yield { type: "result", subtype: "success", is_error: false, result: "{}", usage: { input_tokens: 1, output_tokens: 1 } };
+    })();
+  }) as unknown as Parameters<typeof askOpus>[2];
+  const out = await askOpus("judge-model", 5000, fakeQuery)("a prompt");
+  assert.equal(out.text, "{}");
+  assert.ok(seen);
+  const { env, abortController, cwd, ...rest } = seen;
+  assert.equal((env as Record<string, string>).CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
+  assert.ok(abortController instanceof AbortController);
+  assert.equal(cwd, tmpdir());
+  assert.deepEqual(rest, {
+    model: "judge-model",
+    effort: "medium",
+    maxTurns: 1,
+    tools: [],
+    allowedTools: [],
+    settingSources: [],
+    settings: { disableClaudeAiConnectors: true },
+    mcpServers: {},
+    mcpServersDelivery: "initialize",
+    strictMcpConfig: true,
+    plugins: [],
+    permissionMode: "dontAsk",
+    persistSession: false,
+    systemPrompt: "You judge whether a shell command may run. Reply with one JSON object only.",
+  });
 });
