@@ -4,7 +4,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
@@ -62,8 +62,9 @@ function generated() {
 // Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
 // denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
 const HARDENING_REASONS = [
-  // Release 2.0.0, slice w7: prompts set by builtins and expansions (N5), the size caps (N6)
+  // Release 2.0.0, slice w7: prompts set by builtins and expansions (N5), the size caps (N6), string wrappers (S1)
   /^setting PS[014] through a builtin or an expansion that assigns it/,
+  /^[a-z]+ with (an argument the guard cannot read|an option cluster of more than|more attached option values).* is always blocked: it runs a command string through a shell/,
   /^a command (of|with) more than \d+ (characters|of [[{(]) is always blocked/,
   // w2, third attempt: the option allowlist (R1), wrapped programs (R4), git templates (R5)
   /^(set|setopt|unsetopt|shopt) .* is always blocked: the guard allows only option words it can read/,
@@ -172,6 +173,8 @@ for (const c of listIn("judge.test.ts", "W2R2_DENY")) HARDENED.push([c, ["deny"]
 const W7_DENY = listIn("judge.test.ts", "W7_DENY");
 for (const c of W7_DENY) HARDENED.push([c, ["deny"]]);
 for (const c of listIn("judge.test.ts", "W7_WRAPPERS")) HARDENED.push([c, ["deny"]]);
+// Third review: the string wrappers' getopt spellings (S1) and zsh's stuck braces (S2) (W7_SHAPES).
+for (const c of listIn("judge.test.ts", "W7_SHAPES")) HARDENED.push([c, ["deny"]]);
 const W2_JUDGE = listIn("judge.test.ts", "W2_JUDGE");
 for (const c of W2_JUDGE) HARDENED.push([c, ["judge", "deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
@@ -399,4 +402,143 @@ test("differential (w7): never weaker than release-1.6.1 on every judge test str
     if ((o.cls === "deny" && n.cls !== "deny") || (o.cls === "judge" && n.cls === "pass")) weaker.push(`${JSON.stringify(s)}: 1.6.1 ${o.cls}, now ${n.cls}`);
   }
   assert.deepEqual(weaker, []);
+});
+
+// Slice w7, third review: the self-check of S1 and S2 against the real shells and tools. Each template has a slot for
+// a body (B), a group (G) and a lock file (F). Kind: "zsh" runs as `zsh -f -c`, "bash" as `bash -c`, and "string" and
+// "argv" (a wrapper that runs a command string through a shell, or its words as a program) as `sh -c` with the tool
+// first. Run with the body `echo $((6*7))MARK`, a template that prints 42MARK runs its body; then the same template
+// with `parallel x` as the body (and `setopt globsubst` for "zsh" and "string") must be denied by both copies. The third
+// field is what the template printed on the machine the table was recorded on (Linux, zsh, bash, util-linux, shadow's
+// sg, as root, whose shell is zsh; watch with TERM=xterm). The test runs each template again where its tool is
+// installed (su and runuser only as root, watch never: it needs a terminal and waits) and requires the denial when
+// either run printed the mark.
+/** @type {Array<[string, string, number]>} */
+const SELF_CHECK = [
+  ["zsh", "@B@", 1], ["zsh", "{@B@}", 1], ["zsh", "{ @B@ }", 1], ["zsh", "{ @B@; }", 1], ["zsh", "{@B@;}", 1],
+  ["zsh", "{{@B@}}", 0], ["zsh", "{ {@B@} }", 1], ["zsh", "true && {@B@}", 1], ["zsh", "true || false; {@B@}", 1],
+  ["zsh", "false || {@B@}", 1], ["zsh", "true | {@B@}", 1], ["zsh", "! {@B@}", 1], ["zsh", "!{@B@}", 0],
+  ["zsh", "time {@B@}", 1], ["zsh", "time @B@", 1], ["zsh", "nocorrect @B@", 1], ["zsh", "noglob @B@", 1],
+  ["zsh", "noglob {@B@}", 0], ["zsh", "command @B@", 1], ["zsh", "builtin @B@", 1], ["zsh", "exec @B@", 1],
+  ["zsh", "- @B@", 0], ["zsh", "repeat 1 @B@", 1], ["zsh", "repeat 1 {@B@}", 1], ["zsh", "repeat 1 { @B@ }", 1],
+  ["zsh", "repeat 1 do @B@; done", 1], ["zsh", "repeat 1 { repeat 1 {@B@} }", 1], ["zsh", "if true; then @B@; fi", 1],
+  ["zsh", "if true; then {@B@}; fi", 1], ["zsh", "if [[ x ]] then @B@; fi", 1], ["zsh", "if [[ x ]] {@B@}", 0],
+  ["zsh", "if [[ x ]] { @B@ }", 0], ["zsh", "if [[ x ]] @B@", 1], ["zsh", "if (( 1 )) @B@", 1],
+  ["zsh", "if false; then :; else @B@; fi", 1], ["zsh", "if false; then :; elif true; then @B@; fi", 1],
+  ["zsh", "if false; then :; elif [[ x ]] then @B@; fi", 1], ["zsh", "if false; then :; else {@B@}; fi", 1],
+  ["zsh", "while [[ x ]] {@B@; break}", 1], ["zsh", "while [[ x ]] { @B@; break }", 1],
+  ["zsh", "while true; do @B@; break; done", 1], ["zsh", "while [[ x ]] do @B@; break; done", 1],
+  ["zsh", "until false; do @B@; break; done", 1], ["zsh", "until [[ ]] {@B@; break}", 0], ["zsh", "for i (a) {@B@}", 1],
+  ["zsh", "for i (a) { @B@ }", 1], ["zsh", "for i (a) @B@", 1], ["zsh", "for i in a; do @B@; done", 1],
+  ["zsh", "for i in a; {@B@}", 1], ["zsh", "for i in a; @B@", 1], ["zsh", "for i in a {@B@}", 0],
+  ["zsh", "for ((i=0;i<1;i++)) {@B@}", 1], ["zsh", "for ((i=0;i<1;i++)) do @B@; done", 1],
+  ["zsh", "for ((i=0;i<1;i++)) @B@", 1], ["zsh", "foreach i (a) @B@; end", 1], ["zsh", "foreach i (a) {@B@}; end", 0],
+  ["zsh", "select i in a; do @B@; break; done </dev/null", 0], ["zsh", "case a in a) @B@;; esac", 1],
+  ["zsh", "case a in a) {@B@};; esac", 1], ["zsh", "case a { a) @B@ ;; }", 1], ["zsh", "case a { a) {@B@} ;; }", 1],
+  ["zsh", "case a in (a) @B@;; esac", 1], ["zsh", "{ : } always {@B@}", 1], ["zsh", "{ : } always { @B@ }", 1],
+  ["zsh", "{:} always {@B@}", 1], ["zsh", "{ @B@ } always { : }", 1], ["zsh", "(@B@)", 1], ["zsh", "( @B@ )", 1],
+  ["zsh", "({@B@})", 1], ["zsh", "() {@B@}", 1], ["zsh", "() { @B@ }", 1], ["zsh", "function {@B@}", 0],
+  ["zsh", "f() {@B@}; f", 1], ["zsh", "function f {@B@}; f", 0], ["zsh", "f() @B@; f", 1], ["zsh", "coproc @B@; wait", 0],
+  ["zsh", "coproc {@B@}; cat <&p", 1], ["zsh", "x=1 @B@", 1], ["zsh", "@B@ > /dev/stdout", 1],
+  ["zsh", "{@B@} >/dev/stdout", 1], ["zsh", "{@B@}|cat", 1], ["zsh", "echo $(@B@)", 1], ["zsh", "echo $({@B@})", 1],
+  ["zsh", "echo `@B@`", 1], ["zsh", "cat <(@B@)", 1], ["zsh", "eval '@B@'", 1], ["zsh", "eval '{@B@}'", 1],
+  ["zsh", "true; {@B@} always {:}", 1],
+  ["bash", "{ @B@; }", 1], ["bash", "{@B@;}", 0], ["bash", "time @B@", 1], ["bash", "time -p @B@", 1], ["bash", "! @B@", 1],
+  ["bash", "command @B@", 1], ["bash", "builtin @B@", 1], ["bash", "exec @B@", 1], ["bash", "if true; then @B@; fi", 1],
+  ["bash", "if false; then :; else @B@; fi", 1], ["bash", "while true; do @B@; break; done", 1],
+  ["bash", "until false; do @B@; break; done", 1], ["bash", "for i in a; do @B@; done", 1],
+  ["bash", "for ((i=0;i<1;i++)); do @B@; done", 1], ["bash", "case a in a) @B@;; esac", 1], ["bash", "(@B@)", 1],
+  ["bash", "coproc { @B@; }; cat <&${COPROC[0]}", 1], ["bash", "@B@ & wait", 1], ["bash", "true && @B@", 1],
+  ["bash", "false || @B@", 1],
+  ["string", "sg @G@ -c '@B@'", 1], ["string", "sg @G@ -c'@B@'", 1], ["string", "sg -c'@B@' @G@", 1],
+  ["string", "sg -c '@B@' @G@", 1], ["string", "sg @G@ '@B@'", 1], ["string", "sg - @G@ -c '@B@'", 0],
+  ["string", "sg - @G@ '@B@'", 0], ["string", "sg @G@ 'echo hi' -c '@B@'", 1], ["string", "sg @G@ -c 'echo hi' -c '@B@'", 1],
+  ["string", "sg @G@ --command='@B@'", 1], ["string", "sg @G@ --command '@B@'", 1], ["string", "sg @G@ --comm='@B@'", 1],
+  ["string", "sg @G@ -- '@B@'", 1], ["string", "sg @G@ -c -- '@B@'", 0], ["string", "sg @G@ -xc '@B@'", 0],
+  ["argv", "sg @G@ @B@", 0], ["string", "sg @G@ \"@B@\"", 1],
+  ["string", "su -c'@B@'", 1], ["string", "su -c '@B@'", 1], ["string", "su - root -c '@B@'", 1], ["string", "su root -c'@B@'", 1],
+  ["string", "su --command='@B@'", 1], ["string", "su --command '@B@'", 1], ["string", "su --comm='@B@'", 1],
+  ["string", "su --session-command='@B@'", 1], ["string", "su -lc '@B@'", 1], ["string", "su -l root -c '@B@'", 1],
+  ["string", "runuser -l root -c '@B@'", 1], ["argv", "runuser -u root -- @B@", 1], ["argv", "runuser -u root @B@", 1],
+  ["string", "runuser root -c'@B@'", 1], ["string", "runuser --command='@B@' root", 1],
+  ["string", "flock @F@ -c '@B@'", 1], ["string", "flock -c'@B@' @F@", 0], ["string", "flock @F@ -c'@B@'", 0],
+  ["string", "flock --command '@B@' @F@", 0], ["string", "flock --command='@B@' @F@", 0], ["string", "flock --comm='@B@' @F@", 0],
+  ["string", "flock -xnc '@B@' @F@", 0], ["string", "flock -xc'@B@' @F@", 0], ["argv", "flock @F@ @B@", 1],
+  ["argv", "flock -x @F@ @B@", 1], ["argv", "flock @F@ -- @B@", 0], ["string", "flock -w 1 @F@ -c '@B@'", 1],
+  ["string", "script -c'@B@' /dev/null", 1], ["string", "script -qc '@B@' /dev/null", 1],
+  ["string", "script --command='@B@' /dev/null", 1], ["string", "script --command '@B@' /dev/null", 1],
+  ["string", "script --comm='@B@' /dev/null", 1], ["string", "script -qefc '@B@' /dev/null", 1],
+  ["string", "script -q /dev/null -c '@B@'", 1], ["string", "script -qc'@B@' /dev/null", 1], ["string", "script -q -c '@B@'", 1],
+  ["string", "script /dev/null -qc '@B@'", 1],
+  ["string", "watch '@B@'", 1], ["string", "watch -n1 '@B@'", 1], ["string", "watch -n 1 '@B@'", 1], ["argv", "watch -x @B@", 1],
+  ["argv", "watch -- @B@", 1], ["argv", "watch -t -n1 @B@", 1], ["string", "watch --interval=1 '@B@'", 1], ["string", "watch -g '@B@'", 1],
+];
+const MARK_BODY = "echo $((6*7))MARK";
+/** Whether `tool` is on PATH. @param {string} tool */
+const installed = (tool) => {
+  try {
+    execFileSync("sh", ["-c", `command -v ${tool}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+test("self-check (w7, S1 and S2): every template a real shell or tool runs is denied with a refused body, in both copies", async () => {
+  assert.ok(SELF_CHECK.length >= 80, `only ${SELF_CHECK.length} templates`);
+  const dir = mkdtempSync(join(tmpdir(), "judge-self-"));
+  const lock = join(dir, "lock");
+  writeFileSync(lock, "");
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  const group = installed("id") ? execFileSync("id", ["-gn"], { encoding: "utf8" }).trim() : "root";
+  /** @type {Map<string, boolean>} */
+  const tools = new Map();
+  const timeout = installed("timeout");
+  const runnable = (/** @type {string} */ kind, /** @type {string} */ t) => {
+    const tool = kind === "zsh" || kind === "bash" ? kind : (t.split(" ")[0] ?? "");
+    if (tool === "watch" || ((tool === "su" || tool === "runuser") && !root) || !timeout) return false;
+    if (!tools.has(tool)) tools.set(tool, installed(tool));
+    return tools.get(tool) === true;
+  };
+  // One bash driver per group of templates runs each under `timeout 5` with stdin closed, after a line `@@<index>`;
+  // the templates reach it as environment variables, never as shell text. Eight drivers at once.
+  const DRIVER = 'for v in $LIST; do k=K_$v; c=C_$v; echo "@@$v"; case ${!k} in zsh) timeout 5 zsh -f -c "${!c}";; bash) timeout 5 bash -c "${!c}";; *) timeout 5 sh -c "${!c}";; esac </dev/null 2>&1; done';
+  const todo = SELF_CHECK.flatMap(([k, t], i) => (runnable(k, t) ? [i] : []));
+  const ran = new Array(SELF_CHECK.length).fill(false);
+  const chunks = Array.from({ length: 8 }, (_, n) => todo.filter((_, j) => j % 8 === n)).filter((c) => c.length);
+  await Promise.all(chunks.map((chunk) => new Promise((done) => {
+    /** @type {Record<string, string | undefined>} */
+    const env = { ...process.env, TERM: "dumb", LIST: chunk.join(" ") };
+    for (const i of chunk) {
+      const [k, t] = SELF_CHECK[i] ?? ["", ""];
+      env[`K_${i}`] = k;
+      env[`C_${i}`] = t.replaceAll("@G@", group).replaceAll("@F@", lock).replaceAll("@B@", MARK_BODY);
+    }
+    const child = execFile("bash", ["-c", DRIVER], { cwd: dir, env, timeout: 60_000, maxBuffer: 1 << 24 }, (_e, out) => {
+      for (const part of String(out).split(/^@@/m).slice(1)) {
+        const i = Number.parseInt(part, 10);
+        if (Number.isInteger(i) && part.includes("42MARK")) ran[i] = true;
+      }
+      done(undefined);
+    });
+    child.stdin?.end();
+  })));
+  rmSync(dir, { recursive: true, force: true });
+  /** @type {string[]} */
+  const wrong = [];
+  let required = 0;
+  SELF_CHECK.forEach(([kind, t, recorded], i) => {
+    if (!recorded && !ran[i]) return;
+    required++;
+    for (const body of kind === "zsh" || kind === "string" ? ["parallel x", "setopt globsubst"] : ["parallel x"]) {
+      const c = t.replaceAll("@G@", "g").replaceAll("@F@", "/tmp/l").replaceAll("@B@", body);
+      const a = next(c, CWD);
+      const b = sdk(c, CWD);
+      if (a.cls !== "deny" || JSON.stringify(a) !== JSON.stringify(b)) wrong.push(`${JSON.stringify(c)}: judge-core ${a.cls}, judge.ts ${b.cls}`);
+    }
+  });
+  assert.deepEqual(wrong, []);
+  assert.ok(required >= 140, `only ${required} templates are required`);
+  // Where zsh is installed the table really ran: most of its zsh templates printed the mark.
+  if (tools.get("zsh")) assert.ok(SELF_CHECK.filter(([k], i) => k === "zsh" && ran[i]).length >= 60, "zsh ran too few templates");
 });

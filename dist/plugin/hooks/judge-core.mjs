@@ -970,6 +970,80 @@ function afterWrapper(ws, k) {
   }
   return false;
 }
+/**
+ * S1, the string wrappers: the WRAPPER_STRING programs, each of which runs a command string through a shell (sg, su,
+ * runuser, flock, script, watch: their manual pages; the other WRAPPERS run argv). They take their options the getopt
+ * way (`sg g -c'x'`, `sg -c'x' g`, `sg g 'a' -c 'b'`, `script -qefc x`, `su --comm=x`), so no option position is read:
+ * every argument is a candidate command string, as a whole, after the `=` of a long option, and, for a word with one
+ * dash, after each of its leading option letters (`-qc'x'` gives `qcx`, `cx` and `x`). Each candidate is read as an
+ * `sh -c` string; a dynamic argument (an expansion, a substitution or a glob: its text is unknown) is refused.
+ * Over-blocks: `sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`, an argument a shell cannot read as a
+ * command line (`flock /tmp/l git commit -m "don't"`), an option cluster that spells a refused command (`-at`).
+ */
+const MAX_OPTION_LETTERS = 32;
+/** The characters all attached option values of one command line may add to the reading (each suffix counts whole):
+ * a bound on the time S1 takes, far above any real option cluster. */
+const ATTACHED_BUDGET = 65_536;
+function wrapperStrings(x, ctx) {
+  if (x.dynamic) return "with an argument the guard cannot read (an expansion, a substitution or a glob)";
+  const t = x.text;
+  const out = [t];
+  if (t.startsWith("--")) {
+    const eq = t.indexOf("=");
+    if (eq > 0) out.push(t.slice(eq + 1));
+  } else if (t.length > 1 && t.startsWith("-")) {
+    const run = /^[A-Za-z0-9]*/.exec(t.slice(1))[0].length;
+    if (run > MAX_OPTION_LETTERS) return `with an option cluster of more than ${MAX_OPTION_LETTERS} letters`;
+    for (let p = 1; p <= run + 1 && p < t.length; p++) {
+      ctx.attached = (ctx.attached ?? 0) + t.length - p;
+      if (ctx.attached > ATTACHED_BUDGET) return "with more attached option values than the guard reads";
+      out.push(t.slice(p));
+    }
+  }
+  return out;
+}
+/**
+ * S2, zsh's stuck braces: zsh reads a `{` stuck to the next word as the start of a group (`{parallel x}`,
+ * `repeat 1 {cmd}`, `for i (a) {cmd}`, `{ : } always {cmd}`) and a `}` stuck to the end of a word as its end
+ * (`{cmd}`, `{:} always {cmd}`). The same command with every unquoted leading `{` and every unquoted trailing `}` of a
+ * word (not a redirection target) stripped, split into one command after each word that lost a `}`, as a spaced `}`
+ * splits it; undefined when nothing changes. The caller reads these as well as the command itself. Over-inclusive:
+ * every word counts, so an argument that starts with `{` is also read without it (`echo {rm}` is denied), and a word
+ * after one that ends with `}` starts a command (`echo x} at now` is denied).
+ */
+function unbraced(cmd) {
+  let changed = false, split = false;
+  const out = [{ ...cmd, words: [] }];
+  for (const w of cmd.words) {
+    if (w.redirect) {
+      out[out.length - 1].words.push(w);
+      continue;
+    }
+    if (split) out.push({ ...cmd, words: [] });
+    split = false;
+    let pieces = w.pieces, text = w.text;
+    const first = pieces[0];
+    if (first && "lit" in first && !first.quoted && first.lit.startsWith("{")) {
+      const n = first.lit.length - first.lit.replace(/^\{+/, "").length;
+      pieces = first.lit.length > n ? [{ lit: first.lit.slice(n), quoted: false }, ...pieces.slice(1)] : pieces.slice(1);
+      text = text.slice(n);
+    }
+    const end = pieces[pieces.length - 1];
+    if (end && "lit" in end && !end.quoted && end.lit.endsWith("}")) {
+      const n = end.lit.length - end.lit.replace(/\}+$/, "").length;
+      pieces = end.lit.length > n ? [...pieces.slice(0, -1), { lit: end.lit.slice(0, -n), quoted: false }] : pieces.slice(0, -1);
+      text = text.slice(0, text.length - n);
+      split = true;
+    }
+    if (pieces === w.pieces) {
+      out[out.length - 1].words.push(w);
+      continue;
+    }
+    changed = true;
+    if (pieces.length) out[out.length - 1].words.push({ ...w, pieces, text });
+  }
+  return changed ? out.filter((c) => c.words.some((w) => !w.redirect)) : undefined;
+}
 
 /** `make()` on first use, then the same value. */
 function once(make) {
@@ -1311,6 +1385,7 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
   const rebaseSeen = new Set(); // see gitShellArgs
   let trapped = false; // a trap word already read every later word as a script
   let runRead = false; // a flock or script word already read its -c string
+  let stringRead = false; // a string wrapper already read every later argument (S1)
   // The first deny decides (see analyze), so the words after it are not read.
   for (let k = 0; k < ws.length && !denied; k++) {
     const w = ws[k];
@@ -1453,6 +1528,16 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
       } else if (k !== at) push(deny("rm run through another command (xargs, find -exec, env, an argument) is always blocked; use a plain rm -r <path>", "rm"));
       else push(rmRule(after(k), plainLine && at === 0 && depth === 0 && ws.every((x) => !x.redirect), ctx.cwd));
     }
+    // S1 (wrapperStrings): a string wrapper where a command runs, or anywhere after a wrapper, reads every later
+    // argument as a candidate command string. Once per command: a later one would read a subset of the same words.
+    if (!denied && !stringRead && WRAPPER_STRING.has(name) && (leads(k) || k > wrapping())) {
+      stringRead = true;
+      for (let i = s; i < nr.length && !denied; i++) {
+        const c = wrapperStrings(nr[i], ctx);
+        if (typeof c === "string") push(deny(`${name} ${c} is always blocked: it runs a command string through a shell, and every argument may be that string`));
+        else for (const t of c) if (!denied) script(t, false, name);
+      }
+    }
   }
   return out;
 }
@@ -1549,8 +1634,21 @@ export function tooLarge(command) {
   return over ? `a command with more than ${MAX_OPENERS} of ${over} is always blocked: the guard does not read one that long; write long text to a file with the editor and run a short command` : undefined;
 }
 
-/** Tokenize and apply the rules to every simple command, every substitution and every script payload. */
+/** analyze, once per text and depth within one classification: a string several rules read (a wrapper's string, S1's
+ * candidates, S2's second reading) costs one reading. The rules read nothing from ctx but cwd, and what they write to
+ * it (env, sensitive, prompt, traced) the first reading already wrote, so a repeat gives the same answer. */
 function analyze(src, ctx, depth) {
+  const key = `${depth}:${src}`;
+  const memo = (ctx.read ??= new Map());
+  const seen = memo.get(key);
+  if (seen) return seen;
+  const r = analyzeText(src, ctx, depth);
+  memo.set(key, r);
+  return r;
+}
+
+/** Tokenize and apply the rules to every simple command, every substitution and every script payload. */
+function analyzeText(src, ctx, depth) {
   if (depth > MAX_DEPTH) return deny("commands nested more than 3 deep are always blocked");
   let script;
   try {
@@ -1572,6 +1670,13 @@ function analyze(src, ctx, depth) {
   const plainLine = script.plain && script.commands.length === 1;
   for (const cmd of script.commands) {
     const r = analyzeCommand(cmd, ctx, depth, plainLine);
+    // S2 (unbraced): the command read again with zsh's stuck braces stripped, never as a plain line.
+    const u = r.some((c) => c.cls === "deny") ? undefined : unbraced(cmd);
+    for (const part of u ?? []) {
+      const p = analyzeCommand(part, ctx, depth, false);
+      for (const c of p) r.push(c);
+      if (p.some((c) => c.cls === "deny")) break;
+    }
     for (const c of r) results.push(c);
     if (r.some((c) => c.cls === "deny")) break;
   }

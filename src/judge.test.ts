@@ -2254,6 +2254,160 @@ test("classify (w7, second review): zsh's alternate forms start commands (N1) an
   assert.match(classifyDetail("sg g \"$C\"", CWD).reason ?? "", /^sg with a string the guard cannot read is always blocked/);
 });
 
+// Third review: the two confirmed gaps, verbatim, then the rest of the two shapes. S1: every argument of a string
+// wrapper (sg, su, runuser, flock, script, watch) is a candidate command string, whole, after a long option's `=` and
+// after each leading option letter. S2: a word that starts with `{` is read again without it, and a word that ends
+// with `}` ends a command (zsh's stuck braces). Both copies deny every row, alone and wrapped (judge-differential reads
+// this list); the real shells' behaviour for each shape is in judge-differential's self-check table.
+const W7_SHAPES: string[] = [
+  // gap 1 (N4), verbatim
+  "sg g -c'parallel x'",
+  "sg -c'parallel x' g",
+  "sg g 'echo hi' -c 'parallel x'",
+  "sg g -c'sudo ls'",
+  "sg -c\"$x\" g",
+  // gap 2 (N1), verbatim, and the same four with setopt globsubst
+  "repeat 1 {parallel x}",
+  "for i (a) {parallel x}",
+  "{ : } always {parallel x}",
+  "while [[ x ]] {parallel x; break}",
+  "repeat 1 {setopt globsubst}",
+  "for i (a) {setopt globsubst}",
+  "{ : } always {setopt globsubst}",
+  "while [[ x ]] {setopt globsubst; break}",
+  // S1: the getopt spellings of each string wrapper
+  "sg g -c 'echo hi' -c 'parallel x'",
+  "sg g --command='parallel x'",
+  "sg g --comm='parallel x'",
+  "sg g --command 'parallel x'",
+  "sg g -- 'parallel x'",
+  "sg g -c'setopt globsubst'",
+  "sg -c\"echo $x\" g",
+  "sg g -c`id`",
+  "sg g -c p*",
+  "timeout -s KILL 5 sg g -c'parallel x'",
+  "env -u HOME sg g -c'parallel x'",
+  "flock /tmp/l -c'parallel x'",
+  "flock -w 1 /tmp/l -c 'parallel x'",
+  "flock --command='parallel x' /tmp/l",
+  "flock -xnc 'parallel x' /tmp/l",
+  "script -c'parallel x' /dev/null",
+  "script -qefc 'parallel x' /dev/null",
+  "script -qc'parallel x' /dev/null",
+  "script --comm='parallel x' /dev/null",
+  "script /dev/null -qc 'setopt globsubst'",
+  "watch -n1 'parallel x'",
+  "watch --interval=1 'setopt globsubst'",
+  "watch -x parallel x",
+  "watch -- parallel x",
+  "watch -tc'parallel x'",
+  `sg g -${"q".repeat(33)}c'x'`,
+  // S1 over-blocks, stated
+  "sg docker -c \"docker run $IMAGE\"",
+  "flock /tmp/l ls *.ts",
+  "flock /tmp/l git commit -m \"don't\"",
+  // S2: stuck braces wherever a command starts
+  "{parallel x}",
+  "{sudo ls}",
+  "{parallel x;}",
+  "{ {parallel x} }",
+  "true && {parallel x}",
+  "false || {setopt globsubst}",
+  "true | {parallel x}",
+  "! {parallel x}",
+  "time {parallel x}",
+  "repeat 1 { repeat 1 {parallel x} }",
+  "if true; then {parallel x}; fi",
+  "if false; then :; else {setopt globsubst}; fi",
+  "for i in a; {parallel x}",
+  "for ((i=0;i<1;i++)) {parallel x}",
+  "case a in a) {parallel x};; esac",
+  "case a { a) {setopt globsubst} ;; }",
+  "{:} always {parallel x}",
+  "{ls} always {setopt globsubst}",
+  "({parallel x})",
+  "coproc {parallel x}",
+  "{parallel x} >/dev/null",
+  "{parallel x}|cat",
+  "echo $({parallel x})",
+  "eval '{parallel x}'",
+  "{'parallel' x}",
+  "{\\parallel x}",
+  "{rm -r build}",
+  "() {parallel x}",
+  "f() {parallel x}; f",
+  "function f {parallel x}; f",
+  // S2 over-blocks, stated
+  "echo {rm}",
+  "echo x} at now",
+];
+// The everyday commands of the slice that pass on 1.6.1 and must keep passing. `echo {a,b}`, `cp x.{ts,js} out/`,
+// `ls src/{a,b}/*.ts` and `mkdir -p out/{a,b}` are denied on 1.6.1 already (brace expansion): reported, not changed.
+const W7_SHAPES_PASS: string[] = [
+  "if [[ -f x ]]; then cat x; fi",
+  "if [ -f x ]; then cat x; fi",
+  "if grep -q x file; then echo y; else echo n; fi",
+  "[[ -n \"$CI\" ]] && npm ci",
+  "(( n > 0 )) && echo y",
+  "for f in a b; do echo \"$f\"; done",
+  "for f in *.ts; do wc -l \"$f\"; done",
+  "while read -r l; do echo \"$l\"; done < file",
+  "echo \"then do else\"",
+  "git commit -m \"do parallel work, then at last sem\"",
+  "npm run batch",
+  "grep -rn parallel src",
+  "echo at",
+  "git diff HEAD@{1}",
+  "git diff HEAD@{1} -- src",
+  "git stash show stash@{0}",
+  "awk '{print $1}' file",
+  "find . -name '*.ts' -exec grep -l x {} +",
+  "xargs -I{} echo {}",
+  "set -euo pipefail",
+  "time npm test",
+  "timeout 60 npm test",
+  "xargs -P 4 -n 1 echo",
+  "env FOO=1 node x.js",
+  "export PS1='$ '",
+  "bash -lc 'npm test'",
+  "sg docker -c 'docker ps'",
+  "sg docker -c'docker ps'",
+  "flock /tmp/l echo hi",
+  "flock /tmp/l make test",
+  "script -c 'echo hi'",
+  "script -q -c 'npm test' /dev/null",
+  "watch -n 1 ls",
+  "watch -d git status",
+  "{ make; }",
+];
+
+test("classify (w7, third review): every argument of a string wrapper is a command string (S1); stuck braces start and end groups (S2)", () => {
+  assert.deepEqual(misread([
+    ...W7_SHAPES.map((c): [string, BashClass] => [c, "deny"]),
+    ...W7_SHAPES_PASS.map((c): [string, BashClass] => [c, "pass"]),
+  ]), []);
+  for (const brace of ["echo {a,b}", "cp x.{ts,js} out/", "ls src/{a,b}/*.ts", "mkdir -p out/{a,b}"]) assert.match(classifyDetail(brace, CWD).reason ?? "", /\(brace expansion\)/, brace);
+  assert.match(classifyDetail("sg g -c'parallel x'", CWD).reason ?? "", /^parallel runs its arguments/);
+  assert.match(classifyDetail("repeat 1 {setopt globsubst}", CWD).reason ?? "", /^(setopt|unsetopt) of globsubst or promptsubst/);
+  assert.match(classifyDetail("flock /tmp/l ls *.ts", CWD).reason ?? "", /^flock with an argument the guard cannot read .* is always blocked: it runs a command string through a shell/);
+  assert.match(classifyDetail(`sg g -${"q".repeat(33)}c'x'`, CWD).reason ?? "", /^sg with an option cluster of more than 32 letters is always blocked/);
+  // The attached values S1 reads are bounded: an option word of the length cap is refused after the budget, quickly.
+  const long = `sg g '-cc;${"echo x;".repeat(37000)}'`;
+  const t = performance.now();
+  assert.equal(classify(long, CWD), "deny");
+  assert.ok(performance.now() - t < 2000, `${Math.round(performance.now() - t)} ms`);
+  // Every argument read on its own stays bounded too: distinct words (no answer to reuse) at the length cap, decided in
+  // about 1 to 2 s (the bound here leaves room for a slow machine; chains and nesting measured the same).
+  let words = "";
+  for (let i = 0; words.length < MAX_COMMAND_LENGTH - 64; i++) words += `w${i.toString(36)} `;
+  for (const cmd of [`sg g ${words}`]) {
+    const s = performance.now();
+    assert.equal(tooLarge(cmd), undefined);
+    classify(cmd, CWD);
+    assert.ok(performance.now() - s < 5000, `${cmd.slice(0, 20)}: ${Math.round(performance.now() - s)} ms`);
+  }
+});
+
 // N6: the tokenizer's time is bounded. Its scans of nested `(`, `{` and `[` are linear (each answer kept by index), and
 // a command over MAX_COMMAND_LENGTH characters or with more than MAX_OPENERS of one opener is denied before parsing.
 // The worst commands under the caps (every opener at the cap, filled to the length cap) are decided well under 2 s.
