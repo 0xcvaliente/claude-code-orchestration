@@ -175,7 +175,7 @@ log_gate() { # decision reason [extra JSON fields: counts only]
   [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
   [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
   [ -z "${fail_extra:-}" ] || extra="${extra:+$extra,}$fail_extra"
-  [ "${took_over:-0}" = 0 ] || extra="${extra:+$extra,}\"lock_takeover\":1" # this gate removed a stale suite lock
+  [ "${took_over:-0}" = 0 ] || extra="${extra:+$extra,}\"lock_takeover\":1" # this gate replaced a stale suite lock
   mkdir -p "$state" 2>/dev/null || return 1
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   printf '{"ts":"%s","gate":"test","decision":"%s","reason":"%s","agent_type":"%s","agent_id":"%s","session_id":"%s"%s}\n' \
@@ -290,9 +290,10 @@ fi
 # The lock is "<pid> <start epoch seconds>" of its holder, made whole in a private file and hard-linked into place (ln
 # fails when the name exists: atomic, and never seen half written). A lock that is older than the hook timeout
 # (LOCK_STALE_S), or whose holder is gone and whose companion file (test-gate.lock.run) names no process group that
-# still has a member, is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) removes it and all
-# try again. The EXIT trap releases it on every way out (exit, the test run's limit, SIGTERM), and only while it still
-# holds this hook's own token; a hook killed with SIGKILL leaves it to the stale rule.
+# still has a member, is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) replaces it with its
+# own lock in one rename (take_over) and holds it. The EXIT trap releases it on every way out (exit, the test run's
+# limit, SIGTERM), and only while it still holds this hook's own token; a hook killed with SIGKILL leaves it to the
+# stale rule.
 lock="$state/test-gate.lock"
 lock_token="" lock_held=0
 LOCK_STALE_S=900 # the hook timeout in the settings
@@ -339,34 +340,43 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
   return 0
 }
 # One taker at a time (the guard folder; a waiter that finds it older than 2 minutes removes it and does not take over
-# that round). The stale lock is renamed away first, an atomic step, and only then compared with what was judged stale:
-# a lock some other gate made in between is put back with ln (never over another), not removed, and that gate keeps it.
-# An empty or unreadable read means the lock changed under this gate (the name was free, or the file went between the
-# test and the read): the takeover returns 1 and the caller tries take_lock again; that value is never judged stale and
-# never reaches the mv. (Before, an empty read counted as stale: a gate that read the name while another taker had just
-# moved the stale lock away then moved that taker's fresh lock aside, and when a third gate linked its own lock first,
-# the put-back failed and the fresh lock was removed, so two suites ran at once; src/test-gate-lock.test.mjs, "a takeover
-# that reads the lock while its name is free never moves the fresh lock that appears there".) Every read here happens
-# under the guard, and take_lock links only a whole file, so a non-empty read is a lock some gate made; it changes before
-# the mv only when something outside the guard removes it, which leaves three cases open (docs/limits.md): its holder,
-# still alive when the lock is LOCK_STALE_S old, releases it in that window, or after its lock was taken over removes a
-# successor's lock in the moment between release_lock's read and its rm; two gates are in the takeover at once once a
-# guard left by a gate killed (or stopped) inside its takeover is 2 minutes old (the age test and the rmdir are two
-# steps, so a waiter can remove a newer taker's guard); a lock file that is empty for good (take_lock never makes one) is
-# never stale, so every gate waits until its floor, as for a live holder.
-take_over() { # 0 when a stale lock was removed
-  local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$"
+# that round). The takeover never frees the lock's name, so no other gate can link a lock there while it works:
+#  1. it reads the lock; an empty or unreadable read (the name was free, or the file went before the read) means the
+#     lock changed under this gate, and a lock that is not stale stands: either way it returns 1 and the caller waits;
+#  2. it hard-links the lock under a private name in the same folder (a snapshot; the name keeps its file) and reads the
+#     snapshot: a lock other than the one judged stale (its holder released it and another gate linked its own after the
+#     read) is left alone, the snapshot removed, and it returns 1;
+#  3. otherwise it writes its own lock whole into a private file in the same folder and renames that over the name (one
+#     atomic step), removes the snapshot and holds the lock from then on, as take_lock's link would (return 0).
+# No lock is ever moved away, put back or removed by a taker, so a fresh lock is never lost to a takeover that read the
+# name while it was free (src/test-gate-lock.test.mjs, "a takeover that reads the lock while its name is free never
+# moves the fresh lock that appears there") or that read a lock its holder then released (src/test-gate-lock.test.mjs,
+# "a lock released and replaced by another gate's between a waiter's read and its takeover is left in place"). What
+# stays open (docs/limits.md, C): a holder still alive when its lock is more than LOCK_STALE_S old (a machine suspended
+# mid-run) has its lock replaced while its suite may still run, a gate that links its lock while such a holder releases
+# between a taker's snapshot and rename has it replaced, and its release_lock can remove the successor's lock (or
+# companion file) between its token check and its rm; a holder alive with a lock under LOCK_STALE_S is never stale, also
+# between release_lock's removal of the companion file and of the lock (lock_stale asks the pid first); two gates are in the takeover at once once a guard left by a gate
+# killed or stopped inside its takeover is 2 minutes old (the age test and the rmdir are two steps, so a waiter can
+# remove a newer taker's guard), and then the second rename can replace the first taker's new lock; a new lock with the
+# very content judged stale (the departed holder's pid reused by a gate within the same second) passes the comparison;
+# a lock file that is empty for good (take_lock never makes one) is never stale, so every gate waits until its floor.
+take_over() { # 0 when this gate replaced a stale lock with its own: the lock is then held
+  local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$" tmp="$state/.test-gate.lock.$$"
   if ! mkdir "$guard" 2>/dev/null; then
     [ -z "$(find "$guard" -maxdepth 0 -mmin +2 2>/dev/null)" ] || rmdir "$guard" 2>/dev/null
     return 1
   fi
+  rm -f "$grab" "$tmp" 2>/dev/null # this gate's own private names (its pid), left by a killed gate with the same pid
   { IFS= read -r seen <"$lock"; } 2>/dev/null
-  if [ -n "$seen" ] && [ -e "$lock" ] && lock_stale "$seen" && mv "$lock" "$grab" 2>/dev/null; then
+  if [ -n "$seen" ] && lock_stale "$seen" && ln "$lock" "$grab" 2>/dev/null; then
     { IFS= read -r now_seen <"$grab"; } 2>/dev/null
     if [ "$now_seen" = "$seen" ]; then
-      rc=0 took_over=1
-    else
-      ln "$grab" "$lock" 2>/dev/null
+      lock_token="$$ $(date +%s)"
+      if printf '%s\n' "$lock_token" 2>/dev/null >"$tmp" && mv -f "$tmp" "$lock" 2>/dev/null; then
+        rc=0 took_over=1 lock_held=1
+      fi
+      rm -f "$tmp" 2>/dev/null
     fi
     rm -f "$grab" 2>/dev/null
   fi
@@ -392,7 +402,10 @@ acquire_lock() { # floor
     r=$?
     lock_wait_s=$((SECONDS - t0))
     [ "$r" = 1 ] || return "$r"
-    take_over && continue
+    if take_over; then # the stale lock was replaced by this gate's own: held
+      lock_wait_s=$((SECONDS - t0))
+      return 0
+    fi
     [ "$(time_left)" -gt "$1" ] || return 1
     sleep 1
   done

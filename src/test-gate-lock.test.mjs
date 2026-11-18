@@ -3,7 +3,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -135,13 +135,16 @@ test("a fresh lock made between the stale check and the removal is never removed
   try {
     deadLock(project);
     // rm and mv first on PATH: the first time either names the lock, another gate's fresh lock (a live holder: this
-    // process) takes its place just before the real command runs.
+    // process) takes its place just before the real command runs. ln too, when it names the lock as its source (the
+    // takeover's snapshot): the fresh lock replaces the name, as another gate's link would after a release.
     const mark = join(bin, "done");
-    for (const name of ["rm", "mv"]) {
+    const realRm = spawnSync("sh", ["-c", "command -v rm"], { encoding: "utf8" }).stdout.trim();
+    for (const name of ["rm", "mv", "ln"]) {
       const real = spawnSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).stdout.trim();
+      const args = name === "ln" ? `"$1"` : `"$@"`;
       writeFileSync(
         join(bin, name),
-        `#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = '${lockFile(project)}' ] && [ ! -e '${mark}' ]; then : > '${mark}'; echo "${process.pid} $(date +%s)" > '${lockFile(project)}'; break; fi\ndone\nexec '${real}' "$@"\n`,
+        `#!/bin/sh\nfor a in ${args}; do\n  if [ "$a" = '${lockFile(project)}' ] && [ ! -e '${mark}' ]; then : > '${mark}'; '${realRm}' -f '${lockFile(project)}'; echo "${process.pid} $(date +%s)" > '${lockFile(project)}'; break; fi\ndone\nexec '${real}' "$@"\n`,
         { mode: 0o755 },
       );
     }
@@ -209,6 +212,84 @@ test("a takeover that reads the lock while its name is free never moves the fres
     await run;
     rmSync(project, { recursive: true, force: true });
     rmSync(box, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("a lock released and replaced by another gate's between a waiter's read and its takeover is left in place", async () => {
+  const project = tmp("orch-glk-rel-");
+  const box = tmp("orch-glk-box-");
+  const bin = tmp("orch-glk-bin-");
+  const lock = lockFile(project);
+  // Holder H: a live process (an orphaned sleep), so the waiter's take_lock fails and its takeover reads H's lock. The
+  // first external command after the takeover's guard is made and the lock read is the date in lock_stale: its shim
+  // plays H's normal release (H ends, its lock goes) and gate C linking its fresh lock (a live holder: this process).
+  // A takeover that moves whatever is at the name would then move C's lock; the ln shim lets gate D link its lock just
+  // before a put-back, which then fails and loses C's lock.
+  const holder = Number(spawnSync("sh", ["-c", "sleep 60 >/dev/null 2>&1 & echo $!"], { encoding: "utf8" }).stdout.trim());
+  const C = join(box, "c.lock");
+  writeFileSync(C, `${process.pid} ${nowS()}\n`);
+  const inGuard = join(bin, "guard");
+  const swapped = join(bin, "swapped");
+  mkdirSync(join(project, ".claude", "state"), { recursive: true });
+  writeFileSync(lock, `${holder} ${nowS()}\n`);
+  const real = (/** @type {string} */ n) => spawnSync("sh", ["-c", `command -v ${n}`], { encoding: "utf8" }).stdout.trim();
+  const shim = (/** @type {string} */ n, /** @type {string} */ body) => writeFileSync(join(bin, n), `#!/bin/sh\n${body}\nexec '${real(n)}' "$@"\n`, { mode: 0o755 });
+  shim("mkdir", `for a in "$@"; do [ "$a" != '${lock}.takeover' ] || : > '${inGuard}'; done`);
+  shim(
+    "date",
+    `if [ -e '${inGuard}' ] && [ ! -e '${swapped}' ]; then : > '${swapped}'; kill ${holder}; n=0; while kill -0 ${holder} 2>/dev/null && [ $n -lt 100 ]; do '${real("sleep")}' 0.05; n=$((n+1)); done; '${real("rm")}' -f '${lock}'; '${real("ln")}' '${C}' '${lock}'; fi`,
+  );
+  shim("ln", `case "$1" in '${lock}'.stale.*) [ "$2" != '${lock}' ] || [ -e '${bin}/linked' ] || { : > '${bin}/linked'; echo "${process.pid} 1" > '${lock}'; } ;; esac`);
+  const started = join(box, "started");
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let child;
+  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `date +%s%3N > '${started}'` }, onStart: (c) => (child = c) });
+  try {
+    const t = Date.now() + 20000;
+    while (!existsSync(swapped) && Date.now() < t) await sleep(50);
+    assert.ok(existsSync(swapped), "the holder released and gate C linked its lock during the waiter's takeover");
+    await sleep(2500);
+    assert.equal(alive(holder), false, "the holder is gone");
+    assert.equal(existsSync(lock) && statSync(lock).ino, statSync(C).ino, "gate C's lock (same inode) is still at the name");
+    assert.equal(readFileSync(lock, "utf8"), readFileSync(C, "utf8"), "and its content is unchanged");
+    assert.equal(existsSync(started), false, "no suite while gate C holds the lock");
+    const released = Date.now();
+    rmSync(lock, { force: true }); // gate C releases its lock
+    const r = await run;
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(num(started) >= released, `the waiter's suite started only after the release (${num(started) - released} ms)`);
+    assert.equal(records(project).at(-1)?.reason, "tests_passed", "the waiter ends with a decision");
+  } finally {
+    child?.kill("SIGKILL");
+    await run;
+    try {
+      process.kill(holder, "SIGKILL");
+    } catch {
+      // gone
+    }
+    rmSync(project, { recursive: true, force: true });
+    rmSync(box, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("a stale lock is replaced in place: the lock's path is never the source of a move, and the takeover is logged", async () => {
+  const project = tmp("orch-glk-swap-");
+  const bin = tmp("orch-glk-bin-");
+  const lock = lockFile(project);
+  const moves = join(bin, "moves");
+  try {
+    deadLock(project); // a dead holder, no companion file
+    const realMv = spawnSync("sh", ["-c", "command -v mv"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(bin, "mv"), `#!/bin/sh\nfor a in "$@"; do case "$a" in -*) ;; *) [ "$a" != '${lock}' ] || echo "$*" >> '${moves}'; break ;; esac; done\nexec '${realMv}' "$@"\n`, { mode: 0o755 });
+    const r = await gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: "true" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual([records(project).at(-1)?.reason, records(project).at(-1)?.lock_takeover], ["tests_passed", 1]);
+    assert.equal(existsSync(moves), false, `no mv took the lock's path as its source: ${existsSync(moves) ? readFileSync(moves, "utf8") : ""}`);
+    assert.equal(existsSync(lock), false, "the lock was released at the end");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
   }
 });
