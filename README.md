@@ -123,6 +123,7 @@ It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7
 
 ## Limits and safety
 
+- Everything this release does not do is listed on [docs/limits.md](docs/limits.md), each item with its reason.
 - The guards and deny lists catch mistakes; they are not a security boundary. Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist.
 - Worktrees isolate git state, not files. A shell write such as `cp` or `>` can still reach your main folder.
 - The benchmarks are small (1 or 2 runs per setup). They show a direction, not a measurement.
@@ -143,7 +144,7 @@ It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7
 
 ```bash
 npm install
-npm run check    # typecheck, tests, check-agents and check-plugin at the same time; CI runs it on push and pull request to main
+npm run check    # typecheck, tests, check-agents and check-plugin at the same time; CI runs it, then the dashboard test, on push and pull request to main
 ```
 
 Versions are tagged from `v1.1.0` onward. Scripts, layout and contributor rules: [docs/development.md](docs/development.md) and [CLAUDE.md](CLAUDE.md).

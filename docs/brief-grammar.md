@@ -186,7 +186,7 @@ CHECKS: C1, C2                             (optional: answer one line per id)
 
 Parsed by `parseHeader` (`focus`, `checks`).
 
-**Test gate pending line (1.6.1).** The plan check may append one line to a slice reviewer's brief (never a PLAN REVIEW): `Test gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, ...`. It appears only while the slice's latest implementer has stopped and the test gate has logged no record after that stop. It means the tests may still fail: the reviewer runs the acceptance check itself, does not rest a pass on the tests having passed, and says in its report that the gate had not reported. The line parses as no brief or reply line. While that implementer has a failed-tests block it never saw, the plan check refuses the reviewer instead (`tests_failed_after_report`, [gates.md, Plan check](gates.md#plan-check)).
+**Test gate pending line (1.6.1).** The plan check may append one line to a slice reviewer's brief (never a PLAN REVIEW): `Test gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, ...`. It appears only while the slice's latest implementer has stopped and no test-gate record is paired with that stop: none was logged yet, or since 2.0.0 the pairing (`stopGateOf` in `run.mjs`) cannot tie one to it. It means the tests may still fail: the reviewer runs the acceptance check itself, does not rest a pass on the tests having passed, and says in its report that the gate had not reported. The line parses as no brief or reply line. While that implementer has a failed-tests block it never saw, the plan check refuses the reviewer instead (`tests_failed_after_report`, [gates.md, Plan check](gates.md#plan-check)).
 
 ## Reply
 
@@ -439,7 +439,7 @@ A slice needs a passing opus review after its latest implementer launch when any
 | `read_answer` | its latest review counted as a pass answered a constraint with `(read)` |
 | `open_items` | its latest review counted as a pass has a non-empty OPEN |
 | `tests_failed_isolated` | a test-gate record `tests_failed_isolated` (joined by `agent_id`) belongs to its latest attempt: it is later than the review the attempt followed. This includes a record with `not_run: 1`, which the test gate logs in an isolated worktree when the project's suite lock stayed held until too little time was left, so the tests did not run ([docs/gates.md](gates.md)) |
-| `test_gate_gave_up` | a test-gate record that gave up (gate `test`, reason `max_blocks_reached` or `bugfix_unverified_gave_up`; joined by `agent_id`) belongs to its latest attempt, as above: the attempt's tests were not shown to pass. The pane cannot read test-gate records, so it shows neither this signal nor `tests_failed_isolated` |
+| `test_gate_gave_up` | a test-gate record that gave up (gate `test`, reason `max_blocks_reached` or `bugfix_unverified_gave_up`; joined by `agent_id`) belongs to its latest attempt, as above: the attempt's tests were not shown to pass. Since 2.0.0 the pane reads the last MiB of each `gates.jsonl` and marks both signals (`⚠isolated`, `⚠gate gave up`) |
 | `low_confidence_fail` | a review after its latest implementer launch or stop reported fail but counts as a pass, because every gap was below `ORCH_GAP_MIN` (and not superseded) |
 
 `ORCH_ESCALATION=off` turns the signals off. `ORCH_ESCALATION=always` requires an opus review for every slice (signal `always`).
@@ -479,11 +479,13 @@ Written to `journal.jsonl` at SubagentStop by `stopRecord({ ts, sessionId, agent
 | `ts`, `session_id`, `agent_id` | the time, the session and the worker |
 | `role` | bare; readers also accept `agent_type` |
 | `slice` | from the launch record with the same `agent_id`, or through `journal-pending.jsonl` when the stop arrives before its launch |
-| `status` | `parseStatus` of the final reply |
+| `status` | `parseStatus` of the final reply, or the status of the hand-back capture `journal.mjs` takes; `null` for a refused last hand-back (below) |
 | `answers`, `open` | `parseReply` |
 | `run` | the id `foldRuns` gives the run at write time; runs are numbered 1, 2, ... in session order |
 | `model` | a reviewer stop may carry it; otherwise the model comes from its launch record |
 | `continues` | `true`, only when set ([below](#continued-stops)) |
+| `after_handback` | added by `journal.mjs`: the `tool_use_id` of the hand-back the stop follows, when there is one since the agent's latest start |
+| `report`, `refused_by` | added by `journal.mjs` (2.0.0) only when the agent's latest hand-back since its previous stop record was refused and the stop's last message has no STATUS line: `report: "handback_refused"`, `refused_by` the refusing check (`handback`, `quote` or `test`), with `status` null ([logs.md, Hand-back capture](logs.md#hand-back-capture)) |
 
 A resumed worker keeps its `agent_id`, so its stops join the same launch.
 
@@ -515,6 +517,8 @@ Written to `gates.jsonl` by `verify.sh`, with `gate: "test"`. It carries `sessio
 - The slice is resolved at read time by joining `agent_id` to a launch record.
 - A record whose `session_id` differs from that launch's is ignored. `verify.sh` logs both.
 - A record without `session_id` still counts through the join.
+- A record of the hand-back gate carries `"at":"handback"` and `handback_id`; a stop's record carries `after_handback` when the stop follows a hand-back. `run.mjs` pairs records with stops by these ([docs/gates.md, Hand-back gate](gates.md#hand-back-gate)).
+- Since 2.0.0 a failed run's record also carries `failed_count`, `failed_tests`, `failed_crash` and `output`, and one written by a gate that took over a stale lock `lock_takeover`.
 
 ### Ordering
 

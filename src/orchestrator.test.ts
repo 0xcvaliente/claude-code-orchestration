@@ -464,6 +464,31 @@ test("resume: the task passed on this invocation is exactly what the judge gets,
   assert.ok(logs.some((l) => /warning: the task passed differs/.test(l)));
 });
 
+// Item 3 of 2.0.0 (CHANGELOG 1.2.0 and 1.4.5, Known and not fixed: "a resumed pipeline run starts its token count at zero").
+test("item 3: resume: the budget counts what the run spent before the resume, and the report carries it", async () => {
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = scripted([[slice("alpha"), slice("beta")]], (cwd) => !cwd.endsWith("beta"));
+  const r1 = await orchestrate({ repo, task: "build both", outRoot: out, run: first.run, maxRetries: 0 });
+  assert.deepEqual(r1.slices.map((s) => s.status), ["passed", "failed"]);
+  assert.ok(r1.spentTokens > 0);
+
+  // The cap is what the first invocation already spent: a resume that counted from zero would start beta again.
+  const second = scripted([[]], () => true);
+  const r2 = await orchestrate({ repo, task: "build both", outRoot: out, run: second.run, resume: r1.runId, runBudgetTokens: r1.spentTokens });
+  assert.equal(second.calls.filter((c) => c.role === "writer").length, 0, "no writer starts on a spent budget");
+  assert.deepEqual(r2.slices.find((s) => s.id === "beta")?.issues, ["run budget exhausted"]);
+  assert.equal(r2.spentTokens, r1.spentTokens, "the report counts the earlier spend");
+  assert.equal(r2.tokensByRole.planner, r1.tokensByRole.planner);
+
+  // With room left, the resume runs, and the run's total is both invocations'.
+  const third = scripted([[]], () => true);
+  const r3 = await orchestrate({ repo, task: "build both", outRoot: out, run: third.run, resume: r1.runId, runBudgetTokens: r1.spentTokens * 10 });
+  assert.equal(r3.slices.find((s) => s.id === "beta")?.status, "passed");
+  const thirdSpend = third.calls.length * 1000;
+  assert.equal(r3.spentTokens, r1.spentTokens + thirdSpend);
+});
+
 test("resume: an unknown run id is an error, not a fresh run", async () => {
   const { run, calls } = fake([slice("alpha")]);
   const report = await orchestrate({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run, resume: "20200101000000-dead" });

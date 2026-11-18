@@ -443,7 +443,10 @@ const nodesOf = (list: Agent[], ghosts = true): Map<string, Node> => {
     if (!a.slice) continue
     const groups = bySlice.get(a.slice) ?? []
     let cur = groups[groups.length - 1]
-    if (!cur || (a.role !== 'reviewer' && cur.some(x => x.status === 'fail' && x.endedAt !== undefined && a.startedAt >= x.endedAt))) groups.push((cur = []))
+    // A new attempt: after a failure in the attempt, or a fresh implementer (another agent id) while the attempt already has one, even if that one
+    // still runs (a retry launched before the failed agent ended).
+    const fresh = a.role === 'implementer' && !!cur?.some(x => x.role === 'implementer' && x.id !== a.id)
+    if (!cur || fresh || (a.role !== 'reviewer' && cur.some(x => x.status === 'fail' && x.endedAt !== undefined && a.startedAt >= x.endedAt))) groups.push((cur = []))
     cur.push(a)
     bySlice.set(a.slice, groups)
   }
@@ -733,16 +736,132 @@ const latestOf = (list: Agent[], id: string) => {
   for (let i = list.length - 1; i >= 0; i--) if ((list[i] as Agent).id === id) return i
   return -1
 }
+// The record SendMessage's `to` reaches: an agent id, else the name the Agent call gave (agent.spawn's `name`); of several agents with that name
+// the latest started wins, as Claude Code resolves it.
+export const addressedOf = (list: readonly Agent[], to: string) => {
+  const i = latestOf(list as Agent[], to)
+  if (i >= 0 || !to) return i
+  const id = [...list].sort((a, b) => a.startedAt - b.startedAt).filter(a => (a as Agent & { name?: string }).name === to).at(-1)?.id
+  return id === undefined ? -1 : latestOf(list as Agent[], id)
+}
 
 type Ctx = Parameters<Hook<'agent.spawn'>>[0]
 
+// ---- The gates' settings, read the way the hooks read them (brief.mjs staleMinutes, gapMinimum, escalationMode; state.mjs bridgeOptions): the
+// environment variable when it is set (even empty), else the plugin option when it is not empty, else the default. The mod reads the environment
+// of the Claude Code process with `$.env.get` (the hooks inherit the same one) and the options from `register(on, options)` (the plugin's userConfig;
+// the standalone dist/dashboard declares none, so there only the environment and the defaults apply). Read at every session start (a reload runs it again).
+export type Settings = { staleMs: number; gapMin: number; escalation: 'off' | 'always' | 'auto' }
+export type SettingsEnv = { run?: string; gap?: string; escalation?: string }
+const RUN_STALE_MIN_DEFAULT = 30
+const GAP_MIN_DEFAULT = 80
+const pickSetting = (env: string | undefined, opt: unknown) =>
+  env !== undefined ? env : opt !== undefined && opt !== null && String(opt) !== '' ? String(opt) : undefined
+export const settingsOf = (env: SettingsEnv, options: Readonly<Record<string, unknown>> = {}): Settings => {
+  const stale = Number(pickSetting(env.run, options.run_stale_min))
+  const gapV = String(pickSetting(env.gap, options.gap_min) ?? '').trim()
+  const gap = /^\d+$/.test(gapV) ? Number(gapV) : NaN
+  const esc = String(pickSetting(env.escalation, options.escalation) ?? '').trim().toLowerCase()
+  return {
+    staleMs: (Number.isFinite(stale) && stale > 0 ? stale : RUN_STALE_MIN_DEFAULT) * 60_000,
+    gapMin: gap >= 0 && gap <= 100 ? gap : GAP_MIN_DEFAULT,
+    escalation: esc === 'off' || esc === 'always' ? esc : 'auto',
+  }
+}
+let CFG: Settings = settingsOf({})
+
 // The main turn still works: `work` exists and has no end. Stale (a killed or interrupted session whose `turn.complete` never came): agents ran, none runs,
-// the last one ended over ten minutes ago. A solo run (no agents) is never stale by this rule.
-// Tradeoff: a legitimate main turn that stays busy for over ten minutes after the last agent ended (a long build) counts as stale too: the pane shows
+// the last one ended longer ago than the gates' stale time (30 minutes by default). A solo run (no agents) is never stale by this rule.
+// Tradeoff: a legitimate main turn that stays busy for longer than that after the last agent ended (a long build) counts as stale too: the pane shows
 // signed off, and a following spawn passes the `newRun` guard and starts a clean run. A lost `turn.complete` is the likelier case, so this is accepted.
-const STALE_MS = 600_000
 const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
-  !!work && !work.endedAt && !(list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS)
+  !!work && !work.endedAt && !(list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > CFG.staleMs)
+
+// ---- Test-gate records (gates.jsonl, written by the test gate in the state dir): an isolated test failure and the test gate's give-ups, which the
+// gates read as doubt signals (brief.mjs TEST_GATE_REASONS). The mod reads the file with `$.fs` (read only, the last MiB) from every state dir the
+// hooks may write to (state.mjs stateDirFor, userStateDirs) and keeps the records of the agents it knows. Read at an agent's start and end and at a
+// prompt; kept in this load's memory (a reload reads them again at the next event).
+type GateRec = { agent: string; reason: string; at: number }
+const TEST_GATE_REASONS = new Set(['tests_failed_isolated', 'max_blocks_reached', 'bugfix_unverified_gave_up'])
+let GATES: GateRec[] = []
+// True when a gates.jsonl was longer than the bounded read, so its older records are not on the pane (a marker under the slices says so).
+let GATES_CUT = false
+let projectDir = ''
+// state.mjs stateKey: the path's UTF-8 bytes, each one not a letter or digit replaced by "-", the last 200.
+export const stateKey = (p: string) =>
+  [...new TextEncoder().encode(p)].map(b => (/[A-Za-z0-9]/.test(String.fromCharCode(b)) ? String.fromCharCode(b) : '-')).join('').slice(-200)
+export const gatesFrom = (text: string, known: ReadonlySet<string>): GateRec[] => {
+  const out: GateRec[] = []
+  for (const line of text.split('\n')) {
+    if (!line.includes('"test"')) continue
+    try {
+      const r = JSON.parse(line) as Record<string, unknown>
+      if (r.gate !== 'test' || typeof r.reason !== 'string' || !TEST_GATE_REASONS.has(r.reason) || typeof r.agent_id !== 'string' || !known.has(r.agent_id)) continue
+      const at = typeof r.ts === 'number' ? r.ts : Date.parse(String(r.ts ?? ''))
+      if (Number.isFinite(at)) out.push({ agent: r.agent_id, reason: r.reason, at })
+    } catch {
+      // a torn or foreign line: skip it
+    }
+  }
+  return out
+}
+const TAIL = 1 << 20
+async function readGates($: Ctx, list: Agent[]) {
+  const known = new Set(list.filter(a => a.role === 'implementer').map(a => a.id))
+  if (!known.size || !projectDir) return
+  const home = (await $.env.get('HOME')) ?? ''
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`
+  const data = await $.env.get('CLAUDE_PLUGIN_DATA')
+  const key = stateKey(projectDir)
+  const roots = [data, `${home}/.claude/orchestration`].filter((r): r is string => !!r)
+  try {
+    for (const d of await $.fs.list(`${config}/plugins/data`)) if (d.name === 'orchestration' || d.name.startsWith('orchestration-')) roots.push(`${config}/plugins/data/${d.name}`)
+  } catch {
+    // no plugin data dir
+  }
+  const files = [`${projectDir}/.claude/state/gates.jsonl`, ...roots.map(r => `${r}/state/${key}/gates.jsonl`)]
+  const found: GateRec[] = []
+  let cut = false
+  for (const f of [...new Set(files)]) {
+    try {
+      const { size } = await $.fs.stat(f)
+      const offset = Math.max(0, size - TAIL)
+      const text = String(await $.fs.read(f, { offset, length: size - offset }))
+      // read from a cut: the first line may be the tail of a record cut in two, so it is skipped, never parsed
+      if (offset) cut = true
+      found.push(...gatesFrom(offset ? text.slice(text.indexOf('\n') + 1) : text, known))
+    } catch {
+      // missing or unreadable: the next dir
+    }
+  }
+  const seen = new Set<string>()
+  GATES = found.filter(g => !seen.has(`${g.agent} ${g.reason} ${g.at}`) && !!seen.add(`${g.agent} ${g.reason} ${g.at}`)).slice(-500)
+  GATES_CUT = cut
+}
+// The plugin's userConfig values of this load (register's `options`).
+let OPTIONS: Readonly<Record<string, unknown>> = {}
+// The gates' settings: read again at each session start.
+async function loadSettings($: Ctx) {
+  try {
+    CFG = settingsOf(
+      { run: await $.env.get('ORCH_RUN_STALE_MIN'), gap: await $.env.get('ORCH_GAP_MIN'), escalation: await $.env.get('ORCH_ESCALATION') },
+      OPTIONS,
+    )
+  } catch {
+    // the defaults stand
+  }
+}
+// The test-gate records, at an agent's start and end and at a prompt; a change redraws the pane.
+async function refreshGates($: Ctx) {
+  try {
+    const before = GATES.length
+    const cut = GATES_CUT
+    await readGates($, await read($, agents))
+    if (GATES.length !== before || GATES_CUT !== cut) await update($, tick, n => n + 1)
+  } catch {
+    // the pane goes on with what it read before
+  }
+}
 
 // ---- The run model of the gates (docs/brief-grammar.md, Run model), worked out from the agents on the pane. ----
 // A run opens at a PLAN REVIEW launch without REPLAN (closing the previous one) or at a light-path implementer launch when none is open; REPLAN extends
@@ -750,57 +869,91 @@ const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
 const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed review is final
 // Review counting (brief.mjs countReview): a fail whose gaps are all below the cutoff, with no failed answer, counts as a pass carrying a doubt
 // (`doubt`); a counted fail keeps the keys of its gaps at or above the cutoff (`gapKeys`, brief.mjs gapKey's normalised text before the hash) for
-// the stall check. The pane cannot read ORCH_GAP_MIN, so it uses the default cutoff. `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
-// launched with VALIDATE: gaps.
-const GAP_MIN = 80
-type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean }
+// the stall check. The cutoff is the gates' (CFG.gapMin, read at session start). `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
+// launched with VALIDATE: gaps; `resumed` a record opened by the main loop's SendMessage to an agent that had ended (a resume, which fires no agent.spawn).
+type Rec = Agent & { name?: string; doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean; resumed?: boolean }
 const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
-export const countedOf = (reply: Reply): { status: 'pass' | 'fail' | null; doubt: boolean; keys: string[] } => {
-  const high = reply.gaps.filter(g => (g.confidence ?? 100) >= GAP_MIN)
+// A resume still running: the gates see its stop only (brief.mjs foldRuns moves lastImplAt at a launch or a stop), so it does not move the attempt yet.
+const pendingResume = (a: Agent) => !!(a as Rec).resumed && a.endedAt === undefined
+export const countedOf = (reply: Reply, gapMin = CFG.gapMin): { status: 'pass' | 'fail' | null; doubt: boolean; keys: string[] } => {
+  const high = reply.gaps.filter(g => (g.confidence ?? 100) >= gapMin)
   const failedAnswer = Object.values(reply.answers).some(a => a.verdict === 'fail')
   const doubt = reply.status === 'fail' && reply.gaps.length > 0 && !high.length && !failedAnswer
   const status = doubt ? 'pass' : reply.status
   return { status, doubt, keys: status === 'fail' ? [...new Set(high.map(g => gapText(g.text)))] : [] }
 }
-type SliceRun = { attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean; stalled: boolean; latest: 'pass' | 'fail' | null; built: boolean }
-const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number]): SliceRun => {
+type SliceRun = {
+  attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean
+  stalled: boolean; latest: 'pass' | 'fail' | null; built: boolean; isolated: boolean; gaveUp: boolean
+}
+// The implementer launches and stops the gates have seen of a slice (a resume still running is not one yet), and the time a review follows: the
+// latest of them before it ended.
+const implsOf = (mine: Agent[]) => mine.filter(a => a.role === 'implementer' && !pendingResume(a))
+const implAtOf = (impls: Agent[]) => (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
+// VALIDATE supersede (brief.mjs fold): a VALIDATE: gaps review with a verdict replaces the earlier reviews of the same attempt, which then count as
+// nothing (no retry, no stall, no doubt, and no failure in the header or the review stage); a validation with no verdict supersedes nothing.
+const supersededOf = (mine: Agent[]) => {
+  const implAt = implAtOf(implsOf(mine))
+  const ended = mine.filter(a => a.role === 'reviewer' && a.endedAt !== undefined)
+  const out = new Set<Agent>()
+  for (const v of ended) {
+    if (!(v as Rec).validate || (v.status !== 'pass' && v.status !== 'fail')) continue
+    for (const p of ended) if (p !== v && (p.endedAt as number) < (v.endedAt as number) && (p.endedAt as number) > implAt(v)) out.add(p)
+  }
+  return out
+}
+const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number], cfg: Settings = CFG, gates: readonly GateRec[] = GATES): SliceRun => {
   const mine = list.filter(a => a.slice === id)
-  const impls = mine.filter(a => a.role === 'implementer')
-  // Attempts: implementer stops (fresh launches and resumes alike); stops with no review of the slice between them count as one.
+  const impls = implsOf(mine)
+  // Attempts: implementer stops (fresh launches and resumes alike); stops with no review of the slice between them count as one. attemptFrom: the
+  // end of the latest review before the latest attempt's first stop (brief.mjs attemptFrom), the time a test-gate record must follow to count.
   let attempts = 0
   let reviewed = true
+  let lastReview = -Infinity
+  let attemptFrom = -Infinity
   for (const a of mine.filter(x => x.endedAt !== undefined).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))) {
     if (a.role === 'implementer') {
-      if (reviewed) attempts++
+      if (reviewed) {
+        attempts++
+        attemptFrom = lastReview
+      }
       reviewed = false
-    } else if (a.role === 'reviewer') reviewed = true
+    } else if (a.role === 'reviewer') {
+      reviewed = true
+      lastReview = a.endedAt as number
+    }
   }
   // Reviews that count: reviewer stops after the slice's latest implementer launch or stop.
   const lastImpl = Math.max(-Infinity, ...impls.map(a => a.endedAt ?? a.startedAt))
-  // The implementer time a review follows: the latest implementer launch or stop before it ended.
-  const implAt = (r: Agent) => Math.max(-Infinity, ...impls.map(i => i.endedAt ?? i.startedAt).filter(x => x < (r.endedAt as number)))
+  const implAt = implAtOf(impls)
   const ended = mine.filter(a => a.role === 'reviewer' && a.endedAt !== undefined)
-  // VALIDATE supersede (brief.mjs fold): a VALIDATE: gaps review with a verdict replaces the earlier reviews of the same attempt, which then count as
-  // nothing (no retry, no stall, no doubt); a validation with no verdict supersedes nothing. `reviews` are the reviews that still count.
-  const superseded = new Set<Agent>()
-  for (const v of ended) {
-    if (!(v as Rec).validate || (v.status !== 'pass' && v.status !== 'fail')) continue
-    for (const p of ended) if (p !== v && (p.endedAt as number) < (v.endedAt as number) && (p.endedAt as number) > implAt(v)) superseded.add(p)
-  }
+  const superseded = supersededOf(mine)
   const reviews = ended.filter(r => !superseded.has(r))
   const current = reviews.filter(r => (r.endedAt as number) > lastImpl).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
   const latest = current[current.length - 1]
   const pass = current.filter(r => r.status === 'pass').pop()
   const risky = !!planned?.risky || impls.some(a => a.risky)
-  const signals = [
-    ...(risky ? ['risky'] : []),
-    ...(reviews.some(r => r.status === 'fail') ? ['retry'] : []),
-    ...(pass && Object.values(pass.answers ?? {}).some(a => a.mode === 'read') ? ['read_answer'] : []),
-    ...(pass?.open?.length ? ['open_items'] : []),
-    ...(current.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
-  ]
+  const ids = new Set(mine.filter(a => a.role === 'implementer').map(a => a.id))
+  const mineGates = gates.filter(g => ids.has(g.agent) && g.at > attemptFrom)
+  const isolated = mineGates.some(g => g.reason === 'tests_failed_isolated')
+  const gaveUp = mineGates.some(g => g.reason !== 'tests_failed_isolated')
+  // Doubt signals (brief.mjs doubtSignals): none with escalation off, "always" with it always, else the reasons in the gates' order.
+  const signals =
+    cfg.escalation === 'off'
+      ? []
+      : cfg.escalation === 'always'
+        ? ['always']
+        : [
+            ...(risky ? ['risky'] : []),
+            ...(reviews.some(r => r.status === 'fail') ? ['retry'] : []),
+            ...(pass && Object.values(pass.answers ?? {}).some(a => a.mode === 'read') ? ['read_answer'] : []),
+            ...(pass?.open?.length ? ['open_items'] : []),
+            ...(isolated ? ['tests_failed_isolated'] : []),
+            ...(gaveUp ? ['test_gate_gave_up'] : []),
+            ...(current.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
+          ]
   // Final (brief.mjs settle): failed for good, or the latest review passed and the escalation rule is met: an opus pass after the latest attempt or
-  // no doubt signal. The pane cannot read ORCH_ESCALATION, so it uses the default (signals on, opus only when one fired).
+  // no doubt signal.
   const opusPass = current.some(r => r.status === 'pass' && SENIOR.has(family(r.model)))
   const final = (latest?.status === 'pass' && (opusPass || signals.length === 0)) || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
   // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
@@ -823,6 +976,8 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number])
     answers: latest?.answers ?? {},
     latest: latest?.status === 'pass' || latest?.status === 'fail' ? latest.status : null,
     built: impls.length > 0,
+    isolated,
+    gaveUp,
   }
 }
 // G-1 (brief.mjs foldRuns): a PLAN REVIEW without REPLAN that closes an open run hands the new run each slice it names again that is not final and
@@ -844,17 +999,22 @@ const doneIn = (inRun: Agent[], run: Run, id: string) =>
   !inRun.some(
     a =>
       a.slice === id &&
-      ((a.role === 'implementer' && (a.startedAt >= run.at || (a.endedAt !== undefined && a.endedAt >= run.at))) ||
+      ((a.role === 'implementer' && !pendingResume(a) && (a.startedAt >= run.at || (a.endedAt !== undefined && a.endedAt >= run.at))) ||
         (a.role === 'reviewer' && a.status === 'fail' && a.endedAt !== undefined && a.endedAt >= run.at)),
   )
-// Stale: agents ran, none runs, the last one ended over ten minutes ago (the same escape as the main turn's below).
+// Stale: agents ran, none runs, the last one ended longer ago than the gates' stale time (the same escape as the main turn's above).
 const staleOf = (list: Agent[], t: number) =>
-  list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > STALE_MS
-// Every slice of the run is final (a run with no slice yet, a plan review alone or an old-style plan without SLICE lines, is not).
-const allFinal = (list: Agent[], plan: Plan | null, run: Run) => {
+  list.length > 0 && !list.some(a => a.status === 'running') && t - Math.max(0, ...list.map(a => a.endedAt ?? 0)) > CFG.staleMs
+// The slices of the run that are not final yet (a run with no slice yet, a plan review alone or an old-style plan without SLICE lines, has none known).
+const openSlicesOf = (list: Agent[], plan: Plan | null, run: Run) => {
   const inRun = inRunOf(list, run)
   const ids = run.kind === 'light' ? [run.slice as string] : [...new Set([...(plan?.slices ?? []).map(s => s.id), ...inRun.flatMap(a => (a.slice ? [a.slice] : []))])]
-  return ids.length > 0 && ids.every(id => doneIn(inRun, run, id) || sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)
+  return { known: ids.length, open: ids.filter(id => !(doneIn(inRun, run, id) || sliceRunOf(inRun, id, plan?.slices.find(s => s.id === id)).final)) }
+}
+// Every slice of the run is final.
+const allFinal = (list: Agent[], plan: Plan | null, run: Run) => {
+  const { known, open } = openSlicesOf(list, plan, run)
+  return known > 0 && open.length === 0
 }
 // A run is open while it exists, is not closed or stale, and an agent runs or a slice of it is not final. A run with no slice yet stays open until a slice
 // is known or it goes stale.
@@ -1079,8 +1239,9 @@ export function workerRow(p: RowProps, records: readonly Agent[]): string | null
   return typeof p.columns === 'number' && p.columns > 8 ? fitColumns(row, p.columns) : row
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   const slot: { timer?: Timer } = {} // the one redraw timer of this load
+  OPTIONS = (options ?? {}) as Readonly<Record<string, unknown>>
 
   // The prompt the person typed starts the work, with or without agents or a repository: open the pane and keep it moving.
   on('prompt.submit', async ($, e, next) => {
@@ -1090,6 +1251,7 @@ export const register: Register = on => {
       // a prompt while the main session still works with no answer yet is a follow-up in the same turn window: reset nothing
       const working = await read($, workAtom)
       const before = await read($, agents)
+      await refreshGates($)
       const open = workOpen(working, before, now) // a stale one (a lost turn.complete) starts a clean run
       const running = before.some(a => a.status === 'running')
       // New input is new work once nothing runs and no run is open; a prompt never closes an open run (a headless run's background results
@@ -1110,6 +1272,12 @@ export const register: Register = on => {
   })
 
   on('session.start', async ($, e, next) => {
+    await loadSettings($)
+    try {
+      projectDir = (await $.env.get('CLAUDE_PROJECT_DIR')) || String((e as { cwd?: unknown }).cwd ?? '')
+    } catch {
+      projectDir = String((e as { cwd?: unknown }).cwd ?? '')
+    }
     try {
       await $.command.register({
         name: 'orchestration',
@@ -1177,6 +1345,7 @@ export const register: Register = on => {
       }
     }
     if (!ROLES.includes(role) || !('agentId' in spawned) || !spawned.agentId) return spawned
+    await refreshGates($)
     try {
       const plan = isPlanReview(e.prompt) // the brief starts with it (the hooks read it the same way), not any later line
       const parsed = plan ? parsePlan(e.prompt) : undefined
@@ -1189,6 +1358,7 @@ export const register: Register = on => {
         ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
         ...(plan ? { plan: true } : {}), ...(parsed && parsed.replan !== null ? { replan: true } : {}),
         ...(!plan && role === 'reviewer' && header.validate ? { validate: true } : {}),
+        ...(typeof e.name === 'string' && e.name ? { name: e.name } : {}), // what SendMessage may address it by
       }
       const t = agent.startedAt
       const before = await read($, agents)
@@ -1306,6 +1476,38 @@ export const register: Register = on => {
     } catch {
       // the list must never change the tool call
     }
+    // The main loop resumes an agent with SendMessage (no agent.spawn follows): open a running record for it, so the pane shows it working and its
+    // turn end closes this record. Until it stops, the gates have not seen it either (pendingResume), so it changes no review that counts.
+    if (!e.agentId && (e.tool as string) === 'SendMessage' && !('deny' in ran && ran.deny) && !ran.isError) {
+      try {
+        const t = e as unknown as Record<string, unknown>
+        const input = (t.input && typeof t.input === 'object' ? t.input : t) as Record<string, unknown>
+        const to = str(input.to)
+        const now = await $.clock.now()
+        const hold: { one?: Rec } = {}
+        const list = await update($, agents, l => {
+          const i = addressedOf(l, to) // by id or by the name its Agent call gave
+          const a = l[i] as Rec | undefined
+          if (!to || !a || a.endedAt === undefined) return l
+          const again: Rec = {
+            ...a, startedAt: Math.max(now, a.endedAt), status: 'running', endedAt: undefined, tool: undefined, tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
+            result: undefined, answers: undefined, open: undefined, doubt: undefined, gapKeys: undefined, resumed: true,
+          }
+          hold.one = again
+          return kept([...l, again])
+        })
+        const one = hold.one
+        if (one) {
+          const note = startNote(list, one) ?? 'resumed'
+          await update($, log, l => [...l, { at: one.startedAt, kind: 'start', role: one.role, label: one.label, model: one.model, note } as LogEntry].slice(-60))
+          await openPane($)
+          startTimer($, slot)
+        }
+      } catch {
+        // a resume the pane cannot record must never change the tool call
+      }
+      return ran
+    }
     // An Agent launch a gate blocked (the plan check denies before the agent exists, so no agent.spawn follows): log the reason.
     if ((e.tool === 'Agent' || (e.tool as string) === 'Task') && (('deny' in ran && ran.deny) || ran.isError)) {
       try {
@@ -1354,6 +1556,7 @@ export const register: Register = on => {
       }
     }
     if (id) {
+      await refreshGates($)
       try {
         const now = await $.clock.now()
         const u = e.usage
@@ -1379,6 +1582,15 @@ export const register: Register = on => {
             // the run this record opened ends
             const status = statusOf(a)
             const upd = { ...a, ...review(a), status, endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
+            hold.one = upd
+            return l.map((x, j) => (j === i ? upd : x))
+          }
+          // A reviewer's turn ends again with no resume between (no SendMessage to it opened a record): the same review going on after a stop hook,
+          // such as the stop after a forced hand-back. As the fold does with a stop record marked `continues` (journal.mjs, brief.mjs G-8), the later
+          // end replaces the review, unless an implementer of the slice launched or stopped after it: one review, counted once.
+          const implAfter = l.some(x => !!a.slice && x.slice === a.slice && x.role === 'implementer' && ((x.endedAt ?? x.startedAt) > (a.endedAt as number)))
+          if (a.role === 'reviewer' && !implAfter) {
+            const upd = { ...a, ...review(a), status: statusOf(a), endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
             hold.one = upd
             return l.map((x, j) => (j === i ? upd : x))
           }
@@ -1428,6 +1640,7 @@ export const register: Register = on => {
     const verdict = await read($, triage)
     const work = (await read($, workAtom)) ?? undefined // state holds null, not undefined
     const plan = await read($, planAtom)
+    const run = await read($, runAtom)
     const used = (await read($, usedAtom)) ?? NO_USE
     const f = await read($, tick)
     const now = await $.clock.now()
@@ -1436,9 +1649,12 @@ export const register: Register = on => {
     const { map, fix, layers } = sceneOf(list, list.some(a => a.status === 'running') || working)
     const attemptOf = new Map<Agent, string>() // the diagram node (attempt) each slice agent sits in
     for (const n of map.values()) for (const a of n.agents) attemptOf.set(a, n.id)
-    const fixedOf = (a: Agent) => (a.status === 'fail' ? fix.get(a.slice ? (attemptOf.get(a) ?? a.slice) : a.id) : undefined)
-    // A failure that was fixed later counts as done, not as a failure.
-    const eff = (a: Agent): State => (fixedOf(a) ? 'done' : a.status)
+    const fixedOf = (a: Agent) => (a.status === 'fail' || (a.role === 'reviewer' && a.status === 'done') ? fix.get(a.slice ? (attemptOf.get(a) ?? a.slice) : a.id) : undefined)
+    // Reviews a gap validation set aside (brief.mjs fold: they count as nothing).
+    const setAside = new Set([...new Set(all.flatMap(a => (a.slice ? [a.slice] : [])))].flatMap(s => [...supersededOf(all.filter(a => a.slice === s))]))
+    // What a cell, the header and a stage read for one agent: a failure fixed later or a review set aside counts as done, not as a failure; a reviewer
+    // reply with no STATUS line gave no verdict and reads as failed, as on its card (stateOf), whatever cell shows it.
+    const eff = (a: Agent): State => (fixedOf(a) || setAside.has(a) ? 'done' : a.role === 'reviewer' && a.status === 'done' ? 'fail' : a.status)
     const running = list.filter(a => a.status === 'running').length
     const failed = list.filter(a => eff(a) === 'fail').length
     const fixedN = list.filter(a => fixedOf(a)).length
@@ -1454,7 +1670,8 @@ export const register: Register = on => {
     // attempt (a failure made good counts as done). A slice is done once it passed review, or was built with no reviewer.
     const goals = new Map((plan?.slices ?? []).map(s => [s.id, s.goal]))
     // Marks after a slice id, each only when it applies (an old-style plan and reply show none): ⚑ RISKY; ↻replan when the slice is stalled (it needs
-    // a REPLAN plan review); doubt when a review passed only because its gaps were all low-confidence; ⇧opus✔ or ⇧opus? when a doubt signal
+    // a REPLAN plan review); doubt when a review passed only because its gaps were all low-confidence; ⚠isolated and ⚠gate gave up for the test
+    // gate's records of its latest attempt (gates.jsonl: an isolated test failure, a test gate that gave up); ⇧opus✔ or ⇧opus? when a doubt signal
     // (RISKY, a failed review before, a (read) answer or OPEN items in its passing review) asks for an opus review, and whether one passed; then one
     // tick per constraint from its latest review: C1✔ passed by a command, C1✓ passed by reading, C1✖ failed, C1· not answered.
     const marksOf = (id: string) => {
@@ -1464,7 +1681,7 @@ export const register: Register = on => {
         const a = sr.answers[c]
         return `${c}${!a ? '·' : a.verdict === 'fail' ? '✖' : a.mode === 'read' ? '✓' : '✔'}`
       })
-      return [...(sr.risky ? ['⚑'] : []), ...(sr.stalled ? ['↻replan'] : []), ...(sr.doubt ? ['doubt'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
+      return [...(sr.risky ? ['⚑'] : []), ...(sr.stalled ? ['↻replan'] : []), ...(sr.doubt ? ['doubt'] : []), ...(sr.isolated ? ['⚠isolated'] : []), ...(sr.gaveUp ? ['⚠gate gave up'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
     }
     const steps = [...new Set([...(plan?.slices ?? []).map(s => s.id), ...[...map.values()].map(n => n.slice)])].map(id => {
       const n = resolve(map, id)
@@ -1516,9 +1733,13 @@ export const register: Register = on => {
     const active = list.length > 0 || !!work || !!verdict
     const flow = running > 0 || working
     const mode = verdict?.mode ?? inferMode(list) ?? (work?.endedAt ? 'plain' : undefined)
-    // Agents and a main turn: signed off once nothing runs and the turn ended. With no `work` (agents without a typed prompt, or background agents that woke the
-    // main session) only "nothing runs" is known, so the pane can still flicker to signed off between waves there: a known limit.
-    const signed = list.length > 0 ? !running && !working : !!work?.endedAt
+    // Agents and a main turn: signed off once nothing runs, the turn ended and no slice of the run the gates see is still open (not final). With no
+    // `work` (agents without a typed prompt, or background agents that woke the main session) and no run (no plan review, no light path) only "nothing
+    // runs" is known, so the pane can still sign off between two waves there.
+    const openSlices = list.length > 0 && !running && run && !(run as RunMarks).closed && !staleOf(all, now) ? openSlicesOf(all, plan, run).open : []
+    const pending = openSlices.length > 0
+    const pendingText = `${openSlices.length} slice${openSlices.length === 1 ? '' : 's'} not final: ${openSlices.join(', ')}`
+    const signed = list.length > 0 ? !running && !working && !pending : !!work?.endedAt
     // The main turn ended while agents still run (background agents): the pane waits for them before it signs off.
     const waiting = running > 0 && !!work?.endedAt
     const waitingText = `waiting for ${running} agent${running === 1 ? '' : 's'}`
@@ -1727,7 +1948,7 @@ export const register: Register = on => {
     const LOGMARK = { start: '▶', pass: '✔', fail: '✖', done: '◆', triage: '◇', blocked: '⊘' } as const
     const LOGCOLOR = { start: 'subtle', pass: 'success', fail: 'error', done: 'subtle', triage: 'subtle', blocked: 'error' } as const
 
-    const mainState: State = running || working ? 'running' : solo ? workState : failed ? 'fail' : 'pass'
+    const mainState: State = running || working ? 'running' : solo ? workState : pending ? 'queued' : failed ? 'fail' : 'pass'
     const dots = '.'.repeat(1 + (f % 3))
     const bodyRows = (e.props as { scroll?: { bodyRows?: number } } | undefined)?.scroll?.bodyRows ?? 0
     const diagramRows = vertical ? layers.reduce((t, l) => t + layerRows(l) + 1, 0) : Math.max(0, ...layers.map(layerRows))
@@ -1790,7 +2011,7 @@ export const register: Register = on => {
       bodyRows > 0 &&
       26 + (active ? 5 : 0) + (work ? 4 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length +
         (active ? forkHeight + linkRows.length - 2 + (lane ? 1 : 0) : 0) + drawnLoops.reduce((t, l) => t + (Math.floor(l.toAt / cols) === Math.floor(l.fromAt / cols) ? 3 : 1), 0) +
-        (steps.length ? 3 + Math.min(STEPS_SHOWN, steps.length) + (steps.length > STEPS_SHOWN ? 1 : 0) : 0) + (usedRows.length ? 2 + usedRows.length : 0) > bodyRows
+        (steps.length ? 3 + Math.min(STEPS_SHOWN, steps.length) + (steps.length > STEPS_SHOWN ? 1 : 0) + (GATES_CUT ? 1 : 0) : 0) + (usedRows.length ? 2 + usedRows.length : 0) > bodyRows
 
     return (
       <Box flexDirection="column">
@@ -1823,6 +2044,7 @@ export const register: Register = on => {
               </Text>
             ))}
             {steps.length > STEPS_SHOWN && <Text dimColor>+{steps.length - STEPS_SHOWN} more</Text>}
+            {GATES_CUT && <Text dimColor wrap="truncate-end">⚠ older test-gate records not read (gates.jsonl over 1 MiB)</Text>}
           </Box>
         )}
         {work && (
@@ -1841,6 +2063,8 @@ export const register: Register = on => {
                 ? waitingText
                 : running || (working && !solo)
                 ? `dispatching${dots} ${running} running`
+                : pending
+                ? pendingText
                 : solo
                   ? work ? (working ? `working in this session${dots}` : work.outcome === 'answered' ? 'answered in this session' : 'stopped before an answer') : 'waiting for agents'
                   : failed ? `signed off with ${failed} failed` : fixedN ? `passed · ${fixedN} fixed on the way` : 'all agents passed'}
@@ -2030,7 +2254,7 @@ export const register: Register = on => {
             <Text dimColor wrap="truncate-end">
               {solo && work
                 ? working ? 'waiting for the reply' : work.outcome === 'answered' ? 'answered in this session' : 'stopped'
-                : signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : waiting ? waitingText : 'waiting for agents · verified findings only'}
+                : signed ? `${list.length - failed - fixedN} passed · ${failed} failed${fixedN ? ` · ${fixedN} fixed` : ''}` : waiting ? waitingText : pending ? pendingText : 'waiting for agents · verified findings only'}
             </Text>
           </Box>
         )}

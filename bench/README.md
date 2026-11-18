@@ -79,6 +79,8 @@ In `bench/tasks/<id>/`. The cap is the task's own wall-clock limit (`cap_min`); 
 
 The graders `score.mjs` of k1, k2 and h3 run their command-line block through the real-path entry guard, so a grader called through a symlinked path still prints its grade.
 
+The k1 and k2 graders grade against Python 3.13's standard library: `hidden/grade.py` re-runs itself under `python3.13` (or `K2_PYTHON`) when it finds one. Run under Python 3.14 or later instead, it grades the cases listed in that task's `hidden/py313.py` (two for k1, eight for k2) against the values recorded there, not the live oracle. Each file's docstring says what each value is and what is established about it: none could be reproduced on 3.13 here ([docs/limits.md](../docs/limits.md), G).
+
 ## Commands, in order
 
 ```bash
@@ -98,7 +100,9 @@ npm run bench:analyze -- runs/bench/<campaign>           # summary.json: token m
 npm run bench:report -- runs/bench/<campaign>/summary.json   # report.html, plus benchmarks.md for docs/benchmarks.md
 ```
 
-Every `npm run bench` line starts paid model runs; only `bench:validate` and the three offline steps call no model. `bench/matrix/k2-cap10-onext.json` is data only: `run.mjs` rejects its `O-next` arm, which no longer exists.
+Every `npm run bench` line starts paid model runs; only `bench:validate` and the three offline steps call no model.
+
+`bench:validate` runs several tasks at once: half the CPUs (`availableParallelism`), at least 2 and at most the number of tasks, `--parallel N` to set it. The three known slow tasks (h3, k2, k1) start first, and each task's lines print together when it ends. It stops at a deadline of 270 s (`--deadline-s S`, 0 for none): it prints the tasks that finished, a `NOT DONE <id>` line for each unfinished one (still running, or not reached), ends the graders it started and exits 3. Exit codes: 0 every task valid, 1 a task failed or no task matched, 3 the deadline, 130 on SIGINT or SIGTERM. `--task <id>` validates one task. `bench/eval-graders.test.mjs` checks the deadline: the caller survives, no grader is left running, no scratch folder is left. `bench/matrix/k2-cap10-onext.json` is data only: `run.mjs` rejects its `O-next` arm, which no longer exists.
 
 The pilot showed that k1 and h3 saturate within minutes. So the splittable-task hypothesis (H1) and both sweeps (H7) moved to `k2-stdlib-toolkit-xl`, which has its own main campaign (`lite-k2`) and the sweeps. `lite.json` stays unchanged and keeps k1 as a saturated large task. See the amendment in [HYPOTHESES.md](HYPOTHESES.md).
 
@@ -107,7 +111,7 @@ The pilot showed that k1 and h3 saturate within minutes. So the splittable-task 
 - `bench:analyze` accepts several campaign folders (pooled) and `--out`. `bench:report` takes `--html` and `--md`.
 - `bench/run.mjs`: `--matrix <file>`, `--campaign <name>`, `--resume <campaign dir>`, `--dry-run` (prints each run's command and environment additions), `--only <substring of run_id>`, `--parallel-blocks N`, `--seed N`, `--tasks-dir <dir>`, `--check-isolation`.
 - `bench/grade.mjs`: `--jobs N`, `--only <substring>`, `--final-only`, `--tasks-dir <dir>`. Identical (task, content hash) pairs are graded once (`grades-cache.json`), and finished (run, snapshot) pairs are skipped, so grading can be rerun.
-- `bench/validate.mjs`: `--task <id>`, `--tasks-dir <dir>`.
+- `bench/validate.mjs`: `--task <id>`, `--tasks-dir <dir>`, `--parallel N`, `--deadline-s S`.
 
 **Matrix files.** A [matrix](../docs/glossary.md#m) file has `name`, `seed` and `groups`. Each group lists `tasks`, `arms`, `cells` (`id`, plus `cap_min` or `budget_tokens`) and `reps`. It may also set `parallel_blocks` (`--parallel-blocks` overrides it).
 
@@ -327,7 +331,7 @@ npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # a
 
 **Smoke run, 2026-11-10.** The bounded command above was run twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed; the three that failed were not understood then ([docs/research-2026-11-10.md](../docs/research-2026-11-10.md), "Open"). Since then:
 
-- The test-result graders (`results-nonempty`, `results-pass`, in every case that has them) also match a coloured `node:test` summary, which starts with an escape sequence. Whether colour caused the failures seen on `t2-single` is unproven.
+- The test-result graders (`results-nonempty`, `results-pass`, in every case that has them) also match a coloured `node:test` summary, which starts with an escape sequence (`bench/eval-graders.test.mjs` runs both graders on real `node:test` output, coloured and plain). Whether colour caused the failures seen on `t2-single` is unproven.
 - `orch-agent-used` was removed from `t2-single`. That case expects the plugin to stay light, so the grader counted against a correct light route in a one-arm (`--ablation none`) run. The same grader stays in `c1-unit-registry`, `d1-handbook`, `e1-shared-file` and `t1-parallel`, where an orchestration agent is expected.
 - No eval has been run since these changes.
 

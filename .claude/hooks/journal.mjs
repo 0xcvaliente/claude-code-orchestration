@@ -31,7 +31,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
-import { duplicate, ensureStateDir, handbackFor, latestHandbackId, stateDir } from "./state.mjs";
+import { duplicate, ensureStateDir, HANDBACK_LOG, HANDBACK_REFUSALS, latestHandbackId, stateDir } from "./state.mjs";
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -153,6 +153,45 @@ function filesTouched(entries, hookCwd) {
   }
 }
 
+/**
+ * The agent's hand-backs since its previous stop record here (journal.jsonl or journal-pending.jsonl): the latest
+ * capture (handbacks.jsonl), unless a refusal (handback-refusals.jsonl) marks it, and then the refusing gate.
+ * A refusal marks: the capture with its tool_use_id; without one, the capture with its report_key nearest in time
+ * (written before or after the refusal: the quote check and handback-check.mjs run side by side, w6 item 3); a record
+ * with neither marks the latest capture written before it (state.mjs handbackFor's rule).
+ * @param {string} sid @param {string | null} id
+ * @returns {{ capture: Record<string, any> | null, refusedBy: string | null }}
+ */
+function handbackState(sid, id) {
+  if (!id) return { capture: null, refusedBy: null };
+  /** @param {string} name */
+  const mine = (name) => readJsonl(stateDir, name, sid).filter((r) => r && r.agent_id === id && (r.session_id ?? "") === sid);
+  const t = (/** @type {any} */ r) => Date.parse(r?.ts);
+  const captures = mine(HANDBACK_LOG).filter((c) => Number.isFinite(t(c)));
+  const refusals = mine(HANDBACK_REFUSALS).filter((r) => Number.isFinite(t(r)));
+  /** @type {Map<any, string>} */
+  const refused = new Map();
+  for (const r of refusals) {
+    const gate = typeof r.gate === "string" && r.gate ? r.gate : "check";
+    /** @type {any} */
+    let hit;
+    if (typeof r.tool_use_id === "string" && r.tool_use_id) {
+      for (const c of captures) if (c.tool_use_id === r.tool_use_id) refused.set(c, gate);
+      continue;
+    }
+    if (typeof r.report_key === "string" && r.report_key) {
+      hit = captures.filter((c) => c.report_key === r.report_key).sort((a, b) => Math.abs(t(a) - t(r)) - Math.abs(t(b) - t(r)) || t(b) - t(a))[0];
+    } else hit = captures.filter((c) => t(c) <= t(r)).at(-1);
+    if (hit) refused.set(hit, gate);
+  }
+  const stops = [...mine("journal.jsonl"), ...mine("journal-pending.jsonl")].map(t).filter(Number.isFinite);
+  const since = stops.length ? Math.max(...stops) : -Infinity;
+  const latest = captures.filter((c) => t(c) > since).at(-1);
+  if (!latest) return { capture: null, refusedBy: null };
+  const by = refused.get(latest);
+  return by ? { capture: null, refusedBy: by } : { capture: latest, refusedBy: null };
+}
+
 if (p.hook_event_name !== "SubagentStop" || !STOP_ROLES.includes(bare(p.agent_type))) process.exit(0);
 const role = bare(p.agent_type);
 const agentId = typeof p.agent_id === "string" && p.agent_id ? p.agent_id : null;
@@ -196,13 +235,21 @@ for (let i = entries.length - 1; report === undefined && i >= 0; i--) {
 // handbackFor: the latest capture of this agent newer than its previous stop record here), and that capture wins.
 /** @type {Record<string, any> | null} */
 let handback = null;
+/** @type {string | null} */
+let refusedBy = null;
 try {
-  handback = handbackFor(sessionId, agentId, ["journal.jsonl", "journal-pending.jsonl"]);
+  ({ capture: handback, refusedBy } = handbackState(sessionId, agentId));
 } catch {
   // no capture: today's sources
 }
+// The latest hand-back since the agent's previous stop was refused and nothing was handed back after it (2.0.0, w6
+// item 2). Unless the stop's own last message carries a STATUS line (a text report after the refusal), no report was
+// delivered: the record says so (status null, report "handback_refused", refused_by the check) and takes nothing from
+// the refused report, the transcript (which holds that refused hand-back) or an older report.
+const undelivered = !handback && refusedBy !== null && parseStatus(last) === null;
 const touched = role === "implementer" ? filesTouched(transcriptRead ? entries : null, p.cwd) : null;
-let rec = stopRecord({ sessionId, agentId, role, slice, reply: handback ? "" : (report ?? last), run: slice ? runOf(slice) : null, filesTouched: touched?.files });
+let rec = stopRecord({ sessionId, agentId, role, slice, reply: handback || undelivered ? "" : (report ?? last), run: slice ? runOf(slice) : null, filesTouched: touched?.files });
+if (undelivered) rec = /** @type {typeof rec} */ ({ ...rec, status: null, report: "handback_refused", refused_by: refusedBy });
 if (handback) {
   /** @type {Record<string, any>} */
   const fields = { status: handback.status === "pass" || handback.status === "fail" ? handback.status : null };

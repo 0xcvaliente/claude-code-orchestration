@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunAgent } from "./agent.js";
 import { count } from "./args.js";
@@ -44,6 +44,11 @@ export interface OrchestrateOptions {
    * Unset: no cap; turns, timeouts and retries still bound the run.
    */
   runBudgetTokens?: number;
+  /**
+   * Tokens spent before this run, by role (auto(): the triage call, a failed plain or reviewed session). A fresh run
+   * writes them to its telemetry before its first call and counts them against runBudgetTokens; a resume reads them back.
+   */
+  priorSpend?: Record<string, number>;
   concurrency?: number;
   maxRetries?: number;
   log?: (line: string) => void;
@@ -184,6 +189,35 @@ function readJournal(dir: string): Journal | undefined {
   }
 }
 
+/**
+ * What earlier invocations of a run spent, from its telemetry.jsonl (one line per worker call, appended by Run.charge,
+ * never truncated). A resume starts its count there, so --budget caps the run across resumes (CHANGELOG 1.2.0 and
+ * 1.4.5: the count restarted at zero). A missing file or an unreadable line counts 0.
+ */
+export function earlierSpend(dir: string): { total: number; byRole: Record<string, number> } {
+  const byRole: Record<string, number> = {};
+  let total = 0;
+  let text = "";
+  try {
+    text = readFileSync(join(dir, "telemetry.jsonl"), "utf8");
+  } catch {
+    return { total, byRole };
+  }
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let rec: unknown;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(rec) || typeof rec.tokens !== "number" || !Number.isFinite(rec.tokens) || rec.tokens <= 0) continue;
+    total += rec.tokens;
+    if (typeof rec.role === "string") byRole[rec.role] = (byRole[rec.role] ?? 0) + rec.tokens;
+  }
+  return { total, byRole };
+}
+
 const replanPrompt = (task: string, findings: string, done: Slice[], failed: SliceResult[], byId: Map<string, Slice>) =>
   `Task:\n${task}\n\nExploration findings:\n${findings || "(none)"}\n\n` +
   `Finished and merged-ready slices (their work exists on branches; do not repeat it):\n` +
@@ -201,6 +235,21 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   const maxReplans = Math.min(3, count("maxReplans", opts.maxReplans ?? 0, 0));
   const run = new Run(opts.resume ?? newRunId(), opts.outRoot);
   const journal = opts.resume ? readJournal(run.dir) : undefined;
+  // A resume keeps counting from what the run spent before (its telemetry), so the budget is the run's, not this call's.
+  const earlier: { total: number; byRole: Record<string, number> } = journal ? earlierSpend(run.dir) : { total: 0, byRole: {} };
+  if (!opts.resume && opts.priorSpend) {
+    // Written before the first call, so an interrupted run keeps it for --resume (earlierSpend reads it back).
+    const ts = new Date().toISOString();
+    const prior = Object.entries(opts.priorSpend).filter(([, n]) => Number.isFinite(n) && n > 0);
+    if (prior.length) {
+      appendFileSync(join(run.dir, "telemetry.jsonl"), prior.map(([role, tokens]) => JSON.stringify({ ts, role, label: "before the pipeline (triage, failed session)", tokens }) + "\n").join(""));
+    }
+    for (const [role, n] of prior) {
+      earlier.total += n;
+      earlier.byRole[role] = (earlier.byRole[role] ?? 0) + n;
+    }
+  }
+  run.spentTokens += earlier.total;
   const task = journal?.task ?? opts.task;
   // The judge's authority is only what the user typed on this invocation, never the journal: journal.json sits in the
   // run folder, above every worktree, so a worker could rewrite it. A resume with no task passed gives the judge an
@@ -214,7 +263,9 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
   };
   const finish = (): Report => {
     report.spentTokens = run.spentTokens;
-    report.tokensByRole = run.tokensByRole();
+    const byRole: Record<string, number> = { ...earlier.byRole };
+    for (const [role, n] of Object.entries(run.tokensByRole())) byRole[role] = (byRole[role] ?? 0) + (n ?? 0);
+    report.tokensByRole = byRole;
     run.save("report.json", report);
     return report;
   };
@@ -233,7 +284,7 @@ export async function orchestrate(opts: OrchestrateOptions): Promise<Report> {
     run.save("journal.json", { task, base, questions, findings, slices, finished: [...finished.values()], replans } satisfies Journal);
 
   if (journal) {
-    log(`resume: ${slices.length} slice(s), ${[...finished.values()].filter((r) => r.status === "passed").length} already passed`);
+    log(`resume: ${slices.length} slice(s), ${[...finished.values()].filter((r) => r.status === "passed").length} already passed, ${earlier.total} tokens spent before`);
   } else {
     // 1. Plan (strongest model) -> questions
     const p1 = await opts.run({

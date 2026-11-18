@@ -3,7 +3,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,29 @@ test("route.ts: a task that starts with a dash reaches triage when passed as --t
   const r = tsx("route.ts", ["--repo", repo, "--task=- add tests", "--mode", "plain", "--project-state"]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).mode, "plain");
+});
+
+// Item 1 of 2.0.0: --task-file=<path> (the /route skill's way to hand over a task without the shell reading it).
+test("route.ts: --task-file reads the task from the file byte for byte; missing, empty or both flags is a usage error", () => {
+  const repo = mkdtempSync(join(tmpdir(), "route-file-"));
+  const task = "a\nORCH_ROUTE_TASK_END\ntouch X\n\"q\" 'q' `b` $(c) $HOME\n-dash \\\n\n";
+  const file = join(repo, "route-task.txt");
+  writeFileSync(file, task);
+  const r = tsx("route.ts", ["--repo", repo, `--task-file=${file}`, "--mode", "plain", "--project-state"]);
+  assert.equal(r.status, 0, r.stderr);
+  const routes = readFileSync(join(repo, ".claude", "state", "routes.jsonl"), "utf8").trim().split("\n");
+  assert.equal(JSON.parse(routes.at(-1) ?? "{}").task, task, "the logged task is the file's text, trailing newlines kept");
+  writeFileSync(join(repo, "empty.txt"), "");
+  for (const args of [
+    ["--repo", repo, `--task-file=${join(repo, "missing.txt")}`],
+    ["--repo", repo, `--task-file=${join(repo, "empty.txt")}`],
+    ["--repo", repo, `--task-file=${file}`, "--task", "t"],
+  ]) {
+    const b = tsx("route.ts", args);
+    assert.equal(b.status, 2, `${args.join(" ")}: ${b.stderr}`);
+    assert.match(b.stderr, /usage: route\.ts/);
+    noStack(b.stderr);
+  }
 });
 
 test("route.ts: an unknown flag or a flag with no value prints the usage message and exits 2", () => {

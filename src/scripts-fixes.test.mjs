@@ -240,7 +240,12 @@ test("W-3: known limits, pinned so a change to them is seen (docs/data/audit-202
   assert.equal(permitted(args, 'git commit -m "drop the -c flag"'), false);
   // Under-block: a command built to get around the rules still matches a `git -C * <subcommand>*` rule when an allowed
   // subcommand word follows as an argument. These rules guard against mistakes, not against a command made to pass.
-  for (const cmd of [`git -C ${R} branch -D main status`, `git -C ${R} checkout -- . diff`]) assert.equal(permitted(args, cmd), true, cmd);
+  // The plain forms `branch -D main status` and `checkout -- . diff` were closed in 2.0.0 (GIT_C_DESTRUCTIVE_DENY in
+  // orchestrate.sh, pinned as denied in src/orchestrate-sh.test.mjs, CLOSED); the forms below are LIMITS rows there.
+  for (const cmd of [`git -C ${R} branch -D main status`, `git -C ${R} checkout -- . diff`]) assert.equal(permitted(args, cmd), false, cmd);
+  for (const cmd of [`git -C ${R} branch -qD main status`, `git -C ${R} reset --merge HEAD~3 status`, `git -C ${R} restore ${R}/src log`]) {
+    assert.equal(permitted(args, cmd), true, cmd);
+  }
 });
 
 test("W-3: every rule denied before is still denied, and no git allow rule reaches beyond the old ones", () => {
@@ -591,3 +596,112 @@ for (const launcher of ["native-launch.sh", "plugin-launch.sh"]) {
     }
   });
 }
+
+// Item 1 of 2.0.0 (CHANGELOG 1.2.0, Known and not fixed): the /route skill quoted $ARGUMENTS in double quotes, so a task
+// holding a double quote broke the command and a backtick or $(...) ran; a quoted here-document (the first attempt) still
+// ended early on a line equal to its closing word. Now the model writes the task with its file tool and the shell line
+// names only the file (--task-file), so no shell parses the task. Here the skill's exact shell block runs under bash, sh
+// and zsh with a fake npm that copies the file it is given; the file is written by the test, as the model's tool would.
+// ORCH_ROUTE_SKILL_FILE points the test at another copy (an earlier skill, to show the test fails there).
+const SKILL_FILE = process.env.ORCH_ROUTE_SKILL_FILE || join(root, ".claude", "skills", "route", "SKILL.md");
+
+/**
+ * The route command block of the skill, with the folder put in for $TASK_DIR and the file for $TASK_FILE.
+ * @param {string} skillText @param {string} taskDir @param {string} taskFile
+ */
+function routeBlock(skillText, taskDir, taskFile) {
+  const m = /```bash\n([^`]*npm run --silent route[^`]*)```/.exec(skillText);
+  assert.ok(m, "the route skill has a bash block that runs `npm run --silent route`");
+  const block = String(m?.[1]);
+  assert.ok(!block.includes("$ARGUMENTS"), "the task text never appears in the shell block");
+  assert.ok(block.includes("--task-file=\"$TASK_FILE\""), "the block names the task file only");
+  return block.split("$TASK_DIR").join(taskDir).split("$TASK_FILE").join(taskFile);
+}
+
+/**
+ * Writes the task to a file, runs the block with `shell`; returns the exit code, the bytes the fake npm got through
+ * --task-file, whether the task file is gone and the marker files that exist.
+ * @param {string} skillText @param {string} task @param {string} [shell] @param {number} [npmExit]
+ */
+function runRouteBlock(skillText, task, shell = "bash", npmExit = 0) {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "route-skill-")));
+  try {
+    for (const d of ["bin", "home", "proj", "pad"]) mkdirSync(join(scratch, d));
+    writeFileSync(join(scratch, "home", "package.json"), "{}\n");
+    const taskFile = join(scratch, "pad", "route-task.txt");
+    writeFileSync(taskFile, task);
+    writeFileSync(join(scratch, "bin", "npm"), `#!/bin/sh\nfor a in "$@"; do case "$a" in --task-file=*) cp "\${a#--task-file=}" "${scratch}/captured" ;; esac; done\nexit ${npmExit}\n`);
+    chmodSync(join(scratch, "bin", "npm"), 0o755);
+    const r = spawnSync(shell, ["-c", routeBlock(skillText, join(scratch, "proj"), taskFile)], {
+      cwd: scratch,
+      env: { ...process.env, PATH: `${join(scratch, "bin")}:${process.env.PATH}`, ORCH_HOME: join(scratch, "home"), HOME: scratch },
+      encoding: "utf8",
+    });
+    const cap = join(scratch, "captured");
+    const files = ["X", join("home", "X"), join("pad", "X")].filter((f) => existsSync(join(scratch, f)));
+    return { status: r.status, got: existsSync(cap) ? readFileSync(cap) : null, removed: !existsSync(taskFile), files, stderr: r.stderr };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const HOSTILE_TASKS = [
+  "a\nORCH_ROUTE_TASK_END\ntouch X\n",
+  "a\nEOF\ntouch X",
+  'fix the "double" and \'single\' quotes, then `touch X` and $(touch X); keep $HOME and ${X:-y} as text',
+  "-x a task that starts with a dash",
+  "ends with a backslash \\",
+  "two lines\nthen trailing newlines\n\n\n",
+];
+
+test("item 1: /route hands the task over as a file: nothing in it runs and it arrives byte for byte", () => {
+  const skill = readFileSync(SKILL_FILE, "utf8");
+  for (const task of HOSTILE_TASKS) {
+    const r = runRouteBlock(skill, task);
+    assert.deepEqual(r.files, [], `nothing in the task ran: ${JSON.stringify(task)}`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.got && r.got.equals(Buffer.from(task)), `the task arrives whole, trailing newlines included: ${JSON.stringify(task)}`);
+    assert.ok(r.removed, "the block removes the task file");
+  }
+  // The route command's exit code is the block's, and the file is removed then too.
+  const failed = runRouteBlock(skill, "plain task", "bash", 2);
+  assert.equal(failed.status, 2);
+  assert.ok(failed.removed);
+});
+
+const hasZsh = spawnSync("zsh", ["-c", "true"]).status === 0;
+test("item 1: the /route block also holds in sh and zsh", { skip: !hasZsh && "zsh not installed" }, () => {
+  const skill = readFileSync(SKILL_FILE, "utf8");
+  for (const shell of ["sh", "zsh"]) {
+    for (const task of HOSTILE_TASKS) {
+      const r = runRouteBlock(skill, task, shell);
+      assert.deepEqual(r.files, [], shell);
+      assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
+      assert.ok(r.got && r.got.equals(Buffer.from(task)), `${shell}: ${JSON.stringify(task)}`);
+    }
+  }
+});
+
+// Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed: "a task that begins with - still fails once the session is
+// started"). Gone since 1.5.0: shown here end to end, not in a dry run. auto.sh runs the session through orchestrate.sh
+// and a fake claude records what it gets: the task is the last argument, after `--`, and never the word after -p.
+test("item 2: a dash-led task reaches the started session as its prompt after `--` (auto.sh, then orchestrate.sh)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "orch-dash-run-"));
+  try {
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, ".claude", "agents"), { recursive: true });
+    const bin = fakeBin(tmp);
+    for (const task of ["--help me"]) { // one task: each run takes about a second; W-4 covers the other forms
+      const r = spawnSync("bash", [join(scripts, "auto.sh"), task, repo], { env: cleanEnv({ PATH: `${bin}:${process.env.PATH}`, ORCH_MODE: "plain", GIT_CEILING_DIRECTORIES: tmp }), encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      const npxArgs = readFileSync(join(bin, "npx.args"), "utf8").split("\n");
+      assert.ok(npxArgs.includes(`--task=${task}`), "route.ts gets --task=<task>");
+      const args = readFileSync(join(bin, "claude.args"), "utf8").replace(/\n$/, "").split("\n");
+      assert.deepEqual(args.slice(-2), ["--", task]);
+      assert.equal(args[0], "-p");
+      assert.notEqual(args[1], task);
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

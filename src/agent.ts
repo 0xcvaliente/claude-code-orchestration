@@ -166,9 +166,13 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
     for (const u of streamed.values()) for (const k of ["input", "output", "cacheRead", "cacheWrite"] as const) sum[k] += u[k];
     return sum;
   };
+  // The Bash judge's own model calls (a separate query() inside the hook) count toward the worker's `tokens`, so a set
+  // --budget sees them too (CHANGELOG 1.2.0: they were outside every budget). `usage` and `costUsd` stay the worker's
+  // own. A judge answer that arrives after its timeout still adds, but only if it lands before the worker returns.
+  let judgeTokens = 0;
   const fail = (subtype: string, text: string): AgentResult => {
     const usage = spent();
-    return { ok: false, text, tokens: totalTokens(usage), usage, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model };
+    return { ok: false, text, tokens: totalTokens(usage) + judgeTokens, usage, turns: 0, subtype, durationMs: Date.now() - started, model: cfg.model };
   };
 
   // Bash roles: every Bash call passes the guard first. Plain `Bash` is pre-approved, so a guard that failed without
@@ -177,15 +181,37 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
   // hooks, not what a callback that times out does to the call, so nothing here relies on that), and the matcher's
   // onFailure "block" below blocks the call when the callback throws or answers with output that fails validation.
   // With the judge off the guard still denies the judged classes, on top of UNSAFE_BASH in disallowedTools.
-  // The judge's own tokens are NOT part of the worker's `tokens` (they are a separate query() inside the hook).
+  // The judge's own tokens are added to the worker's `tokens` (judgeTokens above), counted where its answer comes back.
   let hooks: Options["hooks"];
   if (cfg.tools.includes("Bash")) {
     const auditFile = req.auditFile ?? env.ORCH_JUDGE_AUDIT ?? join(process.cwd(), "runs", "judge-audit.jsonl");
+    const judgeDeps = (deps.judgeDeps ?? defaultJudgeDeps)(auditFile);
+    const counted: JudgeDeps = {
+      ...judgeDeps,
+      ask: async (prompt) => {
+        let answer: Awaited<ReturnType<JudgeDeps["ask"]>>;
+        try {
+          answer = await judgeDeps.ask(prompt);
+        } catch (err) {
+          // A failed call still cost its tokens: askOpus throws an Error carrying them. Count them, then rethrow the
+          // same error, so judgeBash still denies. A missing or malformed field adds nothing, and reading it never throws.
+          try {
+            const spent: unknown = err instanceof Error && "tokens" in err ? (err as { tokens?: unknown }).tokens : undefined;
+            if (typeof spent === "number" && Number.isFinite(spent) && spent > 0) judgeTokens += spent;
+          } catch {
+            // a getter that throws: nothing to count
+          }
+          throw err;
+        }
+        if (typeof answer?.tokens === "number" && Number.isFinite(answer.tokens) && answer.tokens > 0) judgeTokens += answer.tokens;
+        return answer;
+      },
+    };
     // cwd is the worktree root: the guard resolves rm targets against the shell's folder (the hook input's cwd, which
     // follows a `cd`) when it lies inside the root, and refuses judged commands while the shell is outside it.
     const guard = bashGuard({
       role: req.role, brief: req.prompt, task: req.task ?? "", cwd: req.cwd,
-      enabled: judgeEnabled(env), deps: (deps.judgeDeps ?? defaultJudgeDeps)(auditFile),
+      enabled: judgeEnabled(env), deps: counted,
     });
     // onFailure "block" (Agent SDK 0.3.317): a guard that throws, returns nothing or returns invalid output blocks the
     // command instead of letting it reach the pre-approved Bash rule. bashGuard already denies on its own errors; this
@@ -230,7 +256,7 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
       if (msg.type !== "result") continue;
       const usage = usageFromResult(msg);
       const common = {
-        tokens: totalTokens(usage),
+        tokens: totalTokens(usage) + judgeTokens,
         usage,
         turns: msg.num_turns,
         subtype: msg.subtype,
