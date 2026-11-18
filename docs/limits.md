@@ -23,7 +23,7 @@ The SDK judge and the native hook are a deny list that works without a sandbox: 
 Out of reach:
 
 - a wrapper program not on its list (`WRAPPERS` in `src/judge.ts`), and `ssh host ...`, which runs its words on another machine;
-- a program name built at run time, and an alias or function defined somewhere the guard does not see (a shell's start-up files, an earlier call);
+- a program name built at run time where it is not the command word (`cpulimit -l 5 -- $c root` passes; as the command word, `$c root`, it is refused), and an alias or function defined somewhere the guard does not see (a shell's start-up files, an earlier call);
 - zsh's `PROMPT4` (`PS4` is read; `PROMPT4` is not);
 - in the native hook's refusal of commands that name the prompt store: a glob built from a variable or a command substitution (`"$dir"/*`), a glob that names only a folder above the store, and a recursive tool given such a folder (`grep -r x ~/.claude`).
 
@@ -36,7 +36,12 @@ Over-blocks it states (refused although harmless; each is a row of `src/judge.te
 - a refused name anywhere after a wrapper (`xargs grep parallel`, `timeout 5 echo at`);
 - a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`), and an option cluster of those that spells a refused command;
 - `echo {rm}`;
-- a command over 262,144 characters, or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`).
+- a command over 262,144 characters, or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`);
+- a shell option outside the guard's short list of known harmless ones (`set -o vi`, `setopt autocd`, `shopt -s histappend`, `bash -o vi`; `set -e` and `set -o pipefail` pass): set such an option in a script file, or leave it out;
+- `emulate` in any form but `emulate [-L] [-R] zsh` (`emulate sh` is refused);
+- a prompt variable set to a value with an expansion (`PS1=$PS1`);
+- assigning a variable named `options` (`options=1`, also after another assignment), zsh's options table: use another name;
+- in the native hook, a relative glob after a `cd` to a folder it cannot read as one plain path (`cd "$dir" && ls *.txt`; a row of `src/judge-hook.test.mjs`).
 
 ## C. Guards and gates
 
@@ -46,7 +51,8 @@ Over-blocks it states (refused although harmless; each is a row of `src/judge.te
 - **The suite lock.** A reused pid keeps a dead holder's lock until it is 900 s old, and one takeover race (a third gate locking in the instant between the rename and the put-back) can run two suites at once. The lock is per project. These and the other limits of each gate are in [Gates, Limits](gates.md#limits).
 - **Bracket ranges** are judged by character code for ASCII names, not by the locale's collation; a name with a character outside ASCII is matched wider.
 - **A `QUOTE:` whose source is not in the read cache** (missing, or a symlinked cache entry, which is never read) cannot be verified and passes as unverifiable.
-- **Kept test output.** The test gate keeps the tail of a failed run's output under `<state dir>/test-output/` (folder 0700, files 0600). A test suite that prints a secret leaves it there.
+- **Kept test output.** The test gate keeps the tail of a failed run's output under `<state dir>/test-output/` (folder 0700, files 0600). A test suite that prints a secret leaves it there. When `test-output` is a symlink to a folder, the gate does not refuse it: the helper writes through it into the target (its files are made under umask 077), and the gate changes the mode of neither the target nor its files (`note_failures` in `verify.sh`).
+- **unittest failfast set by a script.** The `allow` baseline keeps the block when the command or a `.py`, `.cfg`, `.toml` or `.ini` file of the tree names failfast; a `-f` that a script puts into unittest's argv is not seen (`failFastInTree` in `bugfix-check.mjs`).
 - **The reviewer hold is stricter with stop records that carry no hand-back id.** Without one, a failed-tests block since the agent's latest start holds the review, whatever came after it, so an ordinary fix loop is held until a passing stop is paired or the hold gives up after two refusals. And a record of an earlier stop that lands after a resume can still be taken for the new stop when it is the only candidate (checked against `stopGateOf` in `run.mjs`).
 - **A test gate started by a worker that is not isolated runs in that worker's folder.** The orchestrator's step 6 no longer starts a non-isolated worker on another worktree's folder; the gate itself does not detect the case.
 - **Plan check, path identity.** `file_overlap` now reads symlinks behind `**` and later wildcards, hard links and two Unicode normal forms of one name (`src/plan-check-paths.test.mjs`). Still out of reach: a link or hard link made after the launch, a hard link whose other name lies outside every entry's walk, and, in `not_in_plan`, every name that reading adds.
@@ -69,6 +75,7 @@ Also: a commit message that holds a denied form after a space is refused (`commi
 - Telling a typed prompt from other input rests on its opening text (A, K3).
 - A dollar cap can be overshot by one request (A, K8).
 - A session started without hooks is out of every gate's reach.
+- The pane reads the gates' settings (`ORCH_RUN_STALE_MIN`, `ORCH_GAP_MIN`, `ORCH_ESCALATION` and their plugin options) at each session start or reload (`loadSettings` in `dashboard/register.tsx`), while the hooks read them at each call. A setting changed during a session shows on the pane only after the next start or reload.
 - The workflow guard's reach (A, K9).
 - The startup warnings about rules with a `*` for a worktree's name (A, K10).
 - `strictMcpConfig` alone (A, K7).
@@ -91,3 +98,5 @@ Also: a commit message that holds a denied form after a space is refused (`commi
 ## H. Leftovers of the 2.0.0 development run
 
 Three slices of the 1.6.0 run carry stale test-gate blocks in the state log (`gates.jsonl` in the [state dir](glossary.md#s), which for the plugin is per user). They are state, not a code defect; `npm run report` shows them.
+
+The gates sequence diagram (`docs/diagrams/gates-sequence-light.svg` and `-dark.svg`) still says "[implementer allowed, or a researcher or reviewer (never blocked)]". That label predates the reviewer hold, which since 1.6.1 can refuse a reviewer's launch (`tests_failed_after_report`). The text of [docs/gates.md](gates.md) is correct.

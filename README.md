@@ -144,7 +144,7 @@ It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7
 
 ```bash
 npm install
-npm run check    # typecheck, tests, check-agents and check-plugin at the same time; CI runs it on push and pull request to main
+npm run check    # typecheck, tests, check-agents and check-plugin at the same time; CI runs it, then the dashboard test, on push and pull request to main
 ```
 
 Versions are tagged from `v1.1.0` onward. Scripts, layout and contributor rules: [docs/development.md](docs/development.md) and [CLAUDE.md](CLAUDE.md).
