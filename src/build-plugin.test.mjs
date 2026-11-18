@@ -325,6 +325,20 @@ test("userConfig declares every bridged switch with a type, title and a descript
   assert.deepEqual(Object.fromEntries(defaults), { gap_min: 80, run_stale_min: 30, baseline: "inform" });
 });
 
+test("2.0.2: both plugin manifests name the repository, the homepage and keywords, and carry no license", () => {
+  const repo = "https://github.com/0xcvaliente/claude-code-orchestration";
+  for (const [file, name] of /** @type {[string, string][]} */ ([["dist/plugin/.claude-plugin/plugin.json", "orchestration"], ["dist/dashboard/.claude-plugin/plugin.json", "orchestration-dashboard"]])) {
+    const m = read(file);
+    assert.equal(m.name, name, file);
+    assert.equal(m.version, read("package.json").version, file);
+    assert.equal(m.repository, repo, file);
+    assert.equal(m.homepage, repo, file);
+    assert.ok(Array.isArray(m.keywords) && m.keywords.length > 0 && m.keywords.every((/** @type {unknown} */ k) => typeof k === "string"), `${file} keywords`);
+    assert.deepEqual(m.author, { name: "0xcvaliente" }, `${file}: author by name, no email`);
+    assert.equal(m.license, undefined, `${file}: no license (the owner has not chosen one)`);
+  }
+});
+
 test("1.2.0: reports are checked at SubagentHandback in the project and the plugin, and the plugin ships the subagent status line", () => {
   for (const [h, tail] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), ""], [read("dist/plugin/hooks/hooks.json"), " --plugin"]])) {
     const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");

@@ -2,6 +2,25 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-11-18
+
+2.0.2 makes this repository a marketplace that the build writes and checks, documents how to share and install the plugin, and rewrites the READMEs for a new reader. No hook, agent, skill, workflow or pane changes: the plugin behaves as in 2.0.1, and only its manifest differs. Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person.
+
+### Added
+
+- **[docs/marketplace.md](docs/marketplace.md)** ("Sharing the plugin"): what is shared, how to add the marketplace and install (`claude plugin marketplace add 0xcvaliente/claude-code-orchestration`, `claude plugin install orchestration@claude-code-orchestration`, forms checked with `--help` on Claude Code 2.1.327), how to stay on a release tag or follow `main`, how updates reach people, what the plugin ships and why, the maintainer's steps at each release, and what is left to the owner (a submission to Claude's plugin directory, a license, an icon).
+- **The marketplace manifest is built.** `npm run build-plugin` now writes `.claude-plugin/marketplace.json` (name `claude-code-orchestration` and owner kept, a top-level `description`, one entry `orchestration` at `./dist/plugin` with its description, a category, tags, homepage and repository, and no `version`: with one in both, Claude Code silently uses `plugin.json`'s, so the version lives there only), and `npm run check-plugin` fails with `.claude-plugin/marketplace.json is out of date; run npm run build-plugin` when the committed file differs or is missing. The shared facts are `SHARED` in `scripts/build-plugin.mjs`. Tested in `src/marketplace.test.mjs` (the committed file equals the build's, required fields, the entry sets no version, the source holds a plugin of the same name with the version from `package.json`, no reserved name, no `license` and no email address in the three manifests, the check fails on a hand-edited or missing file in a scratch copy) and `src/build-plugin.test.mjs`, "2.0.2: both plugin manifests ...".
+
+### Changed
+
+- **Both plugin manifests** (`dist/plugin`, `dist/dashboard`) now carry `homepage`, `repository` and `keywords`. No `license` is set, so the plugin directory's check (`claude plugin validate --profile directory dist/plugin`) still refuses a submission; choosing one is the owner's call ([docs/marketplace.md](docs/marketplace.md), "Not done here, for the owner"). `claude plugin validate .`, `dist/plugin` and `dist/dashboard` pass, with `--strict` too.
+- **The READMEs, rewritten for a new reader.** [README.md](README.md) is shorter and ordered install, first run, the three routes, triage, gates, limits; its install commands are in the CLI form above, it says how to stay on a stable release, and it links "doubt signal" and "constraints ledger" to the [glossary](docs/glossary.md). [docs/README.md](docs/README.md) says, for each page, which question it answers. [bench/README.md](bench/README.md) keeps how to run and read the benchmark; every campaign's result moved to the new [bench/RESULTS.md](bench/RESULTS.md). [docs/development.md](docs/development.md) release steps add the marketplace check and `claude plugin validate .`.
+- Version 2.0.2 in `package.json`, `package-lock.json` and both plugin manifests. A person gets a new copy only when a release changes it, whether the marketplace follows `main` or is pinned to a tag ([docs/marketplace.md](docs/marketplace.md), "Stable or latest").
+
+### Limits
+
+2.0.2 changes no behaviour, so [docs/limits.md](docs/limits.md) is unchanged and this entry lists no open items of its own. The `#<tag>` form that pins the marketplace to a release comes from Claude Code's docs; the 2.1.327 help does not list it, and it was not tried here, since adding a marketplace changes the machine.
+
 ## [2.0.1] - 2026-11-18
 
 2.0.1 answers a report that a reviewer "goes on" after its report reached the orchestrator, fixes the test gate's stops that left no record, and adds a model-free soak of the gates (`npm run soak`) with the nine defects it found. The probes are in [probes-2.0.1-reviewer-loop.md](docs/data/probes-2.0.1-reviewer-loop.md), [probes-2.0.1-stop-gate.md](docs/data/probes-2.0.1-stop-gate.md) and [probes-2.0.1-soak.md](docs/data/probes-2.0.1-soak.md). Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person; what the release does not do is on [docs/limits.md](docs/limits.md), I.
@@ -603,6 +622,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.0.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.2
 [2.0.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.1
 [1.6.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.6.0
 [1.5.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.1

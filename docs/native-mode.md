@@ -276,7 +276,7 @@ With `code: true`, a wave of several slices runs isolated, after a checkpoint co
 
 ## The plugin
 
-The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. The plugin carries:
+The marketplace manifest `.claude-plugin/marketplace.json` points at the committed `dist/plugin`. `npm run build-plugin` writes it and `npm run check-plugin` compares it; adding the marketplace at `main` or at a release tag, and how a new version reaches people: [Sharing the plugin](marketplace.md). The plugin carries:
 - the agents, the gate hooks, the nudge, the worker conventions skill and the `/route` skill;
 - the gated workflow and the eval suite (`evals/`);
 - the opt-in native Bash judge hooks ([Native hook](bash-judge.md#native-hook));
