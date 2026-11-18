@@ -152,6 +152,10 @@ test("a pending gate adds the note and allows; a passed gate and an environment 
     gate(dir, 6, "warn", "tests_failed_isolated");
     const warn = launch(dir, REVIEW);
     assert.equal(warn.status, 0, "a warning does not refuse");
+    // Several records since the start and no hand-back id to tie one to the stop: pending, so the launch is allowed
+    // with the note (run.mjs stopGateOf), never let through bare.
+    assert.match(warn.stdout, /"permissionDecision":"allow"/);
+    assert.match(warn.stdout, /test gate has not reported yet/, "the warning case carries the note");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

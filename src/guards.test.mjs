@@ -1525,7 +1525,10 @@ test("researcher guard (w3 third attempt): the deadline leaves room for a cold f
   // Checked at each operand, so a line of 30,000 operands (about a second of stat calls) stops at the deadline.
   const t0 = Date.now();
   assert.match(researcherViolation(`cat${" a".repeat(30000)}`, redos, undefined, { deadlineMs: 50 })?.reason ?? "", /took too long to judge/);
-  assert.ok(Date.now() - t0 < 600, `${Date.now() - t0} ms`);
+  // The reason above shows the deadline fired (without it the line is judged in full and refused for another reason).
+  // The wall-time bound only catches a check that runs far past it: about 430 ms of this call come before the first
+  // operand on an idle machine, and a loaded one took 906 ms against the old 600 ms bound, so it leaves room for load.
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
 });
 
 // w8: bracket expressions read as POSIX and the shells read them. The tokenizer closes a bracket at its first `]`, so

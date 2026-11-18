@@ -368,6 +368,25 @@ test("tag chains: a tag of a tag whose inner tag holds a token is found (two dee
   });
 });
 
+test("the draft branch ref itself names a tag object (not a commit): refused as a problem, never followed", () => {
+  for (const msg of [`key ${TOKEN}`, "clean"]) {
+    withSetup((s) => {
+      const tag = tagObject(s, head(s), "commit", msg, "branch-tag");
+      // git refuses to store a non-commit under refs/heads with update-ref, so the ref file is written directly.
+      if (spawnSync("git", ["-C", s.draft, "update-ref", `refs/heads/${BRANCH}`, tag], { encoding: "utf8" }).status !== 0) {
+        const common = git(s.draft, ["rev-parse", "--path-format=absolute", "--git-common-dir"], s.base);
+        rmSync(join(common, "refs", "heads", ...BRANCH.split("/")), { force: true });
+        writeFileSync(join(common, "refs", "heads", ...BRANCH.split("/")), `${tag}\n`);
+      }
+      assert.equal(gitIn(s.draft, ["cat-file", "-t", `refs/heads/${BRANCH}`], "", s.base), "tag", "the branch ref names the tag object");
+      const r = scan(s);
+      assert.ok(r.problems.some((p) => /branch skill\/demo-skill names a tag object, not a commit/.test(p)), `${msg}: ${JSON.stringify(r.problems)}`);
+      assert.equal(r.mergeBase, null, "nothing past the ref is scanned");
+      assert.ok(!JSON.stringify(r).includes(TOKEN));
+    });
+  }
+});
+
 test("tag chains: a six-deep chain with the token in the innermost tag is found; a clean six-deep chain passes", () => {
   withSetup((s) => {
     git(s.draft, ["update-ref", "refs/tags/deep", chain(s, head(s), "commit", 6, (i) => (i === 0 ? `key ${TOKEN}` : "clean"))], s.base);

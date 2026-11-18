@@ -506,6 +506,13 @@ export function scanBranch(dir, { base, branch, name, remote = null, remotes = n
   const foreign = [];
   const none = () => ({ mergeBase: null, findings, outside: [], unpushed, problems, foreign });
   try {
+    // The branch ref must name a commit itself: `^{commit}` below would peel a tag object (an annotated tag stored
+    // under refs/heads) to its commit, and a push of the branch would then carry the tag object, which is never scanned.
+    const kind = git(dir, ["cat-file", "-t", `refs/heads/${branch}`]);
+    if (kind.status === 0 && kind.out.trim() !== "commit") {
+      problems.push(`branch ${branch} names a ${kind.out.trim() === "tag" ? "tag object" : kind.out.trim() || "non-commit object"}, not a commit: point the branch at the draft's commit`);
+      return none();
+    }
     const tip = git(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
     if (tip.status !== 0 || !tip.out.trim()) {
       problems.push(`branch ${branch} cannot be found`);
