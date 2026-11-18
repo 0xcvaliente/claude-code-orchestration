@@ -3,7 +3,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -141,6 +141,36 @@ test("quote check at handback: an unverified quote is refused before delivery, o
     const plain = run(dir, "quote-check.mjs", { session_id: "s1", hook_event_name: "SubagentStop", agent_id: "q4", agent_type: "researcher", agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: wrong });
     assert.equal(plain.code, 2);
     assert.equal(quotes().at(-1)?.at, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("quote check: a read-cache entry that is a symlink is never read; it counts as absent (unverifiable), as in the read router", () => {
+  const dir = project();
+  try {
+    const cache = join(dir, ".claude", "state", "read-cache");
+    mkdirSync(cache, { recursive: true });
+    // The link's target is outside the cache (here a project file the quote check would otherwise read).
+    writeFileSync(join(dir, "private.txt"), "alpha beta gamma delta\n");
+    symlinkSync(join(dir, "private.txt"), join(cache, "linked.txt"));
+    writeFileSync(join(cache, "plain.txt"), "epsilon zeta eta\n");
+    const quotes = () => stateLog(dir, "quotes.jsonl");
+    const stop = (/** @type {string} */ agent, /** @type {string} */ quote) =>
+      run(dir, "quote-check.mjs", { session_id: "s1", hook_event_name: "SubagentStop", agent_id: agent, agent_type: "researcher", agent_transcript_path: join(dir, "missing.jsonl"), last_assistant_message: `STATUS: pass\n${quote}\nOPEN: none` });
+    for (const [agent, loc] of /** @type {[string, string][]} */ ([["c1", ".claude/state/read-cache/linked.txt:1"], ["c2", join(cache, "linked.txt")]])) {
+      const right = stop(agent, `QUOTE: ${loc} | "alpha beta gamma"`);
+      assert.deepEqual([right.code, right.stderr], [0, ""]);
+      const e = quotes().at(-1);
+      assert.deepEqual([e.agent_id, e.verified, e.unverified, e.unverifiable], [agent, 0, 0, 1], `${loc}: the link is not read, so not verified`);
+      const wrong = stop(`${agent}w`, `QUOTE: ${loc} | "omega"`);
+      assert.equal(wrong.code, 0, `${loc}: nothing read, nothing to refuse`);
+      assert.deepEqual([quotes().at(-1).unverified, quotes().at(-1).unverifiable], [0, 1]);
+    }
+    // A regular cache entry is read as before.
+    assert.equal(stop("c3", 'QUOTE: .claude/state/read-cache/plain.txt:1 | "epsilon zeta eta"').code, 0);
+    assert.deepEqual([quotes().at(-1).verified, quotes().at(-1).unverifiable], [1, 0]);
+    assert.equal(stop("c4", 'QUOTE: .claude/state/read-cache/plain.txt:1 | "omega"').code, 2);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

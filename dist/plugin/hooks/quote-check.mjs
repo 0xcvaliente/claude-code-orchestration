@@ -26,8 +26,8 @@
 // by id, so this hook first waits, at most CAPTURE_WAIT_MS, for that capture and writes the refusal after it (2.0.0, w6
 // item 3); when it does not come in time the refusal is still written, and journal.mjs matches it by key.
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
 import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
@@ -155,10 +155,51 @@ const real = (p) => {
     return null;
   }
 };
+/** @param {string} rp a real path @param {string} r a real root */
+const under = (rp, r) => rp === r || rp.startsWith(r.endsWith(sep) ? r : `${r}${sep}`);
+// The read cache is read only when it is a folder itself, not a symlink to one (file-profile.mjs cacheDirSafe, the read
+// router's rule); a missing cache has nothing to read.
+const cacheReal = (() => {
+  try {
+    const st = lstatSync(cacheDir);
+    return st.isDirectory() && !st.isSymbolicLink() ? real(cacheDir) : null;
+  } catch {
+    return null;
+  }
+})();
 // Locators are confined to the project dir and the read cache, after symlinks resolve: anything else is never read.
-const roots = /** @type {string[]} */ ([real(projectDir), real(cacheDir)].filter(Boolean));
+const roots = /** @type {string[]} */ ([real(projectDir), cacheReal].filter(Boolean));
 /** @param {string} rp a real path */
-const inside = (rp) => roots.some((r) => rp === r || rp.startsWith(r.endsWith(sep) ? r : `${r}${sep}`));
+const inside = (rp) => roots.some((r) => under(rp, r));
+/**
+ * An entry of the read cache (its folder resolves into the cache) that is not a regular file, a symlink above all, is
+ * absent: never read, whatever it points at (file-profile.mjs readCache, the read router's rule). A path outside the
+ * cache is judged by `inside` alone, as before. @param {string} abs
+ */
+const cacheEntryRefused = (abs) => {
+  const parent = real(dirname(abs));
+  const inCache = (cacheReal && parent && under(parent, cacheReal)) || under(resolve(abs), resolve(cacheDir));
+  if (!inCache) return false;
+  try {
+    return !lstatSync(abs).isFile();
+  } catch {
+    return true;
+  }
+};
+/** A cache file's text, read without following a symlink (O_NOFOLLOW), or null. @param {string} p */
+function readNoFollow(p) {
+  try {
+    if (!lstatSync(p).isFile()) return null;
+    const fd = openSync(p, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      return fstatSync(fd).isFile() ? readFileSync(fd, "utf8") : null;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
 
 /** @type {Map<string, { text: string, pages: string[] | null } | null>} */
 const sources = new Map();
@@ -169,13 +210,13 @@ function sourceText(abs) {
   let src = null;
   try {
     const st = statSync(abs);
-    if (inside(realpathSync(abs)) && st.isFile() && st.size <= MAX_TEXT_BYTES) {
+    if (!cacheEntryRefused(abs) && inside(realpathSync(abs)) && st.isFile() && st.size <= MAX_TEXT_BYTES) {
       const prof = profileFile(abs, { cacheDir });
       if (prof.kind === "text" || prof.kind === "code") src = { text: readFileSync(abs, "utf8"), pages: null };
       else if (["pdf", "xlsx", "docx", "pptx"].includes(prof.kind) && prof.textPath) {
         const scanned = prof.kind === "pdf" && typeof prof.charsPerPage === "number" && prof.charsPerPage < EMPTY_PAGE_CHARS;
-        if (!scanned) {
-          const text = readFileSync(prof.textPath, "utf8");
+        const text = scanned ? null : readNoFollow(prof.textPath);
+        if (text !== null) {
           // Only the document's own pages: pdftotext ends each page with a form feed, so the split's last element
           // (page N+1) is not a page, and neither is any number past pdfinfo's page count.
           const all = text.split("\f");

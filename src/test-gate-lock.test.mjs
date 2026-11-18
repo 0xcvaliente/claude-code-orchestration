@@ -35,7 +35,7 @@ const alive = (pid) => {
 const records = (project) => readFileSync(join(project, ".claude", "state", "gates.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
 
 /**
- * @param {string} project @param {{ env?: Record<string, string>, id?: string, onStart?: (c: import("node:child_process").ChildProcess) => void }} [o]
+ * @param {string} project @param {{ env?: Record<string, string>, id?: string, transcript?: string, onStart?: (c: import("node:child_process").ChildProcess) => void }} [o]
  * @returns {Promise<{ status: number | null, signal: string | null, stderr: string, ms: number }>}
  */
 function gate(project, o = {}) {
@@ -49,7 +49,7 @@ function gate(project, o = {}) {
       clearTimeout(kill);
       resolve({ status, signal, stderr, ms: Date.now() - t0 });
     });
-    c.stdin.end(JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "implementer", agent_id: o.id ?? "a1", cwd: project, session_id: "s1" }));
+    c.stdin.end(JSON.stringify({ hook_event_name: "SubagentStop", agent_type: "implementer", agent_id: o.id ?? "a1", cwd: project, session_id: "s1", ...(o.transcript ? { agent_transcript_path: o.transcript } : {}) }));
     o.onStart?.(c);
   });
 }
@@ -160,5 +160,53 @@ test("a fresh lock made between the stale check and the removal is never removed
     rmSync(project, { recursive: true, force: true });
     rmSync(box, { recursive: true, force: true });
     rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+// bugfix_timeout: the message says what the gate's time budget went to, from the facts verify.sh has (the wait for
+// the suite lock, the test run, the check), so a block caused by another gate's suite does not blame this suite.
+/** A KIND: bugfix agent's transcript. @param {string} box */
+function bugfixTranscript(box) {
+  const f = join(box, "agent.jsonl");
+  writeFileSync(f, `${JSON.stringify({ type: "user", message: { content: "SLICE: fix\nFILES: app.sh\nDEPENDS: none\nKIND: bugfix\nFix VALUE." } })}\n`);
+  return f;
+}
+const BUGFIX_ON = { ORCH_BUGFIX_CHECK: "" };
+
+test("bugfix_timeout after waiting for the suite lock: the message names the wait, not the suite", async () => {
+  const project = tmp("orch-glk-bfw-");
+  const box = tmp("orch-glk-box-");
+  try {
+    // Another gate holds the lock for the whole budget (a live holder: this process), so the wait runs down to the
+    // floor (a quarter of a 16 s budget) and leaves no time for the bugfix check; the suite itself is instant.
+    mkdirSync(join(project, ".claude", "state"), { recursive: true });
+    writeFileSync(lockFile(project), `${process.pid} ${nowS()}\n`);
+    const r = await gate(project, { transcript: bugfixTranscript(box), env: { ...BUGFIX_ON, ORCH_TEST_CMD: "true", ORCH_HOOK_BUDGET_S: "16" } });
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(records(project).at(-1)?.reason, "bugfix_timeout");
+    assert.match(r.stderr, /KIND: bugfix: unverified/);
+    assert.match(r.stderr, /\b(1[0-6]|9) s of it went to waiting for another test gate/, r.stderr);
+    assert.match(r.stderr, /the test run took [01] s/, r.stderr);
+    assert.doesNotMatch(r.stderr, /Make the test suite faster/, "the wait, not the suite, is to blame");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(box, { recursive: true, force: true });
+  }
+});
+
+test("bugfix_timeout after a slow test run: the message names the run and asks for a faster suite", async () => {
+  const project = tmp("orch-glk-bfr-");
+  const box = tmp("orch-glk-box-");
+  try {
+    // No lock to wait for; the suite takes 6 s of a 14 s budget, which leaves under the 10 s the check needs.
+    const r = await gate(project, { transcript: bugfixTranscript(box), env: { ...BUGFIX_ON, ORCH_TEST_CMD: "sleep 6", ORCH_HOOK_BUDGET_S: "14" } });
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(records(project).at(-1)?.reason, "bugfix_timeout");
+    assert.match(r.stderr, /the test run took [6-8] s/, r.stderr);
+    assert.match(r.stderr, /Make the test suite faster, or report the bug as unverified/);
+    assert.doesNotMatch(r.stderr, /went to waiting/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(box, { recursive: true, force: true });
   }
 });

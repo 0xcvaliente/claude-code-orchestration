@@ -1,45 +1,18 @@
 // run.mjs stopGateOf / implementerTestStates: which test-gate record stands for an implementer's latest stop, read by
 // the plan check's reviewer hold. The rule (run.mjs, stopGateOf): the pairing may only make the hold stricter than the
-// base's, never weaker. The base is the real run.mjs of the release-1.6.1 branch (2.0.0's first pairing), taken from
-// git with what it imports into a scratch folder, and run on the same records as the branch's. For every row and every
+// base's, never weaker. The base is the real run.mjs of the release-1.6.1 branch (2.0.0's first pairing), stored with
+// what it imports under src/fixtures/gates-1.6.1/, and run on the same records as the branch's. For every row and every
 // random sequence: the branch holds at least as much as the base, where a failed-tests block (the hold refuses) is
 // stricter than pending (no record yet: the review goes through with a note), which is stricter than a pass.
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { implementerTestStates } from "../.claude/hooks/run.mjs";
 
-const repo = new URL("..", import.meta.url).pathname;
-/** The base's run.mjs and the hook modules it imports, from git, or null when this clone lacks the ref. */
-async function loadBase() {
-  for (const ref of ["release-1.6.1", "7b408fe"]) {
-    const dir = mkdtempSync(join(tmpdir(), "orch-pair-base-"));
-    const todo = ["run.mjs"];
-    const done = new Set();
-    let ok = true;
-    while (todo.length && ok) {
-      const name = todo.pop() ?? "";
-      if (done.has(name)) continue;
-      done.add(name);
-      const r = spawnSync("git", ["show", `${ref}:.claude/hooks/${name}`], { cwd: repo, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-      if (r.status !== 0) ok = false;
-      else {
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, name), r.stdout);
-        for (const m of r.stdout.matchAll(/from "\.\/([\w.-]+\.mjs)"/g)) todo.push(m[1] ?? "");
-      }
-    }
-    if (ok) return { ref, mod: await import(pathToFileURL(join(dir, "run.mjs")).href) };
-  }
-  return null;
-}
-const base = await loadBase();
-const skip = base ? false : "the release-1.6.1 base is not in this clone";
+// The base: run.mjs and its two imports as stored under src/fixtures/gates-1.6.1/ (byte-for-byte copies of commit 7b408fe,
+// the release-1.6.1 branch; see the README there), so the comparison runs in a clone with no history and never skips.
+import * as baseRun from "./fixtures/gates-1.6.1/run.mjs";
+const base = { ref: "7b408fe", mod: baseRun };
 
 const T = Date.parse("2026-11-17T10:00:00.000Z");
 const at = (/** @type {number} */ m) => new Date(T + m * 60000).toISOString();
@@ -122,7 +95,7 @@ const ROWS = [
   ["no stop yet", [start(0), rec(1, "block")], "i1", 1],
 ];
 
-test("every row: the branch holds at least as much as the base (release-1.6.1), never across the latest start", { skip }, () => {
+test("every row: the branch holds at least as much as the base (release-1.6.1), never across the latest start", () => {
   let stricter = 0;
   for (const [what, events, agent = "i1", want] of ROWS) {
     const [b, n] = compare(events, what, agent);
@@ -133,13 +106,13 @@ test("every row: the branch holds at least as much as the base (release-1.6.1), 
   assert.ok(stricter >= 5, `the branch is stricter than the base in some rows (${stricter})`);
 });
 
-test("sequences A and B (where the previous attempt let the review through): the branch holds", { skip }, () => {
+test("sequences A and B (where the previous attempt let the review through): the branch holds", () => {
   assert.deepEqual(compare(ROWS[0]?.[1] ?? [], "A"), [2, 2], "A: base block, branch block");
   assert.deepEqual(compare(ROWS[1]?.[1] ?? [], "A'"), [2, 2]);
   assert.deepEqual(compare(ROWS[2]?.[1] ?? [], "B"), [1, 2], "B: base pending, branch block");
 });
 
-test("400 random sequences (fixed seed): the branch never holds less than the base", { skip }, () => {
+test("400 random sequences (fixed seed): the branch never holds less than the base", () => {
   let seed = 20261118;
   const rnd = () => {
     seed = (seed * 1103515245 + 12345) % 2147483648;
