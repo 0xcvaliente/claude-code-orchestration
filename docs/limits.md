@@ -79,6 +79,7 @@ Also: a commit message that holds a denied form after a space is refused (`commi
 - The workflow guard's reach (A, K9).
 - The startup warnings about rules with a `*` for a worktree's name (A, K10).
 - `strictMcpConfig` alone (A, K7).
+- **The Agent SDK and the installed Claude Code.** The repository is on Agent SDK 0.3.326 (`^0.3.326` in `package.json`, 0.3.326 in `package-lock.json`), which carries Claude Code 2.1.326, and CI installs Claude Code 2.1.326 (`.github/workflows/ci.yml`), so the two agree. A machine whose Claude Code has updated itself to a newer patch (2.1.327 was seen on the release machine) gets a note, not a failure, from the `sdk` check of `npm run claude-update`, and the SDK pipeline there runs the SDK's own bundled 2.1.326. It stays because an SDK bump is a dependency change with its own procedure, not part of this release; nothing in the native toolkit depends on it. To match: follow [Claude Code updates](claude-code-updates.md) (run `npm run claude-update` after every Claude Code update, install the Agent SDK whose patch number matches, then run `npm run check`).
 
 ## F. Not built
 

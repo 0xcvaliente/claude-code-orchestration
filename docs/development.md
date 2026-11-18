@@ -22,7 +22,7 @@ npm run typecheck    # the type check only
 | Script | What it does |
 |---|---|
 | `npm start`, `npm run orchestrate` | The native orchestrator, the main toolkit, interactive, with the pane loaded (`claude --agent orchestrator --plugin-dir dist/dashboard`) |
-| `npm run check` | Everything CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time |
+| `npm run check` | The first thing CI runs: typecheck, `npm test`, `check-agents` and `check-plugin`, at the same time; CI then also installs the Claude Code CLI and runs `npm run test-dashboard` |
 | `npm test`, `npm run typecheck` | Unit tests (fake model, no API calls; one temp root, removed at the end) and the type check |
 | `npm run check-agents`, `npm run sync-agents` | Find, or fix, drift between `src/config.ts` and `.claude/agents/*.md` |
 | `npm run build-plugin`, `npm run check-plugin` | Build `dist/plugin` and `dist/dashboard`, or fail when the committed build is stale |
