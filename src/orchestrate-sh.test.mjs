@@ -107,78 +107,152 @@ const headless = () => dryRunArgs({ ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_T
 const R = realpathSync(dryRepo);
 const WT = `${R}/.claude/worktrees/agent-a1b2`;
 
+// The base: the deny list of release-2.0.0 (b0f1388), stored here so that no test reads git history. f3 changes no
+// allow rule, so a command's base decision is the script's own allow list with this deny list.
+const BASE_DENY = [
+  "Bash(git push*)", "Bash(git * push*)", "Bash(git remote*)", "Bash(git * remote*)",
+  "Bash(sudo*)", "Bash(rm -rf*)", "Bash(rm -fr*)", "Bash(rm -r -f*)", "Bash(rm -f -r*)",
+  "Bash(git -c*)", "Bash(git * -c*)", "Bash(git --config-env*)", "Bash(git * --config-env*)",
+  "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean -*)",
+  "Bash(git * --namespace*)", "Bash(git * --git-dir*)", "Bash(git * --work-tree*)", "Bash(git * --exec-path*)",
+  "Bash(git * --super-prefix*)", "Bash(git * --attr-source*)", "Bash(git * -C *)", "Bash(git -C */../*)",
+];
+/** @param {string[]} args @param {string} cmd */
+const basePermitted = (args, cmd) => hits(allowed(args), cmd).length > 0 && hits(BASE_DENY, cmd).length === 0;
+/** GIT_C_DESTRUCTIVE_DENY: every deny rule after the base list. @param {string[]} args */
+const newRules = (args) => denied(args).slice(BASE_DENY.length);
+
+// One entry per rule of GIT_C_DESTRUCTIVE_DENY (but the two first-word rules, FIRST_WORD below): the subcommand word
+// directly followed by its destructive token. Each form is tried in the spellings of SPELL (at least three rows per
+// rule), and every row must pass the base rules (so it fails before f3) and hit its own rule.
+/** @type {[string, string[]][]} */
+const RULE_FORMS = [
+  ["Bash(git -C * branch -*d*)", ["branch -d main", "branch --delete main", "branch -rd origin/main"]],
+  ["Bash(git -C * branch -*D*)", ["branch -D main", "branch -qD main", "branch -D x"]],
+  ["Bash(git -C * branch -*m*)", ["branch -m main old", "branch --move main old", "branch -qm main old"]],
+  ["Bash(git -C * branch -*M*)", ["branch -M x main", "branch -qM x main", "branch -M main"]],
+  ["Bash(git -C * branch -*f*)", ["branch -f main HEAD~3", "branch --force main HEAD~3", "branch -qf main HEAD~3"]],
+  // a plain `-C ` is refused by the base rule `git * -C *` already; the clustered form is not
+  ["Bash(git -C * branch -*C*)", ["branch -qC x main"]],
+  ["Bash(git -C * checkout -*)", ["checkout -- .", "checkout -f main", "checkout -qf main", "checkout --ours .", "checkout -B main HEAD~1"]],
+  ["Bash(git -C * checkout .*)", ["checkout .", "checkout ./src"]],
+  ["Bash(git -C * checkout :**)", ["checkout :/", "checkout :(top)src"]],
+  ["Bash(git -C * checkout /*)", ["checkout /abs/src", "checkout /r/src /r/doc"]],
+  ["Bash(git -C * switch -*)", ["switch -f main", "switch --discard-changes main", "switch -qC main HEAD~3", "switch --force main", "switch -m main"]],
+  ["Bash(git -C * restore -*)", ["restore --staged x", "restore -W src", "restore --source=HEAD~3 src"]],
+  ["Bash(git -C * restore .*)", ["restore .", "restore ./src"]],
+  ["Bash(git -C * restore :**)", ["restore :/", "restore :(top)src"]],
+  ["Bash(git -C * restore /*)", ["restore /abs/src", "restore /r/src /r/doc"]],
+  ["Bash(git -C * reset -* *)", ["reset --merge HEAD~3", "reset -N x", "reset --soft HEAD~3", "reset -- .", "reset --mixed HEAD~3", "reset --keep HEAD~3", "reset -q HEAD~3"]],
+  ["Bash(git -C * rebase -*)", ["rebase -i HEAD~3", "rebase --onto x y main", "rebase -q main"]],
+  ["Bash(git -C * update-ref *)", ["update-ref refs/heads/main HEAD~3", "update-ref -d refs/heads/main"]],
+  ["Bash(git -C * symbolic-ref *)", ["symbolic-ref HEAD refs/heads/x", "symbolic-ref -q HEAD refs/heads/x"]],
+  ["Bash(git -C * filter-branch *)", ["filter-branch --index-filter x HEAD", "filter-branch -f HEAD"]],
+  ["Bash(git -C * gc --prune*)", ["gc --prune=now", "gc --prune=all"]],
+  ["Bash(git -C * reflog expire*)", ["reflog expire --expire=now --all", "reflog expire --all"]],
+  ["Bash(git -C * reflog delete*)", ["reflog delete HEAD@{1}", "reflog delete --rewrite HEAD@{1}"]],
+  ["Bash(git -C * worktree remove -*)", ["worktree remove --force /r/wt", "worktree remove -f /r/wt"]],
+  ["Bash(git -C * stash drop*)", ["stash drop", "stash drop -q stash@{1}"]],
+  ["Bash(git -C * stash clear*)", ["stash clear", "stash clear -q"]],
+  ["Bash(git -C * fetch -*)", ['fetch --force "$PWD" main', 'fetch -o status "$PWD" main:main', 'fetch -qf "$PWD" main']],
+  ["Bash(git -C * pull -*)", ['pull --force "$PWD" main', 'pull -f "$PWD" main', 'pull -q "$PWD" main:main']],
+  ["Bash(git -C * rm -*)", ["rm -rf src", "rm -r src", "rm --cached src"]],
+  ["Bash(git -C * tag -*)", ["tag -d v1", "tag -f v1 HEAD~3", "tag --delete v1"]],
+  ["Bash(git -C * config -*)", ["config --add core.x y", "config -f .git/config core.x y", "config --unset core.x"]],
+  ["Bash(git -C * config set *)", ["config set user.name x", "config set core.hooksPath /tmp/h"]],
+  ["Bash(git -C * config unset *)", ["config unset core.x", "config unset user.name"]],
+  ["Bash(git -C * config core.*)", ["config core.hooksPath /tmp/h", "config core.sshCommand x", "config core.fsmonitor x"]],
+  ["Bash(git -C * config alias.*)", ["config alias.st x", "config alias.p !sh"]],
+  ["Bash(git -C * config hook.*)", ["config hook.x.command y"]],
+  ["Bash(git -C * config include*)", ["config include.path /tmp/x", "config includeIf.onbranch:main.path /tmp/x"]],
+  ["Bash(git -C * config url.*)", ["config url./tmp/x.insteadOf y"]],
+];
+/** The three spellings: the project folder and a later `status`, a quoted `-C` path holding a space and a later
+ * `log`, a worktree and a later `add` (its pinned allow rule). @type {((f: string) => string)[]} */
+const SPELL = [(f) => `git -C ${R} ${f} status`, (f) => `git -C "/tmp/a b" ${f} log --oneline`, (f) => `git -C ${WT} ${f} add x`];
+/** @returns {[string, string][]} */
+const ruleRows = () => RULE_FORMS.flatMap(([rule, forms]) =>
+  Array.from({ length: Math.max(3, forms.length) }, (_, i) => /** @type {[string, string]} */ ([rule, SPELL[i % 3]?.(String(forms[i % forms.length])) ?? ""])));
+// The two first-word rules: no default allow rule starts with `git --`, so their rows are judged with a person's extra
+// allow rule `Bash(git *)` (ORCH_EXTRA_ALLOWED_TOOLS), which the base deny list let them through.
+/** @type {[string, string[]][]} */
+const FIRST_WORD = [
+  ["Bash(git --git-dir*)", ['git --git-dir=../origin.git fetch "$PWD" main:main', 'git --git-dir="/tmp/a b/.git" update-ref refs/heads/main HEAD~3', "git --git-dir=../o.git branch -D main"]],
+  ["Bash(git --work-tree*)", ["git --work-tree=../x checkout -- .", 'git --work-tree="/tmp/a b" checkout -f main', "git --work-tree=../x reset --merge HEAD~3"]],
+];
+const withGitStar = () => dryRunArgs({ ORCH_ALLOWED_TOOLS: "", ORCH_EXTRA_ALLOWED_TOOLS: "Bash(git *)", ORCH_SKILL_CREATE: "off" });
+
 // Each row passed the headless rules before f3 (an allowed subcommand word later in the command lets a
-// `git -C * <subcommand>*` rule match it) and is denied now: one row per destructive form closed.
+// `git -C * <subcommand>*` rule match it) and is denied now. Rows the third attempt gave back are in LIMITS.
 const CLOSED = [
   // the two examples of docs/safety.md
   `git -C ${R} branch -D main status`, `git -C ${R} checkout -- . diff`,
   // branch: delete, rename, force
   `git -C ${R} branch -d main status`, `git -C ${R} branch --delete main log`, `git -C ${R} branch --del main log`, `git -C ${R} branch -q -D main status`,
-  `git -C ${R} branch main -D status`, `git -C ${R} branch -M x main status`, `git -C ${R} branch -m main old status`, `git -C ${R} branch -q -m main old status`,
+  `git -C ${R} branch -M x main status`, `git -C ${R} branch -m main old status`, `git -C ${R} branch -q -m main old status`,
   `git -C ${R} branch --move main old status`, `git -C ${R} branch -f main HEAD~3 status`, `git -C ${R} branch --force main HEAD~3 log`,
   // checkout and switch that drop work or move a branch
-  `git -C ${R} checkout -f main status`, `git -C ${R} checkout --force main status`, `git -C ${R} checkout . status`, `git -C ${R} checkout HEAD -- src status`,
-  `git -C ${R} checkout -B main HEAD~1 status`, `git -C ${R} checkout :/ status`, `git -C ${WT} checkout main -f add x`,
+  `git -C ${R} checkout -f main status`, `git -C ${R} checkout --force main status`, `git -C ${R} checkout . status`,
+  `git -C ${R} checkout -B main HEAD~1 status`, `git -C ${R} checkout :/ status`,
   `git -C ${R} switch -f main status`, `git -C ${R} switch --force main status`, `git -C ${R} switch --discard-changes main status`,
   // restore
   `git -C ${R} restore . status`, `git -C ${R} restore --staged --worktree src diff`, `git -C ${R} restore -W src status`, `git -C ${R} restore :/ status`, `git -C ${R} restore ${R}/src log`,
-  // reset beyond `reset --merge` (reset --hard was closed before)
-  `git -C ${R} reset --soft HEAD~3 status`, `git -C ${R} reset --mixed HEAD~3 status`, `git -C ${R} reset --keep HEAD~3 status`, `git -C ${R} reset HEAD~3 status`,
-  `git -C ${R} reset -q HEAD~3 status`, `git -C ${R} reset @~3 status`, `git -C ${R} reset -- . status`, `git -C ${R} reset main --soft status`,
+  // reset with an option and a further word (reset --hard was closed before)
+  `git -C ${R} reset --soft HEAD~3 status`, `git -C ${R} reset --mixed HEAD~3 status`, `git -C ${R} reset --keep HEAD~3 status`,
+  `git -C ${R} reset -q HEAD~3 status`, `git -C ${R} reset -- . status`,
   // refs and history written directly
   `git -C ${R} update-ref refs/heads/main HEAD~3 status`, `git -C ${R} update-ref -d refs/heads/main log`, `git -C ${R} symbolic-ref HEAD refs/heads/x status`,
-  `git -C ${R} gc --prune=now status`, `git -C ${R} gc --aggressive --prune=now log`, `git -C ${R} reflog expire --expire=now --all status`, `git -C ${R} reflog delete HEAD@{1} status`,
+  `git -C ${R} gc --prune=now status`, `git -C ${R} reflog expire --expire=now --all status`, `git -C ${R} reflog delete HEAD@{1} status`,
   `git -C ${R} worktree remove --force ${WT} status`, `git -C ${R} worktree remove -f ${WT} log`, `git -C ${R} stash drop status`, `git -C ${R} stash clear status`,
-  `git -C ${R} rebase -i HEAD~3 log`, `git -C ${R} rebase --onto x y main status`, `git -C ${R} rebase HEAD~3 status`, `git -C ${R} rebase @~3 status`,
+  `git -C ${R} rebase -i HEAD~3 log`, `git -C ${R} rebase --onto x y main status`,
   `git -C ${R} filter-branch --index-filter x HEAD status`,
-  // a fetch or pull that writes a ref through a refspec destination or --force (audit J-11: in another repository it is a push)
-  `git -C ../origin.git fetch -o status "$PWD" main:main`, `git -C ../origin.git fetch "$PWD" main:main status`, `git -C ${R} fetch ../other +refs/heads/*:refs/heads/* log`,
-  `git -C ../origin.git fetch --force "$PWD" main status`, `git -C ../origin.git fetch -f "$PWD" main status`, `git -C ../other pull "$PWD" main:main status`,
-  `git -C ../other pull --force "$PWD" main status`, `git -C ${WT} fetch ${R} main:main add x`,
+  // a fetch or pull with an option directly after it (audit J-11: in another repository a destination is a push)
+  `git -C ../origin.git fetch -o status "$PWD" main:main`, `git -C ../origin.git fetch --force "$PWD" main status`, `git -C ../origin.git fetch -f "$PWD" main status`,
+  `git -C ../other pull --force "$PWD" main status`,
 ];
 
-// Second attempt: the eight under-blocks a review found (clustered or reordered short options, reset --merge with more
-// after it, checkout --ours) and the three older ones (rm -rf, tag -d, config), each passing the rules of ed139ef.
+// Second attempt: the under-blocks a review found (clustered short options, reset --merge with more after it,
+// checkout --ours) and rm -rf, tag -d, config, each passing the rules of ed139ef. `branch a b -m log` is in LIMITS.
 const REVIEW_ROWS = [
   `git -C ${R} reset --merge HEAD~3 status`, `git -C ${R} reset -N HEAD~3 status`, `git -C ${R} branch -qD main status`, `git -C ${R} branch -rd origin/main status`,
-  `git -C ${R} branch a b -m log`, `git -C ${R} checkout -qf main status`, `git -C ${R} switch -qf main status`, `git -C ${R} checkout --ours . status`,
+  `git -C ${R} checkout -qf main status`, `git -C ${R} switch -qf main status`, `git -C ${R} checkout --ours . status`,
   `git -C ${R} rm -rf src status`, `git -C ${R} tag -d v1 status`, `git -C ${R} config core.hooksPath /tmp/h status`,
 ];
 
-// One entry per deny rule of GIT_C_DESTRUCTIVE_DENY (but the two first-word rules, in STILL_DENIED): a form and the
-// same form with its options in another order or place. Each is tried in three spellings (shapes() below).
-/** @type {[string, string][]} */
-const SHAPES = [
-  ["branch -qd main", "branch main -d"], ["branch -qD main", "branch main -D"], ["branch -qm main old", "branch main old -m"],
-  ["branch -qM main old", "branch main old -M"], ["branch -qf main HEAD~3", "branch main HEAD~3 -f"], ["branch -qC x main", "branch x main --copy --force"],
-  ["checkout HEAD -- src", "checkout -q HEAD -- src"], ["checkout -qf main", "checkout main -f"], ["checkout -qB main HEAD~1", "checkout HEAD~1 -B main"],
-  ["checkout -qm main", "checkout main --merge"], ["checkout --ours .", "checkout -q --ours src"], ["checkout --theirs .", "checkout -q --theirs src"],
-  ["checkout .", "checkout ./src"], ["checkout :/", "checkout :(top)src"],
-  ["switch -qf main", "switch main --force"], ["switch -qm main", "switch main --merge"], ["switch -qC main HEAD~3", "switch --quiet -qC main HEAD~3"],
-  ["switch --discard-changes main", "switch main --discard-changes"],
-  ["restore -qW src", "restore src --staged"], ["restore .", "restore ./src"], ["restore :/", "restore :(top)src"], ["restore /r/src", "restore /r/src /r/doc"],
-  ["reset -N HEAD~3", "reset --merge HEAD~3"], ["reset main -q", "reset main --soft"], ["reset HEAD~3", "reset HEAD^ src"], ["reset @~3", "reset @{1}"],
-  ["reset ORIG_HEAD", "reset FETCH_HEAD src"],
-  ["update-ref refs/heads/main HEAD~3", "update-ref -d refs/heads/main"], ["symbolic-ref HEAD refs/heads/x", "symbolic-ref -q HEAD refs/heads/x"],
-  ["gc --prune=now", "gc --aggressive --prune=now"], ["reflog expire --all", "reflog expire --expire=now --all"],
-  ["reflog delete HEAD@{1}", "reflog delete --rewrite HEAD@{1}"], ["worktree remove -qf /r/wt", "worktree remove /r/wt --force"],
-  ["stash drop", "stash drop -q stash@{1}"], ["stash clear", "stash clear -q"],
-  ["rebase -i HEAD~3", "rebase main --onto x"], ["rebase HEAD~3", "rebase HEAD~3 main"], ["rebase @~3", "rebase @{u}"],
-  ["filter-branch --index-filter x HEAD", "filter-branch -f HEAD"],
-  ['fetch "$PWD" main:main', 'fetch -q "$PWD" +refs/heads/*:refs/heads/*'], ['fetch -qf "$PWD" main', 'fetch "$PWD" main --force'],
-  ['pull "$PWD" main:main', 'pull -q "$PWD" main:main'], ['pull -qf "$PWD" main', 'pull "$PWD" main --force'],
-  ["rm -rf src", "rm src -r -f"], ["tag -d v1", "tag v1 -d"], ["tag -f v1 HEAD~3", "tag v1 HEAD~3 -f"],
-  ["config core.hooksPath /tmp/h", "config set core.hooksPath /tmp/h"], ["config --add core.hooksPath /tmp/h", "config -f .git/config core.x y"],
-];
-/** Three spellings of each shape: as written with a later allowed word, reordered, and after a quoted `-C` path with a space. */
-const shapes = () => SHAPES.flatMap(([a, b]) => [`git -C ${R} ${a} status`, `git -C ${R} ${b} diff`, `git -C "/tmp/a b" ${a} log --oneline`]);
-
-// Limits: forms a rule pattern cannot tell from an everyday word (a path, a revision or a branch name as the argument,
-// with no option), so they still pass when an allowed subcommand word follows. scripts/orchestrate.sh names each one.
+// Limits: forms a rule of the shape "subcommand word directly followed by its token" cannot reach, so they still pass
+// when an allowed subcommand word follows. Each example of the "Out of reach" list in orchestrate.sh is a row here.
+// Rows the earlier attempts denied and the third attempt gave back (their rules refused ordinary commit messages):
+// moved here by name, with the comment `// moved` on their group.
 const LIMITS = [
+  // the destructive token after another word (moved: branch main -D, branch a b -m, the reordered SHAPES spellings,
+  // checkout main -f in a worktree, reset main --soft, gc --aggressive --prune=now)
+  `git -C ${R} branch main -D status`, `git -C ${R} branch a b -m log`, `git -C ${R} branch main -d diff`, `git -C ${R} branch main old -m diff`,
+  `git -C ${R} branch main old -M diff`, `git -C ${R} branch main HEAD~3 -f diff`, `git -C ${R} branch x main --copy --force diff`,
+  `git -C ${R} checkout main -f status`, `git -C ${R} checkout main -f diff`, `git -C ${WT} checkout main -f add x`, `git -C ${R} checkout HEAD~1 -B main diff`,
+  `git -C ${R} checkout main --merge diff`, `git -C ${R} switch main --discard-changes status`, `git -C ${R} switch main --force diff`, `git -C ${R} switch main --merge diff`,
+  `git -C ${R} restore src --staged diff`, `git -C ${R} reset main --soft status`, `git -C ${R} reset main --soft diff`, `git -C ${R} reset main -q status`,
+  `git -C "/tmp/a b" reset main -q log --oneline`, `git -C ${R} gc --aggressive --prune=now log`, `git -C ${R} gc --aggressive --prune=now diff`,
+  `git -C ${R} worktree remove /r/wt --force diff`, `git -C ${R} rebase main --onto x diff`, `git -C ${R} fetch "$PWD" main --force diff`,
+  `git -C ${R} pull "$PWD" main --force diff`, `git -C ${R} rm src -r -f status`, `git -C ${R} rm src -r -f diff`, `git -C ${R} tag v1 -d status`,
+  `git -C ${R} tag v1 -d diff`, `git -C ${R} tag v1 HEAD~3 -f diff`,
+  // a path, or `--` and a path, after a revision or another path (moved: checkout HEAD -- src)
+  `git -C ${R} checkout HEAD . status`, `git -C ${R} checkout main :/ status`, `git -C ${R} checkout main /abs/src status`,
+  `git -C ${R} checkout HEAD -- src status`, `git -C "/tmp/a b" checkout HEAD -- src log --oneline`,
+  `git -C ${R} restore src . status`, `git -C ${R} restore src :/ status`, `git -C ${R} restore src /abs status`,
+  // a plain path, revision or branch name (moved: reset and rebase with HEAD, @ or *_HEAD)
   `git -C ${R} restore src status`, `git -C ${R} reset main status`, `git -C ${R} reset 0a1b2c3 status`, `git -C ${R} reset origin/main status`,
-  `git -C ${R} rebase main status`, `git -C ${R} checkout main src status`, `git -C ${R} rm src status`, `git -C ../other pull "$PWD" main status`,
-  `git -C ${R} worktree remove ${WT} status`,
+  `git -C ${R} reset HEAD~3 status`, `git -C "/tmp/a b" reset HEAD~3 log --oneline`, `git -C ${R} reset HEAD^ src diff`, `git -C ${R} reset @~3 status`,
+  `git -C ${R} reset @{1} diff`, `git -C "/tmp/a b" reset @~3 log --oneline`, `git -C ${R} reset ORIG_HEAD status`, `git -C ${R} reset FETCH_HEAD src diff`,
+  `git -C "/tmp/a b" reset ORIG_HEAD log --oneline`, `git -C ${R} rebase main status`, `git -C ${R} rebase HEAD~3 status`, `git -C ${R} rebase HEAD~3 main diff`,
+  `git -C "/tmp/a b" rebase HEAD~3 log --oneline`, `git -C ${R} rebase @~3 status`, `git -C ${R} rebase @{u} diff`, `git -C "/tmp/a b" rebase @~3 log --oneline`,
+  `git -C ${R} checkout main src status`, `git -C ${R} rm src status`, `git -C ../other pull "$PWD" main status`, `git -C ${R} worktree remove ${WT} status`,
+  // a fetch or pull with a refspec destination after another word (moved: every refspec row; a rule for it refused
+  // a commit message holding fetch or pull and a colon later)
+  `git -C ../origin.git fetch "$PWD" main:main status`, `git -C ${R} fetch ../other +refs/heads/*:refs/heads/* log`, `git -C ../other pull "$PWD" main:main status`,
+  `git -C ${WT} fetch ${R} main:main add x`, `git -C ${R} fetch "$PWD" main:main status`, `git -C "/tmp/a b" fetch "$PWD" main:main log --oneline`,
+  `git -C ${R} pull "$PWD" main:main status`, `git -C "/tmp/a b" pull "$PWD" main:main log --oneline`,
+  // a config key of another section or in another case
+  `git -C ${R} config user.name x status`, `git -C ${R} config Core.hooksPath x status`,
 ];
 
 // Denied before f3 and still denied: the J-11 commands as written (no allow rule matches them), push and clean.
@@ -206,9 +280,112 @@ const STILL_ALLOWED = [
 // they are pinned so that no change here is mistaken for a widening.
 const NOT_ALLOWED_IN_WORKTREE = [`git -C ${WT} reset --merge`, `git -C ${WT} merge --abort`];
 
+// R2 corpus: subjects copied from `git log --format=%s -300` of this repository (every one holding branch, checkout,
+// switch, restore, reset, rebase, rm, tag, config, fetch, pull, stash, worktree, clean or push, and a spread of the
+// rest), stored here: no test reads git history.
+const CORPUS_SUBJECTS = [
+  "f3: deny clustered and reordered destructive options after git -C; reset beyond bare --merge; rm, tag, config; name limits",
+  "f3: headless git -C destructive-form denies; orchestrator continue-branch and base checks; test-dashboard comment",
+  "Merge branch 'worktree-agent-a5565d1f83d0e0554' into release-2.0.0",
+  "Merge branch 'worktree-agent-a97feccb3f2774b38' into worktree-agent-a5565d1f83d0e0554",
+  "Merge branch 'worktree-agent-a544992465059fdcb' into release-2.0.0",
+  "Merge branch 'worktree-agent-ac1d031964c60422b' into release-2.0.0",
+  "Merge branch 'worktree-agent-a27b49c6a0f81aee0' into release-2.0.0",
+  "Merge branch 'worktree-agent-a73f2c5234998ca87' into release-2.0.0",
+  "Merge branch 'worktree-agent-a9a22a7d620865da7' into release-2.0.0",
+  "Join the release-1.6.1 branch history: its tree equals the published 1.6.1 (a21622b)",
+  "w6 retry 2: follow every tag chain (at most 16 tag objects) and scan each tag object; blob and tree targets the push carries count",
+  "w6 retry: scan every byte of each raw commit and tag object but its fixed-form id lines",
+  "w4: claude-update checks payload fields, the memory switch and the loaded plugin's workflow (items 4, 5)",
+  "Merge pull request #27 from 0xcvaliente/add-update-mac-copy",
+  "Add workflow that updates the Mac copy on push to main",
+  "Release 1.4.2: a test-gate hole closed, the workflow, parser, plan check and guards hardened, a turn warning and a worktree base check (#18)",
+  "Worktree base check, turn warning, researcher coverage note and clearer gate messages (#16)",
+  "Release 1.4.1: the Bash judge denies quoted exec-env assignments and find -rm, and no longer scans quadratically (#13)",
+  "Bash judge: deny quoted exec-env assignments, find -rm, and fix the quadratic scan (#12)",
+  "Release 1.2.2: block the new web-fetch built-in, no auto memory in inner calls, a check for Claude Code updates (#5)",
+  "Merge slice r4-readme: README rewritten for 0.4.0 (diagrams, switch table, compare-040, limitations); baseline modes, skipped-skill and gap-cutoff wording",
+  "s3-skill-prompts: restore missing space in nudge text",
+  "h-test-gate: baseline inform by default (allow opt-in), runner-level crash markers, deps from the main worktree, process-group timeout, subdir in cache key",
+  "c-profiler: WIP profiler core, fixtures, config",
+  "judge: clamp the native judge timeout below the hook kill and deny symlinked or out-of-tree rm targets",
+  "roles: implementer cannot spawn agents; fork subagents denied; tool policy synced from config.ts",
+  "SDK workers: an opus judge decides git push, git remote and recursive rm; sudo and a narrow floor stay blocked",
+  "dashboard: plan reviews are never slice cards, a new prompt starts a clean run, no stale ghost cards (0.1.12)",
+  "Merge branch 'worktree-agent-a2a3486bf3062e286'",
+  "Merge branch 'worktree-agent-aaf230b941ce7ec27'",
+  "Merge branch 'worktree-agent-a3504f2e6862b2e6f'",
+  "Merge branch 'worktree-agent-a165f93e16d760f08'",
+  "Merge branch 'worktree-agent-a917f3e74f99b9bfc'",
+  "Merge branch 'worktree-agent-a05e7a8cf495e26a2'",
+  "Merge branch 'worktree-agent-ae26c6b29d0e5856a'",
+  "Merge branch 'worktree-agent-a5f80f257663a4fed'",
+  "Merge branch 'worktree-agent-a3a88b336f75649c4'",
+  "Merge branch 'worktree-agent-a8bdd92a660dff2bb'",
+  "Merge branch 'worktree-agent-a8dbc0391a8d447e0'",
+  "headless allowlist: python checks and worktree merges",
+  "Merge branch 'worktree-agent-a457dbb1ab525afa2'",
+  "Merge branch 'worktree-agent-a567dc42d59f07df1'",
+  "Merge branch 'worktree-agent-a1bd0a892ddc2b3f7'",
+  "Merge branch 'worktree-agent-a4ad1d6b98d69e2fa'",
+  "w7: string wrappers read every argument as a command string (S1); zsh stuck braces (S2)",
+  "w2 retry 2: rebuild dist/plugin hooks",
+  "w2 retry: attached and bundled zsh options, clone -c attached and abbreviated, find -exec as a command start, send-email prefixes, update-ref judged, prompts narrowed; native hook tracks directory changes",
+  "w4: probe page (item 8: .mcp.json variable forms; claude-update checks)",
+  "w4: /route passes the task through a quoted here-document (item 1)",
+  "b2",
+  "k5: pin headless git -C write rules; worker rows through the mod's AgentRow hook",
+  "Second audit: Bash judge hardening, SDK, hook and pane fixes, README and diagrams (#23)",
+  "Dashboard: open the pane by itself only inside herdr (#10)",
+  "Release 1.1.0: first stable release (0.4.0 plus the escalation-aware finality fix, ORCH_SESSION_PERSISTENCE, the route-040 read-router benchmark and the agent.spawn probe); CHANGELOG.md with the stability statement; version test reads package.json",
+  "f1-run-split: tests and dashboard mirror follow the new finality rule",
+  "r4-readme: CLAUDE.md points to the renamed README sections",
+  "r3-bench-report: compare-040 results page",
+  "r2-docs: native-vs-plugin 0.4.0",
+  "s2-skill-hints: a skipped suggestion goes in one report line, not under OPEN",
+  "Merge slice j-wiring: register the 0.4.0 hooks (read log, guards, quote check, compact context), judge onFailure block, hook timeouts, userConfig, version 0.4.0, rebuilt plugin",
+  "i-router: quote-check tests",
+  "g-review-gate: VALIDATE wording in brief grammar",
+  "e-guards: deny any heredoc or here-string in researcher commands (review GAP 30); note GAP 25",
+  "b-telemetry",
+  "c-profiler: file profiler tests and CI poppler",
+  "docs: harness research 2026-10-31 (file-type model routing, harness survey, final verdict)",
+  "Merge slice B3: plugin eval suite",
+  "Merge slice A1: async-aware, run-scoped gates",
+  "Merge slice A2: role lockdown",
+  "statusline: ship the status line script, an installer and a test",
+  "s2-parity",
+  "test: make the reviewed-route truncation check deterministic",
+  "docs: final benchmark results (review fix)",
+];
+const corpus = () => [
+  ...CORPUS_SUBJECTS.flatMap((s) => [
+    `git -C ${WT} commit -m "${s}"`,
+    `git -C ${WT} commit -m "${s}" -m "Body - details. See docs/config.md."`,
+    `git -C ${WT} commit -m "${s}" -m "Refs: a:b, c:d -- notes"`,
+  ]),
+  // the four commands the second attempt's rules refused
+  `git -C ${WT} commit -m "fix: reset the cache" -m "Body."`, `git -C ${WT} commit -m "fix: update config loader" -m "See docs."`,
+  `git -C ${WT} commit -m "add the branch name to the report" -m "Body - details."`, `git -C ${WT} commit -m "docs: checkout flow -- notes"`,
+  `git -C ${WT} add src/config.ts`, `git -C ${WT} add src/checkout/restore.ts`, `git -C ${WT} diff -- src/config.ts`, `git -C ${WT} log -- src/tag.ts`,
+  `git -C ${WT} status -- scripts/rm.sh`, `git -C ${WT} ls-files src/reset.ts`, `git -C ${WT} show HEAD:src/x.ts`, `git -C ${WT} diff main:src/a.ts branch:src/a.ts`,
+  `git -C ${WT} log --format=%H:%s -3`, `git -C ${WT} branch --show-current`, `git -C ${WT} worktree list`, `git -C ${WT} merge --abort`,
+  `git -C ${R} reset --merge`, `git -C ${R} merge --no-ff --no-edit branch`,
+];
+
+test("orchestrate.sh dry run (f3): the deny list is b0f1388's, in order, then GIT_C_DESTRUCTIVE_DENY, each rule with its rows", () => {
+  const args = headless();
+  assert.deepEqual(denied(args).slice(0, BASE_DENY.length), BASE_DENY);
+  assert.equal(newRules(args).length, 40, newRules(args).join("\n"));
+  assert.deepEqual([...RULE_FORMS.map(([r]) => r), ...FIRST_WORD.map(([r]) => r)], newRules(args));
+});
+
 test("orchestrate.sh dry run (f3): destructive git forms that an allow rule's `*` absorbed are denied", () => {
   const args = headless();
-  for (const cmd of CLOSED) assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${hits(allowed(args), cmd).join(", ")}`);
+  for (const cmd of CLOSED) {
+    assert.ok(basePermitted(args, cmd), `${cmd} must pass the rules before f3`);
+    assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${hits(allowed(args), cmd).join(", ")}`);
+  }
   for (const cmd of STILL_DENIED) assert.equal(permitted(args, cmd), false, cmd);
 });
 
@@ -222,45 +399,85 @@ test("orchestrate.sh dry run (f3): the everyday git commands stay allowed", () =
 
 test("orchestrate.sh dry run (f3, second attempt): the reviewed under-blocks are denied", () => {
   const args = headless();
-  for (const cmd of REVIEW_ROWS) assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${hits(allowed(args), cmd).join(", ")}`);
-});
-
-test("orchestrate.sh dry run (f3, second attempt): each deny pattern holds in three spellings (option order, a quoted -C path, a later allowed word)", () => {
-  const args = headless();
-  for (const cmd of shapes()) {
-    assert.ok(hits(allowed(args), cmd).length > 0, `${cmd}: the row must model a form an allow rule absorbs`);
+  for (const cmd of REVIEW_ROWS) {
+    assert.ok(basePermitted(args, cmd), `${cmd} must pass the rules before f3`);
     assert.equal(permitted(args, cmd), false, `${cmd} is allowed by ${hits(allowed(args), cmd).join(", ")}`);
   }
 });
 
-test("orchestrate.sh dry run (f3, second attempt): the out-of-reach forms named in orchestrate.sh still pass (limits, not fixed)", () => {
+test("orchestrate.sh dry run (f3): each deny rule denies its rows in three spellings, each allowed before f3", () => {
   const args = headless();
-  for (const cmd of LIMITS) assert.equal(permitted(args, cmd), true, `limit ${cmd} is now denied: update the "Out of reach" list in orchestrate.sh`);
-  const sh = readFileSync(orchestrateSh, "utf8");
-  for (const form of ["restore src status", "reset main status", "rebase main status", "checkout main src status", "rm src status", "pull <path> main status", "worktree remove <worktree> status"]) {
-    assert.ok(sh.includes(form), `orchestrate.sh names the limit ${form}`);
+  for (const [rule, cmd] of ruleRows()) {
+    assert.ok(basePermitted(args, cmd), `${cmd}: the row must pass the rules before f3`);
+    assert.ok(hits(newRules(args), cmd).includes(rule), `${cmd} is not denied by ${rule}`);
+    assert.equal(permitted(args, cmd), false, cmd);
+  }
+  const extra = withGitStar();
+  for (const [rule, cmds] of FIRST_WORD) {
+    for (const cmd of cmds) {
+      assert.ok(basePermitted(extra, cmd), `${cmd}: the row must pass the rules before f3 with Bash(git *) allowed`);
+      assert.ok(hits(newRules(extra), cmd).includes(rule), `${cmd} is not denied by ${rule}`);
+      assert.equal(permitted(extra, cmd), false, cmd);
+    }
   }
 });
 
-test("orchestrate.sh dry run (f3, second attempt): stated over-blocks of commit messages", () => {
+test("orchestrate.sh dry run (f3): the out-of-reach forms named in orchestrate.sh still pass (limits, not fixed)", () => {
   const args = headless();
-  // A commit whose message holds a subcommand word a rule names after a space, followed later by an option word (a
-  // second -m, `--`, --no-verify) or by the phrase the rule names, is refused (a word right after the opening quote
-  // has no space before it and is not caught). Pinned so that the list in orchestrate.sh stays true.
+  for (const cmd of LIMITS) {
+    assert.ok(basePermitted(args, cmd), `limit ${cmd} must pass the rules before f3`);
+    assert.equal(permitted(args, cmd), true, `limit ${cmd} is now denied by ${hits(denied(args), cmd).join(", ")}: update the "Out of reach" list in orchestrate.sh`);
+  }
+  // Every example of the comment's "Out of reach" list is a LIMITS row (with <path> as "$PWD" and <worktree> as WT).
+  const sh = readFileSync(orchestrateSh, "utf8").split("\n");
+  const from = sh.findIndex((l) => l.startsWith("# Out of reach"));
+  const to = sh.findIndex((l, i) => i > from && l.startsWith("# This list stops mistakes"));
+  assert.ok(from > 0 && to > from, "orchestrate.sh has the Out of reach list");
+  const examples = [...sh.slice(from, to).join("\n").matchAll(/`([^`]+)`/g)].map((m) => String(m[1]));
+  assert.ok(examples.length >= 25, examples.join(" | "));
+  for (const ex of examples) {
+    const row = ` ${ex.replace("<path>", '"$PWD"').replace("<worktree>", WT)}`;
+    assert.ok(LIMITS.some((r) => r.includes(row)), `the limit ${ex} named in orchestrate.sh has no LIMITS row`);
+  }
+});
+
+test("orchestrate.sh dry run (f3, third attempt): the ordinary commands of the corpus get the same decision as before f3", () => {
+  const args = headless();
+  assert.ok(CORPUS_SUBJECTS.length >= 60, String(CORPUS_SUBJECTS.length));
+  const cmds = corpus();
+  const changed = cmds.filter((cmd) => permitted(args, cmd) !== basePermitted(args, cmd));
+  assert.deepEqual(changed.map((cmd) => `${cmd} -> ${hits(newRules(args), cmd).join(", ")}`), []);
+  // Most of them are allowed (a subject holding " push", " remote", " -c" or " -C " was refused before f3 already).
+  assert.ok(cmds.filter((cmd) => permitted(args, cmd)).length >= cmds.length - 30);
+});
+
+test("orchestrate.sh dry run (f3, second attempt): commit messages the earlier rules refused get their decision from before f3 back", () => {
+  const args = headless();
+  // The second attempt refused these (a subcommand word in the message, followed later by an option word or the
+  // phrase a wider rule named); the rules of this attempt need the token directly after the word.
   for (const cmd of [
     `git -C ${WT} commit -m "fix branch handling" -m "More"`, `git -C ${WT} commit -m "fix: reset cache" -- src/a.ts`, `git -C ${WT} commit -m "update config files. Done"`,
     `git -C ${WT} commit -m "fix checkout page" --no-verify`, `git -C ${WT} commit -m "fix: rm stale file" -- src/a.ts`, `git -C ${WT} commit -m "move tag" -m "details"`,
-  ]) assert.equal(permitted(args, cmd), false, cmd);
+    `git -C ${WT} commit -m "fix fetch of a:b pairs"`, `git -C ${WT} commit -m "fix: reset HEAD handling"`,
+  ]) {
+    assert.ok(basePermitted(args, cmd), cmd);
+    assert.equal(permitted(args, cmd), true, `${cmd}: ${hits(denied(args), cmd).join(", ")}`);
+  }
 });
 
 test("orchestrate.sh dry run (f3): stated over-blocks and limits, pinned so a change to them is seen", () => {
   const args = headless();
-  // Over-blocks: a deny rule cannot tell a commit message from a subcommand. The push one predates f3 (a deny that
-  // goes away would widen the rules); the others need the phrase a rule names.
+  // Over-blocks: a deny rule cannot tell a commit message from a subcommand, so a message holding a denied form (the
+  // subcommand word directly followed by its token) is refused. The push one predates f3 (a deny that goes away
+  // would widen the rules).
+  assert.equal(permitted(args, `git -C ${WT} commit -m "fix: push the button"`), false);
   for (const cmd of [
-    `git -C ${WT} commit -m "fix: push the button"`, `git -C ${WT} commit -m "fix fetch of a:b pairs"`, `git -C ${WT} commit -m "fix: reset HEAD handling"`,
-    `git -C ${WT} commit -m "drop the branch -D shortcut"`,
-  ]) assert.equal(permitted(args, cmd), false, cmd);
+    `git -C ${WT} commit -m "drop the branch -D shortcut"`, `git -C ${WT} commit -m "guard rm -rf in scripts"`,
+    `git -C ${WT} commit -m "docs: checkout -- paths"`, `git -C ${WT} commit -m "judge update-ref calls"`,
+  ]) {
+    assert.ok(basePermitted(args, cmd), cmd);
+    assert.equal(permitted(args, cmd), false, cmd);
+  }
   // Limits: a destructive form a rule pattern cannot tell from an everyday word still passes when an allowed
   // subcommand word follows (a path or a branch name as the argument).
   for (const cmd of [`git -C ${R} restore src status`, `git -C ${R} reset main status`, `git -C ${R} rebase main status`, `git -C ${R} checkout main src status`]) {

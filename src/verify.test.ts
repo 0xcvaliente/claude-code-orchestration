@@ -19,25 +19,23 @@ const HEADLESS_GIT_DENY = [
   "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean -*)",
   "Bash(git * --namespace*)", "Bash(git * --git-dir*)", "Bash(git * --work-tree*)", "Bash(git * --exec-path*)",
   "Bash(git * --super-prefix*)", "Bash(git * --attr-source*)", "Bash(git * -C *)", "Bash(git -C */../*)",
-  // f3: the destructive forms an allow rule's `*` can absorb after `git -C` (GIT_C_DESTRUCTIVE_DENY; rows in
-  // src/orchestrate-sh.test.mjs), and --git-dir and --work-tree as the first word.
-  "Bash(git -C * branch* -*d*)", "Bash(git -C * branch* -*D*)", "Bash(git -C * branch* -*m*)",
-  "Bash(git -C * branch* -*M*)", "Bash(git -C * branch* -*f*)", "Bash(git -C * branch* -*C*)",
-  "Bash(git -C * checkout* -- *)", "Bash(git -C * checkout* -*f*)", "Bash(git -C * checkout* -*B*)",
-  "Bash(git -C * checkout* -*m*)", "Bash(git -C * checkout* --o*)", "Bash(git -C * checkout* --th*)",
-  "Bash(git -C * checkout .*)", "Bash(git -C * checkout :**)", "Bash(git -C * switch* -*f*)",
-  "Bash(git -C * switch* -*m*)", "Bash(git -C * switch* -*C*)", "Bash(git -C * switch* --di*)",
-  "Bash(git -C * restore* -*)", "Bash(git -C * restore .*)", "Bash(git -C * restore :**)", "Bash(git -C * restore /*)",
-  "Bash(git -C * reset -* *)", "Bash(git -C * reset * -*)", "Bash(git -C * reset* --s*)",
-  "Bash(git -C * reset* --mi*)", "Bash(git -C * reset* --k*)", "Bash(git -C * reset* -q*)",
-  "Bash(git -C * reset HEAD*)", "Bash(git -C * reset @*)", "Bash(git -C * reset *_HEAD*)",
-  "Bash(git -C * update-ref*)", "Bash(git -C * symbolic-ref*)", "Bash(git -C * gc *--prune*)",
-  "Bash(git -C * reflog expire*)", "Bash(git -C * reflog delete*)", "Bash(git -C * worktree remove* -*f*)",
-  "Bash(git -C * stash drop*)", "Bash(git -C * stash clear*)", "Bash(git -C * rebase* -*)",
-  "Bash(git -C * rebase HEAD*)", "Bash(git -C * rebase @*)", "Bash(git -C * filter-branch*)",
-  "Bash(git -C * fetch * *:**)", "Bash(git -C * fetch* -*f*)", "Bash(git -C * pull * *:**)",
-  "Bash(git -C * pull* -*f*)", "Bash(git -C * rm* -*)", "Bash(git -C * tag* -*d*)", "Bash(git -C * tag* -*f*)",
-  "Bash(git -C * config *.*)", "Bash(git -C * config -*)", "Bash(git --git-dir*)", "Bash(git --work-tree*)",
+  // f3: the plain destructive forms an allow rule's `*` can absorb after `git -C`, each the subcommand word directly
+  // followed by its token (GIT_C_DESTRUCTIVE_DENY; rows in src/orchestrate-sh.test.mjs), and --git-dir and --work-tree
+  // as the first word.
+  "Bash(git -C * branch -*d*)", "Bash(git -C * branch -*D*)", "Bash(git -C * branch -*m*)", "Bash(git -C * branch -*M*)",
+  "Bash(git -C * branch -*f*)", "Bash(git -C * branch -*C*)",
+  "Bash(git -C * checkout -*)", "Bash(git -C * checkout .*)", "Bash(git -C * checkout :**)", "Bash(git -C * checkout /*)",
+  "Bash(git -C * switch -*)",
+  "Bash(git -C * restore -*)", "Bash(git -C * restore .*)", "Bash(git -C * restore :**)", "Bash(git -C * restore /*)",
+  "Bash(git -C * reset -* *)", "Bash(git -C * rebase -*)",
+  "Bash(git -C * update-ref *)", "Bash(git -C * symbolic-ref *)", "Bash(git -C * filter-branch *)", "Bash(git -C * gc --prune*)",
+  "Bash(git -C * reflog expire*)", "Bash(git -C * reflog delete*)", "Bash(git -C * worktree remove -*)",
+  "Bash(git -C * stash drop*)", "Bash(git -C * stash clear*)",
+  "Bash(git -C * fetch -*)", "Bash(git -C * pull -*)", "Bash(git -C * rm -*)", "Bash(git -C * tag -*)",
+  "Bash(git -C * config -*)", "Bash(git -C * config set *)", "Bash(git -C * config unset *)", "Bash(git -C * config core.*)",
+  "Bash(git -C * config alias.*)", "Bash(git -C * config hook.*)", "Bash(git -C * config include*)",
+  "Bash(git -C * config url.*)",
+  "Bash(git --git-dir*)", "Bash(git --work-tree*)",
 ];
 function detect(files: Record<string, string>, env: Record<string, string> = {}) {
   const dir = tmp();
