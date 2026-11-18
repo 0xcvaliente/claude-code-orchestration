@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 // Offline validation of benchmark tasks (no model calls).
-//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N]   (N tasks side by side, default 4)
+//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N] [--deadline-s S]   (N tasks side by side, default 4)
+// --deadline-s (default 270, 0 = none): when the run has not finished by then, it prints the lines of the tasks that did finish,
+// names each task it did not finish or did not reach (NOT DONE lines), ends its graders and exits 3, instead of being killed
+// silently by an outer timeout.
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
-// scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
+// scores pass:true; every mutant applied to the reference scores pass:false.
+// Exit codes: 0 every task valid; 1 a task failed, or no task matched; 3 the deadline was reached (the unfinished tasks
+// named); 130 the script itself got SIGINT or SIGTERM (its graders ended and its scratch root removed first).
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { cpus, tmpdir } from "node:os";
+import { availableParallelism, cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_TASKS_DIR, applyMutant, loadTask, scoreDir } from "./lib/score.mjs";
 
@@ -109,20 +115,74 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const jobs = Math.max(1, Math.floor(cpus().length / 2));
   const ids = readdirSync(tasksDir).filter((d) => existsSync(join(tasksDir, d, "meta.json"))).sort().filter((d) => !only || d === only);
   if (!ids.length) { console.log(`no tasks found${only ? ` matching ${only}` : ""} in ${tasksDir}`); process.exit(1); }
+  // One scratch root for everything this run and its graders create (os.tmpdir() reads TMPDIR at each call); removed on every way out.
+  const root = mkdtempSync(join(tmpdir(), "bench-validate-run-"));
+  process.env.TMPDIR = root;
+  const cleanup = () => { try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } };
+  // This process's direct children (graders are spawned detached, each in its own group): from /proc, else pgrep -P.
+  const childPids = () => {
+    try {
+      return readdirSync(`/proc/${process.pid}/task`).flatMap((t) => readFileSync(`/proc/${process.pid}/task/${t}/children`, "utf8").trim().split(/\s+/)).filter(Boolean).map(Number);
+    } catch {
+      const r = spawnSync("pgrep", ["-P", String(process.pid)], { encoding: "utf8" });
+      return (r.stdout ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+    }
+  };
+  const signal = (pids, sig) => { for (const p of pids) { try { process.kill(-p, sig); } catch { /* no group */ } try { process.kill(p, sig); } catch { /* gone */ } } };
+  // Processes under the scratch root (a grader's own children that left its group still name it on their command line).
+  const rootPids = () => {
+    try {
+      return readdirSync("/proc").filter((d) => /^\d+$/.test(d) && Number(d) !== process.pid).filter((d) => {
+        try { return readFileSync(`/proc/${d}/cmdline`, "utf8").includes(root); } catch { return false; }
+      }).map(Number);
+    } catch { return []; }
+  };
+  // Synchronous on purpose: the event loop does not turn, so no task can start a new grader while this runs.
+  const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const endChildren = async () => {
+    for (let round = 0; round < 3; round++) {
+      const pids = [...new Set([...childPids(), ...rootPids()])];
+      if (!pids.length) break;
+      signal(pids, "SIGTERM");
+      pause(round === 0 ? 2000 : 500);
+      signal(pids, "SIGKILL");
+      pause(200);
+    }
+  };
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { endChildren().finally(() => { cleanup(); process.exit(130); }); });
   let failures = 0;
   // Tasks run side by side (the whole run took over 280 s one task at a time); each task's lines print in task order.
-  const lanes = Math.max(1, Math.min(ids.length, Number(arg("parallel", "4")) || 1));
+  // At most half the CPUs (at least 2) at once; --parallel N overrides. The slowest known tasks start first.
+  const lanes = Math.max(1, Math.min(ids.length, Number(arg("parallel", String(Math.max(2, Math.floor(availableParallelism() / 2))))) || 1));
+  const SLOW_FIRST = ["h3-sql-engine", "k2-stdlib-toolkit-xl", "k1-stdlib-toolkit"];
+  const rank = (id) => { const r = SLOW_FIRST.indexOf(id); return r === -1 ? SLOW_FIRST.length : r; };
+  const order = ids.map((id, i) => ({ id, i })).sort((a, b) => rank(a.id) - rank(b.id) || a.i - b.i);
   const outputs = ids.map(() => []);
   const done = ids.map(() => false);
   let shown = 0;
-  const flush = () => { while (shown < ids.length && done[shown]) { for (const l of outputs[shown]) console.log(l); shown++; } };
-  const counts = await pool(ids.map((id, i) => ({ id, i })), lanes, async ({ id, i }) => {
+  // each task's lines print as one block as soon as that task ends
+  const printed = ids.map(() => false);
+  const flush = () => { for (let i = 0; i < ids.length; i++) if (done[i] && !printed[i]) { for (const l of outputs[i]) console.log(l); printed[i] = true; shown++; } };
+  const started = ids.map(() => false);
+  const deadlineS = Number(arg("deadline-s", "270"));
+  const deadlineTimer = deadlineS > 0 ? setTimeout(() => {
+    flush();
+    const left = ids.filter((_, i) => !done[i]);
+    for (const [i, id] of ids.entries()) if (!done[i]) console.log(`NOT DONE ${id}: ${started[i] ? `still running after ${deadlineS} s` : "not reached"}`);
+    console.log(`\ndeadline of ${deadlineS} s reached: ${left.length} task(s) not validated (${left.join(", ")})`);
+    // End the graders still running (this process's own children and their groups, never the caller's), then the scratch root.
+    endChildren().finally(() => { cleanup(); process.exit(3); });
+  }, deadlineS * 1000) : undefined;
+  const counts = await pool(order, lanes, async ({ id, i }) => {
+    started[i] = true;
     const n = await validateTask(id, tasksDir, jobs, (line) => outputs[i].push(line));
     done[i] = true;
     flush();
     return n;
   });
+  clearTimeout(deadlineTimer);
   for (const n of counts) failures += n;
   console.log(failures ? `\n${failures} problem(s)` : `\nall ${ids.length} task(s) valid`);
+  cleanup();
   process.exit(failures ? 1 : 0);
 }

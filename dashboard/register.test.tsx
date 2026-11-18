@@ -2507,3 +2507,71 @@ test('item 8: a reviewer reply with no STATUS line reads failed in the review ce
   expect(t.includes('✔ review')).toBe(false)
   expect(t.some(x => /signed off with 1 failed/.test(x))).toBe(true)
 })
+
+// ---- 2.0.0 f4: a resume by name, and gate records cut off by the bounded read.
+test('f4 1(a): a SendMessage resume that names the agent (not its id) reopens that agent, the latest one of the name', async ($, on) => {
+  on('tool.call', () => ({ result: 'sent', text: 'ok' }))
+  await boot($, on)
+  const s = $ as any
+  const named = (id: string, prompt: string, type: string, name: string) =>
+    s.agent.spawn({ tool_use_id: id, prompt, description: id, subagentType: type, name, provider: { plugin: 'orchestration', tier: 'user' }, parentModel: 'opus' } as never)
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await named('b1', brief('s1'), IMPL, 'builder')
+  await finish($, 'b1', PASS)
+  await named('r0', 'SLICE: s1', REVQ, 'checker') // an earlier agent of the same name: not the one a resume reaches
+  await finish($, 'r0', 'STATUS: fail\nGAP: 90 missing check')
+  await named('r1', 'SLICE: s1', REVQ, 'checker')
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 missing check')
+  await sendMessage($, 'checker')
+  let t = await texts($, 100, 200)
+  expect(t.some(x => /dispatching\.+ 1 running/.test(x))).toBe(true) // the resume by name opened a running record
+  await finish($, 'r1', PASS) // the resumed reviewer's turn ends and closes that record: r1 was reopened, not r0
+  t = await texts($, 100, 200)
+  expect(t.some(x => /5 agents ·/.test(x))).toBe(true)
+  expect(t.some(x => /[1-9]\d* running/.test(x))).toBe(false) // nothing left running (r0 reopened instead would still run)
+})
+
+test('f4 1(b): gates.jsonl longer than the bounded read: a marker says older records were not read, and the first partial line is skipped', async ($, on) => {
+  mock.env(on, { HOME: '/home/t', CLAUDE_PROJECT_DIR: '/proj' })
+  const file = '/proj/.claude/state/gates.jsonl'
+  // what a read from the cut returns: its first line is taken as the tail of a record cut in two (here whole enough to parse, so a parse would show it)
+  const text = [
+    JSON.stringify({ ts: new Date(5000).toISOString(), gate: 'test', reason: 'tests_failed_isolated', agent_id: 'b1' }),
+    JSON.stringify({ ts: new Date(6000).toISOString(), gate: 'test', reason: 'max_blocks_reached', agent_id: 'b1' }),
+  ].join('\n') + '\n'
+  on('fs.stat', (_: unknown, e: any) => (e.path === file ? { value: { kind: 'file', size: (1 << 20) + 4096, mtimeMs: 0, isLink: false } } : { deny: 'ENOENT' }))
+  on('fs.read', (_: unknown, e: any) => (e.path === file ? { value: text } : { deny: 'ENOENT' }))
+  on('fs.list', () => ({ deny: 'ENOENT' }))
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  const t = await texts($, 100, 200)
+  expect(t.some(x => x.includes('⚠gate gave up'))).toBe(true)
+  expect(t.some(x => x.includes('⚠isolated'))).toBe(false) // the partial first line is not parsed
+  expect(t.some(x => /older test-gate records not read/.test(x))).toBe(true)
+})
+
+test('f4 1(b): a gates.jsonl within the bounded read shows no marker', async ($, on) => {
+  mock.env(on, { HOME: '/home/t', CLAUDE_PROJECT_DIR: '/proj' })
+  const file = '/proj/.claude/state/gates.jsonl'
+  const text = JSON.stringify({ ts: new Date(6000).toISOString(), gate: 'test', reason: 'max_blocks_reached', agent_id: 'b1' }) + '\n'
+  on('fs.stat', (_: unknown, e: any) => (e.path === file ? { value: { kind: 'file', size: text.length, mtimeMs: 0, isLink: false } } : { deny: 'ENOENT' }))
+  on('fs.read', (_: unknown, e: any) => (e.path === file ? { value: text } : { deny: 'ENOENT' }))
+  on('fs.list', () => ({ deny: 'ENOENT' }))
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  const t = await texts($, 100, 200)
+  expect(t.some(x => x.includes('⚠gate gave up'))).toBe(true)
+  expect(t.some(x => /older test-gate records not read/.test(x))).toBe(false)
+})

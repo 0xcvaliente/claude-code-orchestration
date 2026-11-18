@@ -736,6 +736,14 @@ const latestOf = (list: Agent[], id: string) => {
   for (let i = list.length - 1; i >= 0; i--) if ((list[i] as Agent).id === id) return i
   return -1
 }
+// The record SendMessage's `to` reaches: an agent id, else the name the Agent call gave (agent.spawn's `name`); of several agents with that name
+// the latest started wins, as Claude Code resolves it.
+export const addressedOf = (list: readonly Agent[], to: string) => {
+  const i = latestOf(list as Agent[], to)
+  if (i >= 0 || !to) return i
+  const id = [...list].sort((a, b) => a.startedAt - b.startedAt).filter(a => (a as Agent & { name?: string }).name === to).at(-1)?.id
+  return id === undefined ? -1 : latestOf(list as Agent[], id)
+}
 
 type Ctx = Parameters<Hook<'agent.spawn'>>[0]
 
@@ -776,6 +784,8 @@ const workOpen = (work: Work | null | undefined, list: Agent[], t: number) =>
 type GateRec = { agent: string; reason: string; at: number }
 const TEST_GATE_REASONS = new Set(['tests_failed_isolated', 'max_blocks_reached', 'bugfix_unverified_gave_up'])
 let GATES: GateRec[] = []
+// True when a gates.jsonl was longer than the bounded read, so its older records are not on the pane (a marker under the slices says so).
+let GATES_CUT = false
 let projectDir = ''
 // state.mjs stateKey: the path's UTF-8 bytes, each one not a letter or digit replaced by "-", the last 200.
 export const stateKey = (p: string) =>
@@ -811,11 +821,14 @@ async function readGates($: Ctx, list: Agent[]) {
   }
   const files = [`${projectDir}/.claude/state/gates.jsonl`, ...roots.map(r => `${r}/state/${key}/gates.jsonl`)]
   const found: GateRec[] = []
+  let cut = false
   for (const f of [...new Set(files)]) {
     try {
       const { size } = await $.fs.stat(f)
       const offset = Math.max(0, size - TAIL)
       const text = String(await $.fs.read(f, { offset, length: size - offset }))
+      // read from a cut: the first line may be the tail of a record cut in two, so it is skipped, never parsed
+      if (offset) cut = true
       found.push(...gatesFrom(offset ? text.slice(text.indexOf('\n') + 1) : text, known))
     } catch {
       // missing or unreadable: the next dir
@@ -823,6 +836,7 @@ async function readGates($: Ctx, list: Agent[]) {
   }
   const seen = new Set<string>()
   GATES = found.filter(g => !seen.has(`${g.agent} ${g.reason} ${g.at}`) && !!seen.add(`${g.agent} ${g.reason} ${g.at}`)).slice(-500)
+  GATES_CUT = cut
 }
 // The plugin's userConfig values of this load (register's `options`).
 let OPTIONS: Readonly<Record<string, unknown>> = {}
@@ -841,8 +855,9 @@ async function loadSettings($: Ctx) {
 async function refreshGates($: Ctx) {
   try {
     const before = GATES.length
+    const cut = GATES_CUT
     await readGates($, await read($, agents))
-    if (GATES.length !== before) await update($, tick, n => n + 1)
+    if (GATES.length !== before || GATES_CUT !== cut) await update($, tick, n => n + 1)
   } catch {
     // the pane goes on with what it read before
   }
@@ -856,7 +871,7 @@ const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed rev
 // (`doubt`); a counted fail keeps the keys of its gaps at or above the cutoff (`gapKeys`, brief.mjs gapKey's normalised text before the hash) for
 // the stall check. The cutoff is the gates' (CFG.gapMin, read at session start). `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
 // launched with VALIDATE: gaps; `resumed` a record opened by the main loop's SendMessage to an agent that had ended (a resume, which fires no agent.spawn).
-type Rec = Agent & { doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean; resumed?: boolean }
+type Rec = Agent & { name?: string; doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean; resumed?: boolean }
 const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
 // A resume still running: the gates see its stop only (brief.mjs foldRuns moves lastImplAt at a launch or a stop), so it does not move the attempt yet.
 const pendingResume = (a: Agent) => !!(a as Rec).resumed && a.endedAt === undefined
@@ -1343,6 +1358,7 @@ export const register: Register = (on, options) => {
         ...(!plan && header.risky ? { risky: true } : {}), ...(!plan && header.checks.length ? { checks: header.checks } : {}), ...(!plan && header.path ? { light: true } : {}),
         ...(plan ? { plan: true } : {}), ...(parsed && parsed.replan !== null ? { replan: true } : {}),
         ...(!plan && role === 'reviewer' && header.validate ? { validate: true } : {}),
+        ...(typeof e.name === 'string' && e.name ? { name: e.name } : {}), // what SendMessage may address it by
       }
       const t = agent.startedAt
       const before = await read($, agents)
@@ -1470,7 +1486,7 @@ export const register: Register = (on, options) => {
         const now = await $.clock.now()
         const hold: { one?: Rec } = {}
         const list = await update($, agents, l => {
-          const i = latestOf(l, to)
+          const i = addressedOf(l, to) // by id or by the name its Agent call gave
           const a = l[i] as Rec | undefined
           if (!to || !a || a.endedAt === undefined) return l
           const again: Rec = {
@@ -1995,7 +2011,7 @@ export const register: Register = (on, options) => {
       bodyRows > 0 &&
       26 + (active ? 5 : 0) + (work ? 4 : 0) + stageRows.length * 5 + (stageRows.length - 1) * 3 + diagramRows + tasks.length * 2 + byModel.length + shownLog.length +
         (active ? forkHeight + linkRows.length - 2 + (lane ? 1 : 0) : 0) + drawnLoops.reduce((t, l) => t + (Math.floor(l.toAt / cols) === Math.floor(l.fromAt / cols) ? 3 : 1), 0) +
-        (steps.length ? 3 + Math.min(STEPS_SHOWN, steps.length) + (steps.length > STEPS_SHOWN ? 1 : 0) : 0) + (usedRows.length ? 2 + usedRows.length : 0) > bodyRows
+        (steps.length ? 3 + Math.min(STEPS_SHOWN, steps.length) + (steps.length > STEPS_SHOWN ? 1 : 0) + (GATES_CUT ? 1 : 0) : 0) + (usedRows.length ? 2 + usedRows.length : 0) > bodyRows
 
     return (
       <Box flexDirection="column">
@@ -2028,6 +2044,7 @@ export const register: Register = (on, options) => {
               </Text>
             ))}
             {steps.length > STEPS_SHOWN && <Text dimColor>+{steps.length - STEPS_SHOWN} more</Text>}
+            {GATES_CUT && <Text dimColor wrap="truncate-end">⚠ older test-gate records not read (gates.jsonl over 1 MiB)</Text>}
           </Box>
         )}
         {work && (
