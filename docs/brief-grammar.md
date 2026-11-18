@@ -186,6 +186,8 @@ CHECKS: C1, C2                             (optional: answer one line per id)
 
 Parsed by `parseHeader` (`focus`, `checks`).
 
+**Test gate pending line (1.6.1).** The plan check may append one line to a slice reviewer's brief (never a PLAN REVIEW): `Test gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, ...`. It appears only while the slice's latest implementer has stopped and the test gate has logged no record after that stop. It means the tests may still fail: the reviewer runs the acceptance check itself, does not rest a pass on the tests having passed, and says in its report that the gate had not reported. The line parses as no brief or reply line. While that implementer has a failed-tests block it never saw, the plan check refuses the reviewer instead (`tests_failed_after_report`, [gates.md, Plan check](gates.md#plan-check)).
+
 ## Reply
 
 ```
@@ -551,7 +553,8 @@ A worker that stops at its turn limit, or is killed, fires no SubagentStop. So i
 - Once nothing is running, the review gate blocks with `implementer_unfinished` for each implementer of the session that has both:
   - a latest SubagentStart (telemetry.jsonl) with no later SubagentStop, and
   - a launch record without the workflow marker (workflow agents are left to their script).
-- It is resolved when the implementer is resumed and stops, or when a later implementer stop record names the same slice. For a brief with no slice: any later implementer stop of the session.
+- An implementer whose latest test-gate record is a block with no later SubagentStop counts the same way. The message names that block's reason (the `tests_failed` text is unchanged).
+- It is resolved when the implementer is resumed and stops, or when a later implementer stop record names the same slice. For a brief with no slice: any later implementer stop of the session. Since 1.6.1, after a test-gate block for `bugfix_base_unusable`, `bugfix_no_base`, `bugfix_timeout` or `bugfix_tmp_lost`, a later passing opus review of the slice also resolves it (logged in `skips` as `implementer_unfinished:<slice>:<reason>_cleared_by_review`); after `tests_failed`, `bugfix_no_test` or `bugfix_test_passes_on_base` it does not.
 - Its loop guard is per implementer and lasts the session. Every block and give-up record lists the `agent_id`s of the unfinished implementers it named (`unfinished`). An implementer named in 2 blocks no longer carries a block. The next allow is logged as `implementer_unfinished_gave_up` (or `max_blocks_reached` when an older reason gave up with it) and names it. An implementer a give-up has named is ignored from then on. So an implementer the person stopped early in a long session costs two blocks once, not two after every later implementer stop.
 - With no implementer stop in the session, an unfinished implementer is what keeps the gate from allowing with `no_implementer_in_session`.
 

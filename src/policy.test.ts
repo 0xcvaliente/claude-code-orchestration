@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { BUILTIN_AGENTS, DENIED_AGENTS, NATIVE_TOOLS, PUSH_BASH, SDK_DENIED_BASH, UNSAFE_BASH } from "./config.js";
 import { builtinAgents, learnedBuiltins, learnedFile, OWN_AGENTS } from "../.claude/hooks/builtin-agents.mjs";
@@ -67,9 +67,13 @@ test("this repo runs as the orchestrator: the project settings name it, the plug
   assert.equal(settings.agent, "orchestrator");
   assert.match(readFileSync(new URL("../.claude/agents/orchestrator.md", import.meta.url), "utf8"), /^name: orchestrator$/m, "the named agent exists");
   // The plugin must not ship the default: it would turn every session of every project with the plugin on into an
-  // orchestrator. Its settings.json holds the subagent status line only.
-  const plugin = JSON.parse(readFileSync(new URL("../dist/plugin/settings.json", import.meta.url), "utf8"));
-  assert.deepEqual(Object.keys(plugin), ["subagentStatusLine"]);
+  // orchestrator. Since 1.6.1 it ships no settings.json at all (the worker rows moved to the mod's AgentRow hook); if one
+  // comes back, it must not name `agent`.
+  const pluginSettings = new URL("../dist/plugin/settings.json", import.meta.url);
+  assert.ok(!existsSync(pluginSettings), "dist/plugin/settings.json is not shipped");
+  for (const f of ["../dist/plugin/hooks/hooks.json", "../dist/plugin/.claude-plugin/plugin.json"]) {
+    assert.equal(JSON.parse(readFileSync(new URL(f, import.meta.url), "utf8")).agent, undefined, f);
+  }
   // Everything that must stay a plain session says so itself.
   assert.match(readFileSync(new URL("../scripts/orchestrate.sh", import.meta.url), "utf8"), /args\+=\(--settings '\{"agent":""\}'\)/);
   // SDK workers: the flag settings start with an empty agent (src/agent.test.ts checks every role's options).

@@ -3,12 +3,12 @@
 import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { agentsOf, check, HEADLESS_ENV, HEADLESS_FLAGS, HIDDEN_FLAGS, main, missingFlags, parseVersion, writeSource } from "../scripts/claude-update.mjs";
+import { agentsOf, check, HEADLESS_ENV, HEADLESS_FLAGS, HIDDEN_FLAGS, main, missingFlags, parseVersion, sandboxCheck, writeSource } from "../scripts/claude-update.mjs";
 import { BUILTIN_AGENTS } from "../.claude/hooks/builtin-agents.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -96,7 +96,7 @@ test("check: a healthy machine passes, writes its record and never runs a model"
   try {
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, JSON.stringify(r.checks));
-    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["sdk", "ok"], ["plugin", "ok"], ["dist", "ok"]]);
+    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["sdk", "ok"], ["plugin", "ok"], ["sandbox", "ok"], ["dist", "ok"]]);
     assert.equal(r.claude_code_version, CC);
     assert.equal(r.orchestration_version, VERSION);
     assert.equal(JSON.parse(readFileSync(join(m.home, "orchestration", "claude-update.json"), "utf8")).claude_code_version, CC);
@@ -278,4 +278,106 @@ test("main: exit codes and output forms", () => {
   assert.equal(main(["--nope"], { env: m.env, run: m.run, root, stdout: (s) => out.push(s) }), 2);
   assert.match(out[0] ?? "", /^usage: /);
   m.done();
+});
+
+// sandbox: Claude Code 2.1.326 lets sandboxed commands write to fewer home folders; the per-user orchestration folder
+// (state, skill drafts, the judge's record) is writable again only through sandbox.filesystem.allowWrite in user settings.
+test("check sandbox: off, missing file or a covering entry is ok; on without the entry is a note naming the exact entry", () => {
+  const m = machine();
+  const file = join(m.home, "settings.json");
+  const dir = join(m.home, "orchestration");
+  const sandbox = (/** @type {any} */ settings) => {
+    if (settings === undefined) rmSync(file, { force: true });
+    else writeFileSync(file, typeof settings === "string" ? settings : `${JSON.stringify(settings, null, 2)}\n`);
+    return of(check({ env: m.env, run: m.run, root }), "sandbox");
+  };
+  try {
+    assert.equal(sandbox(undefined)?.status, "ok", "no user settings: the sandbox is off");
+    assert.equal(sandbox({ model: "opus" })?.status, "ok");
+    assert.equal(sandbox({ sandbox: { enabled: false } })?.status, "ok");
+    for (const entry of [dir, `${dir}/`, `${dir}/**`, m.home, "orchestration", `/${dir}`]) {
+      const c = sandbox({ sandbox: { enabled: true, filesystem: { allowWrite: ["/other", entry] } } });
+      assert.equal(c?.status, "ok", `${entry}: ${c?.text}`);
+    }
+    for (const settings of [{ sandbox: { enabled: true } }, { sandbox: { enabled: true, filesystem: { allowWrite: [`${dir}-old`, join(dir, "skill-drafts")] } } }]) {
+      const before = `${JSON.stringify(settings, null, 2)}\n`;
+      const c = sandbox(settings);
+      assert.equal(c?.status, "warn", JSON.stringify(settings));
+      assert.ok(c?.text.includes(`add ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite`), c?.text);
+      assert.equal(readFileSync(file, "utf8"), before, "a check changes nothing");
+    }
+    const r = check({ env: m.env, run: m.run, root });
+    assert.equal(r.ok, true, "a note, not a failure");
+    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "sdk", "plugin", "sandbox", "dist"], "placed after plugin");
+  } finally {
+    m.done();
+  }
+});
+
+test("check sandbox --fix: adds the entry, keeps every other key and the indent; an unreadable file is a note and never rewritten", () => {
+  const m = machine();
+  const file = join(m.home, "settings.json");
+  const dir = join(m.home, "orchestration");
+  try {
+    const settings = { model: "opus", permissions: { allow: ["Bash(ls)"] }, sandbox: { enabled: true, excludedCommands: ["docker"], filesystem: { allowWrite: ["/srv/cache"], denyRead: ["~/.ssh"] } }, theme: "dark" };
+    writeFileSync(file, `${JSON.stringify(settings, null, 4)}\n`);
+    let c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+    assert.equal(c?.status, "fixed", c?.text ?? "no sandbox check");
+    const want = { ...settings, sandbox: { ...settings.sandbox, filesystem: { ...settings.sandbox.filesystem, allowWrite: ["/srv/cache", dir] } } };
+    assert.equal(readFileSync(file, "utf8"), `${JSON.stringify(want, null, 4)}\n`, "same keys, same order, same indent");
+    assert.equal(of(check({ env: m.env, run: m.run, root }), "sandbox")?.status, "ok", "covered now");
+    // No filesystem block yet: one is made.
+    writeFileSync(file, `{\n\t"sandbox": { "enabled": true }\n}\n`);
+    assert.equal(of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox")?.status, "fixed");
+    assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { sandbox: { enabled: true, filesystem: { allowWrite: [dir] } } });
+    assert.match(readFileSync(file, "utf8"), /^\t"sandbox"/m, "tab indent kept");
+    // A file that does not parse, or cannot be read, is a note; --fix leaves it as it is and nothing throws.
+    for (const bad of ['{ "sandbox": { "enabled": true, } ', "[1, 2]"]) {
+      writeFileSync(file, bad);
+      c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+      assert.equal(c?.status, "warn", bad);
+      assert.match(c?.text ?? "", /could not be (read|parsed)|is not a JSON object/);
+      assert.equal(readFileSync(file, "utf8"), bad, "never rewritten");
+    }
+    rmSync(file);
+    mkdirSync(file);
+    c = of(check({ env: m.env, run: m.run, root, fix: true }), "sandbox");
+    assert.equal(c?.status, "warn");
+    assert.match(c?.text ?? "", /could not be read/);
+  } finally {
+    m.done();
+  }
+});
+
+test("check sandbox: symlinks are resolved; --fix writes through a symlinked settings.json and adds no second entry for one folder", () => {
+  const top = mkdtempSync(join(tmpdir(), "claude-update-link-"));
+  try {
+    // A dotfiles link: settings.json points at a file in another folder. --fix changes that file and keeps the link.
+    const real = join(top, "real");
+    mkdirSync(real);
+    const dots = join(top, "dotfiles");
+    mkdirSync(dots);
+    const target = join(dots, "settings.json");
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true } }, null, 2)}\n`);
+    symlinkSync(target, join(real, "settings.json"));
+    const env = { CLAUDE_CONFIG_DIR: real, HOME: top };
+    assert.equal(sandboxCheck({ fix: true, env }).status, "fixed");
+    assert.ok(lstatSync(join(real, "settings.json")).isSymbolicLink(), "the link stays a link");
+    assert.deepEqual(JSON.parse(readFileSync(target, "utf8")).sandbox.filesystem.allowWrite, [join(real, "orchestration")], "the linked file changed");
+    assert.equal(sandboxCheck({ env }).status, "ok");
+    // The config folder is a symlink and allowWrite names its real path: covered, and --fix adds nothing.
+    const link = join(top, "link");
+    symlinkSync(real, link);
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true, filesystem: { allowWrite: [join(real, "orchestration")] } } }, null, 2)}\n`);
+    const before = readFileSync(target, "utf8");
+    const viaLink = { CLAUDE_CONFIG_DIR: link, HOME: top };
+    assert.equal(sandboxCheck({ env: viaLink }).status, "ok", "the real path covers the linked folder");
+    assert.equal(sandboxCheck({ fix: true, env: viaLink }).status, "ok");
+    assert.equal(readFileSync(target, "utf8"), before, "no second entry");
+    // The other way round: the entry names the link, the config folder is the real path.
+    writeFileSync(target, `${JSON.stringify({ sandbox: { enabled: true, filesystem: { allowWrite: [join(link, "orchestration")] } } }, null, 2)}\n`);
+    assert.equal(sandboxCheck({ env }).status, "ok", "the linked path covers the real folder");
+  } finally {
+    rmSync(top, { recursive: true, force: true });
+  }
 });

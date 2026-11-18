@@ -9,14 +9,21 @@
 //   - the triage decision of src/route.ts: `costUsd` (the call's total_cost_usd), else its `tokens`;
 //   - a session's document from orchestrate.sh (scripts/run-result.mjs): `total_cost_usd`, which covers the whole session
 //     and its subagents, else its token count (tokens.mjs, modelUsage or usage);
-//   - anything unreadable (an error text, no document): 0, since nothing can be read from it.
+//   - anything unreadable (an error text, no document): 0 for the triage decision, since nothing can be read from it;
+//   - a session that left no readable result (a crash with no output, an error text, or run-result.mjs's `no_result`
+//     document without a cost or token figure): unknown. The run cannot tell what it spent, so it counts as having
+//     spent the whole rest of the cap: no later session starts and auto.sh exits 3 with a message saying so.
 // Dollars first because claude enforces the cap in dollars (--max-budget-usd and the SDK's maxBudgetUsd).
 // A session never starts with less than MIN_SESSION_TOKENS, the smallest cap tokens.mjs accepts: the run ends instead.
 //
 // CLI (auto.sh):
 //   node scripts/run-budget.mjs spent < document          prints the tokens the document's call spent (an integer)
+//   node scripts/run-budget.mjs spent --session < document the same for a session's output, or `unknown` when it left no
+//                                                           readable result
 //   node scripts/run-budget.mjs next <cap> <spent> <what>  prints the tokens left for the next session, or, when fewer than
 //                                                           MIN_SESSION_TOKENS are left, says why on stderr and exits 3
+//   node scripts/run-budget.mjs next <cap> unknown <what> <earlier>
+//                                                           says the earlier session left no result on stderr, exits 3
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { formatTokens, parseTokens, TOKENS_PER_USD, totalTokens } from "./tokens.mjs";
@@ -42,6 +49,24 @@ export function spentOf(doc) {
   return Math.round(totalTokens(d));
 }
 
+/** @param {Record<string, unknown>} d @returns {boolean} the document carries a cost or a token figure */
+const hasFigure = (d) =>
+  isAmount(d.costUsd) || isAmount(d.total_cost_usd) || isAmount(d.tokens) || (typeof d.usage === "object" && d.usage !== null) || (typeof d.modelUsage === "object" && d.modelUsage !== null);
+
+/**
+ * Tokens a session spent, or null when it left no readable result: output that is not a JSON object (a crash with no
+ * output, an error text), or run-result.mjs's `no_result` document (an event stream with no result record) without a
+ * cost or token figure. A readable result is counted as spentOf counts it, 0 when it carries no figure.
+ * @param {unknown} doc the session's output, parsed (null when it did not parse)
+ * @returns {number | null}
+ */
+export function sessionSpentOf(doc) {
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return null;
+  const d = /** @type {Record<string, unknown>} */ (doc);
+  if (d.subtype === "no_result" && !hasFigure(d)) return null;
+  return spentOf(d);
+}
+
 /**
  * What is left of the run's cap for the next session.
  * @param {number} cap the run's cap in tokens
@@ -65,6 +90,17 @@ export const spentMessage = (capText, spent, left, what) =>
   `(the triage call and the sessions before this one), leaving ${formatTokens(left)}, under the ${formatTokens(MIN_SESSION_TOKENS)} ` +
   `a session needs: the ${what} does not start. Raise ORCH_BUDGET_TOKENS to give the run more.`;
 
+/**
+ * The message when an earlier session left no readable result, so its spend is unknown and the cap counts as spent.
+ * @param {string} capText ORCH_BUDGET_TOKENS as the person wrote it
+ * @param {string} earlier the session that left no result
+ * @param {string} what the session that does not start
+ */
+export const unknownMessage = (capText, earlier, what) =>
+  `budget: ORCH_BUDGET_TOKENS=${capText} is the cap for the whole run, and the ${earlier} before it left no result, so what ` +
+  `it spent is unknown and the run counts the cap as spent: the ${what} does not start. Raise ORCH_BUDGET_TOKENS or run ` +
+  `again to give the task another session.`;
+
 // Entry script? Real paths on both sides: Node resolves symlinks in the main module's import.meta.url, not in argv[1].
 const isEntry = () => {
   try {
@@ -74,16 +110,23 @@ const isEntry = () => {
   }
 };
 if (isEntry()) {
-  const [cmd, a, b, what] = process.argv.slice(2);
+  const [cmd, a, b, what, earlier] = process.argv.slice(2);
   try {
     if (cmd === "spent") {
       let doc = null;
       try {
         doc = JSON.parse(readFileSync(0, "utf8"));
       } catch {
-        // not a document: nothing to read, 0
+        // not a document: nothing to read (0, or unknown for a session)
       }
-      console.log(String(spentOf(doc)));
+      if (a === "--session") {
+        const s = sessionSpentOf(doc);
+        console.log(s === null ? "unknown" : String(s));
+      } else console.log(String(spentOf(doc)));
+    } else if (cmd === "next" && b === "unknown") {
+      parseTokens(a ?? "");
+      console.error(unknownMessage(String(a), earlier || "earlier session", what || "next session"));
+      process.exit(SPENT_EXIT);
     } else if (cmd === "next") {
       const cap = parseTokens(a ?? "");
       const spent = Number(b);
@@ -95,7 +138,7 @@ if (isEntry()) {
       }
       console.log(String(r.left));
     } else {
-      throw new Error("usage: run-budget.mjs spent < document | run-budget.mjs next <cap> <spent> <what>");
+      throw new Error("usage: run-budget.mjs spent [--session] < document | run-budget.mjs next <cap> <spent|unknown> <what> [earlier]");
     }
   } catch (e) {
     console.error(/** @type {Error} */ (e).message);

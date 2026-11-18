@@ -40,4 +40,5 @@ Dated records. They are not edited after they are written.
 - Benchmark write-ups: [built-in subagents blocked](benchmark-builtins-blocked.md), [compare-040](benchmark-compare-040.md), [route-040](benchmark-route-040.md), [short k2 run](benchmark-short-k2.md), [onext](benchmark-onext.md), and the generated [benchmark report of 2026-10-15](benchmarks.md).
 - [Pre-registered hypotheses](../bench/HYPOTHESES.md): the benchmark's hypotheses and verdict rules, written before the runs.
 - [Live checks, 2026-11-17](data/live-checks-2026-11-17.md): the probes behind 1.6.0 (the triage call's hooks, title call and connectors, a triage stopped by the cap, the workflow guard).
+- [Live checks for 1.6.1](data/live-checks-2026-11-17-b.md): the probes behind 1.6.1 (the typed prompt's transcript record, workflow resume and the guard live, the five other SDK roles, the pinned git rules' warnings and the worker rows).
 - [Run data and live checks](data/): raw campaign data and the live probes behind the gates.

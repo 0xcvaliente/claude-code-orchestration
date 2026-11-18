@@ -693,8 +693,11 @@ export function stopRecord(ctx) {
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
  *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
  *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[],
- *   carriedFinal: boolean, testGaveUp: number[], testGateGaveUp: boolean
+ *   carriedFinal: boolean, testGaveUp: number[], testGateGaveUp: boolean, implementers: string[]
  * }} SliceState
+ * implementers: agent ids of the slice's implementer launches and stops folded into this state, in order (a slice
+ * carried whole into a new run keeps them; one that starts clean or is carried as final starts with none). The
+ * plan check's reviewer hold reads it to look only at the implementers of the run a review lands in.
  * testGaveUp: times of the test gate's give-ups for the slice's implementers (max_blocks_reached of gate test,
  * bugfix_unverified_gave_up); testGateGaveUp: one belongs to the latest attempt (later than attemptFrom).
  * carriedFinal: the slice was final and passed in the run a plain PLAN REVIEW closed, and this plan names it again: it
@@ -734,7 +737,7 @@ const newSlice = (slice, planned) => ({
   slice, planned, risky: false, checks: [], files: [], launches: 0, attempts: 0, lastImplAt: null, reviews: [],
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
   countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [], carriedFinal: false,
-  testGaveUp: [], testGateGaveUp: false,
+  testGaveUp: [], testGateGaveUp: false, implementers: [],
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
@@ -942,6 +945,7 @@ export function foldRuns(records, opts = {}) {
         s.carriedFinal = false;
         s.launches += 1;
         s.lastImplAt = ts;
+        if (typeof r.agent_id === "string" && r.agent_id && !s.implementers.includes(r.agent_id)) s.implementers.push(r.agent_id);
         s.risky = s.risky || r.risky === true;
         s.checks = [...new Set([...s.checks, ...strings(r.checks)])];
         open.lastAt = ts;
@@ -973,6 +977,7 @@ export function foldRuns(records, opts = {}) {
       // Any implementer activity of the slice in this run (a stop: a SendMessage resume makes no launch) is new work:
       // a slice carried over as final is open again.
       s.carriedFinal = false;
+      if (typeof r.agent_id === "string" && r.agent_id && !s.implementers.includes(r.agent_id)) s.implementers.push(r.agent_id);
       if (s.attempts === 0 || s.reviewedSince) {
         s.attempts += 1;
         s.attemptFrom = s.reviews.at(-1)?.ts ?? -Infinity;

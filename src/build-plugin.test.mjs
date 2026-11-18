@@ -100,7 +100,7 @@ test("evals/ is copied when present and skipped when absent; judge hooks only wh
     // Without the judge files UserPromptSubmit holds the nudge alone (its line for the workflow keyword).
     assert.deepEqual(hb.UserPromptSubmit, [{ hooks: [{ type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/nudge.mjs" --plugin' }] }]);
     assert.deepEqual(hb.PreToolUse.map((/** @type {any} */ h) => h.matcher), ["Agent|Task", "Bash", "WebFetch", "SubagentHandback", "Workflow"]);
-    assert.ok(existsSync(join(outBare, "plugin", "settings.json")), "the subagent status line setting ships with its script");
+    assert.ok(!existsSync(join(outBare, "plugin", "settings.json")), "no plugin settings.json: the mod's AgentRow hook draws the worker rows");
     assert.ok(!existsSync(join(bare, "dist")), "a build with --out writes no dist/");
 
     build(full, outFull);
@@ -310,7 +310,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   const state = readFileSync(join(root, ".claude", "hooks", "state.mjs"), "utf8");
   const list = state.match(/OPTION_KEYS = Object\.freeze\(\[([^\]]*)\]/)?.[1] ?? "";
   const keys = [...list.matchAll(/"(\w+)"/g)].map((m) => String(m[1]));
-  assert.equal(keys.length, 21);
+  assert.equal(keys.length, 22);
   assert.deepEqual(Object.keys(manifest.userConfig).sort(), keys.map((k) => k.toLowerCase()).sort());
   const verify = readFileSync(join(root, ".claude", "hooks", "verify.sh"), "utf8");
   assert.ok(verify.includes(`for _k in ${keys.join(" ")}; do`), "verify.sh bridges the same keys");
@@ -330,17 +330,36 @@ test("1.2.0: reports are checked at SubagentHandback in the project and the plug
     const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
     assert.ok(e, "a SubagentHandback entry");
     const cmds = e.hooks.map((/** @type {any} */ c) => String(c.command));
-    assert.equal(cmds.length, 2);
-    assert.ok(cmds[0].includes("handback-check.mjs") && cmds[1].includes("quote-check.mjs"));
-    for (const c of cmds) assert.ok(c.endsWith(`.mjs"${tail}`), c);
+    // 2.0.0: the test gate's hand-back mode runs third, after the report checks (its own test below).
+    assert.equal(cmds.length, 3);
+    assert.ok(cmds[0].includes("handback-check.mjs") && cmds[1].includes("quote-check.mjs") && cmds[2].includes("verify.sh"));
+    for (const c of cmds.slice(0, 2)) assert.ok(c.endsWith(`.mjs"${tail}`), c);
     // Deny-only hooks: neither fails closed, so a crash never holds a report back.
     assert.ok(e.hooks.every((/** @type {any} */ c) => c.onFailure === undefined));
   }
   for (const f of ["handback-check.mjs", "subagent-statusline.mjs"]) assert.ok(existsSync(join(root, "dist", "plugin", "hooks", f)), `${f} ships`);
-  // A plugin may set only `agent` and `subagentStatusLine`: the file holds exactly the one key.
-  assert.deepEqual(read("dist/plugin/settings.json"), { subagentStatusLine: { type: "command", command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-statusline.mjs" --plugin' } });
-  // The project's own settings do not set it: the plugin's default, or the person's own row, applies there.
+  // 1.6.1: no plugin settings.json (`subagentStatusLine` is deprecated in favour of mods): the mod shipped as
+  // hooks/dashboard.tsx draws the worker rows with its AgentRow render hook; the script ships for a person's own setting.
+  assert.ok(!existsSync(join(root, "dist", "plugin", "settings.json")), "dist/plugin/settings.json is gone");
+  assert.match(readFileSync(join(root, "dist", "plugin", "hooks", "dashboard.tsx"), "utf8"), /on\('ui\.render', \{ component: 'AgentRow' \}/);
+  // The project's own settings do not set it: the mod's row, or the person's own row, applies there.
   assert.equal(read(".claude/settings.json").subagentStatusLine, undefined);
+});
+
+test("2.0.0: the test gate runs at SubagentHandback after the report checks, in the project and the plugin, and keeps its SubagentStop entry", () => {
+  for (const [h, tail] of /** @type {[any, string][]} */ ([[read(".claude/settings.json"), "/.claude/hooks/verify.sh --handback"], [read("dist/plugin/hooks/hooks.json"), '/hooks/verify.sh" --handback --plugin']])) {
+    const e = h.hooks.PreToolUse.find((/** @type {any} */ x) => x.matcher === "SubagentHandback");
+    const gate = e.hooks.at(-1);
+    assert.ok(String(gate.command).endsWith(tail), gate.command);
+    // The SubagentStop gate's 900 s: verify.sh's own budget (540 s by default, 870 s at most) ends first.
+    assert.equal(gate.timeout, 900);
+    // Not fail-closed: a crash or a timeout lets the report through, and the SubagentStop gate decides.
+    assert.equal(gate.onFailure, undefined);
+    // The SubagentStop gate stays registered and stays the authority.
+    const stop = entry(h, "SubagentStop", "verify.sh");
+    assert.ok(stop, "verify.sh stays on SubagentStop");
+  }
+  assert.ok(existsSync(join(root, "dist", "plugin", "hooks", "test-gate-cache.mjs")), "test-gate-cache.mjs ships");
 });
 
 test("--out without a directory fails", () => {

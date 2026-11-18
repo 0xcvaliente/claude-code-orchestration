@@ -169,5 +169,6 @@ Everything else, including the full rules ([section 2.1](bash-judge.md#21-deny-r
 - None of the native gates, guards or hooks: no plan check, no review gate, no test gate.
 - The Bash judge is best-effort, not a sandbox ([The Bash judge, Limits](bash-judge.md#11-limits)).
 - The sandbox is opt-in and was smoke-tested on macOS only.
-- The roles' options were checked with a faked model only. Whether a live worker then has no account connector and no hook, and how `ORCH_SDK_MCP=project` servers start (`${VAR}` in a `.mcp.json` included), is for a live probe; their token use was not measured.
+- The five roles other than the triager were probed live once each on 2.1.326 ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K4): no MCP tool, no MCP server, no account connector, each on its configured model; with `ORCH_SDK_MCP=project` a verifier started the project's stdio server and `${VAR}` was expanded in its `args` and `env`. Not covered: `${VAR:-default}`, an unset variable, http or sse servers. Those roles still make Claude Code's session-title call (about 0.0002 USD a session); only the triager skips it. Their token use was not measured.
+- The Bash judge's own call (`askOpus` in `src/judge.ts`) passes `disableClaudeAiConnectors: true` too (1.6.1).
 - Worktrees isolate git state, not the file system ([Safety, Worktrees](safety.md#worktrees)).

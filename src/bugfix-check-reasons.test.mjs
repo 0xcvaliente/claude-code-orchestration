@@ -50,19 +50,33 @@ const check = (r, cmd) => bugfix({ cwd: r.dir, cmd, isolated: false, state: r.st
 /** verify.sh keeps only these characters of the extra line: the cause must survive it unchanged. @param {string} extra */
 const survivesVerify = (extra) => assert.equal(extra.replace(/[^a-z_0-9,:"]/g, ""), extra);
 
-test("bugfix: a lock file that differs from the base says so, not 'no parsable test names'", async () => {
+// K1 (run of 2026-11-17): the worker cannot make the main checkout's node_modules match the base's lock file, so a
+// block only came back after every resume. The check gives up at once (the give-up is a doubt signal) with the cause.
+test("bugfix: a lock file that differs from the base gives up at once with cause lock_mismatch, never a block", async () => {
   const r = bugRepo({ ".gitignore": "node_modules/\n", "package-lock.json": "{}\n" });
   mkdirSync(join(r.dir, "node_modules"));
   write(r.dir, { "package-lock.json": '{"lockfileVersion":3}\n' });
   const res = await check(r, "bash run.sh");
   assert.ok(res);
-  assert.deepEqual([res.decision, res.reason], ["block", "bugfix_base_unusable"]);
+  assert.deepEqual([res.decision, res.reason], ["allow", "bugfix_unverified_gave_up"]);
   assert.match(res.extra, /"cause":"lock_mismatch"/);
   survivesVerify(res.extra);
-  assert.match(res.message, /unverified/);
-  assert.match(res.message, /package-lock\.json/);
-  assert.match(res.message, /dependencies/);
-  assert.doesNotMatch(res.message, /parsable/);
+  assert.equal(res.message, "");
+});
+
+test("bugfix: a lock file that changed after the plain base run was cached also gives up with lock_mismatch", async () => {
+  const r = bugRepo({ ".gitignore": "node_modules/\n", "package-lock.json": "{}\n" });
+  mkdirSync(join(r.dir, "node_modules"));
+  // First stop: the lock files match, so the plain base run is cached for this base and command.
+  write(r.dir, { "tests/value_test.sh": "true\n" });
+  const first = await check(r, "bash run.sh");
+  assert.equal(first?.reason, "bugfix_test_passes_on_base");
+  // Then the lock file changes: the cached plain run is reused, and the run with the test files hits the mismatch.
+  write(r.dir, { "package-lock.json": '{"lockfileVersion":3}\n', "tests/value_test.sh": REPRO });
+  const res = await check(r, "bash run.sh");
+  assert.ok(res);
+  assert.deepEqual([res.decision, res.reason], ["allow", "bugfix_unverified_gave_up"]);
+  assert.match(res.extra, /"cause":"lock_mismatch"/);
 });
 
 test("bugfix: a failed git worktree add says so", async () => {

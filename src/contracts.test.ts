@@ -222,6 +222,11 @@ test("model-facing text names gate reasons but no environment switch", () => {
   const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS, ...authoring];
   for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
   for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) assert.doesNotMatch(nudgeContext(env), switches, "the nudge context names a switch");
+  // 1.6.1: the nudge refuses a typed prompt holding the workflow keyword; its reason is shown to the person.
+  const keyword = spawnSync("node", [join(root, NUDGE)], { input: JSON.stringify({ hook_event_name: "UserPromptSubmit", prompt: "ultracode x" }), env: { ...process.env, ORCH_WORKFLOW_GUARD: "", CLAUDE_PLUGIN_OPTION_WORKFLOW_GUARD: "" }, encoding: "utf8" });
+  const refusal = JSON.parse(keyword.stdout) as { decision: string; reason: string };
+  assert.equal(refusal.decision, "block");
+  assert.doesNotMatch(refusal.reason, switches, "the nudge's refusal names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
   const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
   for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "ORCH_WORKFLOW_GUARD", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
