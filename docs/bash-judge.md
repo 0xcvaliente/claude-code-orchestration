@@ -57,9 +57,9 @@ In short, the floor refuses:
 - settings that make git or a shell run another program;
 - anything the tokenizer cannot read with confidence.
 
-The table is the exact rule.
+The table lists the rules, each with examples; the code next to each rule in `src/judge.ts` has the full detail.
 
-The example column is taken from the `CASES` table and the audit row lists in `src/judge.test.ts` (class as asserted there, with `/work/repo` as the working folder). Every example is `deny`.
+The example column is taken from the `CASES` table and the audit row lists in `src/judge.test.ts` (class as asserted there, with `/work/repo` as the working folder); the examples of the rows marked "Since 2.0.0" were run through `classify` of both copies for this page. Every example is `deny`.
 
 | Rule | Examples (all `deny`) |
 |---|---|
@@ -94,8 +94,14 @@ The example column is taken from the `CASES` table and the audit row lists in `s
 | `hash -p <path> <name>` (bash), `hash <name>=<path>` (zsh) and `enable -f` (as the command word or after a wrapper): they point a command name at another program, like an alias | `hash -p /usr/bin/git ls; ls push origin main` · `hash ls=/usr/bin/git` · `enable -f ./x.so x` |
 | An assignment of zsh's `functions`, `aliases`, `galiases`, `saliases`, `dis_functions`, `dis_aliases`, `dis_galiases` or `dis_saliases` table, or of its `commands` table, which points a command name at another program like `hash -p`. A table word is a word whose static prefix is the table name followed by `=`, `+=` or a `[...]` subscript, or, after an assigning builtin anywhere earlier in the simple command (`typeset`, `declare`, `local`, `export`, `readonly`, `integer`, `float`, `read`, `getopts`, `vared`, `zparseopts`, `let`, `set` with an `-A`/`+A` cluster, `printf`/`print` with a `-v` cluster), the bare name or a value `=<table>`. A table word is denied wherever it stands, behind any keyword, `!`, zsh precommand modifier (`noglob`, `nocorrect`, `-`, `repeat`, `coproc`) or wrapper. It passes only as an argument of a simple command whose command word is one of `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ack`, `git`, `cat`, `echo`, `ls`, `wc`, `head`, `tail`, `less`, `diff` (`TEXT_ONLY`, commands that cannot assign a shell variable) with nothing but redirections in front of it. Also an assigning `${...}` into a table (`${functions[f]::=body}`, `:=`, `=`), decided on the widest reading of the whole command text, never on where the expansion ends (`tableExpansion`): after removing backslash-newline pairs as the shell does, a `${` followed by a table's name with an `=` anywhere later in the text, to its very end, across separators and newlines, is denied. Before the name may stand any run of zsh's prefix characters (`#`, `+`, `^`, `=`, `~`, also `!`, a blank or a newline), other characters that are not a name (`:`, `-`, ...), and `(...)` flag groups; a quote, backslash or backtick where the name would start, or inside a name read after only prefix characters and flags, counts like a table's name. So `${#functions[f]::=body}`, `${+aliases[p]=x}`, `${functions[x\}]::=body}` (an escaped `}`), a backslash-newline inside the name, between a prefix character and the name, inside the operator or between `$` and `{` (`${func\⏎tions[h]::=body}`, ⏎ standing for the newline), a quoted `}`, a nested expansion, a newline or spaces in the subscript are refused, in double quotes, behind any keyword or wrapper, and in each nested command string the guard reads (`zsh -c`, `eval`, a substitution, ...): the check runs at every level where a command text is classified. Text inside single quotes (or `$'...'`) at the top level, or inside `$(...)`/`(...)`, is skipped, as the tokenizer skips it (`echo '${functions[f]::=x}'`, `git commit -m '... ${functions[f]::=x} ...'` pass); from the first construct whose quoting the scan cannot be sure of (a quote, backslash, `(` or `{` inside `${...}`, a `$(` or backtick inside double quotes, a backtick, `((`, `$[`, `<<`, a comment) nothing more is skipped. The tokenizer's older check of the same rule stays as a Doubt (section 2.4). Reading a table passes when no `=` follows (`${#functions}`, `${functions[f]}`, `${+commands[git]}`, `${#aliases[p]:-none}`) or when the `=` stands only before it (`n=${#functions}; echo $n`), as does an assigning expansion of any other name (`${x:=default}`, `${count::=0}`, `${myfunctions::=1}`, `${functions_dir:=x}`). Over-blocked, the safe side: a reading expansion of a table followed later by any `=` (`[[ ${#functions} == 0 ]]`, `echo ${#aliases}; y=1`; section 11), a default value holding `=` (`${aliases[p]:-a=b}`; take the value in two steps) and an empty-name default whose text starts with a table name (`${:-functions=x}`; write the text directly) | `functions+=(f 'rm -rf ../victim')\nf` · `aliases+=(p 'git push origin main')` · `typeset 'functions[f]=rm -rf x'` · `set -A functions f 'rm -rf ../victim'` · `: ${functions[f]::=rm -rf ../victim}; f` · `commands+=(ls /usr/bin/git); ls push origin main` · `commands[ls]=/bin/rm` · `read -A functions` · `if typeset 'functions[f]=x'; then f; fi` · `noglob set -A functions f x` · `! commands+=(zz /bin/echo)` |
 | Literal (quoted) text with `$(` or a backtick inside an array subscript (`name[...]`): bash runs it wherever the text reaches arithmetic (`$((x))`, `let`, `[[ -v ]]`, `declare -i`, `printf -v`). Arithmetic alone passes: a `$((...))` that closes with the first `))` and holds no parenthesis or backtick is stepped over (`'arr[$((i+1))]'`); one that does not may be read as `$( (...) )` and counts as a substitution | `x='a[$(rm -rf ../victim)]'; echo $((x))` · `let 'a[$(rm -rf x)]'` · `printf -v 'a[$(rm -rf x)]' %s 1` · `x='a[$(( $(rm -rf x) ))]'; echo $((x))` · `x='a[$((rm -rf x) )]'; echo $((x))` |
+| Since 2.0.0: an option-setting command (`set`, `setopt`, `unsetopt`, `shopt`, and a shell's own `-o` option) with an option word the guard cannot read or does not know as harmless, `globsubst` or `promptsubst` in any spelling, and `emulate` other than `emulate [-L] [-R] zsh` | `setopt globsubst` · `set -o promptsubst` · `set -o vi` · `setopt autocd` · `shopt -s histappend` · `bash -o vi -c ls` · `emulate sh` |
+| Since 2.0.0: `sched` with a command, and `parallel` or `sem` where a command runs; `su`, `pkexec`, `runuser`, `parallel`, `sem`, `at` or `batch` anywhere after a wrapper or a `find -exec` action; any of these where a command starts after a keyword or modifier, or inside braces stuck to a word (section 2.4) | `sched +1 ls` · `parallel echo ::: a` · `sem ls` · `xargs echo parallel` · `timeout 5 echo at` · `find . -exec su \;` · `until su; do :; done` · `exec -a foo su` · `{parallel x}` |
+| Since 2.0.0: the arguments of a string wrapper (`sg`, `su`, `runuser`, `flock`, `script`, `watch`), each read as a possible command string; one the guard cannot read as a literal is denied | `flock /tmp/l -c 'rm -rf .git'` · `script -c 'sudo id' log` · `sg docker -c 'sudo id'` · `flock /tmp/l ls *.ts` |
+| Since 2.0.0: `PS0`, `PS1` or `PS4` set through a builtin or an expansion that assigns it, or set to a value with an expansion (`$(...)`, `${...}`, `$name`, a backtick, an octal escape) on any line | `read PS4` · `printf -v PS4 x` · `declare -n r=PS4` · `: ${PS4:=x}` · `PS4+=x` · `export -n PS1` · `PS1=$PS1` · `export PS4='$(id)'` |
+| Since 2.0.0: `git clone` or `git init` with `--template`, `git clone -c` of a key that runs a program, the keys `instaweb.*` and `guitool.*.cmd`, the options of `send-email` that run a program (`--to-cmd`, `--cc-cmd`, `--header-cmd`, `--sendmail-cmd`, `--smtp-server`) and `instaweb --httpd` read as scripts, and zsh's `options` table under the table rule above | `git clone --template=x u d` · `git init --template x` · `git clone -c core.hooksPath=x u` · `git -c guitool.x.cmd=y status` · `git send-email --to-cmd='rm -rf ../victim' a.patch` · `git instaweb --httpd='sudo id'` · `local options` · `options[globsubst]=on` |
+| Since 2.0.0: a command over 262,144 characters, or with more than 4,096 of one of `[`, `{` or `(` (`tooLarge`; section 2.4) | a generated command of 262,145 characters |
 
-The same list is in the header comment of `classifyDetail`.
+The header comment of `classifyDetail` holds the same list without the rows marked "Since 2.0.0"; those rules are described in the code next to each of them and in section 2.4.
 
 #### Refused since the 2026-11-16 audit
 
@@ -159,7 +165,8 @@ A judged command goes to the opus model. There are two kinds.
 
 - its subcommand is `push`, `remote`, `send-pack`, `receive-pack`, `config` or `alias`;
 - the subcommand is dynamic;
-- or a later word in the same simple command is not wholly quoted and mentions `push`, `remote`, `send-pack`, `receive-pack`, or starts with `alias`, `url.` or `include`.
+- or a later word in the same simple command is not wholly quoted and mentions `push`, `remote`, `send-pack`, `receive-pack`, or starts with `alias`, `url.` or `include`;
+- since 2.0.0, its subcommand is `update-ref`, or it is a `fetch` or `pull` whose refspec writes a branch (`main:main`, `+refs/heads/*:refs/heads/*`, a `--refmap` with a destination, or a refspec the guard cannot read). Run in another repository (`git -C ../origin.git fetch "$PWD" main:main`, audit J-11) such a fetch moves that repository's branch as a push would.
 
 A whole quoted argument (a commit message) is text.
 
@@ -174,6 +181,7 @@ A whole quoted argument (a commit message) is text.
 | `git config alias.p push` · `git alias` · `git config remote.origin.url u` · `git config url.git@x:.insteadOf https://x/` | judge (git) |
 | `git-push origin` · `git send-pack origin` · `git pu\sh` · `git $'\x70ush' origin main` · `git pu${X}sh origin main` · `git $SUB origin main` · `/usr/bin/gi? push origin main` | judge (git) |
 | `sh -c "git push"` · `eval "git push"` · `timeout 5 git push` · `xargs git push` · `echo push origin main \| xargs git` · `trap 'git push' EXIT` · `watch 'git push'` · `bash -o pipefail -c 'git push'` · `cd sub && git push --force` | judge (git) |
+| `git -C ../origin.git fetch "$PWD" main:main` · `git pull origin main:main` · `git fetch ../o.git +refs/heads/*:refs/heads/*` · `git update-ref refs/heads/main HEAD` | judge (git, since 2.0.0) |
 | `git commit -m push-fix` | judge (over-inclusive: an unquoted word that mentions push) |
 
 ### 2.3 `pass` examples
@@ -199,7 +207,7 @@ A whole quoted argument (a commit message) is text.
 - **Expansions.** A word with an expansion or a glob is "dynamic". If its pieces could spell `rm`, `sudo` and so on (`r${X}m`, `/bin/r?`), it is denied. As a command word, any dynamic word that cannot be git is denied.
 - **Substitutions.** Every `$(...)`, backtick and `<(...)` body is read as a script of its own, with the same rules.
 - **Here-documents.** The body of a quoted here-document is data. In an unquoted one, `$(...)` and backticks in the body are read as scripts. A here-document that is never closed is doubt.
-- **`bash -c` payloads.** For `sh`, `bash`, `zsh`, `dash`, `ksh`, `ash`, `fish`, `csh`, `tcsh`, `rbash` and `busybox` with `-c`, the payload string is read as a script of its own. The same goes for `eval`, `trap` actions, `env -S` strings and `watch` commands. A payload that is not a literal string is denied.
+- **`bash -c` payloads.** For `sh`, `bash`, `zsh`, `dash`, `ksh`, `mksh`, `ash`, `fish`, `csh`, `tcsh`, `rbash` and `busybox` with `-c`, the payload string is read as a script of its own. The same goes for `eval`, `trap` actions, `env -S` strings, `watch` commands and, since 2.0.0, the strings of `flock -c`, `script -c` and `sg`. A payload that is not a literal string is denied.
 - **Depth limit.** Scripts nested in scripts are read to depth 3 (`MAX_DEPTH`). A fourth level is denied.
 - **Doubt is deny.** Anything the tokenizer cannot read with confidence throws `Doubt`, and the command is denied. That covers:
   - an unterminated quote, backtick, `$(` or `${`, or a trailing backslash;
@@ -216,7 +224,7 @@ A whole quoted argument (a commit message) is text.
 
 - **Where a command starts (2.0.0).** `commandStarts` marks the first word that is not a redirection or an assignment, and the next such word after each reserved word or precommand modifier of zsh and bash (`STARTERS`): `if`, `then`, `do`, `while`, `!`, `{`, `noglob`, `time` (its options skipped), `exec` (with `-a NAME`), `repeat N` (the count skipped), `coproc` (with an optional name), and others. An unquoted whole word `then`, `do`, `else` or `elif` (`REOPENERS`) and a closing `]]` start a command wherever they stand, as zsh's short forms do (`if [[ x ]] cmd`); the brace forms (`repeat 2 { cmd }`) start one at the `{`. A `{` stuck to a word (`{parallel x}`) is read a second time with the stuck braces stripped.
 - **Wrappers.** After a program on `WRAPPERS` (`timeout`, `env`, `nice`, `xargs`, `flock`, `watch`, `sg` and the rest), any later word of the same simple command named `parallel`, `sem`, `su`, `pkexec`, `runuser`, `at` or `batch` is denied (`WRAPPED_DENY`). For `sg`, `su`, `runuser`, `flock`, `script` and `watch` (`WRAPPER_STRING`) every argument is read as a possible command string; one the guard cannot read as a literal is denied.
-- **Prompt variables.** Setting `PS0`, `PS1` or `PS4` through an assigning builtin or an expansion is denied: `printf -v`, `read`, `declare`, `typeset`, `local` or `export` with `-n`, `getopts`, a loop variable, `${PS4:=...}`, an element, `+=`, an array value or arithmetic. A plain `declare PS4=x` or `export PS4=x` passes, as `PS4=x` does, unless its value holds a substitution or the same command turns tracing on.
+- **Prompt variables.** Setting `PS0`, `PS1` or `PS4` through an assigning builtin or an expansion is denied: `printf -v`, `read`, `declare`, `typeset`, `local` or `export` with `-n`, `getopts`, `let`, a loop variable, `${PS4:=...}`, an element, `+=`, an array value or arithmetic. A plain `declare PS4=x` or `export PS4=x` passes, as `PS4=x` does, unless its value holds an expansion (`$(...)`, `${...}`, `$name`, a backtick or an octal escape; `PS1=$PS1` is denied, `PS1='$ '` passes) or the same command turns tracing on.
 - **Size caps.** A command over `MAX_COMMAND_LENGTH` (262,144 characters), or with more than `MAX_OPENERS` (4,096) of one of `[`, `{` or `(`, is denied before it is read (`tooLarge`; the native hook refuses it the same way).
 - **The native hook's own reading.** For globs that might reach the prompt store, it reads `env`'s options as GNU env documents them (`envOptions`): `-C DIR` is a directory change, while `-S`, an option not on its list or a word built from an expansion leaves the folder unknown, and every later relative glob of the line is refused. A bracket expression is never parsed (`segMatch`): it stands for any one character together with what follows up to a later `]` of the segment, so it matches every name a shell's reading could.
 
@@ -226,7 +234,7 @@ Some environment variables make git, a shell or the loader run another program (
 
 **Rule.** For every word of every simple command (redirection targets included), the guard takes the word's *static prefix*. That is the text of its literal pieces joined, quoted or not, up to its first dynamic or glob piece. Double quotes, single quotes, `$'...'` read as a literal, a backslash-escaped character and an empty quoted piece all count as literal. So `"PATH=/x"`, `'PATH=/x'`, `PA"TH=/x"`, `""PATH=/x`, `\PATH=/x`, `"PATH"=/x`, `$'PATH'=/x` and `PATH="/x"` all give the prefix `PATH=/x`.
 
-When that prefix starts with an exec-env name followed by `=` or the append form `+=`, the line has an exec-env assignment. The names (`EXEC_ENV`) are: `GIT_EXTERNAL_DIFF`, `GIT_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_*`, `GIT_PROXY_COMMAND`, `EDITOR`, `VISUAL`, `PAGER`, `LD_PRELOAD`, `BASH_ENV`, `BASH_FUNC_<name>` (any name up to the `=`, so `BASH_FUNC_git%%`), `ZDOTDIR`, `ENV`, `PROMPT_COMMAND`, `PS0`, `PS1`, `PS4`, `IFS`, `PATH` and `SHELLOPTS`. The static no-op values of [section 2.1, "Relaxed"](#relaxed) (`GIT_EDITOR=true`, `GIT_EDITOR=:`, an empty `IFS=`) are not recorded at all.
+When that prefix starts with an exec-env name followed by `=` or the append form `+=`, the line has an exec-env assignment. The names (`EXEC_ENV`) are: `GIT_EXTERNAL_DIFF`, `GIT_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_PAGER`, `GIT_ASKPASS`, `GIT_SEQUENCE_EDITOR`, `GIT_CONFIG_*`, `GIT_PROXY_COMMAND`, `EDITOR`, `VISUAL`, `PAGER`, `LD_PRELOAD`, `BASH_ENV`, `BASH_FUNC_<name>` (any name up to the `=`, so `BASH_FUNC_git%%`), `ZDOTDIR`, `ENV`, `PROMPT_COMMAND`, `PS0`, `PS1`, `PS4`, `IFS`, `PATH`, `SHELLOPTS` and, since 2.0.0, `GIT_ALLOW_PROTOCOL`, `LESSOPEN`, `LESSCLOSE` and `GIT_TEMPLATE_DIR`. The static no-op values of [section 2.1, "Relaxed"](#relaxed) (`GIT_EDITOR=true`, `GIT_EDITOR=:`, an empty `IFS=`) are not recorded at all.
 
 - **The deny.** An exec-env assignment on a command line that also runs git, `rm` or a shell (anywhere in it, nested scripts included) is denied. A quoted word is recorded at the same place, in the same scope, as an unquoted one.
 - **Tracing.** A `PS0`, `PS1` or `PS4` assignment is also denied with no git, `rm` or shell on the line, when the line turns on tracing (`set -x`, `set -o xtrace`, `setopt xtrace`; reason `setting PS4 on a command line that turns on tracing ...`). The shell expands `PS4` before every traced command.
@@ -242,7 +250,7 @@ When that prefix starts with an exec-env name followed by `=` or the append form
 
 - a word whose name part is dynamic (`env ${P}ATH=/x git status`, `env "$V" git status`);
 - `env -S` strings beyond what section 2.1 reads;
-- assignments never spelled `NAME=` (`declare -n r=PAGER; r=evil`, `read PATH <<< /x`, `printf -v PATH /x`, `for PATH in /x`, `: ${GIT_SSH_COMMAND:=x}`).
+- assignments never spelled `NAME=` (`declare -n r=PAGER; r=evil`, `read PATH <<< /x`, `printf -v PATH /x`, `for PATH in /x`, `: ${GIT_SSH_COMMAND:=x}`). For `PS0`, `PS1` and `PS4` these forms are denied since 2.0.0 (section 2.4, "Prompt variables").
 
 A quoted exec-env word in command position (`"PATH=/x" su`) is not an assignment to any shell; it is outside the rule's property.
 
@@ -253,6 +261,8 @@ A quoted exec-env word in command position (`"PATH=/x" su`) is not an assignment
 - what 1.4.0 passes or judges becomes a deny only by this rule, `find -rm`, or the hardening rows added since (their reasons or their inputs, `HARDENED`).
 
 A property over generated lines (each exec-env name, `=` and `+=`, 22 command prefixes, 9 line endings) checks that each quoting above fires the env deny exactly when the unquoted word does.
+
+Since 2.0.0 the same file also loads the release-1.6.1 judge (`src/fixtures/judge-core-1.6.1.mjs.txt`, byte for byte `git show 7b408fe:.claude/hooks/judge-core.mjs`) from the fixture, never from git history. It checks that nothing 1.6.1 denies passes or is judged, on every judge test string and its wrapped forms, and that the tokenizer's output equals 1.6.1's on every test string and on random shell text, in both copies.
 
 ## 3 How the judge decides
 
@@ -328,6 +338,7 @@ If only the brief, and not the request, asks for an action that needs the reques
 
 - **Allow, as a safe default:** a push of the task's own feature branch that fits the request, without force or delete.
 - **The request must ask explicitly:** a push to the default branch (main or master); any force push (`--force`, `-f`, `--force-with-lease`, `+ref`) or deleting push (`--delete`, `-d`, `:branch`); adding, removing or changing a remote or its URL (`git remote add/set-url/remove`, `git config remote.*`, `url.*.insteadOf`). If only the brief asks, the denial is `NOT_AUTHORITY`.
+- **A fetch or pull that writes a branch, and `git update-ref`** (since 2.0.0): allowed in the working folder's own repository when it fits the request; run in another repository (`git -C`, `--git-dir`, a path outside the working folder) it counts as a push to that repository and needs the request to ask for that push.
 - **Deny** git aliases or config that would hide a push or a remote change, and anything the judge is unsure about.
 
 ### 3.6 The answer
@@ -429,7 +440,7 @@ The SDK judge reads these environment variables. The native hook has its own ([N
 | `decision` | `allow` or `deny` |
 | `reason` | The reason text |
 | `model` | The model that answered, or empty when it was not asked |
-| `tokens` | The judge call's tokens (0 when not asked or cached) |
+| `tokens` | The judge call's tokens (0 when not asked or cached). Since 2.0.0 a failed call whose error result reported usage records those tokens; a failure before any result records 0 |
 | `cached` | `true` when the verdict came from the cache |
 
 What is and is not in the log:
@@ -517,7 +528,7 @@ It prints a JSON object (`insideCwdWritten`, `homeMarkerBlocked`, `markerCleaned
 ## 10 Cost and behaviour
 
 - Only judged commands pay. A `pass` command costs nothing, and a floor command is denied without a model call. A judged command adds the time of git facts plus one opus call (seconds, bounded at 60 s).
-- The judge's tokens are not part of the worker's `tokens`: the judge is a separate `query()` inside the hook (comment in `makeRunAgent`). So `--budget`, `report.json` and `telemetry.jsonl` do not count them. They are in the audit file's `tokens` field.
+- Since 2.0.0 the judge's tokens are added to the worker's `tokens` (`judgeTokens` in `makeRunAgent`), so `--budget`, `report.json` and `telemetry.jsonl` count them. A failed judge call counts only when its error carried the usage of a result; a call that failed before any result (no result in the stream, the stream itself failing) adds nothing ([Limits, F](limits.md#f-not-built)). The worker's `usage` and `costUsd` stay its own. A judge answer that arrives after its timeout still adds, but only if it lands before the worker returns. Each call's tokens are also in the audit file's `tokens` field. Tested in `src/agent.test.ts`.
 - The cache ([section 3.8](#38-the-cache)) avoids repeat calls for the same command and facts within one worker call.
 
 ## 11 Limits
@@ -530,7 +541,7 @@ This is best-effort defence in depth against mistakes. It is not a security boun
 - variables set in an earlier call, or set in the same call and expanded as a plain argument (`X='rm -rf .git'; env $X`);
 - scripts that push or delete (`./deploy.sh`, `bash x.sh`, `source x.sh`);
 - strings run by interpreters (`python -c`, `perl -e`, `ruby -e`, `node -e`, `awk 'BEGIN{system(...)}'`);
-- `find -exec` forms other than `rm` or a shell;
+- `find -exec` forms other than `rm`, a shell, git, or (since 2.0.0) one of the names refused after a wrapper (`find . -exec chmod 600 {} +` passes);
 - `git clean -fdx`; `shred`, `unlink`, `rmdir`; `mv x /dev/null`; truncation (`> file`); `dd of=`;
 - pushes by other tools (`gh pr create`, `gh repo create`); `ssh host cmd`; `make`/`just` targets;
 - environment or flags that point git at config, hooks or binaries planted in an earlier step (`GIT_DIR=...`, `HOME=... git`, `git -C <dir> ...`, `git --exec-path=...`);
@@ -560,7 +571,7 @@ Refused since 2.0.0, where earlier versions let them through (rows in `src/judge
 - the forms the 2026-11-16 audit rows refuse ([section 2.1](#refused-since-the-2026-11-16-audit)): `PS4='+ ' bash -x run.sh`, zsh `hash -d name=path`, `enable -f`, a here-document delimiter with `$`, a table word behind a keyword or wrapper or given to a command off the `TEXT_ONLY` list (`if grep -q functions= f; then ...`: write the search as its own command), quoted `$(` or a backtick inside `name[...]`, a subscript `$((...))` that holds parentheses, `set -A`, a variable named `commands`, `git config --get` of an exec key, and a `filter-branch` filter refused as a command of its own;
 - a reading expansion of one of zsh's special tables (`functions`, the alias tables, `dis_*`, `commands`) followed later in the same command by any `=`, even in another statement or on another line (`[[ ${#functions} == 0 ]]`, `(( ${+commands[git]} )) && x=1`, `echo ${#aliases}; y=1`; write the read and the rest as two commands). After a construct whose quoting the scan cannot be sure of (section 2.1), such a `${` inside later single-quoted text counts too. This also catches a quoted here-document or a `node -e` one-liner that holds a JavaScript template literal such as `${commands[0]}` with a later `=` (section 2.1; put that code in a file);
 - on the git side, any unquoted word near `git` that mentions push or remote (`git commit -m push-fix` is judged, not passed);
-- since 2.0.0: a dynamic command word after a keyword (`if $verbose; then ...`, `exec "$@"`); `PS4+=...` and `export -n PS1`; an unquoted `do`, `then`, `else` or `elif` before a refused name (`echo do parallel`); a refused name anywhere after a wrapper (`xargs grep parallel`, `timeout 5 echo at`); a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`) and an option cluster that spells a refused command; `echo {rm}`; a command over 262,144 characters or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`). The summary of every limit is on [docs/limits.md](limits.md).
+- since 2.0.0: a dynamic command word after a keyword (`if $verbose; then ...`, `exec "$@"`); `PS4+=...` and `export -n PS1`; an unquoted `do`, `then`, `else` or `elif` before a refused name (`echo do parallel`); a refused name anywhere after a wrapper (`xargs grep parallel`, `timeout 5 echo at`); a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`) and an option cluster that spells a refused command; `echo {rm}`; a command over 262,144 characters or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`); an option of `set`, `setopt`, `unsetopt`, `shopt` or a shell's `-o` that is not on the guard's harmless list (`set -o vi`, `setopt autocd`, `shopt -s histappend`, `bash -o vi -c ls`; set such an option in a script file or a shell start-up file), and `emulate sh`; a prompt value with an expansion on any line (`PS1=$PS1`); a variable named `options` (`local options`). The summary of every limit is on [docs/limits.md](limits.md).
 
 **Other limits.**
 
@@ -573,7 +584,7 @@ Refused since 2.0.0, where earlier versions let them through (rows in `src/judge
 
 ## 12 How it was tested
 
-- `src/judge.test.ts` has a `CASES` table of 457 `[command, expected class]` rows (302 `deny`, 67 `judge`, 88 `pass`; counted by loading the array, not by pattern). The test "classify: floor, judged and pass cases" checks them with `classify(cmd, "/work/repo")`. A comment in the file states the intent that every floor row must fail if its rule were removed. Row groups are labelled after review rounds ("reviewer probes", "review 3", "review 3 usability: must pass"). The audit rows are in their own lists (`AUDIT_1116_DENY`, `AUDIT_1116_2_DENY`, `AUDIT_1116_2_TABLE_EXPANSION_DENY`, `AUDIT_1116_3_TABLE_EXPANSION_DENY`).
+- `src/judge.test.ts` has a `CASES` table of 457 `[command, expected class]` rows (302 `deny`, 67 `judge`, 88 `pass`; counted by loading the array, not by pattern). The test "classify: floor, judged and pass cases" checks them with `classify(cmd, "/work/repo")`. A comment in the file states the intent that every floor row must fail if its rule were removed. Row groups are labelled after review rounds ("reviewer probes", "review 3", "review 3 usability: must pass"). The audit rows are in their own lists (`AUDIT_1116_DENY`, `AUDIT_1116_2_DENY`, `AUDIT_1116_2_TABLE_EXPANSION_DENY`, `AUDIT_1116_3_TABLE_EXPANSION_DENY`), and the 2.0.0 rows in theirs (`W2_DENY`, `W2_JUDGE`, `W2_PASS`, `W2R2_DENY`, `W2R2_PASS`, `W7_DENY`, `W7_PASS`, `W7_WRAPPERS`, `W7_WRAPPERS_PASS`, `W7_SHAPES`, `W7_SHAPES_PASS`); `CASES` itself is unchanged since 1.6.1. Since 2.0.0 the bounds on the judge's own work are checked in CPU time, with growth ratios and loose wall-clock backstops.
 - Further tests cover the tokenizer, an absolute `rm` target with an unknown working folder, `parseVerdict`, `judgeEnabled` and the hook-timeout margin, the prompt blocks and nonce, the cache, the audit file, symlink and `statPath` cases, the blank task, judge off, every failure being a deny, and a missing or non-string command.
 - `src/agent.test.ts` covers the wiring: the hook and its timeout per Bash role, `SDK_DENIED_BASH` with the judge on and `UNSAFE_BASH` off, no hook for non-Bash roles, the worker system texts, the audit file precedence, the sandbox options, and that solo passes the original task and a per-run audit file on every Bash role call.
 - The model call is faked in all of these (`fakes()` in the test file). No test calls a real opus judge. The real-judge behaviour of `RM_POLICY` and `JUDGE_POLICY` (what opus actually allows) has not been measured here.
@@ -637,7 +648,8 @@ The folder is created with mode 0700 and the file with mode 0600. The project ke
 
 - the raw text with quotes and backslashes dropped (the absolute path, `~/...`, `$HOME/...` or the bare folder name);
 - each word as the tokenizer decodes it, in every command of the line and in its `$(...)`, backtick and process substitutions (up to 8 deep), so `judge-$'prompts'`, `judge-$"prompts"`, `$'judge\x2dprompts'` and other escapes count;
-- the decoded words read again as command text, whichever command would run them (`bash -c`, `sh -c`, `zsh -c`, `eval` or none), up to 4 levels (`DECODE_LEVELS`), so `bash -c "cat judge-\$'prompts'/x"` counts.
+- the decoded words read again as command text, whichever command would run them (`bash -c`, `sh -c`, `zsh -c`, `eval` or none), up to 4 levels (`DECODE_LEVELS`), so `bash -c "cat judge-\$'prompts'/x"` counts;
+- since 2.0.0, a glob whose matches can include the store folder's path (`judge-*`, `j*/*/*` after `cd`, `pushd` or `env -C` into its parent), matched segment by segment against that path (`storeVerdict` in `judge-core.mjs`; reason `... (through a glob)`). A relative glob after a directory change to a folder the guard cannot read as one plain path (a variable, `~`, `-`, a stack entry, `HOME` or `CDPATH` set, an `env` option it does not know) is refused too, with a reason that says to run the directory change as its own call. A command over the judge's size caps is refused before any of this is read.
 
 **The model call.** The hook runs:
 
