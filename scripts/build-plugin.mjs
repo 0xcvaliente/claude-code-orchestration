@@ -11,7 +11,8 @@
 // below already matches. A repo-root evals/ directory ships as evals/ when it exists. The judge hooks are registered
 // only when their files exist in .claude/hooks. Plugin settings are declared as userConfig (see OPTIONS).
 // It also writes the marketplace manifest .claude-plugin/marketplace.json (this repository is the marketplace people
-// add), and --check compares it like dist/ (docs/marketplace.md).
+// add), and --check compares it like dist/ (docs/marketplace.md). Since 2.0.3 it copies the root LICENSE into both
+// builds, and plugin-assets/README.md and plugin-assets/icon.png into dist/plugin, so --check compares them too.
 // --out <dir>: build into <dir>/plugin and <dir>/dashboard, and the marketplace manifest into <dir>/marketplace.json,
 // instead of dist/ and .claude-plugin/ (ignored with --check).
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
@@ -20,10 +21,12 @@ import { join, resolve } from "node:path";
 
 const NAME = "orchestration";
 // The facts every manifest shares, in one place. The marketplace name and owner are the ones people already added:
-// renaming the marketplace would drop it for them. No owner email, and no license: the owner has not chosen one.
+// renaming the marketplace would drop it for them. No owner email. The license (MIT since 2.0.3, the root LICENSE file)
+// goes into both plugin manifests only, not into the marketplace entry: one place per fact.
 const REPO = "https://github.com/0xcvaliente/claude-code-orchestration";
 const SHARED = {
   owner: { name: "0xcvaliente" },
+  license: "MIT",
   homepage: REPO,
   repository: REPO,
   keywords: ["orchestration", "multi-agent", "subagents", "code-review", "test-gate", "triage"],
@@ -49,6 +52,11 @@ const outRoot = check ? mkdtempSync(join(tmpdir(), "orch-plugin-")) : outArg ? r
 const out = join(outRoot, "plugin");
 const dash = join(outRoot, "dashboard");
 const dashSrc = join(process.cwd(), "dashboard");
+// 2.0.3: the plugin's README and icon (plugin-assets/, whose NOTES.md and icon.svg are not shipped) and the root LICENSE.
+// The PNG is committed: the build never renders the SVG (plugin-assets/NOTES.md says how to regenerate it).
+const assets = join(process.cwd(), "plugin-assets");
+const license = join(process.cwd(), "LICENSE");
+const ICON = "icon.png";
 const version = JSON.parse(readFileSync("package.json", "utf8")).version;
 
 rmSync(out, { recursive: true, force: true });
@@ -71,6 +79,10 @@ if (existsSync(workflows)) {
 }
 const evals = join(process.cwd(), "evals");
 if (existsSync(evals)) cpSync(evals, join(out, "evals"), { recursive: true });
+// A missing source throws, so the build and --check fail loudly instead of shipping a plugin without them.
+cpSync(license, join(out, "LICENSE"));
+cpSync(join(assets, "README.md"), join(out, "README.md"));
+cpSync(join(assets, ICON), join(out, ICON));
 
 const orch = join(out, "agents", "orchestrator.md");
 writeFileSync(
@@ -191,7 +203,7 @@ const userConfig = Object.fromEntries(
 
 writeFileSync(
   join(out, ".claude-plugin", "plugin.json"),
-  `${JSON.stringify({ name: NAME, version, description: PLUGIN_DESCRIPTION, author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, keywords: SHARED.keywords, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
+  `${JSON.stringify({ name: NAME, version, description: PLUGIN_DESCRIPTION, author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, license: SHARED.license, keywords: SHARED.keywords, icon: `./${ICON}`, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
 );
 
 // No plugin settings.json since 1.6.1: Claude Code 2.1.326 lists `subagentStatusLine` as deprecated in favour of mods,
@@ -200,10 +212,11 @@ writeFileSync(
 
 cpSync(join(dashSrc, "register.tsx"), join(dash, "hooks", "register.tsx"));
 cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));
+cpSync(license, join(dash, "LICENSE"));
 writeFileSync(join(dash, "hooks", "hooks.json"), `${JSON.stringify({ modules: ["./register.tsx"] }, null, 2)}\n`);
 writeFileSync(
   join(dash, ".claude-plugin", "plugin.json"),
-  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, keywords: SHARED.keywords, types: "./types/index.d.ts" }, null, 2)}\n`,
+  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, license: SHARED.license, keywords: SHARED.keywords, types: "./types/index.d.ts" }, null, 2)}\n`,
 );
 
 // The marketplace manifest: one entry, the plugin under ./dist/plugin (relative to the repository root, so the built

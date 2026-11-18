@@ -14,9 +14,9 @@ Use it when a wrong result is costly or when a task splits into parallel parts. 
    ```
 
 2. Start a new chat. The plugin's nudge tells Claude to run `orchestration:route` before any non-trivial task.
-3. After a plugin update, run `/reload-plugins`.
+3. A plugin installed or updated from your shell loads in the next session you start. In a session that is already open, run `/reload-plugins`.
 
-You get a new copy only when a release changes the version. Added this way, the marketplace reads `main` and picks up each new release when you update. To stay on one release, add it at its tag (`0xcvaliente/claude-code-orchestration#v2.0.2`). Updates, release tags and what the plugin ships: [Sharing the plugin](docs/marketplace.md).
+You get a new copy only when a release changes the version. Added this way, the marketplace reads `main` and picks up each new release when you update. To stay on one release, add it at its tag (`0xcvaliente/claude-code-orchestration#v2.0.3`). Updates, release tags and what the plugin ships: [Sharing the plugin](docs/marketplace.md).
 
 The plugin carries the agents, the gates, the `/route` skill, the gated workflow, the nudge and the pane. A plugin cannot set the two settings below. Add them to `.claude/settings.json` in your project or to `~/.claude/settings.json`:
 
@@ -165,3 +165,7 @@ npm run soak           # model-free soak of the gates: 10 minutes by default, --
 - After `npm run check`, CI also runs the dashboard test.
 - The soak drives random worker life cycles through the real hooks in temp projects and checks nine invariants. It exits 1 with a replayable sequence for each violation ([docs/data/probes-2.0.1-soak.md](docs/data/probes-2.0.1-soak.md)).
 - Versions are tagged from `v1.1.0` onward. Scripts, layout and contributor rules: [docs/development.md](docs/development.md) and [CLAUDE.md](CLAUDE.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).

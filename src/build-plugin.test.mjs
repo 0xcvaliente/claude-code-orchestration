@@ -48,6 +48,8 @@ function project({ judge = false, evals = false }) {
   });
   cpSync(join(root, "dashboard"), join(dir, "dashboard"), { recursive: true });
   cpSync(join(root, "package.json"), join(dir, "package.json"));
+  cpSync(join(root, "LICENSE"), join(dir, "LICENSE"));
+  cpSync(join(root, "plugin-assets"), join(dir, "plugin-assets"), { recursive: true });
   if (judge) {
     writeFileSync(join(dir, ".claude", "hooks", "judge-hook.mjs"), "process.exit(0);\n");
     writeFileSync(join(dir, ".claude", "hooks", "prompt-capture.mjs"), "process.exit(0);\n");
@@ -325,7 +327,7 @@ test("userConfig declares every bridged switch with a type, title and a descript
   assert.deepEqual(Object.fromEntries(defaults), { gap_min: 80, run_stale_min: 30, baseline: "inform" });
 });
 
-test("2.0.2: both plugin manifests name the repository, the homepage and keywords, and carry no license", () => {
+test("2.0.2: both plugin manifests name the repository, the homepage and keywords, and (2.0.3) the MIT license", () => {
   const repo = "https://github.com/0xcvaliente/claude-code-orchestration";
   for (const [file, name] of /** @type {[string, string][]} */ ([["dist/plugin/.claude-plugin/plugin.json", "orchestration"], ["dist/dashboard/.claude-plugin/plugin.json", "orchestration-dashboard"]])) {
     const m = read(file);
@@ -335,7 +337,69 @@ test("2.0.2: both plugin manifests name the repository, the homepage and keyword
     assert.equal(m.homepage, repo, file);
     assert.ok(Array.isArray(m.keywords) && m.keywords.length > 0 && m.keywords.every((/** @type {unknown} */ k) => typeof k === "string"), `${file} keywords`);
     assert.deepEqual(m.author, { name: "0xcvaliente" }, `${file}: author by name, no email`);
-    assert.equal(m.license, undefined, `${file}: no license (the owner has not chosen one)`);
+    assert.equal(m.license, "MIT", `${file}: license`);
+  }
+});
+
+// 2.0.3: the license, the icon and the plugin README. Expected values come from the files themselves and from the PNG
+// format (signature, IHDR), never from the build script.
+/** @param {Buffer} b @returns {{ width: number, height: number }} */
+function pngSize(b) {
+  assert.ok(b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), "PNG signature");
+  assert.equal(b.subarray(12, 16).toString("latin1"), "IHDR", "IHDR is the first chunk");
+  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+}
+/** @param {string} text words of prose: fenced code blocks left out */
+const proseWords = (text) => text.replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, "").match(/[A-Za-z][A-Za-z'-]*/g)?.length ?? 0;
+
+test("2.0.3: LICENSE is the MIT License of 0xcvaliente and ships unchanged in dist/plugin and dist/dashboard", () => {
+  const text = readFileSync(join(root, "LICENSE"), "utf8");
+  assert.ok(text.startsWith("MIT License\n"), "starts with MIT License");
+  assert.ok(text.split("\n").includes("Copyright (c) 2026 0xcvaliente"), "the copyright line");
+  assert.match(text, /THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND/);
+  for (const d of ["plugin", "dashboard"]) assert.equal(readFileSync(join(root, "dist", d, "LICENSE"), "utf8"), text, `dist/${d}/LICENSE`);
+});
+
+test("2.0.3: the plugin's icon is a 512 by 512 PNG inside dist/plugin, the committed plugin-assets/icon.png", () => {
+  const manifest = read("dist/plugin/.claude-plugin/plugin.json");
+  assert.equal(typeof manifest.icon, "string");
+  assert.match(manifest.icon, /^\.\/[\w.-]+\.png$/, "a relative path inside the plugin");
+  const shipped = readFileSync(join(root, "dist", "plugin", manifest.icon));
+  assert.deepEqual(pngSize(shipped), { width: 512, height: 512 });
+  assert.ok(shipped.length < 200 * 1024, "under 200 KB");
+  assert.ok(shipped.equals(readFileSync(join(root, "plugin-assets", "icon.png"))), "equals plugin-assets/icon.png");
+  assert.ok(existsSync(join(root, "plugin-assets", "icon.svg")), "the SVG source is committed");
+  assert.equal(read("dist/dashboard/.claude-plugin/plugin.json").icon, undefined, "the dashboard build needs none");
+});
+
+test("2.0.3: dist/plugin/README.md is plugin-assets/README.md, with at least 40 words outside code blocks; NOTES.md and the SVG stay out", () => {
+  const src = readFileSync(join(root, "plugin-assets", "README.md"), "utf8");
+  assert.equal(readFileSync(join(root, "dist", "plugin", "README.md"), "utf8"), src);
+  assert.ok(proseWords(src) >= 40, `${proseWords(src)} words of prose`);
+  for (const f of ["NOTES.md", "icon.svg"]) assert.ok(!existsSync(join(root, "dist", "plugin", f)), `${f} is not shipped`);
+});
+
+test("2.0.3: --check fails when the shipped LICENSE, icon or README differs from its source (scratch copy)", () => {
+  const dir = project({});
+  try {
+    const run = () => spawnSync("node", [script, "--check"], { cwd: dir, encoding: "utf8" });
+    assert.equal(spawnSync("node", [script], { cwd: dir, encoding: "utf8" }).status, 0);
+    assert.equal(run().status, 0, "fresh build");
+    for (const rel of ["dist/plugin/LICENSE", "dist/plugin/icon.png", "dist/plugin/README.md", "dist/dashboard/LICENSE"]) {
+      const file = join(dir, rel);
+      const saved = readFileSync(file);
+      writeFileSync(file, Buffer.concat([saved, Buffer.from("x")]));
+      const r = run();
+      assert.equal(r.status, 1, `a changed ${rel} must fail the check`);
+      assert.ok(r.stderr.includes(`Files differ: ${rel.split("/").slice(2).join("/")}`), r.stderr);
+      writeFileSync(file, saved);
+      assert.equal(run().status, 0, `${rel} restored`);
+    }
+    // A changed source fails too: the committed copy is then stale.
+    writeFileSync(join(dir, "plugin-assets", "README.md"), "changed\n");
+    assert.equal(run().status, 1, "a changed plugin-assets/README.md");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
