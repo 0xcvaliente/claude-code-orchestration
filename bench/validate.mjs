@@ -2,9 +2,12 @@
 // Offline validation of benchmark tasks (no model calls).
 //   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N] [--deadline-s S]   (N tasks side by side, default 4)
 // --deadline-s (default 270, 0 = none): when the run has not finished by then, it prints the lines of the tasks that did finish,
-// names each task it did not finish or did not reach, and exits 1, instead of being killed silently by an outer timeout.
+// names each task it did not finish or did not reach (NOT DONE lines), ends its graders and exits 3, instead of being killed
+// silently by an outer timeout.
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
-// scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
+// scores pass:true; every mutant applied to the reference scores pass:false.
+// Exit codes: 0 every task valid; 1 a task failed, or no task matched; 3 the deadline was reached (the unfinished tasks
+// named); 130 the script itself got SIGINT or SIGTERM (its graders ended and its scratch root removed first).
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { availableParallelism, cpus, tmpdir } from "node:os";
