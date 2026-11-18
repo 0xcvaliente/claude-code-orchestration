@@ -38,7 +38,7 @@ npm run claude-update -- --write-source    # maintainer: also update the block l
 npm run claude-update -- --json            # print the result as JSON
 ```
 
-- It calls no model. It runs `claude --version`, `claude --help`, `claude plugin ...` and two start-up requests ("How the built-in list is read" below).
+- It calls no model. It runs `claude --version`, `claude --help`, `claude plugin ...` and two start-up requests ("How the built-in list is read" below), and reads the program file of `claude` (found on `PATH`, through symlinks) for the `payload` and `memory` checks.
 - It prints one line per check, marked `ok`, `fixed`, `note` or `FAIL`. It exits 0 when no check failed, 1 when one did, and 2 on an unknown argument.
 - It writes its result to `<CLAUDE_CONFIG_DIR or ~/.claude>/orchestration/claude-update.json`.
 - `ORCH_CLAUDE_BIN` names another `claude` binary.
@@ -49,8 +49,11 @@ npm run claude-update -- --json            # print the result as JSON
 | `builtins` | Every built-in subagent type of the installed Claude Code is in `BUILTIN_AGENTS` | `--fix` blocks the new type on this machine at once. `--write-source` adds it to the repo; then run `npm run check` and release |
 | `headless` | With `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0` Claude Code lists no subagent | The switches stopped working: headless runs can delegate to built-ins. `scripts/orchestrate.sh` needs another way to turn them off, for example `--disallowedTools "Agent(<type>)"` for each type |
 | `flags` | Every option in `HEADLESS_FLAGS` (the options `scripts/orchestrate.sh` and the native judge pass) is in `claude --help` | An option was removed or renamed; change the script that passes it |
+| `payload` | Every hook payload field the hooks read (`HOOK_FIELDS`) is named in the program file of `claude` (2.0.0). Presence only: a field can keep its name and change its shape | The failure names the missing fields. The hooks exit 0 on input they cannot read, so a gate can go quiet: read the hook docs and probe the hooks (`npm run test-dashboard`, a headless run). A program file that cannot be found or read, or that names none of the fields (a wrapper script), is a note |
+| `memory` | `CLAUDE_CODE_DISABLE_AUTO_MEMORY` is named in the same program file (2.0.0). Presence only: whether it still turns auto memory off is not tested | The judge hook and the SDK workers may now start auto memory; read Claude Code's memory docs for what replaced the switch. Same notes as `payload` |
 | `sdk` | The Agent SDK's patch number equals Claude Code's (0.3.N carries 2.1.N) | A note, not a failure: the [SDK pipeline](glossary.md#s) runs the older Claude Code the SDK carries. To match: `npm install @anthropic-ai/claude-agent-sdk@0.3.N && npm run check`. With no Agent SDK installed the check passes |
 | `plugin` | The plugin, when installed, is at this checkout's version | An older installed version fails; `--fix` updates it. Not installed or disabled is a note, because the plugin is opt-in: `--enable` installs it from this checkout and turns it on |
+| `workflow` | The enabled plugin's `workflows/orchestrate.js` (in the folder it is read from) has the content the workflow guard expects (`PLUGIN_WORKFLOW_SHA256`; 2.0.0). Not run when the plugin is off | The guard's project copy checks only `dist/plugin`, so a loaded copy of other content would be trusted as installed. Update the plugin (`claude plugin update`; `--fix` runs it only when the version differs from this checkout's), or, for a plugin read from this checkout, run `npm run build-plugin`. A folder the plugin list does not name, or a file that cannot be read, is a note |
 | `sandbox` | With `sandbox.enabled` in your user settings (`<config dir>/settings.json`), `sandbox.filesystem.allowWrite` covers `<config dir>/orchestration` (state, skill drafts, the judge's record; 1.6.1) | A note naming the entry. `--fix` adds `<config dir>/orchestration` to `sandbox.filesystem.allowWrite`, keeping every other key and the indent; a symlinked `settings.json` is written at its target, and paths are compared with symlinks resolved. Managed settings are never edited; a file that cannot be read or parsed is a note only. On Linux an entry for a path that does not exist has no effect; the check creates the folder (it writes `claude-update.json` there). Restart Claude Code after the fix |
 | `dist` | `npm run check-plugin` passes | `npm run build-plugin` |
 
@@ -69,7 +72,8 @@ It asks twice: once as it is, for the `builtins` check, and once with the two he
 
 - It writes the built-in types that are not in `BUILTIN_AGENTS` to `<CLAUDE_CONFIG_DIR or ~/.claude>/orchestration/builtin-agents.json`. `builtinAgents()` in `builtin-agents.mjs` adds that file's names to the list every time the plan check runs. So the new type is blocked from the next launch on, with no new release and no restart.
 - The file can only add plain names, never one of this plugin's own agents. The worst a wrong file can do is block a type twice before the loop guard lets it through. `ORCH_BUILTINS_FILE` names another file; empty means none.
-- It updates an installed plugin that is older than this checkout. Restart Claude Code afterwards.
+- It updates an installed plugin whose version differs from this checkout's. Restart Claude Code afterwards.
+- With the sandbox on in your user settings, it adds `<config dir>/orchestration` to `sandbox.filesystem.allowWrite` (the `sandbox` row above).
 
 `--enable` installs the plugin from this checkout's marketplace when it is missing, and enables it when it is disabled. `--fix` never does that: whether the plugin is on is your choice, and an update check must not change it.
 
@@ -83,8 +87,9 @@ It asks twice: once as it is, for the `builtins` check, and once with the two he
 | `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS` and `CLAUDE_CODE_FORK_SUBAGENT` | `scripts/orchestrate.sh` | `headless` |
 | The `claude` options in `HEADLESS_FLAGS` | `scripts/orchestrate.sh`, `judge-hook.mjs` | `flags`; a test fails when a script passes an option that list does not name |
 | `--max-turns` and `--advisor`, which `claude --help` does not list | `judge-hook.mjs`, `scripts/orchestrate.sh` | Nothing: the help cannot confirm them |
-| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `judge-hook.mjs`, `workerEnv()` in `src/judge.ts` | Tests check that it is set; nothing checks that Claude Code still honours it |
-| [Hook](glossary.md#h) events and their payload fields (`agent_type`, `tool_input.subagent_type`, `background_tasks`, ...) | `.claude/hooks/` | Nothing automatic; the probes in `docs/data/live-checks-*.md` were run by hand |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | `judge-hook.mjs`, `workerEnv()` in `src/judge.ts` | Tests check that it is set; `memory` checks that Claude Code still names it; nothing checks that Claude Code still honours it |
+| [Hook](glossary.md#h) events and their payload fields (`agent_type`, `tool_input.subagent_type`, `background_tasks`, ...) | `.claude/hooks/` | `payload` checks that each field name is still in the program file; nothing checks a field's shape or an event; the probes in `docs/data/live-checks-*.md` were run by hand |
+| The loaded plugin's workflow file | the installed or checkout plugin folder | `workflow` |
 | The plugin being enabled, if you use it | `~/.claude/settings.json` | `plugin` (a note when it is off) |
 
 ## Limits

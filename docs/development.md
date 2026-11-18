@@ -11,11 +11,11 @@ npm test             # the tests only (fake model, no API calls)
 npm run typecheck    # the type check only
 ```
 
-`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main. It must finish in under 5 minutes on the maintainer's machine.
+`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main, then, since 2.0.0, installs the Claude Code CLI (2.1.326) and runs `npm run test-dashboard` (the 2.0.0 changelog notes that this step was not run on a CI runner before the release). `npm run check` must finish in under 5 minutes on the maintainer's machine.
 
 **Test rules (2.0.0).**
 - Tests never read this repository's git history. A comparison with an older version reads stored files under `src/fixtures/`: `judge-core-1.4.0.mjs`, `judge-core-1.6.1.mjs.txt` and `gates-1.6.1/` (`brief.mjs`, `run.mjs`, `state.mjs`). A test under `src/` never skips because history is missing; `bench/arms.test.mjs` still skips one test in a clone without the 0.3.0 ref ([limits.md](limits.md), G).
-- A bound on the in-process work of the code under test is checked in CPU time (`process.cpuUsage`, the `cpuMs` helpers at the top of `src/judge.test.ts` and `src/guards.test.mjs`), so it holds on a loaded machine. Tests of a deadline firing and tests that time a child process (the hook run as a process, the 20,000-word commands) stay on the wall clock. Some in-process checks in `src/judge.test.ts` still use the wall clock: growth ratios taken as the best of three runs, and loose backstops (the attached-value test's 60 s and 5 s bounds).
+- A bound on the in-process work of the code under test is checked in CPU time (`process.cpuUsage`, through the helpers at the top of the two files, `cpuMs` in `src/judge.test.ts` and `cpuTimed` in `src/guards.test.mjs`), so it holds on a loaded machine. Tests of a deadline firing and tests that time a child process (the hook run as a process, the 20,000-word commands) stay on the wall clock. Some in-process checks in `src/judge.test.ts` still use the wall clock: growth ratios taken as the best of three runs, and loose backstops (the attached-value test's 60 s and 5 s bounds).
 
 ## npm scripts
 
@@ -137,7 +137,7 @@ npm run bench -- --matrix bench/matrix/<name>.json    # one benchmark campaign (
 npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # one bounded eval run (paid)
 ```
 
-`npm run bench:validate` makes no model call. It runs half the CPUs' worth of tasks at once (at least 2; `--parallel N` sets it), slowest first, and stops at a deadline of 270 s (`--deadline-s S`, 0 for none): it prints the finished tasks, names each unfinished one (`NOT DONE`) and exits 3. `node bench/validate.mjs --task <id>` validates one task.
+`npm run bench:validate` makes no model call. It runs half the CPUs' worth of tasks at once (at least 2; `--parallel N` sets it), the three known slow tasks first, and stops at a deadline of 270 s (`--deadline-s S`, 0 for none): it prints the finished tasks, names each unfinished one (`NOT DONE`) and exits 3. `node bench/validate.mjs --task <id>` validates one task.
 
 The eval suite was smoke-run on 2026-11-10 with the bounded command above, twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed. How the benchmark works and every result: [bench/README.md](../bench/README.md).
 
