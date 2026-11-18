@@ -2,7 +2,8 @@
 // Runs dashboard/register.test.tsx with `claude plugin test` against a copy of the built mod (dist/dashboard) with the
 // dashboard/ sources laid over it, so it tests the source, not the committed build, plus src/fixtures/briefs for the grammar contract test.
 // `claude plugin validate` runs first.
-// Needs the `claude` CLI; without it the test is skipped (CI runs `npm run check`, which does not include this).
+// Needs the `claude` CLI; without it the test is skipped. `npm run check` does not include it; CI installs the CLI and
+// runs `npm run test-dashboard` as a step of its own (.github/workflows/ci.yml).
 import { spawnSync } from "node:child_process";
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
