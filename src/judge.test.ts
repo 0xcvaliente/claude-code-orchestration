@@ -1678,6 +1678,67 @@ test("askOpus: the judge's own call takes no account connectors and keeps every 
   });
 });
 
+/** A fake `query` that yields the given messages, then throws `end` when one is given. */
+const fakeStream = (messages: unknown[], end?: Error) =>
+  (() =>
+    (async function* () {
+      for (const m of messages) yield m;
+      if (end) throw end;
+    })()) as unknown as Parameters<typeof askOpus>[2];
+
+test("askOpus: a failed judge call throws with the tokens it read, in the success path's shape; a throw before any usage carries none", async () => {
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 3, cache_creation_input_tokens: 2 };
+  const ok = await askOpus("m", 5000, fakeStream([{ type: "result", subtype: "success", is_error: false, result: "{}", usage }]))("p");
+  assert.equal(ok.tokens, 20, "the success path's count");
+  const modelUsage = { "claude-opus-5-5": { inputTokens: 100, outputTokens: 7, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } };
+  for (const [msg, want] of [
+    [{ type: "result", subtype: "error_max_turns", is_error: true, usage }, 20],
+    [{ type: "result", subtype: "error_during_execution", is_error: true, usage, modelUsage }, 107],
+    [{ type: "result", subtype: "success", is_error: true, result: "API Error", usage }, 20],
+    [{ type: "result", subtype: "error_max_budget_usd", is_error: true }, 0],
+  ] as const) {
+    const err = await askOpus("m", 5000, fakeStream([{ type: "assistant" }, msg]))("p").then(
+      () => assert.fail(`no throw for ${msg.subtype}`),
+      (e: unknown) => e,
+    );
+    assert.ok(err instanceof Error, msg.subtype);
+    assert.match(err.message, /^judge call failed: /, msg.subtype);
+    assert.equal((err as Error & { tokens?: unknown }).tokens, want, msg.subtype);
+  }
+  for (const [stream, why] of [
+    [fakeStream([{ type: "assistant" }]), "a stream with no result"],
+    [fakeStream([{ type: "assistant" }], new Error("aborted")), "a stream that throws before its result"],
+  ] as const) {
+    const err = await askOpus("m", 5000, stream)("p").then(() => assert.fail(why), (e: unknown) => e);
+    assert.ok(err instanceof Error, why);
+    assert.equal("tokens" in err, false, why);
+  }
+});
+
+test("judgeBash: the audit line keeps the tokens of a failed judge call; the decision stays a deny", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "judge-audit-"));
+  const cases: Array<[unknown, number]> = [
+    [Object.assign(new Error("judge call failed: error_max_turns"), { tokens: 20 }), 20],
+    [new Error("judge stream ended without a result"), 0],
+    [Object.assign(new Error("x"), { tokens: Number.NaN }), 0],
+    [Object.assign(new Error("x"), { tokens: -5 }), 0],
+    [Object.assign(new Error("x"), { tokens: "9" }), 0],
+    ["a thrown string", 0],
+  ];
+  for (const [i, [thrown, want]] of cases.entries()) {
+    for (const command of ["git push", "rm -rf build"]) {
+      const auditFile = join(dir, `audit-${i}-${command.length}.jsonl`);
+      const { deps } = fakes(ALLOW, world(), { auditFile, ask: async () => Promise.reject(thrown) });
+      const v = await judgeBash(command, ctx, deps);
+      assert.equal(v.decision, "deny", `${command} ${String(thrown)}`);
+      const [line] = readFileSync(auditFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.equal(line.decision, "deny");
+      assert.equal(line.tokens, want, `${command} ${String(thrown)}`);
+      assert.equal(line.cached, false);
+    }
+  }
+});
+
 // Release 2.0.0, slice w2: forms docs/bash-judge.md and CHANGELOG 1.2.0, 1.4.5 and 1.5.0 listed as passing. Each list is
 // one string per line (judge-differential.test.mjs reads them with listIn, both copies must give the same class).
 // Item 1: zsh options that run text as code (globsubst, promptsubst) in the forms of `set`, `setopt`, `unsetopt`,

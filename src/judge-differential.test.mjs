@@ -336,18 +336,16 @@ test("zsh table expansion (fix-judge-3): an escaped }, a backslash-newline anywh
   }
 });
 
-/** A file of this repository at commit `rev`, written into a scratch folder, or undefined when the clone does not hold
- * that commit (a shallow CI checkout). @param {string} rev @param {string} path */
-function fromGit(rev, path) {
-  let text;
-  try {
-    text = execFileSync("git", ["-C", here, "show", `${rev}:${path}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 26 });
-  } catch {
-    return undefined;
-  }
+/** An older judge stored under src/fixtures/ as `<name>.mjs.txt` (so neither the typecheck nor the test runner picks it
+ * up), written into a scratch folder as `<name>.mjs` and returned as an importable URL. It reads no git history, so a
+ * one-commit clone runs every comparison. src/fixtures/judge-core-1.6.1.mjs.txt is a byte-for-byte copy of
+ * .claude/hooks/judge-core.mjs at release-1.6.1 (git show 7b408fe:.claude/hooks/judge-core.mjs); never edit it.
+ * @param {string} name */
+function fromFixture(name) {
+  const text = readFileSync(join(here, "fixtures", `${name}.mjs.txt`), "utf8");
   const dir = mkdtempSync(join(tmpdir(), "judge-rev-"));
   process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
-  const file = join(dir, path.split("/").pop() ?? "x.mjs");
+  const file = join(dir, `${name}.mjs`);
   writeFileSync(file, text);
   return pathToFileURL(file).href;
 }
@@ -366,12 +364,12 @@ const shown = (/** @type {(s: string) => unknown} */ f, /** @type {string} */ s)
 };
 
 // Slice w7, N6: the tokenizer's scans of `(`, `{` and `[` became linear (memos by index, lookups instead of rescans).
-// The researcher guard imports the tokenizer, so its output must stay exactly what it was at 3bd0de6, the commit the
-// slice started from: on every test string, and on random text made of the characters those scans read.
-test("tokenizer (w7, N6): output equal to 3bd0de6's on every test string and on random shell text, in both copies", async (t) => {
-  const url = fromGit("3bd0de6", ".claude/hooks/judge-core.mjs");
-  if (!url) return t.skip("3bd0de6 is not in this clone (a shallow checkout)");
-  const { tokenize: before } = await import(url);
+// The researcher guard imports the tokenizer, so its output must stay exactly what it was before the slice: on every
+// test string, and on random text made of the characters those scans read. The reference is release-1.6.1's tokenizer
+// (src/fixtures/judge-core-1.6.1.mjs.txt): the slice started from 3bd0de6, whose tokenizer output equals 1.6.1's on
+// every input below (checked when the fixture replaced the git history read), so one stored copy serves both tests.
+test("tokenizer (w7, N6): output equal to release-1.6.1's on every test string and on random shell text, in both copies", async () => {
+  const { tokenize: before } = await import(fromFixture("judge-core-1.6.1"));
   const inputs = allStrings();
   let seed = 7;
   const random = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
@@ -381,6 +379,7 @@ test("tokenizer (w7, N6): output equal to 3bd0de6's on every test string and on 
     for (let n = 1 + Math.floor(random() * 24); n > 0; n--) s += atoms[Math.floor(random() * atoms.length)];
     inputs.push(s);
   }
+  assert.ok(inputs.length > 25000, `only ${inputs.length} inputs`);
   const differ = [];
   for (const s of inputs) {
     const want = shown(before, s);
@@ -391,12 +390,12 @@ test("tokenizer (w7, N6): output equal to 3bd0de6's on every test string and on 
 
 // Never weaker than the release this work builds on: nothing release-1.6.1 (7b408fe) denies passes or is judged now,
 // and nothing it judges passes, on every test string and its wrapped forms.
-test("differential (w7): never weaker than release-1.6.1 on every judge test string and its wrapped forms", async (t) => {
-  const url = fromGit("7b408fe", ".claude/hooks/judge-core.mjs");
-  if (!url) return t.skip("7b408fe is not in this clone (a shallow checkout)");
-  const { classifyDetail: release } = await import(url);
+test("differential (w7): never weaker than release-1.6.1 on every judge test string and its wrapped forms", async () => {
+  const { classifyDetail: release } = await import(fromFixture("judge-core-1.6.1"));
   const weaker = [];
-  for (const s of allStrings()) {
+  const all = allStrings();
+  assert.ok(all.length > 5000, `only ${all.length} strings`);
+  for (const s of all) {
     const o = release(s, CWD);
     const n = next(s, CWD);
     if ((o.cls === "deny" && n.cls !== "deny") || (o.cls === "judge" && n.cls === "pass")) weaker.push(`${JSON.stringify(s)}: 1.6.1 ${o.cls}, now ${n.cls}`);

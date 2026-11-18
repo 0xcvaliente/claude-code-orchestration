@@ -363,3 +363,79 @@ test("item 3: the judge's own tokens count in the worker's tokens, on a result a
     if (end === "result") assert.deepEqual(res.usage, { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 }, "usage stays the worker's own");
   }
 });
+
+// A failed judge call still cost its tokens: askOpus throws an Error carrying them (judge.ts), and the worker's total
+// must count them as it counts a success. The command stays denied and the same error still reaches judgeBash.
+async function runWithFailingJudge(errors: unknown[]) {
+  const judge = fakeJudge([]);
+  const seen: unknown[] = [];
+  judge.deps.ask = async (p) => {
+    judge.prompts.push(p);
+    throw errors.shift();
+  };
+  const decisions: Array<string | undefined> = [];
+  const n = errors.length;
+  const query = ((args: { prompt: string; options: Options }) =>
+    (async function* () {
+      const hook = hookOf(args.options);
+      for (let i = 0; i < n; i++) {
+        try {
+          decisions.push(decisionOf(await call(hook, `git push origin release-${i}`))?.permissionDecision);
+        } catch (e) {
+          seen.push(e);
+        }
+      }
+      yield { type: "result", subtype: "success", is_error: false, result: "done", num_turns: 1, usage: { input_tokens: 5, output_tokens: 5 }, modelUsage: {} };
+    })()) as unknown as typeof sdkQuery;
+  const res = await makeRunAgent({ query, env: {}, judgeDeps: () => judge.deps })(req("writer", { task: "push the release" }));
+  return { res, decisions, seen, prompts: judge.prompts };
+}
+
+test("a failed judge call with usage: its tokens count in the worker's tokens and the command is denied", async () => {
+  const { res, decisions, seen, prompts } = await runWithFailingJudge([Object.assign(new Error("judge call failed: error_max_turns"), { tokens: 900 })]);
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(decisions, ["deny"]);
+  assert.equal(seen.length, 0, "nothing throws out of the hook");
+  assert.equal(res.tokens, 10 + 900);
+  assert.deepEqual(res.usage, { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 }, "usage stays the worker's own");
+});
+
+test("a failed judge call with no or malformed usage adds nothing, denies, and throws nothing new", async () => {
+  const getterThrows = Object.defineProperty(new Error("odd"), "tokens", { get() { throw new Error("getter"); } });
+  const errors: unknown[] = [
+    new Error("no result"), // no tokens field
+    Object.assign(new Error("bad"), { tokens: "900" }),
+    Object.assign(new Error("bad"), { tokens: Number.NaN }),
+    Object.assign(new Error("bad"), { tokens: Number.POSITIVE_INFINITY }),
+    Object.assign(new Error("bad"), { tokens: -5 }),
+    Object.assign(new Error("bad"), { tokens: null }),
+    getterThrows,
+    "a string thrown",
+    undefined,
+  ];
+  const n = errors.length;
+  const { res, decisions, seen, prompts } = await runWithFailingJudge(errors);
+  assert.equal(prompts.length, n);
+  assert.deepEqual(decisions, Array(n).fill("deny"));
+  assert.equal(seen.length, 0, "nothing throws out of the hook");
+  assert.equal(res.tokens, 10);
+});
+
+test("the counting wrapper rethrows the very error the judge's ask threw", async () => {
+  const thrown = Object.assign(new Error("judge call failed: error_during_execution"), { tokens: 50 });
+  const judge = fakeJudge([]);
+  judge.deps.ask = async () => {
+    throw thrown;
+  };
+  let caught: unknown;
+  // judgeBash builds the deny reason from the error's message, so the reason shows the same error got through.
+  const query =((args: { prompt: string; options: Options }) =>
+    (async function* () {
+      const out = await call(hookOf(args.options), "git push origin x");
+      caught = decisionOf(out)?.permissionDecisionReason;
+      yield { type: "result", subtype: "success", is_error: false, result: "done", num_turns: 1, usage: {}, modelUsage: {} };
+    })()) as unknown as typeof sdkQuery;
+  const res = await makeRunAgent({ query, env: {}, judgeDeps: () => judge.deps })(req("writer", { task: "push the release" }));
+  assert.match(String(caught), /judge failed \(judge call failed: error_during_execution\): denied/);
+  assert.equal(res.tokens, 50);
+});

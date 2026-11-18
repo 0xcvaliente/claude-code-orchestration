@@ -2189,6 +2189,9 @@ export async function judgeBash(command: string, ctx: JudgeContext, deps: JudgeD
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const reason = err instanceof Timeout ? `${msg}: denied` : `judge failed (${msg}): denied`;
+    // A failed model call's error carries the tokens it cost (askOpus): the audit line keeps them.
+    const spent = err instanceof Error && "tokens" in err ? err.tokens : undefined;
+    if (typeof spent === "number" && Number.isFinite(spent) && spent > 0) tokens = spent;
     verdict = kind === "rm" ? rmDeny(reason) : { decision: "deny", reason };
   }
   audit(deps, { kind, role: ctx.role, taskHash: hash(ctx.task), command, decision: verdict.decision, reason: verdict.reason, model, tokens, cached });
@@ -2208,6 +2211,8 @@ export function workerEnv(env: NodeJS.ProcessEnv = process.env): Record<string, 
 /**
  * The default `deps.ask`: one model call with nothing attached. No tools, no settings or CLAUDE.md, no MCP servers, no
  * plugins, no auto memory, one turn, in the temp folder; `dontAsk` so nothing could prompt even if a tool slipped in.
+ * A result that is not a success throws an Error with a `tokens` field (the result's count, as a success returns it);
+ * a throw before any result (no result in the stream, the stream itself failing) carries no `tokens`.
  */
 export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5", timeoutMs = JUDGE_TIMEOUT_MS, run: typeof query = query): JudgeDeps["ask"] {
   return async (prompt) => {
@@ -2241,7 +2246,8 @@ export function askOpus(model = process.env.ORCH_MODEL_JUDGE || "claude-opus-5-5
       for await (const msg of stream) {
         if (msg.type !== "result") continue;
         const tokens = totalTokens(usageFromResult(msg));
-        if (msg.subtype !== "success" || msg.is_error) throw new Error(`judge call failed: ${msg.subtype}`);
+        // A failed call still cost its tokens: the error carries them, counted as the success path counts them.
+        if (msg.subtype !== "success" || msg.is_error) throw Object.assign(new Error(`judge call failed: ${msg.subtype}`), { tokens });
         return { text: msg.result, tokens, model };
       }
       throw new Error("judge stream ended without a result");
