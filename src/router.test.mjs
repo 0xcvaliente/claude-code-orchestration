@@ -499,3 +499,23 @@ test("quote check: the log holds counts and paths only, never quote, reply or fi
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("router log (w3 item 2): hard_pages agrees with the pdf_hard_pages reason code, also for a source with no conversion", { skip: POPPLER }, () => {
+  // A scanned PDF has hard pages but no text conversion. The log counted hard pages over converted files only, so it
+  // showed hard_pages: 0 next to pdf_hard_pages.
+  const dir = project();
+  try {
+    launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf\nREAD: extract\nQ" }, ON);
+    launch(dir, { subagent_type: "researcher", prompt: "SOURCES: scanned.pdf, table.pdf\nREAD: extract\nQ" }, ON);
+    launch(dir, { subagent_type: "researcher", prompt: "SOURCES: text.pdf\nQ" }, ON);
+    const log = logOf(dir, "reads-route.jsonl");
+    assert.equal(log.length, 3);
+    for (const e of log) assert.equal(e.reasons.includes("pdf_hard_pages"), e.hard_pages > 0, JSON.stringify(e));
+    assert.equal(log[0].conversions, 0);
+    assert.ok(log[0].hard_pages > 0);
+    assert.equal(log[1].hard_pages, log[0].hard_pages + 1, "the scan's hard pages plus the table page");
+    assert.equal(log[2].hard_pages, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

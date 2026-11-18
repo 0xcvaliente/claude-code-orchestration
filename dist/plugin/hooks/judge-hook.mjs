@@ -11,16 +11,18 @@
 //   Anything else (a refusal, a timeout, a missing CLI, an unreadable answer, no recorded request): deny.
 // - The record of those requests (state.mjs `promptStore`) is a per-user folder outside the project; a prompts.jsonl
 //   in the project's state dir is never read. A Bash command that names the record's folder is denied with no model
-//   call (audit 2026-11-16 J-12). A text check: a glob or a name built at run time gets past it, and the Write and Edit
-//   tools never reach this hook. Best-effort, not a sandbox.
+//   call (audit 2026-11-16 J-12), and so is one whose glob matches the record's folder (`storeVerdict` in
+//   judge-core.mjs). A text check: a name built at run time gets past it, and the Write and Edit tools never reach this
+//   hook. Best-effort, not a sandbox.
+// - A command over the judge's size caps (judge-core.mjs `tooLarge`) is refused before any of it is read.
 // - Malformed hook input: exit 0, no decision. Every floor or judged decision goes to gates.jsonl in the state dir.
 // Settings: ORCH_JUDGE_CLAUDE_BIN (the claude binary, default `claude`), ORCH_JUDGE_MODEL (default opus),
 // ORCH_JUDGE_TIMEOUT_MS (default 40000, clamped to 45000 so the hook always decides before Claude Code kills it).
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput, tokenize } from "./judge-core.mjs";
+import { NO_REQUEST_REASON, checkRmTargets, decide, judgeTimeoutMs, nativePrompt, parseCliOutput, storeVerdict, tooLarge } from "./judge-core.mjs";
 import { PROMPT_STORE_NAME, duplicate, ensureStateDir, promptStore, stateDir } from "./state.mjs";
 
 if ((process.env.ORCH_JUDGE ?? "").trim().toLowerCase() !== "native") process.exit(0);
@@ -64,78 +66,20 @@ if (typeof input !== "object" || input === null || (input.tool_name !== undefine
   process.exit(0);
 }
 
-// The judge's authority must stay out of the judged worker's reach: a command that names the record's folder (its
-// absolute path, `~/...`, `$HOME/...`, or the bare folder name, all of which hold the name) is refused, even one that
-// only reads. Case is ignored (a case-insensitive file system). What it looks at, any hit refuses:
-// - the raw text with quotes and backslashes dropped, so `judge'-'prompts` and `judge\-prompts` count, also where the
-//   tokenizer cannot read the line;
-// - each word as the judge's tokenizer decodes it (`tokenize` in judge-core.mjs), in every command of the line and of
-//   the `$(...)`, backtick and process substitutions it records (up to 8 deep): each run of literal text in a word,
-//   with its quoting removed and `$'...'` escapes decoded, so `judge-$'prompts'`, `judge-$"prompts"` and
-//   `$'judge\x2dprompts'` count. A run ends at an expansion or a glob character.
-// - the decoded words read again as command text, whichever command would run them (`bash -c`, `sh -c`, `zsh -c`,
-//   `eval`, or none), up to DECODE_LEVELS levels: each command's decoded words joined by spaces (each word alone when
-//   that joined text cannot be read) get the same looks, the raw one with `$` dropped too. So `bash -c "cat
-//   judge-\$'prompts'/x"`, `eval cat judge-\$\'prompts\'/x` and a script string inside a script string count. A
-//   decoded text with no quote, backslash, `$` or backtick decodes to itself and is not read again.
-// Out of reach (best-effort, not a sandbox): a glob (`judge-*`), a name built at run time from variables or command
-// output, a `cd` into the parent then a relative glob, a spelling nested deeper than DECODE_LEVELS script strings, and
-// a line the tokenizer cannot read at the top level (the judge's floor denies that one anyway).
-const DECODE_LEVELS = 4;
+// Size first: a command over the judge's caps is refused before any scan reads it (judge-core.mjs `tooLarge`), so the
+// hook always decides in a bounded time.
+const big = tooLarge(command);
+if (big) deny(`always blocked: ${big}`);
 
-/** @param {string} command @returns {boolean} */
-function namesPromptStore(command) {
-  return scanForStore(command, 0, 0) === true;
-}
-
-/**
- * true when `text` (decoded `level` times already) names the store, false when it is read and does not, null when the
- * tokenizer cannot read it (only the raw look was made).
- * @param {string} text @param {number} level @param {number} subDepth @returns {boolean | null}
- */
-function scanForStore(text, level, subDepth) {
-  if (text.replace(level ? /[\\'"$]/g : /[\\'"]/g, "").toLowerCase().includes(PROMPT_STORE_NAME)) return true;
-  /** @type {{ commands: { words: { pieces: ({ lit: string } | object)[] }[] }[], substitutions: string[] }} */
-  let t;
-  try {
-    t = tokenize(text);
-  } catch {
-    return null; // unreadable: the raw-text look above is all this check can do here
-  }
-  /** @type {string[][]} */
-  const decoded = [];
-  for (const { words } of t.commands) {
-    /** @type {string[]} */
-    const texts = [];
-    for (const { pieces } of words) {
-      let run = "";
-      let whole = "";
-      for (const p of [...pieces, {}]) {
-        if ("lit" in p) {
-          run += p.lit;
-          whole += p.lit;
-        } else if (run.toLowerCase().includes(PROMPT_STORE_NAME)) return true;
-        else {
-          run = "";
-          whole += " ";
-        }
-      }
-      texts.push(whole.trim());
-    }
-    decoded.push(texts);
-  }
-  if (subDepth < 8 && t.substitutions.some((s) => scanForStore(s, level, subDepth + 1) === true)) return true;
-  if (level >= DECODE_LEVELS) return false;
-  const again = (/** @type {string} */ s) => (/[\\'"$`]/.test(s) ? scanForStore(s, level + 1, subDepth) : false);
-  for (const texts of decoded) {
-    const joined = again(texts.join(" "));
-    if (joined === true) return true;
-    if (joined === null && texts.some((w) => again(w) === true)) return true;
-  }
-  return false;
-}
-
-if (namesPromptStore(command)) deny("always blocked: the command names the judge's record of the user's requests");
+// The judge's authority must stay out of the judged worker's reach: a command that names the record's folder, or
+// whose glob matches its path, is refused with no model call (audit 2026-11-16 J-12). The check (what it reads, and
+// what stays out of reach) is `storeVerdict` in judge-core.mjs. A text check: a name built at run time gets past it,
+// and the Write and Edit tools never reach this hook. Best-effort, not a sandbox.
+const storeCheck = storeVerdict(command, typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd(), { store: promptStore, name: PROMPT_STORE_NAME, home: homedir(), cdpath: !!process.env.CDPATH });
+if (storeCheck === "names") deny("always blocked: the command names the judge's record of the user's requests");
+if (storeCheck === "reaches") deny("always blocked: the command names the judge's record of the user's requests (through a glob)");
+if (storeCheck === "unknown")
+  deny("always blocked: a directory change on this line (cd, pushd, popd, chdir or env -C) goes to a folder the guard cannot read as one plain path (a variable, a substitution, ~, -, a glob or brace, a stack entry, two arguments, HOME or CDPATH set, or an env option it does not know), and a relative glob follows it, which could reach the judge's record of the user's requests. Run the directory change as its own Bash call and the command in the next call, or give the glob an absolute path.");
 
 /** The user's typed requests in this session, oldest first. @returns {string[]} */
 function requests() {

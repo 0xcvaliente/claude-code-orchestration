@@ -54,7 +54,7 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { isSkillName, parseHeader, sliceOfBrief } from "./brief.mjs";
 import { readJsonl } from "./run.mjs";
-import { findingLine, historyAdvice, MAX_SCAN_BYTES, mask, outsideText, scanBranch, scanText, unpushedText } from "./skill-scan.mjs";
+import { findingLine, historyAdvice, MAX_SCAN_BYTES, mask, metaAdvice, outsideText, scanBranch, scanText, unpushedText } from "./skill-scan.mjs";
 import { verify } from "./skill-seal.mjs";
 import { ensureStateDir, stateDir } from "./state.mjs";
 
@@ -343,10 +343,12 @@ function checkDraft({ draft, name, base, baseName = null }) {
   if (findings.length) {
     const shown = findings.slice(0, MAX_FINDINGS_SHOWN).map((f) => `   - ${findingLine(f)}`);
     const more = findings.length > MAX_FINDINGS_SHOWN ? [`   - and ${findings.length - MAX_FINDINGS_SHOWN} more`] : [];
-    const history = findings.some((f) => "commit" in f && f.commit && !("base" in f && f.base)) ? [`   ${historyAdvice(scan?.mergeBase ?? null)}`] : [];
+    const history = findings.some((f) => "commit" in f && f.commit && !("base" in f && f.base) && !("where" in f && f.where)) ? [`   ${historyAdvice(scan?.mergeBase ?? null)}`] : [];
+    // A finding in a commit message, author, committer or tag (skill-scan.mjs metaFindings).
+    const meta = findings.some((f) => "where" in f && f.where) ? [`   ${metaAdvice(scan?.mergeBase ?? null)}`] : [];
     fail.push({
       code: "secrets",
-      text: [`Possible secrets or personal details, or files the scan could not read (${findings.length}). Remove each secret, or replace it with a placeholder such as <token>, user@example.com or ~/; never put a real key, address or home path in a skill:`, ...shown, ...more, ...history].join("\n"),
+      text: [`Possible secrets or personal details, or files the scan could not read (${findings.length}). Remove each secret, or replace it with a placeholder such as <token>, user@example.com or ~/; never put a real key, address or home path in a skill:`, ...shown, ...more, ...history, ...meta].join("\n"),
     });
   }
   // Only skills/<name>/ and README.md: whatever else the branch carries is pushed unsealed.

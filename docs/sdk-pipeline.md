@@ -19,7 +19,7 @@ Start with the native orchestrator, for code in git too; it is the only one for 
 | Reviewed | `reviewed` | A `solo` session, then a verifier; a failed review starts another round, up to `--retries` more. |
 | Orchestrate | `orchestrate` | The steps below, in worktrees, merged into `orch/<id>/result`. |
 
-When a triaged plain or reviewed run fails, the task runs again on the orchestrate route ([escalation](glossary.md#e)). The failed run's edits stay uncommitted in the working tree; nothing reverts them. The new run works from HEAD in worktrees, so it does not see them. `--no-escalate` turns this off, and a route you force with `--mode` never escalates.
+When a triaged plain or reviewed run fails, the task runs again on the orchestrate route ([escalation](glossary.md#e)). The failed run's edits stay uncommitted in the working tree; nothing reverts them. The new run works from HEAD in worktrees, so it does not see them. `--no-escalate` turns this off, and a route you force with `--mode` never escalates. Since 2.0.0, with `--budget` set, a failed run is rerun only when at least 10k tokens of the budget are left (`MIN_ESCALATION_TOKENS` in `src/auto.ts`); otherwise the log says `route: no escalation` and the run ends failed.
 
 **The orchestrate route, step by step** (`src/orchestrator.ts`):
 
@@ -73,7 +73,7 @@ npm run sdk -- --repo . --resume <id> --task "<the original request>"
 npm run route -- --repo /path/to/folder --task "..."
 ```
 
-A task that starts with a dash goes as `--task=<task>`.
+A task that starts with a dash goes as `--task=<task>`. `npm run route` also takes `--task-file=<path>` (since 2.0.0; the `/route` skill uses it): the task is the file's text, read by the triager itself, so no shell parses it.
 
 Exit codes:
 
@@ -106,11 +106,11 @@ Exit codes:
 
 **How `--budget` works:**
 
-- Orchestrate route: the cap is checked before each slice attempt and before each replan. Once it is spent, no new attempt or replan starts. Triage tokens, and on escalation the failed session's tokens, count against the cap.
+- Orchestrate route: the cap is checked before each slice attempt and before each replan. Once it is spent, no new attempt or replan starts. Triage tokens, and on escalation the failed session's tokens, count against the cap. Since 2.0.0 they are written to the run's `telemetry.jsonl` before the first worker call, and a `--resume` reads that file back, so a resumed run counts everything the run spent before (`earlierSpend` in `src/orchestrator.ts`).
 - Reviewed route: the cap is checked before each round. Once it is spent no further round starts, but a session already running is not cut short. Triage tokens do not count toward that check.
 - Plain route: a single session, so the cap never stops it.
 - Triage: `--budget` gives the triage call no cap of its own; its tokens count only as above. `npm run route -- --budget <tokens>` caps a triage call on its own, at 1M tokens per dollar. A triage it stops prints the orchestrate route with `capStopped: true`; `npm run auto` then starts no session ([Settings, Headless runs](settings.md#headless-runs)).
-- The Bash judge's own tokens are not counted ([Cost and behaviour](bash-judge.md#10-cost-and-behaviour)).
+- Since 2.0.0 the Bash judge's own tokens count in the worker's tokens, so the cap sees them; a failed judge call counts only when it reported usage ([Cost and behaviour](bash-judge.md#10-cost-and-behaviour)).
 
 ## Environment
 
@@ -138,8 +138,8 @@ Under `runs/<id>/` (or `--out`):
 | `findings.md` | The explorers' answers. |
 | `journal.json` | The run's state after each slice, for `--resume`. |
 | `judge-audit.jsonl` | One line per Bash judge decision ([The audit log](bash-judge.md#7-the-audit-log)). |
-| `telemetry.jsonl` | One line per worker call: role, tokens, turns, model, and the first 200 characters of its result text. |
-| `report.json` | The run's result: each slice's status, attempts and issues, the merged and conflicted branches, the result branch, and tokens spent in total and by role. |
+| `telemetry.jsonl` | One line per worker call: role, tokens (the judge's included), turns, model, and the first 200 characters of its result text. After triage (`--mode auto`), also one line per role for the tokens spent before the pipeline (the triage call, the failed session). |
+| `report.json` | The run's result: each slice's status, attempts and issues, the merged and conflicted branches, the result branch, and tokens spent in total and by role, including what the run spent before a resume or the pipeline. |
 | `worktrees/<slice>` | Each slice's worktree (removed for passing slices unless `--keep-worktrees`). |
 
 Also:

@@ -96,7 +96,7 @@ test("check: a healthy machine passes, writes its record and never runs a model"
   try {
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, JSON.stringify(r.checks));
-    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["sdk", "ok"], ["plugin", "ok"], ["sandbox", "ok"], ["dist", "ok"]]);
+    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["payload", "warn"], ["memory", "warn"], ["sdk", "ok"], ["plugin", "ok"], ["workflow", "warn"], ["sandbox", "ok"], ["dist", "ok"]]);
     assert.equal(r.claude_code_version, CC);
     assert.equal(r.orchestration_version, VERSION);
     assert.equal(JSON.parse(readFileSync(join(m.home, "orchestration", "claude-update.json"), "utf8")).claude_code_version, CC);
@@ -308,7 +308,7 @@ test("check sandbox: off, missing file or a covering entry is ok; on without the
     }
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, "a note, not a failure");
-    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "sdk", "plugin", "sandbox", "dist"], "placed after plugin");
+    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "payload", "memory", "sdk", "plugin", "workflow", "sandbox", "dist"], "placed after plugin");
   } finally {
     m.done();
   }
@@ -379,5 +379,67 @@ test("check sandbox: symlinks are resolved; --fix writes through a symlinked set
     assert.equal(sandboxCheck({ env }).status, "ok", "the linked path covers the real folder");
   } finally {
     rmSync(top, { recursive: true, force: true });
+  }
+});
+
+// Items 4 and 5 of 2.0.0: the payload, memory and workflow checks (docs/claude-code-updates.md, Limits; docs/gates.md,
+// Workflow guard: "an installed plugin of another version is trusted as installed").
+test("items 4 and 5: payload and memory are looked up in the program file; a file that cannot tell is a note, never ok", async () => {
+  const { programChecks, HOOK_FIELDS, MEMORY_SWITCH } = await import("../scripts/claude-update.mjs");
+  const dir = mkdtempSync(join(tmpdir(), "claude-update-prog-"));
+  try {
+    const prog = (/** @type {string} */ name, /** @type {string[]} */ words) => { const f = join(dir, name); writeFileSync(f, `\x7fELF ${words.join(" x ")} end`); return f; };
+    const all = programChecks(prog("all", [...HOOK_FIELDS, MEMORY_SWITCH]));
+    assert.deepEqual([all.payload.status, all.memory.status], ["ok", "ok"]);
+    const noField = programChecks(prog("nofield", [...HOOK_FIELDS.filter((f) => f !== "background_tasks"), MEMORY_SWITCH]));
+    assert.equal(noField.payload.status, "fail");
+    assert.match(noField.payload.text, /background_tasks/);
+    assert.equal(noField.memory.status, "ok");
+    assert.equal(programChecks(prog("nomem", [...HOOK_FIELDS])).memory.status, "fail");
+    for (const unknown of [programChecks(prog("wrapper", ["exec node cli.js"])), programChecks(null), programChecks(join(dir, "absent"))]) {
+      assert.deepEqual([unknown.payload.status, unknown.memory.status], ["warn", "warn"]);
+    }
+    // Through check(): ORCH_CLAUDE_BIN names the program; a name not on PATH is a note.
+    const m = machine();
+    try {
+      const r = check({ env: { ...m.env, ORCH_CLAUDE_BIN: join(dir, "all") }, run: m.run, root });
+      assert.equal(of(r, "payload")?.status, "ok");
+      assert.equal(of(r, "memory")?.status, "ok");
+      const n = check({ env: m.env, run: m.run, root });
+      assert.equal(of(n, "payload")?.status, "warn");
+    } finally {
+      m.done();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("item 5: workflow: the loaded plugin's workflow must have the content the guard expects", () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-update-wf-"));
+  try {
+    mkdirSync(join(dir, "good", "workflows"), { recursive: true });
+    mkdirSync(join(dir, "bad", "workflows"), { recursive: true });
+    cpSync(join(root, "dist", "plugin", "workflows", "orchestrate.js"), join(dir, "good", "workflows", "orchestrate.js"));
+    writeFileSync(join(dir, "bad", "workflows", "orchestrate.js"), "export const meta = {};\n");
+    for (const [folder, want] of /** @type {const} */ ([["good", "ok"], ["bad", "fail"], ["none", "warn"]])) {
+      const m = machine({ plugin: { id: ID, version: VERSION, enabled: true, installPath: join(dir, folder) } });
+      try {
+        const r = check({ env: m.env, run: m.run, root });
+        assert.equal(of(r, "workflow")?.status, want, folder);
+        if (want === "fail") assert.equal(r.ok, false);
+      } finally {
+        m.done();
+      }
+    }
+    // A disabled or missing plugin gets no workflow line.
+    const off = machine({ plugin: null });
+    try {
+      assert.equal(of(check({ env: off.env, run: off.run, root }), "workflow"), undefined);
+    } finally {
+      off.done();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

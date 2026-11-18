@@ -21,6 +21,16 @@
 //   flags     the options scripts/orchestrate.sh and the native judge pass are still in `claude --help`
 //   sdk       the Agent SDK the SDK pipeline uses carries the same Claude Code as the installed one
 //   plugin    the orchestration plugin, when installed, is at this checkout's version; off is a note, not a failure
+//   workflow  the loaded plugin's workflows/orchestrate.js has the content the workflow guard expects
+//             (PLUGIN_WORKFLOW_SHA256): the guard's project copy checks only dist/plugin, so an installed copy of
+//             another content would be trusted as installed. A folder that cannot be found or read is a note
+//   payload   the hook payload fields the hooks read (HOOK_FIELDS) are still named in the installed Claude Code's
+//             program file (`claude` on PATH, through symlinks). Presence only: a field the program still names can
+//             have moved or changed meaning, so this finds a rename or a removal, not every change of shape
+//   memory    CLAUDE_CODE_DISABLE_AUTO_MEMORY, which the judge hook and the SDK workers set, is still named there.
+//             Presence only: whether it still turns auto memory off is not tested
+//             A program file that cannot be found or read, or that names none of the fields (a wrapper script), is a
+//             note for both, never ok
 //   sandbox   with sandbox.enabled in the user settings (<config dir>/settings.json), sandbox.filesystem.allowWrite covers
 //             <config dir>/orchestration (state, skill drafts, the judge's record); a note naming the entry otherwise,
 //             which --fix adds. Managed settings are never edited; a file that cannot be read or parsed is a note only
@@ -28,12 +38,13 @@
 //
 // The result is written to <claude config dir>/orchestration/claude-update.json. Node built-ins only.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BUILTIN_AGENTS, FORK, OWN_AGENTS, learnedBuiltins, learnedFile } from "../.claude/hooks/builtin-agents.mjs";
+import { fileSha256, PLUGIN_WORKFLOW_SHA256 } from "../.claude/hooks/workflow-hash.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Options scripts/orchestrate.sh and .claude/hooks/judge-hook.mjs pass that `claude --help` lists. */
@@ -46,6 +57,16 @@ export const HEADLESS_FLAGS = Object.freeze([
 export const HIDDEN_FLAGS = Object.freeze(["--max-turns", "--advisor"]);
 /** The switches scripts/orchestrate.sh exports for a headless run. */
 export const HEADLESS_ENV = Object.freeze({ CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1", CLAUDE_CODE_FORK_SUBAGENT: "0" });
+/**
+ * Hook payload fields the hooks in .claude/hooks read (docs/claude-code-updates.md, "What the repo relies on"). The
+ * `payload` check looks for each in the installed Claude Code's program file.
+ */
+export const HOOK_FIELDS = Object.freeze([
+  "hook_event_name", "session_id", "agent_id", "agent_type", "subagent_type", "tool_name", "tool_input", "tool_use_id",
+  "background_tasks", "last_assistant_message", "stop_hook_active", "transcript_path", "agent_transcript_path",
+]);
+/** The switch the judge hook and workerEnv() set so no inner call starts Claude Code's auto memory. */
+export const MEMORY_SWITCH = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
 const INIT = `${JSON.stringify({ type: "control_request", request_id: "claude-update", request: { subtype: "initialize" } })}\n`;
 const INIT_ARGS = ["-p", "--safe-mode", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"];
 
@@ -117,6 +138,75 @@ export function writeSource(root, names) {
   writeFileSync(listFile, list);
   writeFileSync(settingsFile, text);
   return true;
+}
+
+/**
+ * The program file of `bin`: the path itself when it has a slash, else the first file of that name on PATH, with
+ * symlinks resolved (the native installer links ~/.local/bin/claude to versions/<version>). Null when not found.
+ * @param {string} bin @param {NodeJS.ProcessEnv} env
+ */
+export function programFile(bin, env) {
+  const candidates = bin.includes("/") ? [resolve(bin)] : String(env.PATH ?? "").split(":").filter(Boolean).map((d) => join(d, bin));
+  for (const c of candidates) {
+    try {
+      const real = realpathSync(c);
+      if (statSync(real).isFile()) return real;
+    } catch {
+      // not here
+    }
+  }
+  return null;
+}
+
+/**
+ * Which of `names` the file does not contain as bytes; null when it cannot be read.
+ * @param {string} file @param {readonly string[]} names
+ * @returns {string[] | null}
+ */
+export function missingStrings(file, names) {
+  let buf;
+  try {
+    buf = readFileSync(file);
+  } catch {
+    return null;
+  }
+  return names.filter((n) => buf.indexOf(n) === -1);
+}
+
+/** @typedef {{ status: Check["status"], text: string }} Outcome */
+
+/**
+ * The `payload` and `memory` checks from one read of the program file. A file that names none of HOOK_FIELDS is not
+ * the program (a wrapper script, a shim): both are notes then, never ok.
+ * @param {string | null} file
+ * @returns {{ payload: Outcome, memory: Outcome }}
+ */
+export function programChecks(file) {
+  /** @param {string} text @returns {Outcome} */
+  const note = (text) => ({ status: "warn", text });
+  if (!file) {
+    const why = "the program file of `claude` was not found on PATH, so this could not be checked";
+    return { payload: note(why), memory: note(why) };
+  }
+  const missing = missingStrings(file, [...HOOK_FIELDS, MEMORY_SWITCH]);
+  if (!missing) {
+    const why = `${file} could not be read, so this could not be checked`;
+    return { payload: note(why), memory: note(why) };
+  }
+  const fields = missing.filter((n) => n !== MEMORY_SWITCH);
+  if (fields.length === HOOK_FIELDS.length) {
+    const why = `${file} names none of the hook payload fields, so it is not Claude Code's program (a wrapper?) and this could not be checked`;
+    return { payload: note(why), memory: note(why) };
+  }
+  /** @type {Outcome} */
+  const payload = fields.length
+    ? { status: "fail", text: `Claude Code no longer names the hook payload field(s) ${fields.join(", ")} (in ${file}). The hooks read them and exit 0 on input they cannot read, so a gate can go quiet without an error: read the hook docs and probe the hooks (npm run test-dashboard, a headless run).` }
+    : { status: "ok", text: `all ${HOOK_FIELDS.length} hook payload fields the hooks read are named in ${file} (presence only, not the payload's shape)` };
+  /** @type {Outcome} */
+  const memory = missing.includes(MEMORY_SWITCH)
+    ? { status: "fail", text: `Claude Code no longer names ${MEMORY_SWITCH} (in ${file}): the judge hook and the SDK workers may now start auto memory. Read the memory docs for what replaced it.` }
+    : { status: "ok", text: `${MEMORY_SWITCH} is named in ${file} (presence only; whether it still turns auto memory off is not tested)` };
+  return { payload, memory };
 }
 
 /** Claude Code's config dir: CLAUDE_CONFIG_DIR, else ~/.claude. @param {NodeJS.ProcessEnv} env */
@@ -281,6 +371,11 @@ export function check({ fix = false, source = false, enable = false, env = proce
     else if (gone.length) add("flags", "fail", `Claude Code ${version} no longer lists ${gone.join(", ")}, which scripts/orchestrate.sh or the native judge passes.`);
     else add("flags", "ok", `all ${HEADLESS_FLAGS.length} documented options exist (${HIDDEN_FLAGS.join(", ")} are not in the help and cannot be checked)`);
 
+    // payload and memory: the help names neither, so they are looked up in the program file itself (no model, no run).
+    const prog = programChecks(programFile(bin, env));
+    add("payload", prog.payload.status, prog.payload.text);
+    add("memory", prog.memory.status, prog.memory.text);
+
     // sdk: 0.3.N of the Agent SDK carries Claude Code 2.1.N.
     // Resolved as Node resolves it from the checkout, so a parent folder's node_modules counts (a worktree). The
     // package exports no ./package.json, so read the one beside its main entry.
@@ -345,6 +440,17 @@ export function check({ fix = false, source = false, enable = false, env = proce
       else if (p.enabled !== true) add("plugin", "warn", `${id} is installed but disabled, so ${off}. --enable turns it on, or: ${bin} plugin enable ${id}`);
       else if (versionOf(p) !== manifest.version) add("plugin", "fail", `${id} is at ${versionOf(p)}, this checkout is ${manifest.version}. --fix updates it, or: ${bin} plugin update ${id}`);
       else add("plugin", done.length ? "fixed" : "ok", `${id} ${versionOf(p)} is enabled${done.length ? ` (${done.join(", ")}; restart Claude Code)` : ""}`);
+
+      // workflow: the content of the loaded plugin's workflow, which the guard's project copy never reads.
+      if (p && p.enabled === true) {
+        const folder = typeof p.readFromFolder === "string" && inRoot(p.readFromFolder) ? p.readFromFolder : p.installPath;
+        const file = typeof folder === "string" && folder ? join(folder, "workflows", "orchestrate.js") : "";
+        const hash = file ? fileSha256(file) : null;
+        if (!file) add("workflow", "warn", `${id}: the plugin list names no folder for it, so the content of its workflow could not be checked`);
+        else if (!hash) add("workflow", "warn", `${file} could not be read, so the content of the plugin's workflow could not be checked`);
+        else if (hash !== PLUGIN_WORKFLOW_SHA256) add("workflow", "fail", `${file} is not the workflow this checkout's guard expects (its content differs). Where this project's copy of the guard decides, it checks dist/plugin and would trust that file as installed. --fix updates the plugin, or: ${bin} plugin update ${id}; for a plugin read from this checkout, run npm run build-plugin.`);
+        else add("workflow", "ok", `the loaded plugin's workflow (${file}) has the content the guard expects`);
+      }
     }
   }
 

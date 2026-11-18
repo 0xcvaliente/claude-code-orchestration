@@ -223,14 +223,14 @@ export function recordHandback(capture) {
 // beside handback-check.mjs on the same PreToolUse, so either hook that refuses a hand-back appends a refusal here:
 // session, agent, the hand-back's tool_use_id when the payload has one, and the refusing gate. Never report text.
 // handbackFor skips a refused capture: one whose tool_use_id a refusal names (in either write order), or, for a
-// refusal without an id, the latest capture of the agent written before it (the refusing hook's own capture; the
-// quote check may finish before handback-check.mjs writes its capture, so only an id ties those two for certain).
+// refusal without an id, the capture with the refusal's report_key nearest in time (in either write order: the quote
+// check may finish before handback-check.mjs writes its capture), else the latest capture of the agent written before it.
 // A separate log, so the capture records keep their shape (they gain tool_use_id only when the payload has one).
 export const HANDBACK_REFUSALS = "handback-refusals.jsonl";
 
 /**
  * Mark a hand-back as refused. Never throws; false when it was not written.
- * @param {{ session_id: string, agent_id: string, tool_use_id?: string | null, gate: string }} refusal
+ * @param {{ session_id: string, agent_id: string, tool_use_id?: string | null, gate: string, report_key?: string }} refusal
  */
 export function recordHandbackRefusal(refusal) {
   try {
@@ -254,12 +254,19 @@ function deliverableCaptures(dir, sessionId, agentId) {
   const ids = new Set(refusals.map((r) => r.tool_use_id).filter((id) => typeof id === "string" && id));
   /** @type {Set<any>} */
   const refused = new Set(captures.filter((c) => typeof c.tool_use_id === "string" && ids.has(c.tool_use_id)));
+  const t = (/** @type {any} */ c) => Date.parse(c?.ts);
   for (const r of refusals) {
     if (typeof r.tool_use_id === "string" && r.tool_use_id) continue;
-    const at = Date.parse(r.ts);
+    const at = t(r);
     if (!Number.isFinite(at)) continue;
-    const before = captures.filter((c) => Date.parse(c.ts) <= at).at(-1);
-    if (before) refused.add(before);
+    // The refusal's report_key, when a capture carries the same key: that capture, the one nearest in time (written
+    // before or after the refusal; journal.mjs handbackState's rule). Otherwise the latest capture written before it.
+    const key = typeof r.report_key === "string" && r.report_key ? r.report_key : null;
+    const keyed = key ? captures.filter((c) => c.report_key === key && Number.isFinite(t(c))) : [];
+    const hit = keyed.length
+      ? keyed.sort((a, b) => Math.abs(t(a) - at) - Math.abs(t(b) - at) || t(b) - t(a))[0]
+      : captures.filter((c) => t(c) <= at).at(-1);
+    if (hit) refused.add(hit);
   }
   return captures.filter((c) => !refused.has(c));
 }

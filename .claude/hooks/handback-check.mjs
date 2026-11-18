@@ -21,12 +21,22 @@
 // read the report from that capture, since the stop payload of a hand-back carries no last_assistant_message and the
 // subagent transcript does not hold the report just handed back yet. A hand-back this hook refuses is also marked in
 // handback-refusals.jsonl (state.mjs recordHandbackRefusal), so the stop never takes the undelivered capture.
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseReply, stopRecord } from "./brief.mjs";
 import { appendJsonl, readJsonl } from "./run.mjs";
 import { duplicate, ensureStateDir, recordHandback, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"]);
+
+/**
+ * A key for one hand-back's report that both hooks on its PreToolUse compute alike, whichever finishes first (2.0.0):
+ * the first 16 hex digits of the report's SHA-256. Never report text. A capture carries it as `report_key`, and so does
+ * a refusal, so a refusal written before its capture (no tool_use_id) can still be matched (journal.mjs).
+ * quote-check.mjs computes the same key with its own copy (it runs where this file may be absent): keep them equal.
+ * @param {string} message
+ */
+export const reportKey = (message) => createHash("sha256").update(message, "utf8").digest("hex").slice(0, 16);
 
 /**
  * What is wrong with a worker's report, or null. `checks` are the ids of the reviewer's CHECKS line, when known.
@@ -90,7 +100,7 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   const toolUseId = typeof input.tool_use_id === "string" && input.tool_use_id ? input.tool_use_id : null;
   if (input.tool_name === "SubagentHandback" && typeof message === "string" && agentId) {
     try {
-      recordHandback({ session_id: sessionId, agent_id: agentId, agent_type: role, ...(toolUseId ? { tool_use_id: toolUseId } : {}), ...handbackFields(message) });
+      recordHandback({ session_id: sessionId, agent_id: agentId, agent_type: role, ...(toolUseId ? { tool_use_id: toolUseId } : {}), report_key: reportKey(message), ...handbackFields(message) });
     } catch {
       // the capture must never hold a report back
     }
@@ -128,7 +138,9 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   }
   if (!deny || !recorded) process.exit(0);
   // The capture above is now a report that is not delivered: mark it, so the stop never takes it (G-14).
-  recordHandbackRefusal({ session_id: sessionId, agent_id: agentId, tool_use_id: toolUseId, gate: "handback" });
+  // report_key: the key journal.mjs matches a refusal without tool_use_id by (an added field; state.mjs keeps it).
+  const refusal = { session_id: sessionId, agent_id: agentId, tool_use_id: toolUseId, gate: "handback", report_key: reportKey(message) };
+  recordHandbackRefusal(refusal);
   process.stderr.write(`${problem.message}\n`);
   process.exit(2);
 }

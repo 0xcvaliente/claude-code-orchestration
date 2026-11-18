@@ -29,7 +29,7 @@
 //                 (commits the seal never covered); else git push --recurse-submodules=no --no-follow-tags -u origin
 //                 skill/<name>:skill/<name> (never a force push; remote and refspec named, so remote.pushDefault,
 //                 branch.<name>.pushRemote and remote.origin.push cannot redirect it; no tag is sent, whatever
-//                 push.followTags says, since tag messages are never scanned).
+//                 push.followTags says, whatever the scan of the tags pointing into the branch found).
 //   6. PR         gh pr create against the base, its body naming the skill, target, provenance digest and that an agent
 //                 created it and a person must review it; an open PR for the branch is reused. Prints the URL.
 // With --merge, after those:
@@ -47,7 +47,7 @@ import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isSkillName } from "../.claude/hooks/brief.mjs";
-import { findingLine, historyAdvice, outsideText, scanBranch, unpushedText } from "../.claude/hooks/skill-scan.mjs";
+import { findingLine, foreignText, historyAdvice, metaAdvice, outsideText, scanBranch, unpushedText } from "../.claude/hooks/skill-scan.mjs";
 import { verify } from "../.claude/hooks/skill-seal.mjs";
 
 const TARGETS = /** @type {const} */ (["private", "public"]);
@@ -316,7 +316,13 @@ step(
     // do not reach, whichever local branch it sits on. A commit counts as there only when every address has it.
     const targets = pushTargets();
     const remotes = targets.map((t) => [...new Set(t.refs.values())]);
-    const scan = scanBranch(draft, { base: baseBranch, branch, name, remotes });
+    // The addresses this git would write as author and committer now (config or GIT_* variables): every author and
+    // committer of the draft's commits with another address is shown and blocks, like a path outside the skill.
+    const mine = ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]
+      .map((v) => git(draft, ["var", v]))
+      .map((r) => (r.ok ? (/<([^>\n]*)>/.exec(r.out)?.[1] ?? "") : ""))
+      .filter((e, i, a) => e && a.indexOf(e) === i);
+    const scan = scanBranch(draft, { base: baseBranch, branch, name, remotes, identity: mine });
     const fetchUrl = git(draft, ["remote", "get-url", "origin"]);
     const remoteName = targets.length > 1 ? "one of origin's push addresses" : fetchUrl.ok && fetchUrl.out === targets[0]?.url ? "origin" : "origin's push address";
     /** @type {string[]} */
@@ -327,9 +333,11 @@ step(
       lines.push(`Possible secrets or personal details (${scan.findings.length}); remove each, or replace it with a placeholder such as <token>, user@example.com or ~/:`);
       for (const f of scan.findings.slice(0, 50)) lines.push(`  ${findingLine(f)}`);
       if (scan.findings.length > 50) lines.push(`  and ${scan.findings.length - 50} more`);
-      if (scan.findings.some((f) => f.commit && !f.base)) lines.push(historyAdvice(scan.mergeBase));
+      if (scan.findings.some((f) => f.commit && !f.base && !f.where)) lines.push(historyAdvice(scan.mergeBase));
+      if (scan.findings.some((f) => f.where)) lines.push(metaAdvice(scan.mergeBase));
     }
     if (scan.outside.length) lines.push(outsideText(scan.outside, name, scan.mergeBase));
+    if (scan.foreign.length) lines.push(foreignText(scan.foreign, mine, scan.mergeBase));
     if (lines.length) fail(`the branch ${branch} cannot be published as it is. Nothing was pushed.\n  - ${lines.join("\n  - ")}\nFix the draft in ${draft}, have it reviewed and sealed again, then rerun.`);
     console.log("   ok");
   },
@@ -348,7 +356,7 @@ step("Push the branch", `git ls-remote <each push address of origin> refs/heads/
   }
   // The remote and the refspec are named, so no push default, push remote or push refspec of origin changes where it
   // goes; submodules are never pushed with it, and no tag either (push.followTags would send the annotated tags that
-  // point into the pushed commits, and tag messages are never scanned).
+  // point into the pushed commits, which the scan checks but the person never chose to publish).
   const r = git(draft, ["push", "--recurse-submodules=no", "--no-follow-tags", "-u", "origin", `${branch}:${branch}`]);
   if (!r.ok) fail(`git push failed:\n${tail(r)}\nThe push never forces: if ${branch} exists on origin with other commits, look at it and resolve that by hand, then rerun.`);
   console.log("   ok");
