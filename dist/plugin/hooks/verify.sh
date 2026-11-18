@@ -701,7 +701,22 @@ note_failures() {
   [ "$lim" -le 10 ] || lim=10
   [ "$lim" -ge 1 ] || return 0
   [ -f "$work/test.out" ] || return 0
+  # The kept output may hold secrets a test printed: the folder is 0700 and each file 0600, also when an older run or
+  # a wider umask left them open (tightened here, before and after the write; a symlink is never followed by chmod).
+  # The helper runs under umask 077, so the folder it makes and the file it writes are private from the start.
+  local um out f
+  out="$state/test-output"
+  mkdir -p "$out" 2>/dev/null
+  [ -L "$out" ] || chmod 700 "$out" 2>/dev/null
+  um="$(umask)"
+  umask 077
   run_limited "$lim" "$work/test.out" "$work/fail.out" /dev/null node "$hooks_dir/bugfix-check.mjs" failures --state "$state" --tag "${agent_id:-}-$$"
+  umask "$um"
+  if [ -d "$out" ] && [ ! -L "$out" ]; then
+    for f in "$out"/* "$out"/.[!.]*; do
+      [ -f "$f" ] && [ ! -L "$f" ] && chmod 600 "$f" 2>/dev/null
+    done
+  fi
   [ "$lim_timed_out" = 0 ] && [ "$lim_rc" = 0 ] || return 0
   fail_extra="$(sed -n 1p "$work/fail.out" 2>/dev/null)"
   case "$fail_extra" in '"failed_count":'*) ;; *) fail_extra="" ;; esac
@@ -765,7 +780,7 @@ if [ -n "$cache_key" ]; then
 fi
 [ -z "$take_reason" ] || tree_extra="${tree_extra:+$tree_extra,}\"reuse\":\"$take_reason\""
 
-lock_wait_s=0
+lock_wait_s=0 run_s=0 chk_s=0 # where the budget went, for the bugfix_timeout message
 timed_out=0 limit=0
 reused=0
 if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
@@ -820,7 +835,9 @@ else
     [ "$limit" -ge 1 ] || limit=1
   fi
   ensure_work
+  run_s="$SECONDS"
   run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
+  run_s=$((SECONDS - run_s))
   rc="$lim_rc"
   timed_out="$lim_timed_out"
   # At a hand-back: L1 at once, then the key again, so that an outcome is stored only for the trees the run began with.
@@ -853,7 +870,9 @@ if [ "$rc" = 0 ]; then
     exit 0
   fi
   if [ "${ORCH_BUGFIX_CHECK:-}" != off ] && [ "$agent_type" = implementer ]; then
+    chk_s="$SECONDS"
     check bugfix "$input" 2
+    chk_s=$((SECONDS - chk_s))
     # A temp folder that could not be made again leaves the brief unread too: treated as a bugfix agent (blocks).
     if [ "$chk_no_time" = 1 ] && { is_bugfix_agent || { [ "$chk_tmp_lost" = 1 ] && ! ensure_work; }; }; then
       # No time left to check the reproduction test, or the check was killed: unverified, so it blocks like the
@@ -873,7 +892,17 @@ if [ "$rc" = 0 ]; then
         exit 2
       fi
       log_gate block bugfix_timeout
-      echo "KIND: bugfix: unverified. The check of the reproduction test against the base did not finish within the test gate's time budget ($budget seconds for the whole gate). Make the test suite faster, or report the bug as unverified." >&2
+      # What the budget went to, from the times this gate measured: the wait for the suite lock (another gate running
+      # this project's suite), the test run (none when the hand-back's outcome was reused) and the check itself. The
+      # wait is named as the cause when it took at least as long as the run and the check together.
+      if [ "$reused" = 1 ]; then ran="the test outcome was the hand-back's run (none here)"; else ran="the test run took $run_s s"; fi
+      if [ "$lock_wait_s" -gt 0 ] && [ "$lock_wait_s" -ge $((run_s + chk_s)) ]; then
+        echo "KIND: bugfix: unverified. The check of the reproduction test against the base could not finish within the test gate's time budget ($budget seconds for the whole gate): $lock_wait_s s of it went to waiting for another test gate that was running this project's suite (one suite runs at a time), $ran and the check $chk_s s. The wait, not your suite, used the time: stop again once the other gate has finished (your next stop runs the gate again), or report the bug as unverified." >&2
+      else
+        waited=""
+        [ "$lock_wait_s" -le 0 ] || waited=", waiting for another test gate's run of this project's suite $lock_wait_s s"
+        echo "KIND: bugfix: unverified. The check of the reproduction test against the base did not finish within the test gate's time budget ($budget seconds for the whole gate): $ran$waited and the check $chk_s s. Make the test suite faster, or report the bug as unverified." >&2
+      fi
       exit 2
     fi
     if [ "$chk_decision" = block ]; then

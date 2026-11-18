@@ -44,7 +44,7 @@
 // the orchestrator holds a report that says pass. For a launch of this plugin's reviewer (bare or orchestration:; never
 // a built-in, fork or another plugin's agent) whose brief names SLICE and is not a PLAN REVIEW, the slice's latest
 // implementer is read the way the review gate reads it (run.mjs implementerTestStates): a test-gate block for failed
-// tests (tests_failed, or no reason; never a bugfix_ reason) later than its latest stop, with no start since, refuses
+// tests (tests_failed, or no reason; never a bugfix_ reason) that stands for its latest stop, with no start since, refuses
 // the launch with tests_failed_after_report, at most twice per slice, agent and block, then lets it through as
 // tests_failed_after_report_gave_up; a stop with no test-gate record after it yet appends one line to the brief (the
 // gate has not reported; the reviewer must not rest a pass on the tests) through the allow with updatedInput below.
@@ -254,8 +254,11 @@ function holdLog(rec) {
 /**
  * The reviewer hold for a launch of our reviewer whose brief names `slice`. The slice's latest implementer (run.mjs
  * latestImplementerOf, over implementerTestStates, the review gate's own reading of the logs):
- *   - has a test-gate block for failed tests (tests_failed, or a record with no reason; never a bugfix_ reason) later
- *     than its latest stop, and no start since the block: refused with tests_failed_after_report (exit 2), twice per
+ *   - has a test-gate block for failed tests (tests_failed, or a record with no reason; never a bugfix_ reason) that
+ *     stands for its latest stop (run.mjs stopGateOf pairs by hand-back id: a record belongs to a stop for certain only
+ *     when both carry the same hand-back id; otherwise any failed-tests block since the agent's latest start holds the
+ *     review; a pass stands only when it is the only candidate; anything else is pending), and no start since the
+ *     block: refused with tests_failed_after_report (exit 2), twice per
  *     slice, agent and block, then let through and logged as tests_failed_after_report_gave_up;
  *   - stopped, and the test gate has logged nothing for that stop yet: the returned note (test_gate_pending) is appended;
  *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an

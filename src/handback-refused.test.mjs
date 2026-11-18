@@ -92,6 +92,9 @@ for (const toolUseId of ["toolu_r1", undefined]) {
       // that skipped C2 (constraints_unchecked); now there is no review to count.
       assert.equal(decision?.reason, "last_reviewer_no_status");
       assert.doesNotMatch(gate.stderr, /passed it/);
+      // The message says what happened: the report was refused at its hand-back, by the report check; not "no STATUS".
+      assert.match(gate.stderr, /slice x \(run [^)]+\): the last reviewer's report was refused at its hand-back by the report check/);
+      assert.doesNotMatch(gate.stderr, /returned no STATUS line/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -137,6 +140,40 @@ test("item 3: a quote-check refusal without tool_use_id that runs ahead of the c
     // So the stop finds no deliverable capture: the refused report is never the researcher's recorded report.
     assert.equal(handbackFor("s1", "q1", ["telemetry.jsonl"], () => true, join(dir, ".claude", "state")), null);
     assert.ok(!readFileSync(join(dir, ".claude", "state", "handback-refusals.jsonl"), "utf8").includes("parser"), "no report text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// handbackFor (state.mjs) matches a refusal without tool_use_id to its capture by report_key when both carry one, the
+// rule journal.mjs already has; otherwise the latest capture written before the refusal, as before.
+test("handbackFor: a refusal without tool_use_id is matched to its capture by report_key, in either write order", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-handback-key-"));
+  try {
+    const at = (/** @type {number} */ s) => new Date(Date.parse("2026-11-18T10:00:00.000Z") + s * 1000).toISOString();
+    const cap = (/** @type {number} */ s, /** @type {string} */ key, /** @type {string} */ status) => ({ ts: at(s), session_id: "s1", agent_id: "q1", report_key: key, status });
+    const ref = (/** @type {number} */ s, /** @type {string | undefined} */ key) => ({ ts: at(s), session_id: "s1", agent_id: "q1", gate: "quote", ...(key ? { report_key: key } : {}) });
+    const put = (/** @type {any[]} */ captures, /** @type {any[]} */ refusals) => {
+      writeFileSync(join(dir, "handbacks.jsonl"), captures.map((c) => `${JSON.stringify(c)}\n`).join(""));
+      writeFileSync(join(dir, "handback-refusals.jsonl"), refusals.map((r) => `${JSON.stringify(r)}\n`).join(""));
+    };
+    const pick = () => handbackFor("s1", "q1", ["telemetry.jsonl"], () => true, dir)?.status ?? null;
+    // The refusal was written before its capture (the quote check did not see the capture in time): the key still
+    // ties them, so the refused report is not taken. Before, only a capture written before the refusal was marked.
+    put([cap(0, "aaaa", "pass"), cap(5, "bbbb", "fail")], [ref(4, "bbbb")]);
+    assert.equal(pick(), "pass", "the refused capture (key bbbb, written after its refusal) is skipped; the earlier one stands");
+    put([cap(5, "bbbb", "fail")], [ref(4, "bbbb")]);
+    assert.equal(pick(), null, "the only capture is the refused one");
+    // A key marks its own capture only: the delivered later report with another key stands.
+    put([cap(0, "aaaa", "pass"), cap(5, "bbbb", "fail")], [ref(1, "aaaa")]);
+    assert.equal(pick(), "fail");
+    // Fallbacks, as before: a refusal without a key, or with a key no capture carries, marks the latest capture before it.
+    put([cap(0, "aaaa", "pass"), cap(5, "bbbb", "fail")], [ref(6, undefined)]);
+    assert.equal(pick(), "pass");
+    put([cap(0, "aaaa", "pass"), cap(5, "bbbb", "fail")], [ref(6, "cccc")]);
+    assert.equal(pick(), "pass");
+    put([{ ...cap(0, "", "pass"), report_key: undefined }, { ...cap(5, "", "fail"), report_key: undefined }], [ref(6, "bbbb")]);
+    assert.equal(pick(), "pass", "captures without a key: the latest before the refusal");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
