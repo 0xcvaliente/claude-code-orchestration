@@ -12,6 +12,13 @@ import {
 } from "./judge.js";
 
 const CWD = "/work/repo";
+/** CPU time (user + system, ms) this process spends in fn: the code's own work, which a loaded machine does not inflate as it does the wall clock. */
+const cpuMs = (fn: () => void) => {
+  const start = process.cpuUsage();
+  fn();
+  const d = process.cpuUsage(start);
+  return (d.user + d.system) / 1000;
+};
 
 // [command, expected class]. Every floor row must fail if its rule were removed from the tokenizer or the rules on its tokens.
 // No prefix command (env, timeout, stdbuf, exec, nohup, nice, xargs, command, time, busybox) is in any list in judge.ts:
@@ -2454,12 +2461,17 @@ test("classify (w7, third review): every argument of a string wrapper is a comma
   assert.match(classifyDetail(`sg g -${"q".repeat(33)}c'x'`, CWD).reason ?? "", /^sg with an option cluster of more than 32 letters is always blocked/);
   // The attached values S1 reads are bounded: an option word of the length cap is refused after the budget, quickly.
   const long = `sg g '-cc;${"echo x;".repeat(37000)}'`;
+  // The bound is on this process's CPU time (the judge's own work), not the wall clock: about 0.6 to 1 s alone, and a
+  // 2 s wall bound failed at 5.9 s while the whole suite ran beside it (f5, 2.0.0). The quadratic code this guards
+  // against took 8.5 to 17 s. The 60 s wall bound is only a backstop; the CPU bound is the real assertion.
   const t = performance.now();
-  assert.equal(classify(long, CWD), "deny");
-  // The bound protects the budget on attached values: the refusal must stay far inside the hook's time (JUDGE_TIMEOUT_MS
-  // 60 s, HOOK_TIMEOUT_S 90 s). About 0.6 to 1 s alone; 2 s failed at 5.9 s while the whole suite ran beside it (f5,
-  // 2.0.0), so the bound is 15 s, still far below the hook's limit.
-  assert.ok(performance.now() - t < 15_000, `${Math.round(performance.now() - t)} ms`);
+  let cls: BashClass | undefined;
+  const cpu = cpuMs(() => {
+    cls = classify(long, CWD);
+  });
+  assert.equal(cls, "deny");
+  assert.ok(cpu < 2000, `${Math.round(cpu)} ms of CPU`);
+  assert.ok(performance.now() - t < 60_000, `${Math.round(performance.now() - t)} ms of wall time`);
   // Every argument read on its own stays bounded too: distinct words (no answer to reuse) at the length cap, decided in
   // about 1 to 2 s (the bound here leaves room for a slow machine; chains and nesting measured the same).
   let words = "";
@@ -2476,10 +2488,13 @@ test("classify (w7, third review): every argument of a string wrapper is a comma
 // a command over MAX_COMMAND_LENGTH characters or with more than MAX_OPENERS of one opener is denied before parsing.
 // The worst commands under the caps (every opener at the cap, filled to the length cap) are decided well under 2 s.
 test("classify (w7, N6): the size caps deny before parsing, the worst command under them is decided in under 2 s, ordinary long commands pass", () => {
+  // CPU time of this process, not the wall clock, so a loaded machine cannot fail a linear scan (f5, 2.0.0).
   const timed = (cmd: string) => {
-    const t = performance.now();
-    const r = classifyDetail(cmd, CWD);
-    return { r, ms: performance.now() - t };
+    let r!: ReturnType<typeof classifyDetail>;
+    const ms = cpuMs(() => {
+      r = classifyDetail(cmd, CWD);
+    });
+    return { r, ms };
   };
   // F6, and the caps themselves
   for (const cmd of ["[".repeat(40000), `echo ${"[".repeat(40000)}`, `${"(".repeat(32766)}${")".repeat(32766)}`, "x".repeat(MAX_COMMAND_LENGTH + 1), `echo ${"(".repeat(MAX_OPENERS + 1)}`, `echo ${"{".repeat(MAX_OPENERS + 1)}`, `echo ${"[".repeat(MAX_OPENERS + 1)}`]) {
