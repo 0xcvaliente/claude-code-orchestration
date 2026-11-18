@@ -4,12 +4,15 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyDetail as next } from "../.claude/hooks/judge-core.mjs";
+import { classifyDetail as next, tokenize as nextTokenize } from "../.claude/hooks/judge-core.mjs";
 import { classifyDetail as old } from "./fixtures/judge-core-1.4.0.mjs";
-import { classifyDetail as sdk } from "./judge.js"; // tsx resolves it to judge.ts
+import { classifyDetail as sdk, tokenize as sdkTokenize } from "./judge.js"; // tsx resolves it to judge.ts
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CWD = "/w";
@@ -59,6 +62,14 @@ function generated() {
 // Audit items J1 to J5: the denies they add, and the inputs that got past the judge before them. Each input must be
 // denied (or judged, for a push) by both copies, judge.ts and judge-core.mjs, alone and in the wrapped forms.
 const HARDENING_REASONS = [
+  // Release 2.0.0, slice w7: prompts set by builtins and expansions (N5), the size caps (N6)
+  /^setting PS[014] through a builtin or an expansion that assigns it/,
+  /^a command (of|with) more than \d+ (characters|of [[{(]) is always blocked/,
+  // w2, third attempt: the option allowlist (R1), wrapped programs (R4), git templates (R5)
+  /^(set|setopt|unsetopt|shopt) .* is always blocked: the guard allows only option words it can read/,
+  /^[a-z]+ (option )?[-+].* is always blocked: the guard allows only option (letters|s) it knows as harmless/,
+  /^[a-z]+ after a wrapper \(xargs, env, timeout, nice, find -exec and the like\) is always blocked wherever it stands/,
+  /^git (clone|init) --template is always blocked/,
   /\(<< inside \(\(\.\.\.\)\) is a left shift, not a here document\)/, // J1
   /\(brace expansion\)/, // J2: the scan no longer stops at a substitution
   /\(a NUL in \$'\.\.\.'\)/, // J3
@@ -74,6 +85,16 @@ const HARDENING_REASONS = [
   /\(an assigning \$\{\.\.\.\} of a zsh function, alias or commands table\)/,
   // fix-judge-3: the same rule on the widest reading of the whole command text
   /^an assigning \$\{\.\.\.\} of zsh's functions, aliases or commands table/,
+  // Release 2.0.0, slice w2
+  /^(setopt|unsetopt) of globsubst or promptsubst/,
+  /^set -o globsubst or promptsubst/,
+  /^emulate is always blocked/,
+  /^sched runs a command later/,
+  /^(parallel|sem) runs its arguments/,
+  /^setting PS[014] to a value with/,
+  /^assigning zsh's options table/,
+  /^[a-z]+ -?[-+][A-Za-z]* (with an option the guard cannot read|\S+) is always blocked: globsubst and promptsubst/,
+  /^git clone .*: a config key that runs a program/,
 ];
 /** @type {Array<[string, string[]]>} [command, the classes it may get] */
 const HARDENED = [
@@ -141,6 +162,18 @@ for (const c of AUDIT_1116_2_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
 // fix-judge-3: the same rule on the widest reading (an escaped }, a backslash-newline, a quoted }, a nested expansion).
 const AUDIT_1116_3_TABLE_EXPANSION = listIn("judge.test.ts", "AUDIT_1116_3_TABLE_EXPANSION_DENY");
 for (const c of AUDIT_1116_3_TABLE_EXPANSION) HARDENED.push([c, ["deny"]]);
+// Release 2.0.0, slice w2: the forms the docs listed as passing (W2_DENY), and the fetches that write a branch, which
+// now go to the judge (W2_JUDGE).
+const W2_DENY = listIn("judge.test.ts", "W2_DENY");
+for (const c of W2_DENY) HARDENED.push([c, ["deny"]]);
+// Third attempt: the option allowlist, wrapped programs and templates (W2R2_DENY).
+for (const c of listIn("judge.test.ts", "W2R2_DENY")) HARDENED.push([c, ["deny"]]);
+// Slice w7: commands after reserved words and modifiers (N1), wrapped refused programs (N4), prompts (N5) (W7_DENY).
+const W7_DENY = listIn("judge.test.ts", "W7_DENY");
+for (const c of W7_DENY) HARDENED.push([c, ["deny"]]);
+for (const c of listIn("judge.test.ts", "W7_WRAPPERS")) HARDENED.push([c, ["deny"]]);
+const W2_JUDGE = listIn("judge.test.ts", "W2_JUDGE");
+for (const c of W2_JUDGE) HARDENED.push([c, ["judge", "deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */
 const HARDENED_INPUTS = new Set(HARDENED.map(([c]) => c));
 
@@ -298,4 +331,72 @@ test("zsh table expansion (fix-judge-3): an escaped }, a backslash-newline anywh
     assert.equal(next(line, CWD).cls, "pass", line);
     assert.equal(sdk(line, CWD).cls, "pass", line);
   }
+});
+
+/** A file of this repository at commit `rev`, written into a scratch folder, or undefined when the clone does not hold
+ * that commit (a shallow CI checkout). @param {string} rev @param {string} path */
+function fromGit(rev, path) {
+  let text;
+  try {
+    text = execFileSync("git", ["-C", here, "show", `${rev}:${path}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 26 });
+  } catch {
+    return undefined;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "judge-rev-"));
+  process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, path.split("/").pop() ?? "x.mjs");
+  writeFileSync(file, text);
+  return pathToFileURL(file).href;
+}
+/** The strings every comparison below reads: every string literal of the judge tests, the corpus, the wrapped forms. */
+function allStrings() {
+  const corpus = JSON.parse(readFileSync(join(here, "fixtures", "judge-corpus.json"), "utf8"));
+  const tested = [...strings("judge.test.ts"), ...strings("judge-hook.test.mjs"), ...corpus.cases.map((/** @type {{ command: string }} */ c) => c.command)];
+  return [...new Set([...tested, ...tested.flatMap((s) => [`env ${s}`, `${s}; git status`, `true && ${s}`])])];
+}
+const shown = (/** @type {(s: string) => unknown} */ f, /** @type {string} */ s) => {
+  try {
+    return JSON.stringify(f(s));
+  } catch (e) {
+    return `throws ${e instanceof Error ? e.message : String(e)}`;
+  }
+};
+
+// Slice w7, N6: the tokenizer's scans of `(`, `{` and `[` became linear (memos by index, lookups instead of rescans).
+// The researcher guard imports the tokenizer, so its output must stay exactly what it was at 3bd0de6, the commit the
+// slice started from: on every test string, and on random text made of the characters those scans read.
+test("tokenizer (w7, N6): output equal to 3bd0de6's on every test string and on random shell text, in both copies", async (t) => {
+  const url = fromGit("3bd0de6", ".claude/hooks/judge-core.mjs");
+  if (!url) return t.skip("3bd0de6 is not in this clone (a shallow checkout)");
+  const { tokenize: before } = await import(url);
+  const inputs = allStrings();
+  let seed = 7;
+  const random = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const atoms = ["(", ")", "{", "}", "[", "]", "$", "$(", "$((", "((", "))", "${", "'", '"', "`", "\\", " ", ";", "\n", ",", ".", "..", "<<", "<<E", "\nE\n", "<(", ">(", "a", "x=", "!", "^", ":alpha:", "|", "&", "#", "*", "?", "=", "~", "-"];
+  for (let i = 0; i < 20000; i++) {
+    let s = "";
+    for (let n = 1 + Math.floor(random() * 24); n > 0; n--) s += atoms[Math.floor(random() * atoms.length)];
+    inputs.push(s);
+  }
+  const differ = [];
+  for (const s of inputs) {
+    const want = shown(before, s);
+    if (shown(nextTokenize, s) !== want || shown(sdkTokenize, s) !== want) differ.push(JSON.stringify(s));
+  }
+  assert.deepEqual(differ.slice(0, 20), [], `${differ.length} of ${inputs.length} inputs`);
+});
+
+// Never weaker than the release this work builds on: nothing release-1.6.1 (7b408fe) denies passes or is judged now,
+// and nothing it judges passes, on every test string and its wrapped forms.
+test("differential (w7): never weaker than release-1.6.1 on every judge test string and its wrapped forms", async (t) => {
+  const url = fromGit("7b408fe", ".claude/hooks/judge-core.mjs");
+  if (!url) return t.skip("7b408fe is not in this clone (a shallow checkout)");
+  const { classifyDetail: release } = await import(url);
+  const weaker = [];
+  for (const s of allStrings()) {
+    const o = release(s, CWD);
+    const n = next(s, CWD);
+    if ((o.cls === "deny" && n.cls !== "deny") || (o.cls === "judge" && n.cls === "pass")) weaker.push(`${JSON.stringify(s)}: 1.6.1 ${o.cls}, now ${n.cls}`);
+  }
+  assert.deepEqual(weaker, []);
 });
