@@ -54,6 +54,7 @@ Other files in the state dir:
 - `skill-catalog.json`: the cached list of installed skills.
 - `turn-warnings/`: one marker per worker that got the turn warning.
 - `test-gate.lock`: the test gate's suite lock, while a gate holds it ([gates.md, Time budget and suite lock](gates.md#time-budget-and-suite-lock)).
+- `test-gate.lock.run` (2.0.0): the lock's companion file, two lines: the holder's lock token and the process group of the command it runs under the lock. `verify.sh` writes it at the start of each such command (`run_limited`), reads it when it judges whether a lock whose holder is gone is stale (`lock_stale`: the lock stands while a member of that group is left), and removes it on release while it still holds the hook's own token (`release_lock`).
 - `test-gate-cache.json`: the hand-back gate's stored outcomes, which the SubagentStop gate right after may reuse ([gates.md, Hand-back gate](gates.md#hand-back-gate)).
 - `test-output/` (2.0.0): the last 64 KiB of the output of each failed test run, named in its record's `output`; the newest 10 files are kept, the folder 0700 and each file 0600.
 - `report.html`: the run report, when `npm run report` writes it here.
