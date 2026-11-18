@@ -74,14 +74,23 @@ test("no reserved marketplace name and no reserved plugin name prefix", () => {
   }
 });
 
-test("no license field and no email address in the three manifests", () => {
+test("2.0.3: the license is MIT in package.json and both plugin manifests, and the marketplace states it nowhere (one place per fact)", () => {
   /** @param {unknown} v @returns {string[]} */
   const keys = (v) => (v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...keys(x)]) : []);
-  for (const f of MANIFESTS) {
-    const text = readFileSync(join(root, f), "utf8");
-    assert.ok(!keys(JSON.parse(text)).includes("license"), `${f}: no license field (the owner has not chosen one)`);
-    assert.doesNotMatch(text, /[\w.+-]+@[\w-]+\.[\w.-]+/, `${f}: no email address`);
-  }
+  assert.equal(read("package.json").license, "MIT", "package.json");
+  for (const f of ["dist/plugin/.claude-plugin/plugin.json", "dist/dashboard/.claude-plugin/plugin.json"]) assert.equal(read(f).license, "MIT", f);
+  assert.ok(!keys(read(".claude-plugin/marketplace.json")).includes("license"), "no license field in the marketplace file");
+});
+
+test("2.0.3: the marketplace entry carries no icon (a plugin.json field only)", () => {
+  /** @param {unknown} v @returns {string[]} */
+  const keys = (v) => (v && typeof v === "object" ? Object.entries(v).flatMap(([k, x]) => [k, ...keys(x)]) : []);
+  assert.ok(!keys(read(".claude-plugin/marketplace.json")).includes("icon"), "no icon field in the marketplace file");
+  assert.equal(read("dist/plugin/.claude-plugin/plugin.json").icon, "./icon.png", "the plugin names its icon");
+});
+
+test("no email address in the three manifests", () => {
+  for (const f of MANIFESTS) assert.doesNotMatch(readFileSync(join(root, f), "utf8"), /[\w.+-]+@[\w-]+\.[\w.-]+/, `${f}: no email address`);
 });
 
 test("--check fails, naming the file, when the marketplace file is stale or missing (scratch copy of the project)", () => {
@@ -93,6 +102,8 @@ test("--check fails, naming the file, when the marketplace file is stale or miss
     });
     cpSync(join(root, "dashboard"), join(dir, "dashboard"), { recursive: true });
     cpSync(join(root, "package.json"), join(dir, "package.json"));
+    cpSync(join(root, "LICENSE"), join(dir, "LICENSE"));
+    cpSync(join(root, "plugin-assets"), join(dir, "plugin-assets"), { recursive: true });
     const check = () => spawnSync("node", [script, "--check"], { cwd: dir, encoding: "utf8" });
     assert.equal(spawnSync("node", [script], { cwd: dir, encoding: "utf8" }).status, 0);
     const file = join(dir, ".claude-plugin", "marketplace.json");
