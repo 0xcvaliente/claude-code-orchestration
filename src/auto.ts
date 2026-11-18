@@ -6,6 +6,8 @@ import { triage, type Decision } from "./triage.js";
 
 export type RequestedMode = "auto" | "plain" | "reviewed" | "orchestrate";
 export const MODES: readonly RequestedMode[] = ["auto", "plain", "reviewed", "orchestrate"];
+/** The least run budget left for which a failed plain or reviewed session is rerun through the pipeline (--budget's floor). */
+export const MIN_ESCALATION_TOKENS = 10_000;
 
 export interface AutoOptions extends OrchestrateOptions {
   /** auto (default): triage decides. Anything else skips triage and uses that route. */
@@ -66,6 +68,15 @@ export async function auto(opts: AutoOptions): Promise<AutoResult> {
 
     const mayEscalate = decision.source !== "forced" && opts.escalate !== false;
     if (soloReport.ok || !mayEscalate) return result;
+    // With a budget, the pipeline starts only with at least MIN_ESCALATION_TOKENS left (CHANGELOG 1.4.5: a session the
+    // cap stopped escalated with almost nothing left, so a little more was spent). The same floor as `npm run auto`.
+    const left = opts.runBudgetTokens === undefined ? undefined : opts.runBudgetTokens - soloReport.spentTokens;
+    if (left !== undefined && left < MIN_ESCALATION_TOKENS) {
+      soloReport.error = `${soloReport.error ?? "failed"}; not rerun through the pipeline: ${Math.max(left, 0)} tokens of the run budget left, fewer than ${MIN_ESCALATION_TOKENS}`;
+      rewrite(opts.outRoot, soloReport);
+      log(`route: no escalation - ${Math.max(left, 0)} tokens of the run budget left`);
+      return result;
+    }
 
     // The cheap route failed: fall back to the pipeline. The failed session's edits stay uncommitted in the working
     // tree (never reverted: they may sit beside the user's own changes); the pipeline works from HEAD in worktrees.
@@ -80,13 +91,9 @@ export async function auto(opts: AutoOptions): Promise<AutoResult> {
     result = { decision: escalated, soloReport, escalated: true };
   }
 
-  // With an explicit budget, what was already spent counts against it. Either way it shows up in the report.
-  const runBudgetTokens = opts.runBudgetTokens === undefined ? undefined : Math.max(opts.runBudgetTokens - spentBefore, 1);
-  const report = await orchestrate({ ...opts, runBudgetTokens });
-  if (spentBefore > 0) {
-    report.spentTokens += spentBefore;
-    for (const [role, tokens] of Object.entries(earlier)) report.tokensByRole[role] = (report.tokensByRole[role] ?? 0) + tokens;
-    rewrite(opts.outRoot, report);
-  }
+  // What was already spent (the triage call, a failed session) goes to the pipeline run's telemetry before the pipeline
+  // starts (priorSpend), so it counts against --budget there, once, and a later --resume of an interrupted run still
+  // finds it. Either way it shows up in the report.
+  const report = await orchestrate({ ...opts, ...(spentBefore > 0 && { priorSpend: earlier }) });
   return { ...result, report };
 }

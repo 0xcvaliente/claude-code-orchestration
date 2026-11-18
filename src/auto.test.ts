@@ -1,6 +1,6 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -193,22 +193,85 @@ test("budget: triage tokens are subtracted, so the pipeline stops earlier than t
 });
 
 test("budget: an escalated pipeline run also gets the failed solo session's tokens subtracted", async () => {
+  // 2.0.0: a pipeline starts only with at least 10k left, so the numbers are larger than before (planning is 2 x 10000).
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
   const { run, calls } = fake(small);
   const r = await auto({
-    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500 }),
-    testCmd: "test -f a.txt", runBudgetTokens: 3000, // 3000 - 500 triage - 1000 solo = 1500 < 2000 spent on planning
+    repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, spend),
+    testCmd: "test -f a.txt", runBudgetTokens: 25_000, // 25000 - 500 triage - 10000 solo = 14500 < 20000 spent on planning
   });
   assert.equal(r.escalated, true);
-  assert.equal(r.soloReport!.tokensByRole.solo, 1000);
+  assert.equal(r.soloReport!.tokensByRole.solo, 10_000);
   assert.deepEqual(r.report!.slices[0]!.issues, ["run budget exhausted"]);
   assert.ok(!calledRoles(calls).includes("writer"));
   assert.equal(r.report!.tokensByRole.triager, 500);
-  assert.equal(r.report!.tokensByRole.solo, 1000);
+  assert.equal(r.report!.tokensByRole.solo, 10_000);
 
-  // Counting only the triage tokens would leave 2500, enough for the slice: the solo tokens are what stop it.
+  // Counting only the triage tokens would leave 24500, enough for planning: the solo tokens are what stop it.
   const roomy = fake(small);
-  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, { triager: 500 }), testCmd: "test -f a.txt", runBudgetTokens: 4000 });
+  const ok = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(roomy.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 40_000 });
   assert.equal(ok.report!.slices[0]!.status, "passed");
+});
+
+test("item 3: a resume of an escalated run counts the triage call and the failed session against its budget", async () => {
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = fake(small);
+  const r1 = await auto({ repo, task: "t", outRoot: out, run: withTokens(first.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 25_000 });
+  assert.equal(r1.escalated, true);
+  assert.deepEqual(r1.report!.slices[0]!.issues, ["run budget exhausted"]);
+  // A budget of exactly what was spent: counting only the pipeline's own calls (20000) would leave 10500 and start the writer.
+  const second = fake(small);
+  const r2 = await auto({ repo, task: "t", outRoot: out, run: withTokens(second.run, spend), resume: r1.report!.runId, runBudgetTokens: r1.report!.spentTokens });
+  assert.equal(r2.report!.spentTokens, r1.report!.spentTokens, "the resumed report counts triage, session and pipeline");
+  assert.equal(r2.report!.tokensByRole.triager, 500);
+  assert.equal(r2.report!.tokensByRole.solo, 10_000);
+  assert.ok(!calledRoles(second.calls).includes("writer"), "no writer starts on a spent budget");
+});
+
+test("item 3: an escalated run interrupted mid-pipeline still counts the triage call and the failed session on --resume", async () => {
+  const spend = { triager: 500, solo: 10_000, planner: 10_000 };
+  const repo = await tempRepo();
+  const out = outRoot();
+  const first = fake(small);
+  // The process dies right after planning (the journal is saved): the first log line after the plan throws, so the
+  // pipeline function rejects and nothing after it in auto() runs.
+  let planned = false;
+  const dyingLog = (line: string) => {
+    if (planned) throw new Error("interrupted");
+    if (/^plan: \d+ slice/.test(line)) planned = true;
+  };
+  await assert.rejects(auto({ repo, task: "t", outRoot: out, run: withTokens(first.run, spend), testCmd: "test -f a.txt", runBudgetTokens: 100_000, log: dyingLog }), /interrupted/);
+  assert.ok(!calledRoles(first.calls).includes("writer"));
+  const runId = readdirSync(out).find((d) => existsSync(join(out, d, "journal.json")));
+  assert.ok(runId, "the pipeline run left its journal");
+  // Spent: 500 triage + 10000 session + 20000 planning. A resume that missed the first two would see 10500 left.
+  const second = fake(small);
+  const r = await auto({ repo, task: "t", outRoot: out, run: withTokens(second.run, spend), resume: runId, runBudgetTokens: 30_500 });
+  assert.ok(!calledRoles(second.calls).includes("writer"), "no writer starts on a spent budget");
+  assert.equal(r.report!.spentTokens, 30_500);
+  assert.equal(r.report!.tokensByRole.triager, 500);
+});
+
+// Item 2 of 2.0.0 (CHANGELOG 1.4.5, Known and not fixed): a session the cap stopped counted as failed and escalated to
+// the pipeline with almost no budget left. Now a failed session escalates only with at least 10k of the budget left.
+test("item 2: budget: a failed session with less than 10k of the run budget left is not rerun through the pipeline", async () => {
+  for (const [budget, solo] of [[12_000, 10_000], [10_000, 10_000], [15_000, 20_000]] as const) {
+    const { run, calls } = fake(small);
+    const logs: string[] = [];
+    const r = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(run, { triager: 500, solo }), testCmd: "test -f a.txt", runBudgetTokens: budget, log: (l) => logs.push(l) });
+    assert.equal(r.escalated, false, `budget ${budget}`);
+    assert.equal(r.report, undefined);
+    assert.ok(!calledRoles(calls).includes("planner"), "no pipeline call");
+    assert.equal(r.soloReport!.ok, false);
+    assert.match(r.soloReport!.error!, /not rerun through the pipeline/);
+    assert.ok(logs.some((l) => /no escalation/.test(l)));
+  }
+  // Exactly 10k left still escalates.
+  const edge = fake(small);
+  const e = await auto({ repo: await tempRepo(), task: "t", outRoot: outRoot(), run: withTokens(edge.run, { triager: 500, solo: 10_000 }), testCmd: "test -f a.txt", runBudgetTokens: 20_500 });
+  assert.equal(e.escalated, true);
 });
 
 test("budget: earlier spend that already meets the budget leaves a floor of 1 token, not a crash", async () => {

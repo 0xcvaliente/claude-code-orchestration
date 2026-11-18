@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Offline validation of benchmark tasks (no model calls).
-//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>]
+//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N]   (N tasks side by side, default 4)
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
 // scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -69,9 +69,10 @@ async function pool(items, n, fn) {
   return out;
 }
 
-async function validateTask(id, tasksDir, jobs) {
+// Each task's lines are kept and printed together, so tasks can run side by side without mixing their output.
+async function validateTask(id, tasksDir, jobs, say = (line) => console.log(line)) {
   let failures = 0;
-  const fail = (msg) => { failures++; console.log(`FAIL ${id}: ${msg}`); };
+  const fail = (msg) => { failures++; say(`FAIL ${id}: ${msg}`); };
   let task;
   try { task = loadTask(id, tasksDir); } catch (e) { fail(`cannot load task: ${e.message}`); return failures; }
   const probs = metaProblems(task.meta, id);
@@ -82,11 +83,11 @@ async function validateTask(id, tasksDir, jobs) {
 
   const bare = await withDir(task, false, (d) => scoreDir(id, d, tasksDir));
   if (bare.pass) fail("setup/ alone scores pass:true");
-  else console.log(`ok   ${id}: setup alone fails (${bare.passed}/${bare.total})`);
+  else say(`ok   ${id}: setup alone fails (${bare.passed}/${bare.total})`);
 
   const ref = await withDir(task, true, (d) => scoreDir(id, d, tasksDir));
   if (!ref.pass) fail(`reference does not pass (${ref.passed}/${ref.total}) ${JSON.stringify(ref.flags ?? [])}`);
-  else console.log(`ok   ${id}: reference passes (${ref.passed}/${ref.total})`);
+  else say(`ok   ${id}: reference passes (${ref.passed}/${ref.total})`);
   if (ref.pass && "total" in task.meta && task.meta.total !== ref.total) fail(`meta.total ${task.meta.total} != reference total ${ref.total}`);
 
   const mutants = loadMutants(task);
@@ -97,7 +98,7 @@ async function validateTask(id, tasksDir, jobs) {
   for (const { m, score, error } of results) {
     if (error) fail(`mutant cannot be applied: ${error}`);
     else if (score.pass) fail(`mutant "${m.name}" SURVIVED`);
-    else console.log(`ok   ${id}: mutant "${m.name}" caught (${score.passed}/${score.total})`);
+    else say(`ok   ${id}: mutant "${m.name}" caught (${score.passed}/${score.total})`);
   }
   return failures;
 }
@@ -109,7 +110,19 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const ids = readdirSync(tasksDir).filter((d) => existsSync(join(tasksDir, d, "meta.json"))).sort().filter((d) => !only || d === only);
   if (!ids.length) { console.log(`no tasks found${only ? ` matching ${only}` : ""} in ${tasksDir}`); process.exit(1); }
   let failures = 0;
-  for (const id of ids) failures += await validateTask(id, tasksDir, jobs);
+  // Tasks run side by side (the whole run took over 280 s one task at a time); each task's lines print in task order.
+  const lanes = Math.max(1, Math.min(ids.length, Number(arg("parallel", "4")) || 1));
+  const outputs = ids.map(() => []);
+  const done = ids.map(() => false);
+  let shown = 0;
+  const flush = () => { while (shown < ids.length && done[shown]) { for (const l of outputs[shown]) console.log(l); shown++; } };
+  const counts = await pool(ids.map((id, i) => ({ id, i })), lanes, async ({ id, i }) => {
+    const n = await validateTask(id, tasksDir, jobs, (line) => outputs[i].push(line));
+    done[i] = true;
+    flush();
+    return n;
+  });
+  for (const n of counts) failures += n;
   console.log(failures ? `\n${failures} problem(s)` : `\nall ${ids.length} task(s) valid`);
   process.exit(failures ? 1 : 0);
 }
