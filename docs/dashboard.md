@@ -299,7 +299,7 @@ implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
 - **Width.** A row is cut by display width over graphemes, whole graphemes only, ending in "…". Wide East Asian characters and emoji count two columns.
 - **Other agents** (built-ins, other plugins) keep the rows Claude Code draws.
 - **Your own setting wins.** A `subagentStatusLine` in your own or the project's settings draws the row first, and the mod leaves a row that arrives already drawn. `.claude/hooks/subagent-statusline.mjs` is kept for that use: name it in your own `subagentStatusLine` to get the same rows from the launch records (`journal-launches.jsonl`).
-- **Checked** on the mod's test host only (`npm run test-dashboard`), not in a live interactive session ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K10 and K2).
+- **Checked** on the mod's test host (`npm run test-dashboard`, which CI runs since 2.0.0). Rows in this format were captured once in a live interactive session ([probes b2](data/probes-2.0.0-b2.md), Probe 1), but which component drew them there was not established ([Limits](limits.md), A, K2).
 
 ### statusline.sh
 
@@ -341,7 +341,8 @@ curl -fsSL https://raw.githubusercontent.com/0xcvaliente/claude-code-orchestrati
 - The progress total is the plan's only when the PLAN REVIEW brief lists the slices as `SLICE:` lines. Free-form plans fall back to the slices seen so far.
 - The run goes stale after 10 minutes with no agent running (`STALE_MS`), not after the gates' `ORCH_RUN_STALE_MIN` (default 30). So the pane can start a clean run while the gates still hold the old one.
 - With no typed prompt, the pane can flicker to signed off between two waves of agents.
-- The pane cannot read `ORCH_ESCALATION` and uses its default. Its `⇧opus?` cannot see an isolated test failure (`tests_failed_isolated`) or a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`: the doubt signal `test_gate_gave_up`). The gates read those in `gates.jsonl`, which the pane does not read. So the gate may require an opus review the pane does not mark, and the pane can call such a slice, and its run, final while the gate holds it.
+- Since 2.0.0 the pane reads the last MiB of each `gates.jsonl` for an isolated test failure (`tests_failed_isolated`, mark `⚠isolated`) and a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`, mark `⚠gate gave up`). When a `gates.jsonl` is longer than that, a line under the slices says older test-gate records were not read, and the pane may then miss a doubt signal the gates see.
+- A `SendMessage` resume is matched to its agent by id, else by the name the Agent call gave (the latest started of that name), as Claude Code resolves it.
 - The pane does not mirror the second stop of a [hand-back](glossary.md#h). `brief.mjs` reads `continues` on the stop record (set from `stop_hook_active`) and counts the two stops as one review. `turn.complete` carries no `stop_hook_active`. So when a worker's reply is sent back and it ends its turn again, the pane records that turn end as a resumed record. One review can then count twice: in the header's counts, and as a retry signal when the first of the two failed.
 - The run model reads at most 500 agent records ("Run boundary"). A run with more can lose an early attempt or failed review.
 - The `doubt` and `↻replan` marks use the default gap cutoff 80. With `ORCH_GAP_MIN` set to another value, the pane and the gates can disagree.

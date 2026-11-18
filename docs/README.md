@@ -11,6 +11,7 @@ Terms are defined once, in the [glossary](glossary.md).
 - [Glossary](glossary.md): every term these docs use, defined in one or two sentences.
 - [What Claude Code ships vs what this plugin adds](native-vs-plugin.md): area by area, what the plugin adds on top of Claude Code and how each claim is measured.
 - [Safety](safety.md): what protects against what, what does not, and a link to every page's limits.
+- [Limits](limits.md): everything release 2.0.0 does not do, each with its reason.
 
 ## How it works
 

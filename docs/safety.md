@@ -31,8 +31,8 @@ Permission rules in Claude Code's settings. A deny rule beats every allow rule.
 
 What the deny lists do not do:
 
-- They guard against mistakes, not against a command built to pass them. A `git -C * status*` allow rule matches any git command with an allowed subcommand word as a later argument: `git -C /r branch -D main status` passes.
-- Plain `git branch -D` and `git worktree remove --force` are still allowed headless.
+- They guard against mistakes, not against a command built to pass them. A `git -C * status*` allow rule matches any git command with an allowed subcommand word as a later argument. Since 2.0.0 the plain destructive forms of that kind are denied (`git -C /r branch -D main status`, `git -C /r checkout -- . diff`), but `git -C /r branch -qD main status` and `git -C /r branch main -D status` still pass (the comment above `GIT_C_DESTRUCTIVE_DENY` in `scripts/orchestrate.sh`; [Limits, D](limits.md#d-headless-rules)).
+- Without `-C`, `git branch -D` and `git worktree remove --force` are still allowed headless; `git -C <dir> worktree remove -<option>` is denied.
 - They over-block too: a commit message that contains ` -c` or ` -C ` is refused headless.
 - Headless runs allow `Bash(npm *)` and `Bash(node *)` (and the Python interpreter for a Python test runner), which can run any code.
 

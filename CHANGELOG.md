@@ -2,6 +2,67 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-18
+
+2.0.0 is the reviewed fixes of the audit after 1.6.1: the test gate, the plan check and its guards, the Bash judge, the headless git rules, the skill scan, the pane, the scripts and the benchmark tooling.
+Everything it does not do is on one page, [docs/limits.md](docs/limits.md). Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`.
+
+### Changed
+
+- **The headless git rules deny more** (`scripts/orchestrate.sh`, `GIT_C_DESTRUCTIVE_DENY`). A `git -C <dir>` command whose subcommand word is directly followed by a destructive token is denied even when an allowed word comes later (`git -C /r branch -D main status`, `checkout -- . diff`), as are `git --git-dir` and `git --work-tree` as the first word. The rules hold no `*` inside a pattern, so ordinary commit messages pass as before. A commit message that holds such a form after a space is refused (O1). Tested in `src/orchestrate-sh.test.mjs` (`CLOSED`, `STILL_ALLOWED`, a corpus of commit subjects; the forms that still pass are its `LIMITS` rows). What to do: reword such a message.
+- **The Bash judge and the researcher guard refuse more, and state what they over-block** (`src/judge.ts`, `.claude/hooks/judge-core.mjs`, `judge-hook.mjs`, `researcher-guard.mjs`). The judge reads where a command can start (reserved words and precommand modifiers, zsh's short and brace forms, a `{` stuck to a word), reads the arguments of `sg`, `su`, `runuser`, `flock`, `script` and `watch` as command strings, refuses `parallel`, `sem`, `at`, `batch`, `su`, `pkexec` and `runuser` anywhere after a wrapper, refuses `sched`, `globsubst` and `promptsubst`, and refuses setting a prompt variable through a builtin. It denies a command over 262,144 characters or with more than 4,096 of one opener. The over-blocks are listed in [docs/limits.md](docs/limits.md), B and C. What to do: split or rewrite a refused harmless command as the refusal says.
+- **The test gate's block records say what failed, and the output is kept** (`.claude/hooks/verify.sh`, `bugfix-check.mjs`). A failed run's records carry `failed_count`, up to 10 `failed_tests`, `failed_crash` and `output`, a file under `<state dir>/test-output/` with the last 64 KiB of the run's output; the newest 10 such files are kept, folder 0700 and files 0600. Tested in `src/test-gate-records.test.mjs`.
+- **The reviewer hold's pairing is stricter** (`.claude/hooks/run.mjs`, `stopGateOf`). A gate record belongs to a stop for certain only when both carry the same hand-back id; otherwise a failed-tests block since the agent's latest start holds the review, and a pass stands only as the only candidate. Tested in `src/test-gate-pairing.test.mjs` and `src/plan-check-review-hold.test.mjs`.
+- **`npm run bench:validate` runs tasks side by side and has a deadline** (`bench/validate.mjs`). At most half the CPUs (at least 2) at once, the three known slow tasks first; `--deadline-s` (default 270, 0 for none) names each unfinished task and exits 3; exit 130 on SIGINT or SIGTERM. Tested in `bench/eval-graders.test.mjs`.
+- **CI installs the Claude Code CLI and runs the dashboard test** (`.github/workflows/ci.yml`; [probes w4](docs/data/probes-2.0.0-w4.md), Probe 3: neither command needs a login). The step was not run on a CI runner here.
+- **`/route` hands the task over in a file** (`.claude/skills/route/SKILL.md`, `src/route.ts` `--task-file`), so no shell reads the task. Tested in `src/scripts-fixes.test.mjs` and `src/cli.test.ts`.
+- **The orchestrator's steps 3, 4, 6 and 6a** (`.claude/agents/orchestrator.md`). A CHECKPOINT or merge brief names the branch and head commit the run is built on, and the integrator stops on a mismatch; an isolated implementer brief names its base commit; a slice's branch that a `SendMessage` resume cannot continue (the third attempt, or a resume that failed or changed branch) is continued by a fresh isolated implementer whose first command merges it, never by a worker that is not isolated on another worktree's folder.
+- Version 2.0.0 in `package.json`, `package-lock.json` and both plugin manifests.
+
+### Fixed
+
+Test gate:
+- A gate killed with SIGKILL left a suite lock that the next gate took over while the suite still ran; the lock now stands while the suite's process group runs, then is taken over at once (`lock_takeover`); a fresh lock made between the stale check and the takeover is put back, not removed (one narrower race stays, [docs/gates.md](docs/gates.md), Limits). `src/test-gate-lock.test.mjs`.
+- A `bugfix_timeout` block did not say where the time went; it now names the wait for another gate's suite when that took at least as long as the run and the check. `src/test-gate-lock.test.mjs`.
+- A unittest failfast set inside a script the command runs let the `allow` baseline allow, and the reproduction test of a bugfix slice in a cargo workspace member whose folder differs from its package name was not matched to the slice's files, so the slice still blocked. The baseline now keeps the block when a `.py`, `.cfg`, `.toml` or `.ini` file of the tree names `failfast`, and a cargo test name is matched through its package's folder. `src/test-gate-known.test.mjs`.
+
+Plan check and guards:
+- `file_overlap` missed a symlink behind `**` or a later wildcard, a hard link, and two Unicode normal forms of one name; it reads them now. `src/plan-check-paths.test.mjs`.
+- The read cache could be read or written through a symlinked entry or folder; it never is now, in the read router and the quote check. `src/file-profile.test.mjs`, `src/handback.test.mjs` ("quote check: a read-cache entry that is a symlink is never read").
+- The read router's log counted `hard_pages` over the converted files only, so a scanned PDF (hard pages, no text conversion) was logged with `hard_pages: 0` next to the `pdf_hard_pages` reason code; the count now runs over every profiled file, as the reason code does. `src/router.test.mjs`.
+- The researcher guard judged a glob by its text; it now judges what the glob may expand to (FIFOs, `/proc`, `/sys`, `--files0-from` values), reads bracket expressions as POSIX does, matches a glob segment without backtracking (time at most pattern length times name length) and bounds its own work. `src/guards.test.mjs`.
+
+Bash judge:
+- Commands that ran through zsh's alternate forms, string wrappers, stuck braces, option setters, `clone --template`, `find -exec` and prompt variables passed; they are refused now, in both copies. `src/judge.test.ts`, `src/judge-hook.test.mjs`; [probes w2](docs/data/probes-2.0.0-w2.md), Probe 2.
+- A fetch or pull whose refspec writes a branch passed (audit J-11); it is judged now. `src/judge.test.ts`; three live judge calls in [probes w2](docs/data/probes-2.0.0-w2.md), Probe 1.
+- The native hook let globs reach the prompt store; they are matched against its path now, also after `cd`, `pushd` or `env -C`. `src/judge-hook.test.mjs`.
+
+Headless rules:
+- `git -C <dir> <allowed word>` let a destructive subcommand through when the allowed word came later; the plain forms are denied (under Changed). `src/orchestrate-sh.test.mjs`.
+
+Skill scan and hand-back records:
+- The skill scan read only the lines the branch's commits add and the paths they touch, so a token in a commit message, an author name or a tag passed; it now also scans each raw commit object the push carries and every tag object of a chain that ends at an object the push carries, byte for byte except a commit's `tree`/`parent` and a tag's `object`/`type` lines in their exact form. It follows a tag chain up to 16 tag objects (a deeper chain, a loop or a malformed tag is a problem) and refuses a draft branch ref that names a tag object. `src/skill-scan-meta.test.mjs`.
+- A refused last hand-back was journalled as delivered, and a quote-check refusal could miss its capture; both are matched by the report's key now. `src/handback-refused.test.mjs`.
+
+Pane:
+- The pane opened no record for a `SendMessage` resume and read no test-gate records, so it showed a resumed agent as ended and missed an isolated test failure or a test gate that gave up. It now opens a running record for a resume, addressed by agent id or by the name the Agent call gave (the latest started of that name), and reads the last MiB of each `gates.jsonl` for its `⚠isolated` and `⚠gate gave up` marks, with a line under the slices when older records were not read. `dashboard/register.test.tsx`.
+
+Scripts and SDK:
+- In the SDK pipeline the Bash judge's own tokens were not part of the worker's tokens, a resumed run did not count what it had spent before the resume, and a failed plain session with under 10k of the run budget left was still rerun through the pipeline. The judge's tokens now count in the worker's (a failed judge call only when it reported usage; [docs/limits.md](docs/limits.md), F), a resume counts the earlier spend, and that rerun is not started. `src/agent.test.ts`, `src/auto.test.ts`, `src/orchestrator.test.ts`.
+- `npm run claude-update` did not notice a hook payload field or the auto-memory switch dropped from Claude Code, or a loaded plugin whose workflow differs from the content the guard expects. Its `payload` and `memory` checks now look for each field the hooks read and for `CLAUDE_CODE_DISABLE_AUTO_MEMORY` in the program file (a file that cannot tell is a note), and its `workflow` check compares the loaded plugin's workflow with the content the guard expects. It still does not check that a field keeps its shape or that the switch is honoured ([docs/claude-code-updates.md](docs/claude-code-updates.md), Limits). `src/claude-update.test.mjs`; [probes w4](docs/data/probes-2.0.0-w4.md), Probe 2.
+
+Benchmark tooling:
+- `bench:validate` had no deadline of its own, so an outer timeout could kill it with no word of which tasks were left; it now stops at its own deadline, names each unfinished task and exits 3. `bench/eval-graders.test.mjs`.
+- Without a `python3.13`, the k1 and k2 graders graded against the Python that ran them, and 3.14 gives other results for some cases; on 3.14 or later they now take recorded 3.13 values for the listed cases, and each `py313.py` docstring says what each value is and that none could be reproduced on 3.13 here ([docs/limits.md](docs/limits.md), G). The `py313.py` files of `bench/tasks/k1-stdlib-toolkit/hidden/` and `bench/tasks/k2-stdlib-toolkit-xl/hidden/`; [probes f4](docs/data/probes-2.0.0-f4.md), Probe 1.
+
+Tests:
+- Tests read the release-1.6.1 judge and gates from `src/fixtures/`, never from this repository's git history. `src/judge-differential.test.mjs`, `src/fixtures/gates-1.6.1/README.md`.
+- Bounds on the judge's and the guard's own work that failed under suite load (a 2 s wall bound measured at 5.9 s) are checked in CPU time now; growth ratios and loose wall-clock backstops remain. `src/judge.test.ts`, `src/guards.test.mjs`.
+
+### Limits
+
+This release has no "known" list in the changelog. Everything that is not fixed, cannot be fixed here, or is a design decision is on [docs/limits.md](docs/limits.md), each with its reason, including the nine items 1.6.1 listed.
+
 ## [1.6.1] - 2026-11-17
 
 1.6.1 works through the ten items 1.6.0 listed under "Known and not fixed" (K1 to K10 below, in that order) and four open points (O1 to O4). The live probes are in [docs/data/live-checks-2026-11-17-b.md](docs/data/live-checks-2026-11-17-b.md) (0.1516 USD in all). Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update` (add `--fix` if it notes the `sandbox` check). A headless run can no longer `git -C` into other folders with a write subcommand, a typed prompt holding the word `ultracode` is now refused, and the plugin ships no `settings.json`; each is below with what to do.

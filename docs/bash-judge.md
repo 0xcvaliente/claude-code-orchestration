@@ -214,6 +214,12 @@ A whole quoted argument (a commit message) is text.
 
   That last Doubt reads only up to the first `}`, so it is not the rule that decides. The whole-text check of section 2.1 (`tableExpansion`, run after the tokenizer at every level) decides, and it does not depend on where the tokenizer ends a `${...}`. The brace-expansion scan steps over `$(...)`, backticks, `${...}` and `<(...)`/`>(...)`, so a brace word that holds one is still seen whole.
 
+- **Where a command starts (2.0.0).** `commandStarts` marks the first word that is not a redirection or an assignment, and the next such word after each reserved word or precommand modifier of zsh and bash (`STARTERS`): `if`, `then`, `do`, `while`, `!`, `{`, `noglob`, `time` (its options skipped), `exec` (with `-a NAME`), `repeat N` (the count skipped), `coproc` (with an optional name), and others. An unquoted whole word `then`, `do`, `else` or `elif` (`REOPENERS`) and a closing `]]` start a command wherever they stand, as zsh's short forms do (`if [[ x ]] cmd`); the brace forms (`repeat 2 { cmd }`) start one at the `{`. A `{` stuck to a word (`{parallel x}`) is read a second time with the stuck braces stripped.
+- **Wrappers.** After a program on `WRAPPERS` (`timeout`, `env`, `nice`, `xargs`, `flock`, `watch`, `sg` and the rest), any later word of the same simple command named `parallel`, `sem`, `su`, `pkexec`, `runuser`, `at` or `batch` is denied (`WRAPPED_DENY`). For `sg`, `su`, `runuser`, `flock`, `script` and `watch` (`WRAPPER_STRING`) every argument is read as a possible command string; one the guard cannot read as a literal is denied.
+- **Prompt variables.** Setting `PS0`, `PS1` or `PS4` through an assigning builtin or an expansion is denied: `printf -v`, `read`, `declare`, `typeset`, `local` or `export` with `-n`, `getopts`, a loop variable, `${PS4:=...}`, an element, `+=`, an array value or arithmetic. A plain `declare PS4=x` or `export PS4=x` passes, as `PS4=x` does, unless its value holds a substitution or the same command turns tracing on.
+- **Size caps.** A command over `MAX_COMMAND_LENGTH` (262,144 characters), or with more than `MAX_OPENERS` (4,096) of one of `[`, `{` or `(`, is denied before it is read (`tooLarge`; the native hook refuses it the same way).
+- **The native hook's own reading.** For globs that might reach the prompt store, it reads `env`'s options as GNU env documents them (`envOptions`): `-C DIR` is a directory change, while `-S`, an option not on its list or a word built from an expansion leaves the folder unknown, and every later relative glob of the line is refused. A bracket expression is never parsed (`segMatch`): it stands for any one character together with what follows up to a later `]` of the segment, so it matches every name a shell's reading could.
+
 ### 2.5 The exec-env rule
 
 Some environment variables make git, a shell or the loader run another program (`PAGER`, `GIT_SSH_COMMAND`, `PATH`, ...). Setting one on a line that runs git, `rm` or a shell is denied.
@@ -529,17 +535,16 @@ This is best-effort defence in depth against mistakes. It is not a security boun
 - pushes by other tools (`gh pr create`, `gh repo create`); `ssh host cmd`; `make`/`just` targets;
 - environment or flags that point git at config, hooks or binaries planted in an earlier step (`GIT_DIR=...`, `HOME=... git`, `git -C <dir> ...`, `git --exec-path=...`);
 - an exec-env assignment not spelled `NAME=`, or whose name part is dynamic ([section 2.5](#25-the-exec-env-rule));
-- `su`, `pkexec` or `runuser` after a shell keyword or in an unlisted wrapper form (`until su; do :; done`, `if true; then su root; fi`, `then pkexec ls`, `do runuser -u r ls`, `exec -a foo su`, `env -u X su root`). They are interactive and need a password or a polkit agent that a headless worker does not have;
 - forms of the hardened families that the guard still does not read: git options that take a shell command beyond `GIT_SHELL_OPTS` and section 2.1, `git -c` keys that run programs beyond `GIT_EXEC_KEY`, and arithmetic reached through text the guard sees only as data (a subscript with `$(` held in a file or in a variable set in an earlier call);
 - a subscript value assembled across statements on one line. The guard reads each word on its own, so text whose parts are joined later is not seen as a subscript with a substitution (`x='a['; x+='$(cmd)]'; echo $((x))`, `printf -v x 'a[%s]' '$(cmd)'; echo $((x))`);
-- a fetch run inside a local remote with a refspec destination (`git -C ../origin.git fetch "$PWD" main:main`, `git --git-dir=../origin.git fetch ...`). It moves that remote's branch, the effect of a push, with no push word, so it is not judged (audit J-11). Only remotes on the local disk (a path remote, another clone, the main checkout of a worktree) are in reach;
-- zsh's `globsubst` option. After `setopt globsubst` (or `set -o globsubst`), `echo $x` with `x='*(e{rm -rf ../victim})'` runs the glob qualifier's code (audit, "Unproven"; it deleted the victim in zsh). The option change is not denied, as `shopt -s expand_aliases` is;
-- zsh's prompt expansion: after `setopt promptsubst`, `print -P '${functions[f]::=...}'` assigns through single-quoted text that the guard skips as data. Both the current judge and the 1.4.0 judge pass it;
-- strings given to zsh's `sched` (`sched +1 'rm -rf ../victim'`): the quoted string is text to the guard. Both the current judge and the 1.4.0 judge pass it;
-- `PS4` (or `PS0`, `PS1`) exported in an earlier call with tracing turned on in a later one, or a traced script file (`PS4=... ./x.sh` where the script runs `set -x`);
+- a wrapper program not on `WRAPPERS`, and `ssh host ...`, which runs its words on another machine;
+- a program name built at run time, an alias or function defined where the guard does not see it (an earlier call, a shell's start-up files), and zsh's `PROMPT4` (`PS0`, `PS1` and `PS4` are read);
+- `PS4` set in an earlier call with tracing turned on in a later one, or a traced script file;
 - anything else the tokenizer cannot see.
 
 Also outside it: the Edit and Write tools (a file can be emptied or overwritten without Bash), a non-recursive `rm` of a single literal path (`rm file`, `rm -f file` pass), and git commands that do not push (`git reset --hard`, `git checkout -- .`).
+
+Refused since 2.0.0, where earlier versions let them through (rows in `src/judge.test.ts`, both copies): `su`, `pkexec` or `runuser` after a keyword or a wrapper (`until su; do :; done`, `exec -a foo su`, `env -u X su root`); zsh's `globsubst` and `promptsubst` options; `sched`; `parallel`, `sem`, `at` and `batch` anywhere after a wrapper; setting `PS0`, `PS1` or `PS4` through a builtin or an expansion; and a fetch or pull whose refspec writes a branch (`git -C ../origin.git fetch "$PWD" main:main`, audit J-11), which is now judged as a push. The headless rules of `scripts/orchestrate.sh` have no judge: there `git -C <local remote> fetch "$PWD" main:main status` passes ([Limits, D](limits.md#d-headless-rules)).
 
 **Over-blocked on purpose** (denied although harmless):
 
@@ -554,7 +559,8 @@ Also outside it: the Edit and Write tools (a file can be emptied or overwritten 
 - under `git bisect run` and `git submodule foreach`, a first word that is a shell name, whatever follows (`git bisect run sh test.sh`; run the program directly, or quote the whole `submodule foreach` command as one argument; `git rebase -x` is read in full and not affected);
 - the forms the 2026-11-16 audit rows refuse ([section 2.1](#refused-since-the-2026-11-16-audit)): `PS4='+ ' bash -x run.sh`, zsh `hash -d name=path`, `enable -f`, a here-document delimiter with `$`, a table word behind a keyword or wrapper or given to a command off the `TEXT_ONLY` list (`if grep -q functions= f; then ...`: write the search as its own command), quoted `$(` or a backtick inside `name[...]`, a subscript `$((...))` that holds parentheses, `set -A`, a variable named `commands`, `git config --get` of an exec key, and a `filter-branch` filter refused as a command of its own;
 - a reading expansion of one of zsh's special tables (`functions`, the alias tables, `dis_*`, `commands`) followed later in the same command by any `=`, even in another statement or on another line (`[[ ${#functions} == 0 ]]`, `(( ${+commands[git]} )) && x=1`, `echo ${#aliases}; y=1`; write the read and the rest as two commands). After a construct whose quoting the scan cannot be sure of (section 2.1), such a `${` inside later single-quoted text counts too. This also catches a quoted here-document or a `node -e` one-liner that holds a JavaScript template literal such as `${commands[0]}` with a later `=` (section 2.1; put that code in a file);
-- on the git side, any unquoted word near `git` that mentions push or remote (`git commit -m push-fix` is judged, not passed).
+- on the git side, any unquoted word near `git` that mentions push or remote (`git commit -m push-fix` is judged, not passed);
+- since 2.0.0: a dynamic command word after a keyword (`if $verbose; then ...`, `exec "$@"`); `PS4+=...` and `export -n PS1`; an unquoted `do`, `then`, `else` or `elif` before a refused name (`echo do parallel`); a refused name anywhere after a wrapper (`xargs grep parallel`, `timeout 5 echo at`); a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`) and an option cluster that spells a refused command; `echo {rm}`; a command over 262,144 characters or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`). The summary of every limit is on [docs/limits.md](limits.md).
 
 **Other limits.**
 
@@ -673,7 +679,7 @@ Claude Code kills a hook at its timeout (60 s when the registration sets none), 
 - Each judged command costs one opus call of a few seconds. There is no cache.
 - The refusal of commands that name the store is a text check. These stay out of its reach:
   - a worker with the Write or Edit tool: those tools never reach the hook, so no Bash check covers them at all;
-  - a glob (`judge-*`), and a `cd` into the parent then a relative glob;
+  - a glob built from a variable or a command substitution (`"$dir"/*`), a glob that names only a folder above the store, and a recursive tool given such a folder (`grep -r x ~/.claude`); other globs (`judge-*`, a `cd` into the parent then a relative glob) are matched against the store's path since 2.0.0;
   - a name built at run time from variables or command output, including a default-value expansion (`judge-${u:-prompts}`);
   - a script written to a file through a here-document that builds the name inside it, and then run;
   - a spelling nested deeper than 4 script strings;

@@ -1,0 +1,93 @@
+# Limits of 2.0.0
+
+This page lists what release 2.0.0 does not do: each item says why it stays and, where there is one, what to do about it. An item leaves this page only when a test or a recorded probe shows it handled, and then the changelog says so. Where a detail lives in another document, the item gives the summary and a link.
+
+## A. Items carried from 1.6.1
+
+The nine lines of the 1.6.1 changelog's "Known and not fixed" list. None of them is closed in 2.0.0.
+
+- **K1, a sandboxed implementer writing skill drafts.** Still not shown live. The cause 1.6.1 recorded, `socat` missing, was not the whole cause: with `socat` installed the sandbox gets as far as its seccomp step and still does not start on the test machine, because the kernel restricts nested user namespaces (setting one up needs CAP_SYS_ADMIN) ([probes f4](data/probes-2.0.0-f4.md), Probe 3). `npm run claude-update` only checks that the `allowWrite` entry is there.
+- **K2, the worker rows.** Rows in this plugin's format were captured in a live interactive session, pane off and pane on ([probes b2](data/probes-2.0.0-b2.md), Probe 1). The page records the session's own settings file and the installed plugin turned off, not the person's user settings, so which component drew the rows (the mod, or a `subagentStatusLine` of the person's own) was not established; the probe page says what would establish it.
+- **K3 and O1, telling a typed prompt from other input.** It rests on the prompt's opening text (`typedPrompt` in `state.mjs`): Claude Code gives no field for it, and the prompt's own transcript record is written after the hook fires. A new kind of message, or a changed opening, counts as typed until `typedPrompt` learns it.
+- **K7, `strictMcpConfig` alone.** Not shown to keep account connectors out in a long session, so every SDK role keeps passing both options. A decision.
+- **K8, the dollar cap.** Claude Code checks a dollar cap after each request, so one request can overshoot `ORCH_BUDGET_TOKENS`. Treat the cap as a stop after the request that crosses it. A triage on a warm cache is never stopped by the smallest cap, 10k.
+- **K9, the workflow guard's reach.** Out of reach: a session that loads no hook, a file changed between the check and Claude Code's read of it, the installed plugin's own file when the project copy decides (it checks the built `dist/plugin` copy), and any project that holds both matching files meets the plugin rule.
+- **K10, warnings at startup.** Claude Code warns about the headless rules that need a `*` for a worktree's name: three, six with skill repositories. A `git -C * status*` read rule still matches a command built to pass it; 2.0.0 denies the plain destructive forms of that kind, and the rest is under [D](#d-headless-rules).
+- **O4, the old `AUTO` benchmark rows.** They stay flagged (`triage_pre_fix`) and were not re-run: a re-run is a long campaign.
+- **A test-gate block and the resume.** Where a worker hands its report back with `SubagentHandback`, the hand-back gate (`verify.sh --handback`) runs the suite first and sends a failing run back to the worker while it still runs ([probes b1](data/probes-2.0.0-b1.md), Run 1). It refuses only for failing tests, within the `tests_failed` cap and while the agent has had fewer than two other hand-backs refused since its latest start; every other outcome lets the report through, and the SubagentStop gate then decides after the report has reached the orchestrator. A block there still reaches the worker only through a resume, and the reviewer hold covers that case (below, under C).
+
+## B. Bash judge
+
+The SDK judge and the native hook are a deny list that works without a sandbox: best-effort against mistakes, not a boundary. The detail, with examples, is in [The Bash judge, Limits](bash-judge.md#11-limits).
+
+Out of reach:
+
+- a wrapper program not on its list (`WRAPPERS` in `src/judge.ts`), and `ssh host ...`, which runs its words on another machine;
+- a program name built at run time, and an alias or function defined somewhere the guard does not see (a shell's start-up files, an earlier call);
+- zsh's `PROMPT4` (`PS4` is read; `PROMPT4` is not);
+- in the native hook's refusal of commands that name the prompt store: a glob built from a variable or a command substitution (`"$dir"/*`), a glob that names only a folder above the store, and a recursive tool given such a folder (`grep -r x ~/.claude`).
+
+Over-blocks it states (refused although harmless; each is a row of `src/judge.test.ts` or was run through the classifier for this page):
+
+- unquoted brace expansion (`echo {a,b}`, `cp x.{ts,js} out/`), refused since before 2.0.0;
+- a dynamic command word after a keyword (`if $verbose; then ...`, `exec "$@"`);
+- `PS4+=...` and `export -n PS1`;
+- an unquoted `do`, `then`, `else` or `elif` word before a refused name (`echo do parallel`);
+- a refused name anywhere after a wrapper (`xargs grep parallel`, `timeout 5 echo at`);
+- a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`), and an option cluster of those that spells a refused command;
+- `echo {rm}`;
+- a command over 262,144 characters, or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`).
+
+## C. Guards and gates
+
+- **The researcher guard is a guard, not a boundary.** Run researcher and reviewer Bash in Claude Code's sandbox for a boundary ([Safety](safety.md)).
+- **The researcher guard's over-blocks:** a quote or backslash inside an unquoted bracket expression (`cat [\]]`; naming the file passes), a glob in the command name, a glob in a `sed` operand, `$'...'` quoting together with a glob in a reader's operand, and a command over 65,536 characters or with more than 256 `[` or `{` (`MAX_COMMAND`, `MAX_BRACKETS`). It also refuses a decision that runs past its 10 s deadline.
+- **What the researcher guard does not judge:** a FIFO a command opens on its own (an ignore file rg or ugrep reads while searching, git's own files), a file created or swapped between the check and the run, zsh's extendedglob operators (off in a non-interactive shell), and a shell function or alias named `cd` (the comments at the top of `researcher-guard.mjs`).
+- **The suite lock.** A reused pid keeps a dead holder's lock until it is 900 s old, and one takeover race (a third gate locking in the instant between the rename and the put-back) can run two suites at once. The lock is per project. These and the other limits of each gate are in [Gates, Limits](gates.md#limits).
+- **Bracket ranges** are judged by character code for ASCII names, not by the locale's collation; a name with a character outside ASCII is matched wider.
+- **A `QUOTE:` whose source is not in the read cache** (missing, or a symlinked cache entry, which is never read) cannot be verified and passes as unverifiable.
+- **Kept test output.** The test gate keeps the tail of a failed run's output under `<state dir>/test-output/` (folder 0700, files 0600). A test suite that prints a secret leaves it there.
+- **The reviewer hold is stricter with stop records that carry no hand-back id.** Without one, a failed-tests block since the agent's latest start holds the review, whatever came after it, so an ordinary fix loop is held until a passing stop is paired or the hold gives up after two refusals. And a record of an earlier stop that lands after a resume can still be taken for the new stop when it is the only candidate (checked against `stopGateOf` in `run.mjs`).
+- **A test gate started by a worker that is not isolated runs in that worker's folder.** The orchestrator's step 6 no longer starts a non-isolated worker on another worktree's folder; the gate itself does not detect the case.
+- **Plan check, path identity.** `file_overlap` now reads symlinks behind `**` and later wildcards, hard links and two Unicode normal forms of one name (`src/plan-check-paths.test.mjs`). Still out of reach: a link or hard link made after the launch, a hard link whose other name lies outside every entry's walk, and, in `not_in_plan`, every name that reading adds.
+
+## D. Headless rules
+
+The deny rules of `scripts/orchestrate.sh` stop mistakes, not a command built to pass them. Each class below is a `LIMITS` row of `src/orchestrate-sh.test.mjs`, which asserts that it passes:
+
+- a destructive option inside a cluster or after another word (`branch -qD main status`, `branch main -D status`);
+- an option the list does not name, or a long option cut short (`reset -q HEAD~3 status`, `branch --del main log`);
+- a path after a revision or another path (`checkout HEAD -- src status`);
+- a plain path, revision or branch name (`restore src status`, `reset main status`);
+- a refspec after a word: `git -C <local remote> fetch "$PWD" main:main status` (audit J-11) passes these rules. The SDK judge and the native hook send a fetch or pull whose refspec writes a branch to the judge (`src/judge.test.ts`, J-11 rows); the headless rules have no judge;
+- subcommands not listed, plumbing included (`read-tree -u --reset HEAD status`), and a config key of another section or case.
+
+Also: a commit message that holds a denied form after a space is refused (`commit -m "see branch -D old"`, O1). Reword such a message. Without `-C`, `git branch -D` and `git worktree remove --force` stay allowed headless.
+
+## E. Platform and design
+
+- Telling a typed prompt from other input rests on its opening text (A, K3).
+- A dollar cap can be overshot by one request (A, K8).
+- A session started without hooks is out of every gate's reach.
+- The workflow guard's reach (A, K9).
+- The startup warnings about rules with a `*` for a worktree's name (A, K10).
+- `strictMcpConfig` alone (A, K7).
+
+## F. Not built
+
+- Agents the workflow starts get no skill suggestions: they make no Agent call, so they never reach the plan check.
+- Leftover worktrees and their branches are not removed after a run.
+- A failed judge call's tokens count in the run total only when the failure carried usage.
+
+## G. Benchmark and measurements
+
+- No benchmark campaign was run for 2.0.0: nothing on this release is measured against earlier ones.
+- The old `AUTO` rows (`triage_pre_fix`) are historical and were not re-run (A, O4).
+- `npm run bench:validate` can need more than its 270 s deadline on a loaded machine. It then prints the finished tasks, names each unfinished one (`NOT DONE`) and exits 3. `node bench/validate.mjs --task <id>` validates one task; `--deadline-s 0` removes the deadline.
+- The `py313.py` expectations of tasks k1 and k2 are recorded values: this machine has no CPython 3.13, so they could not be reproduced. Each file's docstring states which value each case holds and what 3.12 and 3.14 give ([probes f4](data/probes-2.0.0-f4.md), Probe 1).
+- `bench/arms.test.mjs` skips one test in a clone that lacks the 0.3.0 ref.
+- `npm run eval` has three graders that fail for reasons not understood yet ([CLAUDE.md](../CLAUDE.md), Commands; `docs/research-2026-11-10.md`, Open).
+
+## H. Leftovers of the 2.0.0 development run
+
+Three slices of the 1.6.0 run carry stale test-gate blocks in the state log (`gates.jsonl` in the [state dir](glossary.md#s), which for the plugin is per user). They are state, not a code defect; `npm run report` shows them.
