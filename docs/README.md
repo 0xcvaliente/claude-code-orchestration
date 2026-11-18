@@ -11,7 +11,7 @@ Terms are defined once, in the [glossary](glossary.md).
 - [Glossary](glossary.md): every term these docs use, defined in one or two sentences.
 - [What Claude Code ships vs what this plugin adds](native-vs-plugin.md): area by area, what the plugin adds on top of Claude Code and how each claim is measured.
 - [Safety](safety.md): what protects against what, what does not, and a link to every page's limits.
-- [Limits](limits.md): everything release 2.0.0 does not do, each with its reason.
+- [Limits](limits.md): everything release 2.0.1 does not do, each with its reason.
 
 ## How it works
 
@@ -43,4 +43,5 @@ Dated records. They are not edited after they are written.
 - [Live checks, 2026-11-17](data/live-checks-2026-11-17.md): the probes behind 1.6.0 (the triage call's hooks, title call and connectors, a triage stopped by the cap, the workflow guard).
 - [Live checks for 1.6.1](data/live-checks-2026-11-17-b.md): the probes behind 1.6.1 (the typed prompt's transcript record, workflow resume and the guard live, the five other SDK roles, the pinned git rules' warnings and the worker rows).
 - [Probes for 2.0.0](data/): `probes-2.0.0-b1.md`, `-b2.md`, `-f4.md`, `-w2.md` and `-w4.md`, the probes the 2.0.0 changelog and [Limits](limits.md) cite.
+- [Probes for 2.0.1](data/): `probes-2.0.1-reviewer-loop.md` (a reviewer that goes on after its report), `-stop-gate.md` (implementer stops with no test-gate record) and `-soak.md` (the gate soak, `npm run soak`, and its findings), the probes the 2.0.1 changelog and [Limits](limits.md), I, cite.
 - [Run data and live checks](data/): raw campaign data and the live probes behind the gates.

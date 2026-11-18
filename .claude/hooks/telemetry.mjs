@@ -202,7 +202,10 @@ if (process.argv[1]?.endsWith("telemetry.mjs")) {
 
   /** @param {unknown} v */
   const clip = (v) => (typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}...` : v);
-  const slim = Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
+  // Report text never goes in the log (2.0.1, D6): last_assistant_message is the worker's report, and `status` above is
+  // all any reader takes from it. Older records that still carry it are read as before (no reader uses the field).
+  const TEXT_FIELDS = new Set(["last_assistant_message"]);
+  const slim = Object.fromEntries(Object.entries(payload).filter(([k]) => !TEXT_FIELDS.has(k)).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
 
   const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path, String(payload.agent_type ?? "").split(":").pop() ?? "") : undefined;
 

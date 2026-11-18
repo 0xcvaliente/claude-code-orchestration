@@ -2496,6 +2496,39 @@ test('item 7: a hand-back followed by the stop counts one review once (the later
   expect(t.some(x => /3 agents ·/.test(x))).toBe(true)
 })
 
+test('2.0.1 D4: a reviewer end replaced after a retry of its slice stopped keeps its attempt: the retry stays unreviewed', async ($, on) => {
+  on('tool.call', () => ({ result: 'sent', text: 'ok' }))
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', 'STATUS: fail\nGAP: 90 no report yet')
+  await sendMessage($, 'b1')
+  await finish($, 'b1', PASS) // the retry stops between the reviewer's two ends
+  await finish($, 'r1', PASS) // the reviewer's end after its forced hand-back: no SendMessage, no spawn
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /1 slice not final: s1/.test(x))).toBe(true) // the pass is a review of attempt 1, not of the retry
+  expect(t.some(x => /4 agents ·/.test(x))).toBe(true) // replaced in place: no new review record
+})
+
+test('2.0.1 H6: a reviewer woken after its report ends with no STATUS line: its review stays as it was', async ($, on) => {
+  await boot($, on)
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await finish($, 'r1', 'That background search only finished now, after my report was delivered.') // a late shell task woke it
+  const t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 · one')).toBe(true)
+  expect(t.includes('✖ review')).toBe(false)
+  expect(t.some(x => /not final/.test(x))).toBe(false) // the pass still counts
+  expect(t.some(x => /3 agents ·/.test(x))).toBe(true)
+})
+
 test('item 8: a reviewer reply with no STATUS line reads failed in the review cell, the review stage and the header', async ($, on) => {
   await boot($, on)
   await spawnWith($, 'b1', brief('s1'), IMPL)

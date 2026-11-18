@@ -1587,10 +1587,15 @@ export const register: Register = (on, options) => {
           }
           // A reviewer's turn ends again with no resume between (no SendMessage to it opened a record): the same review going on after a stop hook,
           // such as the stop after a forced hand-back. As the fold does with a stop record marked `continues` (journal.mjs, brief.mjs G-8), the later
-          // end replaces the review, unless an implementer of the slice launched or stopped after it: one review, counted once.
-          const implAfter = l.some(x => !!a.slice && x.slice === a.slice && x.role === 'implementer' && ((x.endedAt ?? x.startedAt) > (a.endedAt as number)))
-          if (a.role === 'reviewer' && !implAfter) {
-            const upd = { ...a, ...review(a), status: statusOf(a), endedAt: now, tool: undefined, tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT, result: result || a.result, answers: undefined, open: undefined, ...said }
+          // end replaces the review: one review, counted once. When an implementer of the slice launched or stopped after it, the review keeps its
+          // end time, so it stays a review of the attempt it read (brief.mjs, 2.0.1 D4). A reviewer woken after its report reached the orchestrator
+          // (a late shell task of its own, a prompt) ends with no STATUS line: that turn holds no report, so its review stays as it was and only its
+          // tokens count (journal.mjs writes no stop record for it, 2.0.1 H6).
+          if (a.role === 'reviewer') {
+            const tokens = { tokens: a.tokens + spent.tokens, inTokens: a.inTokens + inT, outTokens: a.outTokens + outT, cacheTokens: a.cacheTokens + cacheT }
+            if (reply.status === null && (a.status === 'pass' || a.status === 'fail')) return l.map((x, j) => (j === i ? { ...a, ...tokens, tool: undefined } : x))
+            const implAfter = l.some(x => !!a.slice && x.slice === a.slice && x.role === 'implementer' && ((x.endedAt ?? x.startedAt) > (a.endedAt as number)))
+            const upd = { ...a, ...review(a), status: statusOf(a), endedAt: implAfter ? a.endedAt : now, tool: undefined, ...tokens, result: result || a.result, answers: undefined, open: undefined, ...said }
             hold.one = upd
             return l.map((x, j) => (j === i ? upd : x))
           }

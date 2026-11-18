@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { KEEP_OUTPUTS, MAX_NAME_CHARS, MAX_NAMES, MAX_OUTPUT_BYTES, OUTPUT_DIR, cleanFailureExtra, failureExtra, failureFields, keepOutput } from "../.claude/hooks/bugfix-check.mjs";
-import { RECENT_MS, storeVerdict } from "../.claude/hooks/test-gate-cache.mjs";
+import { RECENT_MS, listTrees, scanRoots, storeVerdict } from "../.claude/hooks/test-gate-cache.mjs";
 
 const verifySh = new URL("../.claude/hooks/verify.sh", import.meta.url).pathname;
 const SWITCH = /ORCH_|CLAUDE_PLUGIN_OPTION/;
@@ -208,9 +208,14 @@ test("the hand-back's block names what failed, and the stop that reuses its fail
   try {
     git(s.dir, "add", "-A");
     git(s.dir, "commit", "-q", "-m", "change");
-    await new Promise((r) => setTimeout(r, 700)); // older than the 300 ms guard of --recent-ms
-    const cmd = "echo 'FAILED tests/test_a.py::test_one - boom'; exit 1";
+    // The state folder is made BEFORE the wait: making it sets the mtime and ctime of .claude, which the listing watches
+    // (only .claude/state itself is left out), so made after the wait it was the newest listed entry and the store
+    // refused with recent_change whenever the hook reached its L0 listing within 300 ms (docs/data/probes-2.0.1-ci.md).
     mkdirSync(state(s.dir), { recursive: true });
+    await new Promise((r) => setTimeout(r, 700)); // every listed entry older than the 300 ms guard of --recent-ms
+    const cmd = "echo 'FAILED tests/test_a.py::test_one - boom'; exit 1";
+    const settled = listTrees(scanRoots(s.dir) ?? []);
+    assert.ok(settled.hash && Date.now() - settled.maxMs >= 300, `no listed entry changed within the guard (newest ${Date.now() - settled.maxMs} ms old)`);
     writeFileSync(join(state(s.dir), "handbacks.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), session_id: "s1", agent_id: "a1", agent_type: "implementer", tool_use_id: "toolu_H", status: "pass" })}\n`);
     assert.equal(gate(s, cmd, { handback: true, toolUseId: "toolu_H" }).status, 2);
     const hb = records(s.dir).at(-1);

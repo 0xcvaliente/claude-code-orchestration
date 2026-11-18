@@ -24,7 +24,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseReply, stopRecord } from "./brief.mjs";
-import { appendJsonl, readJsonl } from "./run.mjs";
+import { appendJsonl, readJsonl, readJsonlOrNull } from "./run.mjs";
 import { duplicate, ensureStateDir, recordHandback, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const WORKERS = new Set(["researcher", "implementer", "reviewer", "integrator"]);
@@ -110,15 +110,21 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
 
   /** @type {string[]} */
   let checks = [];
-  let deniedBefore = false;
+  // An earlier denial that cannot be ruled out counts as one (2.0.1, D3): a log that exists and cannot be read in full
+  // (readJsonlOrNull null) must never read as "no denial", or a worker is denied at every try and its report is lost.
+  let deniedBefore = true;
+  let logUnreadable = false;
   try {
     if (agentId) {
       const launch = readJsonl(stateDir, "journal-launches.jsonl", sessionId).findLast((l) => l.session_id === sessionId && l.agent_id === agentId);
       if (Array.isArray(launch?.checks)) checks = launch.checks.filter((/** @type {unknown} */ c) => typeof c === "string");
-      deniedBefore = readJsonl(stateDir, "gates.jsonl", sessionId).some((g) => g.gate === "handback" && g.decision === "deny" && g.session_id === sessionId && g.agent_id === agentId);
+      const gates = readJsonlOrNull(stateDir, "gates.jsonl", sessionId);
+      logUnreadable = gates === null;
+      deniedBefore = gates === null || gates.some((g) => g.gate === "handback" && g.decision === "deny" && g.session_id === sessionId && g.agent_id === agentId);
     }
   } catch {
-    // unreadable logs: no CHECKS ids, and no earlier denial is known
+    // unreadable logs: no CHECKS ids, and an earlier denial cannot be ruled out
+    logUnreadable = true;
   }
   const problem = reportProblem(role, message, checks);
   if (!problem) process.exit(0);
@@ -130,9 +136,15 @@ if (process.argv[1]?.endsWith("handback-check.mjs")) {
   let recorded = false;
   try {
     ensureStateDir();
-    const rec = { ts: new Date().toISOString(), gate: "handback", decision: deny ? "deny" : "allow", reason: deny ? problem.reason : `${problem.reason}_gave_up`, ...(problem.missing ? { missing: problem.missing } : {}), session_id: sessionId, agent_id: agentId, agent_type: role };
-    // The record is read back from the end of the log only, so the log is read in full once per call.
-    recorded = appendJsonl(stateDir, "gates.jsonl", rec) && deny;
+    const rec = { ts: new Date().toISOString(), gate: "handback", decision: deny ? "deny" : "allow", reason: deny ? problem.reason : `${problem.reason}_gave_up`, ...(problem.missing ? { missing: problem.missing } : {}), ...(logUnreadable ? { log_unreadable: true } : {}), session_id: sessionId, agent_id: agentId, agent_type: role };
+    // The record is read back from the end of the log only, so the log is read in full once per call; when that tail
+    // read fails, the full read that found no earlier denial confirms it instead (the reader the next call uses).
+    recorded = appendJsonl(stateDir, "gates.jsonl", rec);
+    if (!recorded && deny) recorded = (readJsonlOrNull(stateDir, "gates.jsonl", sessionId) ?? []).some((g) => g.gate === "handback" && g.decision === "deny" && g.ts === rec.ts && g.agent_id === agentId);
+    // A deny record that cannot be read back is not returned: a record right after it says so, so the log never
+    // holds a denial that was not returned without its correction (and the next call still sees a denial).
+    if (deny && !recorded) appendJsonl(stateDir, "gates.jsonl", { ...rec, ts: new Date().toISOString(), decision: "allow", reason: `${problem.reason}_unconfirmed`, voids: rec.ts });
+    recorded = recorded && deny;
   } catch {
     // no record, so no denial
   }

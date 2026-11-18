@@ -677,8 +677,9 @@ export function stopRecord(ctx) {
  *   implAt: number | null, agent: string | null
  * }} Review
  * agent: the reviewer's agent_id (null when the stop record has none). A stop record marked `continues` (journal.mjs: the
- * same turn going on after a stop hook, such as the stop after a forced hand-back) replaces the slice's latest review
- * when that review is the same agent's and no implementer launch or stop of the slice came after it: one review.
+ * same turn going on after a stop hook, such as the stop after a forced hand-back) replaces the same agent's latest
+ * review of the slice: one review. When an implementer launch or stop of the slice (or another review) came after that
+ * review, it is replaced where it stands and keeps its ts and implAt (2.0.1): it stays a review of the attempt it read.
  * implAt: the slice's latest implementer launch or stop when the review arrived (its attempt): two reviews with
  * different implAt have an implementer attempt between them.
  * status: the reviewer's own STATUS. checks: the CHECKS ids of the reviewer's brief (its launch record), which its reply
@@ -991,9 +992,31 @@ export function foldRuns(records, opts = {}) {
       const answers = r.answers && typeof r.answers === "object" ? r.answers : {};
       const validate = launch?.validate === true;
       const agent = typeof r.agent_id === "string" && r.agent_id ? r.agent_id : null;
-      // G-8: the stop after a forced hand-back is the same review as the stop before it: the later record replaces it.
-      const prev = s.reviews.at(-1);
-      if (r.continues === true && agent && prev && prev.agent === agent && (s.lastImplAt === null || prev.ts > s.lastImplAt)) s.reviews.pop();
+      // G-8: the stop after a forced hand-back is the same review as the stop before it: the later record replaces the
+      // same agent's latest review. 2.0.1 (D4): also when an implementer of the slice launched or stopped between the two
+      // stops, or another review came between; then the review is replaced where it stands, keeping its time and its
+      // attempt (implAt), so it never becomes a review of the later attempt.
+      const sameAt = r.continues === true && agent ? s.reviews.findLastIndex((v) => v.agent === agent) : -1;
+      const same = sameAt >= 0 ? /** @type {Review} */ (s.reviews[sameAt]) : undefined;
+      if (same && sameAt === s.reviews.length - 1 && (s.lastImplAt === null || same.ts > s.lastImplAt)) s.reviews.pop();
+      else if (same) {
+        const counting = countReview(status, r.gaps, answers, gapMin);
+        /** @type {Review} */
+        const kept = { ts: same.ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...counting, superseded: same.superseded, validate, implAt: same.implAt, agent };
+        if (kept.superseded) kept.counted = null;
+        s.reviews[sameAt] = kept;
+        if (validate && status !== null && !kept.superseded) {
+          for (const other of s.reviews) {
+            if (other === kept || other.implAt !== kept.implAt || other.ts > kept.ts) continue;
+            other.superseded = true;
+            other.counted = null;
+          }
+        }
+        if (s.carriedFinal && countedStatus(kept) === "fail") s.carriedFinal = false;
+        settle(s, env);
+        closeIfDone(run);
+        continue;
+      }
       // VALIDATE: gaps: this review replaces the earlier reviews of the same attempt for pass/fail purposes, but only
       // with a verdict of its own: a validation reply with no STATUS supersedes nothing.
       if (validate && status !== null) {

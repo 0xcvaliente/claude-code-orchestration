@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { doubtSignals, foldRuns, gapKey, gapMinimum, hasOpusPass, launchRecord, stallGateOn, stopRecord } from "../.claude/hooks/brief.mjs";
+import { currentReviews, doubtSignals, foldRuns, gapKey, gapMinimum, hasOpusPass, launchRecord, stallGateOn, stopRecord } from "../.claude/hooks/brief.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** @param {string} name */
@@ -551,9 +551,10 @@ test("G-8 fold: a continued reviewer stop is the same review; an unmarked second
   // A resume of the same reviewer that turns a fail into a pass is two reviews: the fail still counts (retry).
   const resumed = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), again(2, "a", "STATUS: pass", false)], "a", env);
   assert.deepEqual([resumed.reviews.length, resumed.signals], [2, ["retry"]]);
-  // A continued stop after an implementer attempt of the slice is a review of its own.
+  // 2.0.1 (D4): a continued stop after an implementer attempt of the slice still replaces that review, where it stands:
+  // it keeps its attempt, so the later attempt stays unreviewed (it used to count as a review of the later attempt).
   const later = sliceOf([...implAttempt(1, "a"), ...review(2, "a", "STATUS: fail\nGAP: 90 broken"), ...implAttempt(2.05, "a"), again(2, "a", "STATUS: pass", true)], "a", env);
-  assert.equal(later.reviews.length, 2);
+  assert.deepEqual([later.reviews.length, later.reviews[0]?.status, currentReviews(later).length], [1, "pass", 0]);
 });
 
 // ---- G-2 (audit 2026-11-16): the test gate runs beside the journal at an implementer's stop and decides minutes later,
