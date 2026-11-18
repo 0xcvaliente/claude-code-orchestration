@@ -2,6 +2,28 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-11-18
+
+2.0.3 gives the plugin a license, an icon and a README of its own, so the plugin directory's check passes, and fixes two places where the docs disagreed. No hook, agent, skill, workflow or pane changes: the plugin behaves as in 2.0.2. Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person.
+
+### Added
+
+- **An MIT license.** The root [LICENSE](LICENSE) holds the MIT License text with the line `Copyright (c) 2026 0xcvaliente`. `package.json` and both plugin manifests (`dist/plugin`, `dist/dashboard`) say `"license": "MIT"`; the marketplace entry does not repeat it. The build copies `LICENSE` into both builds.
+- **An icon.** `plugin-assets/icon.svg` is an original mark: one node fans out into three parallel strokes that meet again at a check, in amber and cyan on a dark blue rounded square. Its 512 by 512 PNG, `plugin-assets/icon.png`, is committed (the build never renders the SVG; `plugin-assets/NOTES.md` says how to regenerate it). The build copies it to `dist/plugin/icon.png` and sets `"icon": "./icon.png"` in the plugin's `plugin.json`. The marketplace entry carries no icon.
+- **The plugin's own README.** `plugin-assets/README.md` says what the plugin is, when to use it, how to install it, the first command, where the documentation is and the license, with absolute links, since it is read outside this repository. The build copies it to `dist/plugin/README.md`.
+- `npm run check-plugin` compares the new copies like every other built file. Tested in `src/build-plugin.test.mjs` (the license line, the copies equal their sources, the icon's PNG header says 512 by 512, the README has at least 40 words outside code blocks, `--check` fails on a changed copy in a scratch project) and `src/marketplace.test.mjs` (the license in `package.json` and both manifests, none and no icon in the marketplace entry, no email address).
+
+### Changed
+
+- **The plugin directory's check passes.** `claude plugin validate --profile directory dist/plugin` reports nothing for the plugin; `claude plugin validate . --strict` and `claude plugin validate dist/plugin --strict` pass. The release steps in [docs/development.md](docs/development.md) and [docs/marketplace.md](docs/marketplace.md) now run all three. Submitting to the directory stays the owner's step.
+- **How an update is applied, said the same way everywhere.** The README said to run `/reload-plugins`, and [docs/marketplace.md](docs/marketplace.md) said to restart. Both are true: a plugin installed or updated from your shell loads in the next session you start, and in a session that is already open, `/reload-plugins` applies it. The README, docs/marketplace.md, [docs/claude-code-updates.md](docs/claude-code-updates.md) and the plugin's README now say that.
+- **What `npm run claude-update -- --fix` does to the plugin.** docs/marketplace.md said it "updates it". It runs `claude plugin update` for an installed copy whose version differs from the checkout's. It installs nothing when the plugin is not installed, and an install from a marketplace added at a tag stays on that tag until the marketplace is added again at a newer one.
+- Version 2.0.3 in `package.json`, `package-lock.json` (with `"license": "MIT"` for the root package) and both plugin manifests.
+
+### Limits
+
+2.0.3 changes no behaviour, so [docs/limits.md](docs/limits.md) is unchanged and this entry lists no open items of its own. The validator's directory checks are a subset of the directory's own: it also runs a safety scan and a policy review.
+
 ## [2.0.2] - 2026-11-18
 
 2.0.2 makes this repository a marketplace that the build writes and checks, documents how to share and install the plugin, and rewrites the READMEs for a new reader. No hook, agent, skill, workflow or pane changes: the plugin behaves as in 2.0.1, and only its manifest differs. Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person.
@@ -622,6 +644,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.0.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.3
 [2.0.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.2
 [2.0.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.1
 [1.6.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.6.0

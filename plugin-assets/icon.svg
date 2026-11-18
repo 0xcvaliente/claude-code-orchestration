@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- One plan node fans out into three parallel slices, which meet again at a check. Three flat colours. -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="#1d2742"/>
+  <g transform="translate(25.6 25.6) scale(0.9) translate(-9 0)">
+    <g fill="none" stroke="#5ec8d8" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M100 256 C 148 256 150 148 198 148 L 236 148 C 292 148 314 256 372 256"/>
+      <path d="M100 256 L 372 256"/>
+      <path d="M100 256 C 148 256 150 364 198 364 L 236 364 C 292 364 314 256 372 256"/>
+    </g>
+    <circle cx="100" cy="256" r="42" fill="#f4b942"/>
+    <circle cx="372" cy="256" r="100" fill="#f4b942" stroke="#1d2742" stroke-width="12"/>
+    <path d="M320 262 L 356 298 L 422 232" fill="none" stroke="#1d2742" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
