@@ -128,7 +128,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Journal.** The run's log of parsed brief and reply fields: launch records in `journal-launches.jsonl`, stop records in `journal.jsonl`. Never brief or reply text. Also called: run journal. [`.claude/hooks/journal.mjs`]
 
-**Judge.** The Bash judge. It denies the floor at once and passes everything else. It sends `git push`, git remote changes and a plain recursive `rm` to an opus model, with the user's request as the only authority. It runs in SDK workers by default and in native sessions only with `ORCH_JUDGE=native` (the native judge hook). [docs/bash-judge.md]
+**Judge.** The Bash judge. It denies the floor at once and passes everything else. It sends `git push`, git remote changes, a plain recursive `rm` and, since 2.0.0, a fetch or pull whose refspec writes a branch to an opus model, with the user's request as the only authority. It runs in SDK workers by default and in native sessions only with `ORCH_JUDGE=native` (the native judge hook). [docs/bash-judge.md]
 
 ## L
 
@@ -220,7 +220,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Slice state.** What the gates know about one slice of a run, computed from the logs by `foldRuns`: its launches, attempts and reviews, whether it passed, is final or is stalled, and its doubt signals. [docs/brief-grammar.md "Run model"; `foldRuns` in `.claude/hooks/brief.mjs`]
 
-**Stale run.** An open run with nothing running and no launch, stop or agent start for `ORCH_RUN_STALE_MIN` minutes (30 by default). The plan check treats it as closed; the review gate still gates its unreviewed slices. The pane uses 10 minutes. [docs/brief-grammar.md "Run model"]
+**Stale run.** An open run with nothing running and no launch, stop or agent start for `ORCH_RUN_STALE_MIN` minutes (30 by default). The plan check treats it as closed; the review gate still gates its unreviewed slices. The pane reads the same setting, with the same default of 30 (`RUN_STALE_MIN_DEFAULT` in `dashboard/register.tsx`). [docs/brief-grammar.md "Run model"]
 
 **Stall limit (Claude Code).** Claude Code ends a subagent that makes no progress for 600 seconds; it reports it as stalled. Not the same as a stalled slice. [Check 7 in docs/data/live-checks-2026-11-16.md; `CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS`, docs/settings.md "Test gate time"]
 
