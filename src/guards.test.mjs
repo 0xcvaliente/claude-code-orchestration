@@ -1527,3 +1527,167 @@ test("researcher guard (w3 third attempt): the deadline leaves room for a cold f
   assert.match(researcherViolation(`cat${" a".repeat(30000)}`, redos, undefined, { deadlineMs: 50 })?.reason ?? "", /took too long to judge/);
   assert.ok(Date.now() - t0 < 600, `${Date.now() - t0} ms`);
 });
+
+// w8: bracket expressions read as POSIX and the shells read them. The tokenizer closes a bracket at its first `]`, so
+// `[[:alpha:]]` was matched as one or more characters followed by a literal `]`: in a folder holding a FIFO named `x`
+// the guard passed `cat [[:alpha:]]` and bash expanded it to `x`. A bracket holding a slash is no bracket for bash, which
+// passes `[a/b]` through as the literal path. The guard now reads each raw word itself, and judges every glob word
+// also as the literal path it spells.
+// One FIFO per folder (g1: `x`, gp: `%`, gb: `]`), beside one regular file, so no case is refused for another's name.
+const w8 = join(scratch, "w8-brackets");
+for (const d of ["g1", "gp", "gb"]) {
+  mkdirSync(join(w8, d), { recursive: true });
+  writeFileSync(join(w8, d, "notes.md"), "x\n");
+}
+mkdirSync(join(w8, "g2", "[a"), { recursive: true });
+mkdirSync(join(w8, "gu"), { recursive: true });
+const w8Fifo = [["g1", "x"], ["gp", "%"], ["gb", "]"], ["g2", "[a/b]"], ["gu", "é"]].every(([d, n]) => spawnSync("mkfifo", [join(w8, String(d), String(n))]).status === 0);
+
+test("researcher guard (w8, G1 and G2): POSIX classes and a bracket holding a slash cannot reach a FIFO or a device", { skip: w8Fifo ? false : "mkfifo unavailable" }, () => {
+  const g1 = join(w8, "g1");
+  const g2 = join(w8, "g2");
+  const gp = join(w8, "gp");
+  const gb = join(w8, "gb");
+  for (const [c, cwd] of [
+    ["cat [[:alpha:]]", g1],
+    ["cat [[:punct:]]", gp],
+    ["cat /d[[:alpha:]]v/zero", g1],
+    ["head -c 8 /de[[:lower:]]/zero", g1],
+    ["cat [![:digit:]]", g1],
+    ["cat [[:alpha:][:digit:]]", g1],
+    ["cat [[=x=]]", g1],
+    ["cat [[.x.]]", g1],
+    ["cat []]", gb],
+    ["cat [[:punct:]]", gb],
+    ['cat [" "x]', g1], // a quoted space inside the bracket: the tokenizer saw no glob here
+    // A name outside ASCII: in the C locale `??` is two bytes of `é`, and classes follow the locale.
+    ["cat ??", join(w8, "gu")],
+    ["cat [[:alpha:]]", join(w8, "gu")],
+    ["cat [a/b]", g2],
+    ["cat ./[a/b]", g2],
+    ["cat [[]a/b]", g2],
+    ["wc -l [a/b]", g2],
+    ["grep x [a/b]", g2],
+  ]) {
+    const v = researcherViolation(String(c), String(cwd));
+    assert.ok(v, `expected a denial for ${c}`);
+    assert.match(v.reason, /device that may never end/, String(c));
+  }
+  // A backslash or a quote inside an unquoted bracket: the tokenizer steps over it, so the two readings disagree and the
+  // command is refused as unreadable (a stated over-block: `cat '[\]]'`, or naming the file, passes).
+  for (const c of ["cat [\\]]", "cat [\\]x]", 'cat ["]"]', "cat x[\\]]", "head -1 [!\\]]"]) {
+    assert.match(researcherViolation(c, gb)?.reason ?? "", /cannot be read with confidence/, c);
+  }
+  // A glob in the command's name, and a glob in a sed or cd operand, are refused too.
+  assert.match(researcherViolation("ca[t] notes.md", gb)?.reason ?? "", /not an allowed command/);
+  assert.match(researcherViolation("ls* notes.md", gb)?.reason ?? "", /not an allowed command/);
+  assert.match(researcherViolation('sed -n 1p [" "x]', g1)?.reason ?? "", /`sed` is allowed only/);
+  // A glob in an option's name, also one only the raw word shows.
+  assert.match(researcherViolation('tail -[" "f] notes.md', g1)?.reason ?? "", /glob in an option/);
+  // Through the hook: exit 2, at once.
+  for (const c of ["cat [[:alpha:]]", "cat /d[[:alpha:]]v/zero"]) {
+    const r = hookTimed(c, g1);
+    assert.deepEqual([r.code, r.signal], [2, null], `${c}: ${r.stderr.slice(0, 160)}`);
+    assert.ok(r.ms < 3000, `${c}: ${r.ms} ms`);
+  }
+  const r2 = hookTimed("cat [a/b]", g2);
+  assert.deepEqual([r2.code, r2.signal], [2, null], r2.stderr.slice(0, 160));
+  // Listing them is not reading them; a class that matches only the regular file passes.
+  for (const c of ["ls [[:alpha:]]", "stat [a/b]", "ls [[:punct:]]"]) assert.equal(researcherViolation(c, c.includes("[a/b]") ? g2 : gp), null, c);
+  for (const d of [g1, gp, gb]) assert.equal(researcherViolation("cat [[:lower:]][[:lower:]]tes.md [!x]otes.md", d), null, d);
+});
+
+// [pattern, path, bash in the C locale, bash in C.UTF-8], recorded with GNU bash 5.3.9 (`compgen -G` in a folder holding
+// only that path). The pattern is glob text: a backslash escapes the next character, nothing else quotes.
+const W8_TABLE = [
+  ["[[:alpha:]]", "x", true, true], ["[[:alpha:]]", "1", false, false], ["[[:digit:]]", "7", true, true],
+  ["[[:digit:]]", "a", false, false], ["[[:alnum:]]", "Q", true, true], ["[[:upper:]]", "Q", true, true],
+  ["[[:lower:]]", "q", true, true], ["[[:space:]]", " ", true, true], ["[[:blank:]]", "\t", true, true],
+  ["[[:punct:]]", "%", true, true], ["[[:punct:]]", ",", true, true], ["[[:print:]]", "a", true, true],
+  ["[[:graph:]]", "~", true, true], ["[[:cntrl:]]", "\u0001", true, true], ["[[:xdigit:]]", "f", true, true],
+  ["[[:xdigit:]]", "g", false, false], ["[[:word:]]", "_", true, true], ["[![:alpha:]]", "5", true, true],
+  ["[^[:digit:]]", "z", true, true], ["[![:alpha:]]", "x", false, false], ["[]a]", "]", true, true],
+  ["[]a]", "a", true, true], ["[!]a]", "b", true, true], ["[!]a]", "]", false, false], ["[a-]", "-", true, true],
+  ["[a-]", "a", true, true], ["[a-]", "b", false, false], ["[\\]]", "]", true, true], ["[!\\]]", "a", true, true],
+  ["[a\\]b]", "]", true, true], ["[[.a.]]", "a", true, true], ["[[.-.]]", "-", true, true],
+  ["[[.space.]]", " ", true, true], ["[[=a=]]", "a", true, true], ["[[=a=]b]", "b", true, true],
+  ["[[.a.]-c]", "b", true, true], ["[[:digit:]a-f]", "3", true, true], ["[[:digit:]a-f]", "e", true, true],
+  ["[[:digit:]a-f]", "g", false, false], ["[[:alpha:][:digit:]]", "5", true, true], ["[[:alpha:]-z]", "-", true, true],
+  ["[]-a]", "^", true, true], ["[a", "[a", true, true], ["x[", "x[", true, true], ["[]", "[]", true, true],
+  ["[!]", "[!]", true, true], ["[[:alpha:]", "[a", true, true], ["[[:alpha:]", "[:", true, true],
+  ["[[:alpha]]", "p]", true, true], ["[[:alpha\\:]]", "a", true, true], ["[\\[:alpha:]]", ":]", true, true],
+  ["[a\\]", "[a]", true, true], ["[a/b]", "[a/b]", true, true], ["[a/b]", "a", false, false],
+  ["d[[:alpha:]]v/zero", "dev/zero", true, true], ["[.]x", ".x", false, false], [".[[:alpha:]]x", ".ax", true, true],
+  ["*[[:alpha:]]", "1a", true, true], ["[[:alpha:]][[:digit:]]", "a1", true, true], ["[[:alpha:]]*.md", "notes.md", true, true],
+  ["?[[:upper:]]", "aB", true, true], ["[[:alpha:]]", "é", false, true], ["?", "é", false, true], ["??", "é", true, false],
+  ["[[:bogus:]]", "b", false, false], ["[z-a]", "m", false, false], ["[a-c]", "B", false, false], ["[*]", "*", true, true],
+  ["\\[a]", "[a]", true, true], ["[\\!a]", "!", true, true],
+];
+const hasBash = spawnSync("timeout", ["5", "bash", "-c", "compgen -G / >/dev/null"], { encoding: "utf8" }).status === 0;
+
+test("researcher guard (w8): the segment matcher matches every pattern and name bash matches (wider is safe, narrower never)", () => {
+  assert.equal(typeof guard.globMatch, "function", "the guard exports its pattern matcher");
+  assert.ok(W8_TABLE.length >= 40, String(W8_TABLE.length));
+  const tableDir = join(w8, "table");
+  // Real bash, one call per locale for the whole table: each pair's folder holds only its path.
+  /** @type {boolean[][]} */
+  const answers = [];
+  if (hasBash) {
+    /** @type {string[]} */
+    const argv = [];
+    W8_TABLE.forEach(([pattern, path], k) => {
+      const d = join(tableDir, String(k));
+      mkdirSync(dirname(join(d, String(path))), { recursive: true });
+      writeFileSync(join(d, String(path)), "");
+      argv.push(d, String(pattern));
+    });
+    const script = 'for ((i=1; i<$#; i+=2)); do j=$((i+1)); (cd "${!i}" && compgen -G "${!j}"); echo "--w8-end--"; done';
+    for (const loc of ["C", "C.UTF-8"]) {
+      const r = spawnSync("timeout", ["10", "bash", "-c", script, "_", ...argv], { encoding: "utf8", env: { ...process.env, LC_ALL: loc } });
+      const blocks = String(r.stdout ?? "").split("--w8-end--\n");
+      assert.equal(blocks.length, W8_TABLE.length + 1, `bash answered every pair in ${loc}`);
+      answers.push(W8_TABLE.map(([, path], k) => (blocks[k] ?? "").split("\n").includes(String(path))));
+    }
+  }
+  let asked = 0;
+  W8_TABLE.forEach(([pattern, path, c, utf8], k) => {
+    let matches = Boolean(c || utf8);
+    if (hasBash) {
+      matches = answers.some((a) => a[k]);
+      asked++;
+    }
+    if (matches) assert.equal(guard.globMatch(String(pattern), String(path)), true, `bash matches ${JSON.stringify(path)} with ${JSON.stringify(pattern)}`);
+  });
+  if (hasBash) {
+    assert.equal(asked, W8_TABLE.length);
+    // The recorded expectations are what this bash says too (a different bash may differ; the check above uses its own).
+    const differ = W8_TABLE.filter(([, , c, utf8], k) => answers[0]?.[k] !== c || answers[1]?.[k] !== utf8).length;
+    assert.ok(differ <= 3, `${differ} recorded answers differ from this bash`);
+  }
+  // Narrow where the reading is exact: these neither bash nor the guard match.
+  for (const [pattern, path] of [["[[:digit:]]", "a"], ["[[:xdigit:]]", "g"], ["[![:alpha:]]", "x"], ["[!]a]", "]"], ["[a-]", "b"], ["[[:digit:]a-f]", "g"], ["[a/b]", "a"], ["[[:alpha:]]", "1"]]) {
+    assert.equal(guard.globMatch(String(pattern), String(path)), false, `${pattern} ${path}`);
+  }
+});
+
+test("researcher guard (w8): class brackets over long names stay linear and inside the deadline", { skip: redosFifo ? false : "mkfifo unavailable" }, () => {
+  for (const k of [4, 40]) {
+    const r = hookTimed(`cat longn/${"*[[:alpha:]]".repeat(k)}q ; cat fif[[:alpha:]]`, redos);
+    assert.deepEqual([r.code, r.signal], [2, null], `${k} pairs: ${r.ms} ms ${r.stderr.slice(0, 160)}`);
+    assert.match(r.stderr, /fifo reads a device that may never end/, `${k} pairs`);
+    assert.ok(r.ms < 3000, `${k} pairs: ${r.ms} ms`);
+  }
+  const t0 = performance.now();
+  assert.equal(guard.globMatch(`${"*[[:alpha:]]".repeat(40)}q`, "a".repeat(4000)), false);
+  assert.equal(guard.globMatch(`${"*[![:digit:]]".repeat(40)}a`, "a".repeat(4000)), true);
+  assert.ok(performance.now() - t0 < 1000, `${performance.now() - t0} ms`);
+});
+
+test("researcher guard (w8): everyday commands pass, bracket globs included", () => {
+  const tree = join(w8, "everyday");
+  for (const d of ["src", "docs", ".claude/hooks"]) mkdirSync(join(tree, d), { recursive: true });
+  for (const f of ["src/a.ts", "src/a.test.mjs", "src/b.test.ts", "docs/a.md", "docs/b.md", ".claude/hooks/x.mjs", "README.md", "a1.txt", "b2.txt", "c3.txt"]) writeFileSync(join(tree, f), "x\n");
+  for (const c of ["rg -n x src", "rg x **/*.md", "grep -rn '[[:alpha:]]' docs", "ls src/*.test.*", "cat docs/*.md", "ls [a-c]*", "head -5 src/*.ts", "wc -l .claude/hooks/*.mjs", "cat [ab]1.txt [[:lower:]][[:digit:]].txt", "grep -n x [!.]*.txt"]) {
+    assert.equal(researcherViolation(c, tree), null, c);
+  }
+});

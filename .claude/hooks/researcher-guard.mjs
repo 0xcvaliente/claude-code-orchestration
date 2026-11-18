@@ -20,7 +20,10 @@
 // is naming the files or quoting the glob for the command); and du's --files0-from and find's -files0-from values are
 // judged. Not judged: a FIFO a command opens on its own (an ignore file rg or ugrep reads while searching, git's own
 // files), a file created or swapped between the check and the run, and zsh extendedglob operators (`^`, `#`, `~`),
-// which are off in a non-interactive shell. A lone `--`
+// which are off in a non-interactive shell. Since w8 a glob word is read from its raw characters (scanWords): bracket
+// expressions as POSIX defines them (classes, collating symbols, equivalence classes, ranges, negation, a leading `]`,
+// escapes), what is not read exactly matched wider, and the word is also judged as the literal path it spells (`[a/b]`).
+// A lone `--`
 // never ends the check (review of 2026-11-10: `rg -e -- --pre=sh x` used it to hide an option).
 // Deny-only: exit 2 with the reason on stderr, or exit 0 with no output (the session's own permission rules then
 // decide). It never prints an allow or ask decision. Acts only when the bare agent_type is `researcher`; any other
@@ -120,7 +123,7 @@ const decision = {
   names: TOTAL_NAMES,
   deadline: Infinity,
   cheap: false,
-  /** @type {{ src: string, t?: any, failed?: boolean, err?: unknown } | null} the tokenizer's reading of the command, read once */
+  /** @type {{ src: string, t?: any, failed?: boolean, err?: unknown, raw?: RawWord[][] | null } | null} the tokenizer's reading of the command and its raw words (w8), read once */
   tok: null,
   /** @type {Map<string, { name: string, dir: boolean, link: boolean, odd: boolean }[]>} */
   lists: new Map(),
@@ -330,13 +333,19 @@ function violation(command, cwd, project) {
   if (t.commands.some((/** @type {any} */ c, /** @type {number} */ i) => c.stdin && (i === 0 || !piped))) {
     return { reason: "input redirection, a heredoc or here-string" };
   }
+  // w8: the raw words, read once per decision; a command whose two readings disagree (a quote or an escape inside an
+  // unquoted bracket, which the tokenizer steps over) is refused.
+  if (!("raw" in decision.tok)) decision.tok.raw = rawAligned(t, command);
+  const raw = /** @type {RawWord[][] | null} */ (decision.tok.raw);
+  if (!raw) return { reason: "the command cannot be read with confidence (a quote or backslash inside an unquoted `[...]`); quote the whole word" };
   // The folders the shell may be in when a segment runs: where the command starts, plus each folder an allowed cd reached.
   const folders = [cwd];
-  for (const c of t.commands) {
+  for (const [ci, c] of t.commands.entries()) {
     const words = /** @type {any[]} */ (c.words);
+    const raws = /** @type {RawWord[]} */ (raw[ci]);
     if (late()) return { reason: LATE, word: words[0]?.text };
     if (words[0]?.text === "cd") {
-      const reached = cdReach(words, folders, project);
+      const reached = rawGlob(raws[1]) ? null : cdReach(words, folders, project);
       if (!reached) return { reason: CD_FORM, word: "cd" };
       for (const f of reached) if (!folders.includes(f)) folders.push(f);
       if (folders.length > MAX_FOLDERS) return { reason: CD_FORM, word: "cd" };
@@ -345,16 +354,17 @@ function violation(command, cwd, project) {
     if (words.some((w) => w.redirect)) return { reason: "output redirection or a heredoc" };
     if (words.some((w) => w.assign)) return { reason: `a variable assignment; ${USE_ALLOWED}`, word: words[0]?.text };
     if (words.some((w) => w.pieces.some((/** @type {any} */ p) => p.dyn))) return { reason: "a variable or other expansion", word: words[0]?.text };
-    if (words.some(globInOptionName)) {
+    if (words.some(globInOptionName) || raws.some(rawGlobInOptionName)) {
       return {
         reason: "a glob in an option name (the shell may expand it into another option, such as -f or -delete); quote the glob (`rg -g '*.md' x`) or use the long form (`--glob=*.md`)",
         word: words[0]?.text,
       };
     }
     const w = words.map((x) => String(x.text));
-    if (!allowedWords(w)) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
-    if (w[0] === "sed" && !sedForm(words)) return { reason: SED_FORM, word: "sed" };
-    const option = optionViolation(w, folders, words);
+    // A glob in the command's name expands to whatever a file of that name spells (w8: `ls*` is `ls` to the text).
+    if (!allowedWords(w) || rawGlob(raws[0])) return { reason: `\`${w[0] ?? ""}\` is not an allowed command; ${insteadOf(w[0] ?? "")}`, word: w[0] };
+    if (w[0] === "sed" && (!sedForm(words) || raws.some(rawGlob))) return { reason: SED_FORM, word: "sed" };
+    const option = optionViolation(w, folders, words, raws);
     if (option) return { reason: option, word: w[0] };
     if (w[0] === "git" && w.some((x) => /^--output(=|$)/.test(x))) return { reason: "git --output writes a file", word: "git" };
   }
@@ -379,29 +389,28 @@ function globInOptionName(w) {
 /** A word with literal text only: no expansion and no glob. @param {any} w */
 const literal = (w) => Array.isArray(w?.pieces) && w.pieces.every((/** @type {any} */ p) => "lit" in p);
 
-/** Does the word hold an unquoted glob character? @param {any} w */
-const hasGlob = (w) => Array.isArray(w?.pieces) && w.pieces.some((/** @type {any} */ p) => "glob" in p);
-
 /**
- * The strings to judge for one word run from `folder`: its text and, for a word with a glob, every path the shell may
- * expand it to there, plus (for `--name=<glob>`) every path the value alone may name, since an unmatched word reaches
- * the command as written and the command opens the value. null past the bounds. Never throws (a failed listing names
- * nothing, as for the shell).
- * @param {any} word @param {string} text @param {string} folder @returns {string[] | null}
+ * The strings to judge for one word run from `folder`: its text and, for a word with a glob, the literal path it spells
+ * (bash passes a pattern that matches nothing through as written, and a bracket holding a slash is no bracket: `[a/b]`
+ * names the folder `[a` and its file `b]`) and every path the shell may expand it to there, plus (for `--name=<glob>`)
+ * the same for the value alone, since the command opens the value. The cheap pass judges the literal spellings only.
+ * null past the bounds, or for a glob word this reading cannot rebuild (`$'...'` in it). Never throws (a failed listing
+ * names nothing, as for the shell).
+ * @param {RawWord | undefined} raw @param {string} text @param {string} folder @returns {string[] | null}
  */
-function pathsOf(word, text, folder) {
-  if (!hasGlob(word) || decision.cheap) return [text];
+function pathsOf(raw, text, folder) {
+  if (!rawGlob(raw)) return [text];
+  const w = /** @type {RawWord} */ (raw);
+  if (w.opaque) return null;
+  const value = valueChars(w);
+  /** @type {Ch[][]} */
+  const patterns = value ? [w.chars, value] : [w.chars];
   /** @type {string[]} */
-  const out = [text];
-  /** @type {any[][]} */
-  const patterns = [word.pieces];
-  const first = word.pieces[0];
-  if (first && "lit" in first && first.lit.startsWith("--") && first.lit.includes("=")) {
-    patterns.push([{ lit: first.lit.slice(first.lit.indexOf("=") + 1) }, ...word.pieces.slice(1)]);
-  }
+  const out = [text, ...patterns.map(spelled)];
+  if (decision.cheap) return out;
   for (const pat of patterns) {
     for (const wide of [false, true]) {
-      const key = `${wide}\0${folder}\0${JSON.stringify(pat)}`;
+      const key = `${wide}\0${folder}\0${pat.map((x) => (x.q ? `\\${x.c}` : x.c)).join("")}`;
       if (!decision.expansions.has(key)) decision.expansions.set(key, expand(pat, folder, wide));
       const r = decision.expansions.get(key);
       if (!r) return null;
@@ -421,50 +430,14 @@ function pathsOf(word, text, folder) {
  * Wide reading: what must be judged under any setting (dotglob or GLOB_DOTS, globstar off, `***`): each match of the
  * whole pattern, dot names included, whose path passes or ends at a symlink, FIFO, socket, device, `.` or `..` (a
  * name the last segment cannot match is never judged). Both: `special` when the walk would list
- * /dev, /proc or /sys; a bracket expression matches any one or more characters (the tokenizer keeps no class text, and
- * an unmatched `[...]` names itself); names match without regard to case; `.` and `..` match only a segment that starts
- * with a literal dot, as in every shell.
- * @param {any[]} pieces @param {string} folder @param {boolean} wide the wide reading
+ * /dev, /proc or /sys; a bracket expression is read as POSIX defines it, and what is not read exactly matches wider
+ * (compileSegment); names match without regard to case; `.` and `..` match only a segment that starts with a dot, as
+ * in every shell.
+ * @param {Ch[]} chars the word's raw characters @param {string} folder @param {boolean} wide the wide reading
  * @returns {{ paths: string[], special: boolean } | null}
  */
-function expand(pieces, folder, wide) {
-  /** @type {{ pat: number[] | null, text: string, stars: boolean, follow: boolean, dot: boolean }[]} */
-  const segs = [];
-  /** @type {number[]} */
-  let pat = [];
-  let text = "", glob = false, dot = false, fresh = true, starsOnly = true, starCount = 0;
-  const close = () => {
-    // A segment of two or more stars alone (`**`) also matches across folders.
-    const stars = glob && text === "" && starsOnly && starCount >= 2;
-    const follow = stars && starCount >= 3; // zsh `***/` follows symlinks
-    segs.push({ pat: glob ? pat : null, text, stars, follow, dot });
-    pat = [];
-    text = "";
-    glob = false;
-    dot = false;
-    fresh = true;
-    starsOnly = true;
-    starCount = 0;
-  };
-  for (const p of pieces) {
-    if ("lit" in p) {
-      String(p.lit).split("/").forEach((part, k) => {
-        if (k > 0) close();
-        if (!part) return;
-        if (fresh) dot = part.startsWith(".");
-        fresh = false;
-        pushLiteral(pat, part);
-        text += part;
-      });
-    } else if ("glob" in p) {
-      glob = true;
-      fresh = false;
-      if (p.glob === "*") starCount++;
-      else starsOnly = false;
-      pushGlob(pat, p.glob);
-    } else return null; // an expansion: refused elsewhere, never judged here
-  }
-  close();
+function expand(chars, folder, wide) {
+  const segs = segmentsOf(chars).map((s) => ({ ...s, pat: s.glob ? s.units : null }));
   const absolute = segs.length > 1 && segs[0]?.pat === null && segs[0].text === "";
   const start = absolute ? "/" : folder;
   /** @type {string[]} */
@@ -561,7 +534,7 @@ function expand(pieces, folder, wide) {
       // wide reading takes every name.
       if (!wide && !s.dot && e.name.startsWith(".")) continue;
       const path = join2(e.name);
-      const matched = s.stars || matchCompiled(s.pat, e.name);
+      const matched = s.stars || segmentMatches(s, e.name);
       if (!matched) continue;
       const next = odd || e.link || e.odd;
       if (s.stars) {
@@ -584,11 +557,186 @@ function expand(pieces, folder, wide) {
   return over ? null : { paths: found, special };
 }
 
-// w3 third attempt: a glob segment is matched without a regular expression. Its compiled form is an array: STAR for a
-// run of `*` (collapsed), ONE for `?`, ONE then STAR for a bracket expression (one or more characters, as before: the
-// tokenizer keeps no class text), else a UTF-16 code unit case-folded as a case-insensitive JavaScript regular
-// expression without the u flag folds it (`fold`). The old expression was `^...$` with flags `is`, so the rules are the
-// same: any code unit, newlines included, and the same case folding.
+// w8: the raw words. The tokenizer closes a bracket at its first `]` and keeps no class text, so `[[:alpha:]]` read as
+// one or more characters then a literal `]` (it matched nothing a FIFO named `x` is called, and bash expanded it to
+// `x`), and a quoted space inside a bracket (`[" "x]`) hid the glob from it altogether. scanWords reads the command
+// again the way the tokenizer reads it, keeping each character of each word with whether it was quoted (a backslash
+// escape counts as quoted), so the guard can read bracket expressions itself. rawAligned checks that both readings agree
+// (the same commands, the same words, the same quoted text); when they do not, the command is refused.
+/** @typedef {{ c: string, q: boolean }} Ch */
+/** @typedef {{ chars: Ch[], opaque: boolean }} RawWord a word; opaque when an expansion or `$'...'` is in it */
+const RAW_ENDS = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">", ""]);
+/**
+ * The command's simple commands as raw words, or null when this reading cannot follow it (a substitution, a
+ * redirection, an unterminated quote: each refused before the raw words are used).
+ * @param {string} src @returns {RawWord[][] | null}
+ */
+function scanWords(src) {
+  /** @type {RawWord[][]} */
+  const commands = [];
+  /** @type {RawWord[]} */
+  let words = [];
+  /** @type {RawWord | null} */
+  let cur = null;
+  const open = () => (cur ??= { chars: [], opaque: false });
+  const ch = (/** @type {string} */ c, /** @type {boolean} */ q) => open().chars.push({ c, q });
+  const endWord = () => {
+    if (cur) words.push(cur);
+    cur = null;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length) commands.push(words);
+    words = [];
+  };
+  /**
+   * `$` at i, as the tokenizer reads it: the index of the expansion's last character (the word turns opaque), or i for
+   * a literal `$` or the `$` of `$"..."`; -1 when this reading cannot follow it.
+   * @param {number} i @param {boolean} inDouble
+   */
+  const dollar = (i, inDouble) => {
+    const n = src.charAt(i + 1);
+    if (n === "(" || /[~=^]/.test(n)) return -1;
+    if (n === "{") {
+      const end = src.indexOf("}", i + 2);
+      if (end < 0) return -1;
+      open().opaque = true;
+      return end;
+    }
+    if (/[A-Za-z_]/.test(n)) {
+      let k = i + 1;
+      while (/[A-Za-z0-9_]/.test(src.charAt(k + 1))) k++;
+      open().opaque = true;
+      return k;
+    }
+    if (/[0-9@*#?$!-]/.test(n)) {
+      open().opaque = true;
+      return i + 1;
+    }
+    if (!inDouble && n === "'") {
+      // ANSI-C quoting: its decoded text is not rebuilt here, so the word is opaque.
+      for (let j = i + 2; j < src.length; j++) {
+        if (src.charAt(j) === "\\") j++;
+        else if (src.charAt(j) === "'") {
+          open().opaque = true;
+          return j;
+        }
+      }
+      return -1;
+    }
+    if (!inDouble && n === '"') return i;
+    ch("$", inDouble);
+    return i;
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charAt(i);
+    const next = src.charAt(i + 1);
+    if (c === "\\") {
+      if (next === "\n") i++;
+      else if (i + 1 >= src.length) return null;
+      else ch(src.charAt(++i), true);
+    } else if (c === "'") {
+      const end = src.indexOf("'", i + 1);
+      if (end < 0) return null;
+      open();
+      for (let k = i + 1; k < end; k++) ch(src.charAt(k), true);
+      i = end;
+    } else if (c === '"') {
+      open();
+      let j = i + 1;
+      for (; ; j++) {
+        if (j >= src.length) return null;
+        const d = src.charAt(j);
+        if (d === '"') break;
+        if (d === "\\" && /[$`"\\\n]/.test(src.charAt(j + 1))) {
+          if (src.charAt(j + 1) !== "\n") ch(src.charAt(j + 1), true);
+          j++;
+        } else if (d === "$") {
+          j = dollar(j, true);
+          if (j < 0) return null;
+        } else if (d === "`") return null;
+        else ch(d, true);
+      }
+      i = j;
+    } else if (c === "$") {
+      i = dollar(i, false);
+      if (i < 0) return null;
+    } else if (c === "`" || c === "<" || c === ">") return null;
+    else if (c === " " || c === "\t") endWord();
+    else if (c === "\n") endCommand();
+    else if (c === "#" && !cur) {
+      const eol = src.indexOf("\n", i);
+      i = (eol < 0 ? src.length : eol) - 1;
+    } else if (c === "(" || c === ";" || c === ")") endCommand();
+    else if (c === "&") {
+      if (next === ">") return null;
+      endCommand();
+      if (next === "&") i++;
+    } else if (c === "|") {
+      endCommand();
+      if (next === "|" || next === "&") i++;
+    } else if ((c === "{" || c === "}") && !cur && RAW_ENDS.has(next)) endCommand();
+    else if (c === "~" && !cur) open().opaque = true;
+    else ch(c, false);
+  }
+  endCommand();
+  return commands;
+}
+
+/**
+ * The raw words when they line up with the tokenizer's reading of the same command, else null.
+ * @param {any} t the tokenizer's result @param {string} src @returns {RawWord[][] | null}
+ */
+function rawAligned(t, src) {
+  const raw = scanWords(src);
+  if (!raw || raw.length !== t.commands.length) return null;
+  for (let i = 0; i < raw.length; i++) {
+    const tw = /** @type {any[]} */ (t.commands[i].words);
+    const rw = /** @type {RawWord[]} */ (raw[i]);
+    if (tw.length !== rw.length) return null;
+    for (let k = 0; k < rw.length; k++) {
+      const r = /** @type {RawWord} */ (rw[k]);
+      if (r.opaque) continue;
+      const tq = tw[k].pieces.filter((/** @type {any} */ p) => "lit" in p && p.quoted).map((/** @type {any} */ p) => p.lit).join("");
+      const rq = r.chars.filter((x) => x.q).map((x) => x.c).join("");
+      if (tq !== rq) return null;
+    }
+  }
+  return raw;
+}
+
+/** Is the character an unquoted glob character (`*`, `?` or `[`)? @param {Ch | undefined} x */
+const globCh = (x) => !!x && !x.q && (x.c === "*" || x.c === "?" || x.c === "[");
+/** Does the raw word hold an unquoted glob character? @param {RawWord | undefined} w */
+const rawGlob = (w) => !!w && w.chars.some(globCh);
+/** The text a raw word spells after quote removal, glob characters kept. @param {Ch[]} chars */
+const spelled = (chars) => chars.map((x) => x.c).join("");
+/**
+ * A long option's value (`--include=<glob>`), when the text before the word's first glob character starts with `--`
+ * and holds a `=`; else null. @param {RawWord} w @returns {Ch[] | null}
+ */
+function valueChars(w) {
+  const g = w.chars.findIndex(globCh);
+  const head = spelled(g < 0 ? w.chars : w.chars.slice(0, g));
+  if (!head.startsWith("--") || !head.includes("=")) return null;
+  return w.chars.slice(head.indexOf("=") + 1);
+}
+/** Does a glob stand in the name of an option, in the raw word? @param {RawWord | undefined} w */
+function rawGlobInOptionName(w) {
+  if (!w) return false;
+  let head = "";
+  for (const x of w.chars) {
+    if (globCh(x)) return head.startsWith("-") && !(head.startsWith("--") && head.includes("="));
+    head += x.c;
+  }
+  return false;
+}
+
+// A glob segment is matched without a regular expression (w3 third attempt). Its compiled form is an array of units:
+// STAR for a run of `*` (collapsed), ONE for `?` (and for a `[` that opens no bracket expression: bash reads it as a
+// literal `[`, which ONE also matches), a bracket set (below), else a UTF-16 code unit case-folded as a case-insensitive
+// JavaScript regular expression without the u flag folds it (`fold`): names match without regard to case, which is
+// wider than bash and right for a case-insensitive disk.
 const STAR = -1;
 const ONE = -2;
 /** @type {Map<number, number>} */
@@ -620,14 +768,15 @@ function pushGlob(pat, glob) {
 /**
  * Does a compiled segment match the whole name? The two-pointer wildcard match: on a mismatch it returns to the latest
  * star and lets it take one more character, so it never backtracks further. Time at most pattern length times name
- * length (a name is at most 255 units on disk, a pattern at most MAX_WORD), with no recursion.
- * @param {number[]} pat @param {string} name @returns {boolean}
+ * length (a name is at most 255 units on disk, a pattern at most MAX_WORD; a bracket set is tested in time at most its
+ * own length, which is part of the pattern's), with no recursion.
+ * @param {Unit[]} pat @param {string} name @returns {boolean}
  */
 function matchCompiled(pat, name) {
   let i = 0, j = 0, star = -1, mark = 0;
   while (j < name.length) {
     const p = pat[i];
-    if (p === ONE || (p !== undefined && p >= 0 && p === fold(name.charCodeAt(j)))) {
+    if (p === ONE || (typeof p === "number" && p >= 0 && p === fold(name.charCodeAt(j))) || (typeof p === "object" && setMatches(p, name.charCodeAt(j)))) {
       i++;
       j++;
     } else if (p === STAR) {
@@ -640,6 +789,224 @@ function matchCompiled(pat, name) {
   }
   while (pat[i] === STAR) i++;
   return i === pat.length;
+}
+
+// w8: bracket expressions, read as POSIX and the shells define them. `[` then an optional `!` or `^` (negation), then
+// members up to the first unquoted `]` that is not the first member: a character (quoted or escaped ones are members
+// too, `[\]]`), a range `a-z` (a `-` first or last is a member), a class `[:alpha:]`, a collating symbol `[.x.]` or an
+// equivalence class `[=x=]`. What this reading does not parse exactly (an unknown class, a collating name longer than
+// one character, a reversed range, a quoted character in a class, a range with a class at an end) is replaced by a STAR
+// reaching to the segment's last unquoted `]` (or its end), wider than any reading of that stretch. An unclosed `[` is
+// ONE (bash reads it as a literal `[`, which ONE matches) and the characters after it are read again. Membership is
+// tested with each case of the name's character (wider than bash, which ignores case only with nocaseglob). A name with
+// a character outside ASCII is matched with every unit other than an ASCII literal widened to STAR (`relaxed`): in the
+// C locale one `?` is one byte and in UTF-8 one character, and classes and ranges follow the locale there.
+/** @typedef {{ neg: boolean, items: Item[] }} BracketSet */
+/** @typedef {{ k: "c", c: number } | { k: "r", lo: number, hi: number } | { k: "cls", f: (c: number) => boolean | null }} Item */
+/** @typedef {number | BracketSet} Unit */
+const isUpper = (/** @type {number} */ c) => c >= 65 && c <= 90;
+const isLower = (/** @type {number} */ c) => c >= 97 && c <= 122;
+const isDigit = (/** @type {number} */ c) => c >= 48 && c <= 57;
+const isAlpha = (/** @type {number} */ c) => isUpper(c) || isLower(c);
+const isPunct = (/** @type {number} */ c) => (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126);
+/** ASCII classes (a name with any other character is matched relaxed); null: may or may not belong (zsh's own names). */
+/** @type {Record<string, (c: number) => boolean | null>} */
+const CLASSES = {
+  alpha: isAlpha,
+  digit: isDigit,
+  alnum: (c) => isAlpha(c) || isDigit(c),
+  upper: isUpper,
+  lower: isLower,
+  space: (c) => c === 32 || (c >= 9 && c <= 13),
+  blank: (c) => c === 32 || c === 9,
+  punct: isPunct,
+  print: (c) => c >= 32 && c <= 126,
+  graph: (c) => c >= 33 && c <= 126,
+  cntrl: (c) => c < 32 || c === 127,
+  xdigit: (c) => isDigit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102),
+  word: (c) => isAlpha(c) || isDigit(c) || c === 95,
+  IDENT: () => null,
+  IFS: () => null,
+  IFSSPACE: () => null,
+  INCOMPLETE: () => null,
+  INVALID: () => null,
+  WORD: () => null,
+};
+/**
+ * Does the bracket set match the code unit? Each case of the character is tried; a member that may or may not hold it
+ * counts for both readings. @param {BracketSet} s @param {number} cu
+ */
+function setMatches(s, cu) {
+  const cases = cu < 128 ? [cu, isLower(cu) ? cu - 32 : cu, isUpper(cu) ? cu + 32 : cu] : [cu];
+  for (const v of cases) {
+    /** @type {boolean | null} */
+    let inSet = false;
+    for (const it of s.items) {
+      const r = it.k === "c" ? it.c === v : it.k === "r" ? v >= it.lo && v <= it.hi : it.f(v);
+      if (r === true) {
+        inSet = true;
+        break;
+      }
+      if (r === null) inSet = null;
+    }
+    if (inSet === null || inSet !== s.neg) return true;
+  }
+  return false;
+}
+/**
+ * The bracket expression starting at `chars[start]` (an unquoted `[`) within one segment: its unit and the index of
+ * its last character, or null when no bracket expression starts there (bash reads a literal `[`).
+ * @param {Ch[]} chars @param {number} start @returns {{ unit: Unit, end: number } | null}
+ */
+function parseBracket(chars, start) {
+  const u = (/** @type {number} */ k, /** @type {string} */ s) => !!chars[k] && !chars[k].q && chars[k].c === s;
+  let j = start + 1;
+  let neg = false;
+  if (u(j, "!") || u(j, "^")) {
+    neg = true;
+    j++;
+  }
+  /** @type {Item[]} */
+  const items = [];
+  let doubt = false;
+  let first = true;
+  let close = -1;
+  /** The class, collating symbol or equivalence class at k (`[:`, `[.`, `[=`): its kind, name and last index, or null. */
+  const special = (/** @type {number} */ k) => {
+    const after = chars[k + 1];
+    if (!u(k, "[") || !after || after.q || !":.=".includes(after.c)) return null;
+    const kind = after.c;
+    let name = "";
+    let quoted = false;
+    for (let m = k + 2; m + 1 < chars.length; m++) {
+      if (u(m, kind) && u(m + 1, "]")) return { kind, name, end: m + 1, quoted };
+      const x = /** @type {Ch} */ (chars[m]);
+      if (x.q) quoted = true;
+      name += x.c;
+    }
+    return { kind, name, end: -1, quoted };
+  };
+  while (j < chars.length && !doubt) {
+    if (u(j, "]") && !first) {
+      close = j;
+      break;
+    }
+    first = false;
+    const sp = special(j);
+    if (sp) {
+      if (sp.end < 0 || sp.quoted || sp.name.includes("]")) {
+        doubt = true; // bash may read the `[` as a member, or the escaped terminator as the end
+        break;
+      }
+      const cls = sp.kind === ":" && Object.hasOwn(CLASSES, sp.name) ? CLASSES[sp.name] : undefined;
+      if (cls) items.push({ k: "cls", f: cls });
+      else if (sp.kind !== ":" && sp.name.length === 1 && sp.name.charCodeAt(0) < 128) {
+        // A one-character collating symbol is that character; an equivalence class of an ASCII character is the
+        // character in every case (a locale may add accented forms: a name holding one is matched relaxed).
+        items.push({ k: "c", c: sp.name.charCodeAt(0) });
+      } else doubt = true;
+      j = sp.end + 1;
+      // A range that starts at a collating symbol (`[[.a.]-c]`), or one that ends at a class: not read exactly.
+      if (u(j, "-") && j + 1 < chars.length && !u(j + 1, "]")) doubt = true;
+      continue;
+    }
+    const lo = /** @type {Ch} */ (chars[j]).c.charCodeAt(0);
+    if (u(j + 1, "-") && j + 2 < chars.length && !u(j + 2, "]")) {
+      const hiSp = special(j + 2);
+      const hi = /** @type {Ch} */ (chars[j + 2]).c.charCodeAt(0);
+      if (hiSp || lo > hi || lo > 127 || hi > 127) doubt = true;
+      else items.push({ k: "r", lo, hi });
+      j += 3;
+      continue;
+    }
+    items.push({ k: "c", c: lo });
+    j++;
+  }
+  if (!doubt && close >= 0) return { unit: { neg, items }, end: close };
+  // Not closed, and nothing in it escaped or quoted that could close it another way: a literal `[`.
+  const rest = chars.slice(start + 1);
+  if (!doubt && !rest.some((x) => x.q && x.c === "]")) return null;
+  let end = chars.length - 1;
+  while (end > start && !u(end, "]")) end--;
+  return { unit: STAR, end: end > start ? end : chars.length - 1 };
+}
+/**
+ * One path segment of raw characters (no `/`), compiled: its units (exact and relaxed), whether it holds a glob, is
+ * `**`-like (two or more unquoted stars alone; three or more: zsh `***`, through symlinks), starts with a dot, and the
+ * text it spells. @param {Ch[]} chars
+ */
+function compileSegment(chars) {
+  /** @type {Unit[]} */
+  const units = [];
+  let glob = false, stars = 0, starsOnly = chars.length > 0;
+  const push = (/** @type {Unit} */ x) => {
+    if (x === STAR && units[units.length - 1] === STAR) return;
+    units.push(x);
+  };
+  for (let i = 0; i < chars.length; i++) {
+    const x = /** @type {Ch} */ (chars[i]);
+    if (!x.q && x.c === "*") {
+      glob = true;
+      stars++;
+      push(STAR);
+      continue;
+    }
+    starsOnly = false;
+    if (!x.q && x.c === "?") {
+      glob = true;
+      push(ONE);
+    } else if (!x.q && x.c === "[") {
+      glob = true;
+      const b = parseBracket(chars, i);
+      if (!b) push(ONE);
+      else {
+        push(b.unit);
+        i = b.end;
+      }
+    } else push(fold(x.c.charCodeAt(0)));
+  }
+  const relaxed = /** @type {Unit[]} */ ([]);
+  for (const x of units) {
+    const y = typeof x === "number" && x >= 0 && x < 128 ? x : STAR;
+    if (!(y === STAR && relaxed[relaxed.length - 1] === STAR)) relaxed.push(y);
+  }
+  return { units, relaxed, glob, stars: glob && starsOnly && stars >= 2, follow: glob && starsOnly && stars >= 3, dot: chars[0]?.c === ".", text: spelled(chars) };
+}
+/** @typedef {ReturnType<typeof compileSegment>} Segment */
+/** Does the compiled segment match the name (relaxed when the name holds a character outside ASCII)? @param {Segment} s @param {string} name */
+function segmentMatches(s, name) {
+  for (let k = 0; k < name.length; k++) if (name.charCodeAt(k) > 127) return matchCompiled(s.relaxed, name);
+  return matchCompiled(s.units, name);
+}
+/** A word's raw characters split into path segments at every `/`, quoted or not. @param {Ch[]} chars */
+function segmentsOf(chars) {
+  /** @type {Ch[][]} */
+  const out = [[]];
+  for (const x of chars) {
+    if (x.c === "/") out.push([]);
+    else /** @type {Ch[]} */ (out[out.length - 1]).push(x);
+  }
+  return out.map(compileSegment);
+}
+/** Glob text (a backslash escapes the next character, nothing else quotes) as raw characters. @param {string} text */
+function globChars(text) {
+  /** @type {Ch[]} */
+  const out = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\\" && i + 1 < text.length) out.push({ c: text.charAt(++i), q: true });
+    else out.push({ c: text.charAt(i), q: false });
+  }
+  return out;
+}
+/**
+ * Does the glob pattern (glob text: a backslash escapes, nothing else quotes) match the path, segment by segment (no
+ * `**` across folders, no dot rule), by the guard's rules? Exported for the tests: it must match whatever bash matches.
+ * @param {string} pattern @param {string} path @returns {boolean}
+ */
+export function globMatch(pattern, path) {
+  const segs = segmentsOf(globChars(String(pattern)));
+  const names = String(path).split("/");
+  return segs.length === names.length && segs.every((s, k) => segmentMatches(s, names[k] ?? ""));
 }
 /**
  * Does one segment's pieces (literal text without `/`, and globs `*`, `?`, `[]`, as the tokenizer gives them) match
@@ -683,9 +1050,10 @@ function allowedWords(w) {
  * that only looks like an option, such as a pattern that starts with a dash, is refused too; that is the price.
  * Not covered: a command that waits on standard input because it was given no file. The Bash tool's timeout ends it.
  * @param {string[]} w @param {string[]} folders the folders the command may run in @param {any[]} [words] the tokenizer's
- * words of `w` (glob pieces included) @returns {string | null}
+ * words of `w` (glob pieces included) @param {RawWord[]} [raws] the raw words of `w` (w8: the glob judgement reads them)
+ * @returns {string | null}
  */
-function optionViolation(w, folders, words = []) {
+function optionViolation(w, folders, words = [], raws = []) {
   const first = w[0] ?? "";
   const args = w.slice(1);
   /**
@@ -694,7 +1062,7 @@ function optionViolation(w, folders, words = []) {
    */
   const deviceAt = (i) => {
     for (const f of folders) {
-      const list = pathsOf(words[i + 1], args[i] ?? "", f);
+      const list = pathsOf(raws[i + 1], args[i] ?? "", f);
       if (!list) return "many";
       // Each path gets the whole lstat budget: the listing bound already limits how many there are.
       for (const a of list) {
@@ -749,7 +1117,8 @@ function optionViolation(w, folders, words = []) {
   }
   // w3 item 1: a word with a glob, judged on each path the shell may expand it to (the check above saw its text only).
   for (let i = 0; i < args.length; i++) {
-    if (!hasGlob(words[i + 1])) continue;
+    if (!rawGlob(raws[i + 1])) continue;
+    if (raws[i + 1]?.opaque) return `${first}: a glob in a word with \`$'...'\` quoting cannot be judged; quote that part with '...' instead`;
     const hit = deviceAt(i);
     if (hit === "many") return `${first}: ${TOO_MANY}`;
     if (hit !== null) return `${first} ${hit} reads a device that may never end`;
