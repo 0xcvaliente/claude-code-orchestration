@@ -68,6 +68,10 @@ const holds = (dir) => {
 };
 const REVIEW = "SLICE: a\nCHECKS: C1\nC1: tests pass\nReview the diff.";
 const SWITCH = /ORCH_|CLAUDE_PLUGIN_OPTION|review_hold|REVIEW_HOLD/;
+// T0 lies in the past, so every stop here is older than the test gate can run (run.mjs stopGateWindowMs): a stop with
+// no record paired with it gets the no-result note (2.0.1). The pending note of a recent stop is covered in
+// src/stop-gate-record.test.mjs.
+const NO_RECORD = /test gate left no result that can be tied to this slice's latest implementer stop/;
 
 test("a failed-tests block after the stop refuses the slice's reviewer twice, then gives up and is logged", () => {
   const dir = project();
@@ -132,13 +136,13 @@ test("a pending gate adds the note and allows; a passed gate and an environment 
     assert.equal(out.permissionDecision, "allow");
     assert.ok(out.updatedInput.prompt.startsWith(REVIEW), "the brief is kept");
     const note = out.updatedInput.prompt.slice(REVIEW.length);
-    assert.match(note, /test gate has not reported yet/);
+    assert.match(note, NO_RECORD);
     assert.match(note, /Do not rest a pass on the tests having passed/);
     assert.doesNotMatch(note, SWITCH, "the note names no switch");
     const hd = parseHeader(note);
     const rp = parseReply(note);
     assert.ok(!hd.slice && !hd.files.length && !hd.checks.length && rp.status === null && !rp.open.length, "the note parses as no brief or reply line");
-    assert.deepEqual(holds(dir).map((e) => [e.decision, e.reason]), [["note", "test_gate_pending"]]);
+    assert.deepEqual(holds(dir).map((e) => [e.decision, e.reason]), [["note", "test_gate_no_result"]]);
 
     gate(dir, 4, "allow", "tests_passed");
     assert.deepEqual([launch(dir, REVIEW).stdout, launch(dir, REVIEW).status], ["", 0], "a passed gate adds nothing");
@@ -148,14 +152,14 @@ test("a pending gate adds the note and allows; a passed gate and an environment 
     // A stop with no hand-back id cannot be tied to one of several records (run.mjs stopGateOf, rule 3): pending, so the
     // review goes through with the note, never refused.
     assert.equal(env.status, 0, "an environment block does not refuse");
-    assert.match(env.stdout, /test gate has not reported yet/);
+    assert.match(env.stdout, NO_RECORD);
     gate(dir, 6, "warn", "tests_failed_isolated");
     const warn = launch(dir, REVIEW);
     assert.equal(warn.status, 0, "a warning does not refuse");
     // Several records since the start and no hand-back id to tie one to the stop: pending, so the launch is allowed
     // with the note (run.mjs stopGateOf), never let through bare.
     assert.match(warn.stdout, /"permissionDecision":"allow"/);
-    assert.match(warn.stdout, /test gate has not reported yet/, "the warning case carries the note");
+    assert.match(warn.stdout, NO_RECORD, "the warning case carries the note");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -180,7 +184,7 @@ test("other slices, a PLAN REVIEW and other agents are untouched; the allow goes
     // The pending note reaches only our reviewer.
     implementer(dir, "impl2", "c", 10, 11);
     for (const t of ["researcher", "integrator", "otherplugin:reviewer", BUILTIN]) assert.equal(launch(dir, "SLICE: c\nReview.", t).stdout, "", t);
-    assert.match(launch(dir, "SLICE: c\nReview.", "orchestration:reviewer").stdout, /test gate has not reported/);
+    assert.match(launch(dir, "SLICE: c\nReview.", "orchestration:reviewer").stdout, NO_RECORD);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -306,7 +310,7 @@ test("a second stop after a block, with no new start: without hand-back ids the 
     append(keyed, "telemetry.jsonl", { ts: at(3), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop", after_handback: "h2" });
     const r = launch(keyed, REVIEW);
     assert.equal(r.status, 0, "the block is certainly the first stop's (h1)");
-    assert.match(r.stdout, /test gate has not reported yet/);
+    assert.match(r.stdout, NO_RECORD);
     gate(keyed, 5, "allow", "tests_passed", { after_handback: "h2" });
     assert.deepEqual([launch(keyed, REVIEW).status, launch(keyed, REVIEW).stdout], [0, ""], "the second stop's own pass");
   } finally {
@@ -335,7 +339,7 @@ test("2.0.0: an implementer resumed while its earlier gate still runs: the late 
     gate(dir, 4, "block", "tests_failed", { after_handback: "toolu_k1" });
     const r = launch(dir, REVIEW);
     assert.equal(r.status, 0, "the late block is the earlier stop's: no refusal");
-    assert.match(r.stdout, /test gate has not reported yet/, "the latest stop is still pending");
+    assert.match(r.stdout, NO_RECORD, "no record is tied to the latest stop");
     // Its own record arrives: a block refuses, as it did by count.
     gate(dir, 5, "block", "tests_failed", { after_handback: "toolu_k2" });
     assert.equal(launch(dir, REVIEW).status, 2);
@@ -371,7 +375,7 @@ test("2.0.0: a late block of a stop after a hand-back gives pending, not a stale
     gate(dir, 4, "block", "tests_failed", { after_handback: "toolu_k1" });
     const r = launch(dir, REVIEW);
     assert.equal(r.status, 0, "not the stale block");
-    assert.match(r.stdout, /test gate has not reported yet/);
+    assert.match(r.stdout, NO_RECORD);
     gate(dir, 5, "block", "tests_failed");
     assert.equal(launch(dir, REVIEW).status, 2, "its own unkeyed record, by count");
   } finally {
@@ -389,7 +393,7 @@ test("2.0.0: the hand-back gate's records are never a stop's record", () => {
     append(dir, "telemetry.jsonl", { ts: at(1), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
     const r = launch(dir, REVIEW);
     assert.equal(r.status, 0);
-    assert.match(r.stdout, /test gate has not reported yet/, "unkeyed stop: the hand-back records are not counted for it");
+    assert.match(r.stdout, NO_RECORD, "unkeyed stop: the hand-back records are not counted for it");
     gate(dir, 2, "allow", "tests_passed_cached");
     assert.deepEqual([launch(dir, REVIEW).status, launch(dir, REVIEW).stdout], [0, ""]);
   } finally {

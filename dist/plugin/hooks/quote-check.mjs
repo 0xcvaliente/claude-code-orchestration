@@ -19,7 +19,7 @@
 // project dir and the read cache: such a file is never read, so the hook says nothing about it. Each stop logs { agent_id, slice, total, verified,
 // unverified, unverifiable, blocked } and the unverified quotes' paths to quotes.jsonl in the state dir (counts and
 // paths only, never quote, reply or file text). When a quote is unverified and quote-check has not blocked this agent
-// before, it exits 2 with the unverified locators, asking the researcher to correct each quote from its source or drop
+// before (its earlier records readable, and the refusal's own record written and read back), it exits 2 with the unverified locators, asking the researcher to correct each quote from its source or drop
 // it and list the claim under OPEN; the next stop always passes. Exits early on duplicate(); exits 0 on malformed input.
 // A refusal at a hand-back is marked in handback-refusals.jsonl with the report's key (report_key, the same key
 // handback-check.mjs puts on its capture). Without a tool_use_id the two hooks, which run side by side, cannot be tied
@@ -30,7 +30,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, rea
 import { dirname, resolve, sep } from "node:path";
 import { parseReply } from "./brief.mjs";
 import { profileFile } from "./file-profile.mjs";
-import { appendJsonl, loadRecords, readJsonl, sliceOfAgent } from "./run.mjs";
+import { appendJsonl, loadRecords, readJsonl, readJsonlOrNull, sliceOfAgent } from "./run.mjs";
 import { duplicate, ensureStateDir, HANDBACK_LOG, recordHandbackRefusal, stateDir } from "./state.mjs";
 
 const LOG = "quotes.jsonl";
@@ -107,8 +107,12 @@ function reportFromTranscript(path) {
 const atHandback = input.tool_name === "SubagentHandback" && typeof input.tool_input?.message === "string";
 if (input.tool_name !== undefined && !atHandback) process.exit(0); // a tool call that carries no report
 const reportAgentId = typeof input.agent_id === "string" && input.agent_id ? input.agent_id : null;
-// quotes.jsonl is read once per call: only its records of this agent matter.
-const prior = reportAgentId ? readJsonl(stateDir, LOG).filter((e) => e.agent_id === reportAgentId) : [];
+// quotes.jsonl is read once per call: only its records of this agent matter. A log that exists and cannot be read in
+// full (readJsonlOrNull null) is not "no earlier refusal" (2.0.1, soak item a): an earlier refusal cannot be ruled out,
+// so this call never refuses (blockedBefore below), as handback-check.mjs reads its own earlier denials.
+const priorAll = reportAgentId ? readJsonlOrNull(stateDir, LOG) : [];
+const priorUnreadable = priorAll === null;
+const prior = (priorAll ?? []).filter((e) => e.agent_id === reportAgentId);
 // The stop that follows a checked handback has nothing new to check.
 if (!atHandback && reportAgentId && prior.some((e) => e.agent_id === reportAgentId && e.at === "handback")) process.exit(0);
 const report = atHandback ? String(input.tool_input.message) : (reportFromTranscript(input.agent_transcript_path) ?? (typeof input.last_assistant_message === "string" ? input.last_assistant_message : ""));
@@ -288,21 +292,23 @@ try {
 } catch {
   // no journal: no slice
 }
-// At a hand-back a refusal must be provably the only one: a refused report is not delivered until the researcher sends
-// it again, and after three refusals it is never delivered. So there the hook blocks only with an agent id (without
-// one a second report cannot be told from the first) and only once the record of the refusal is written and readable.
-const blockedBefore = agentId ? prior.some((e) => e.agent_id === agentId && e.blocked === true) : atHandback ? true : input.stop_hook_active === true;
+// A refusal must be provably the only one. At a hand-back a refused report is not delivered until the researcher sends
+// it again, and after three refusals it is never delivered; at a stop an uncounted refusal would send the researcher
+// back at every stop. So the hook blocks only with an agent id (without one a second report cannot be told from the
+// first; at a stop, stop_hook_active stands in for it), only when its earlier records could be read, and (2.0.1, in both
+// places) only once the record of the refusal is written and reads back.
+const blockedBefore = agentId ? priorUnreadable || prior.some((e) => e.agent_id === agentId && e.blocked === true) : atHandback ? true : input.stop_hook_active === true;
 const block = counts.unverified > 0 && !blockedBefore;
 let recorded = false;
 try {
   ensureStateDir();
   // Read back from the end of the log only (appendJsonl), so the log is read in full once per call.
   const readable = appendJsonl(stateDir, LOG, { ts: new Date().toISOString(), session_id: sessionId, agent_id: agentId, slice, total: quotes.length, ...counts, blocked: block, ...(atHandback ? { at: "handback" } : {}), ...(unverifiedPaths.length ? { unverified_paths: unverifiedPaths } : {}) });
-  recorded = !atHandback || !block || readable;
+  recorded = !block || readable;
 } catch {
-  // at SubagentStop logging never changes the decision; at a hand-back an unrecorded refusal is not made (below)
+  // no record, so no refusal (below)
 }
-if (block && (recorded || !atHandback)) {
+if (block && recorded) {
   // A refused hand-back is not delivered: mark it, so the stop never takes handback-check.mjs's capture of it (G-14).
   if (atHandback && agentId) {
     const toolUseId = typeof input.tool_use_id === "string" && input.tool_use_id ? input.tool_use_id : null;

@@ -264,6 +264,7 @@ lim_pid="" lim_wd=""
 on_signal() { # exit status
   local g=0
   trap '' TERM INT HUP
+  sig_extra='"interrupted":1' # for on_exit's record: the gate was ended from outside before it decided
   [ -z "$lim_wd" ] || kill -KILL "$lim_wd" 2>/dev/null
   if [ -n "$lim_pid" ]; then
     kill -TERM -- "-$lim_pid" 2>/dev/null || kill -TERM "$lim_pid" 2>/dev/null
@@ -411,15 +412,25 @@ acquire_lock() { # floor
   done
 }
 
-# In the hand-back mode, a hook that ends with no decision (a crash, an error exit, a TERM at Claude Code's hook timeout)
-# lets the report through (any exit but 2 does) and says so in the log; the SubagentStop gate then decides.
+# A hook that ends with no decision (a crash, an error exit, a TERM at Claude Code's hook timeout) lets the agent go on
+# (any exit but 2 does) and says so in the log, once it is armed (the event is this gate's: an implementer's hand-back
+# or stop). In the hand-back mode the SubagentStop gate then decides (handback_gate_error). At a stop (2.0.1) the record
+# is test_gate_error, with "interrupted":1 after a TERM, INT or HUP, so that every implementer stop the gate takes on
+# has a record its stop is paired with (run.mjs stopGateOf): the plan check tells the reviewer the gate left no result
+# instead of that it has not reported yet. A hook killed with SIGKILL runs no trap and writes nothing (docs/limits.md).
 on_exit() {
   rm -rf "$work" 2>/dev/null
   release_lock
-  [ "$handback" = 1 ] && [ "${armed:-0}" = 1 ] && [ "$decided" = 0 ] && log_gate allow handback_gate_error
+  if [ "${armed:-0}" = 1 ] && [ "$decided" = 0 ]; then
+    if [ "$handback" = 1 ]; then
+      log_gate allow handback_gate_error
+    else
+      log_gate allow test_gate_error "${sig_extra:-}"
+    fi
+  fi
   return 0
 }
-armed=0
+armed=0 sig_extra=""
 trap on_exit EXIT
 # The folder can still be removed from outside while the hook runs (a suite or a cleaner that sweeps TMPDIR). Before
 # each use it is made again; when that fails the caller treats it like no time for the check (never a silent allow).
@@ -482,7 +493,8 @@ count_blocks() { # reason grep-pattern
   [ -n "$agent_id" ] || { printf 0; return 0; }
   n="$(node --input-type=module -e 'import { pathToFileURL } from "node:url"; const { countBlocks } = await import(pathToFileURL(process.argv[2]).href); process.stdout.write(String(countBlocks(process.argv[3], process.argv[4], process.argv[5])));' count "$hooks_dir/bugfix-check.mjs" "$state" "$agent_id" "$1" </dev/null 2>/dev/null)"
   case "$n" in
-    '' | *[!0-9]*) n="$(grep -c "$2" "$state/gates.jsonl" 2>/dev/null || true)" ;;
+    # -a: a NUL byte in the log (a torn write) makes grep call it binary and print no lines (2.0.1, soak S9).
+    '' | *[!0-9]*) n="$(grep -ac "$2" "$state/gates.jsonl" 2>/dev/null || true)" ;;
   esac
   printf '%s' "${n:-0}"
 }
@@ -554,12 +566,39 @@ only_prose_changed() {
   return 0
 }
 
-# A string field of the event JSON, with its escapes \" \\ and \/ undone (sed -E only: it exists wherever the hook
+# The event's own fields: the top-level string fields the gate reads, parsed as JSON by node (2.0.1). A text match reads
+# a key at any depth and its greedy .* keeps the LAST one, and at SubagentStop Claude Code lists the session's in-flight
+# work after the agent's own fields (background_tasks, one agent_type per running subagent): a stop whose list ended
+# with a reviewer was read as the reviewer's and left with no record at all (30 of 102 implementer stops of one session;
+# docs/data/probes-2.0.1-stop-gate.md). node prints one key=value line per field ("" for a field that is missing, not a
+# string or holds a line break or NUL; for cwd that names no folder, so the project dir is used, as before).
+event_fields="" event_parsed=0
+if event_fields="$(printf '%s' "$input" | node -e '
+  let e;
+  try { e = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch { process.exit(1); }
+  if (!e || typeof e !== "object" || Array.isArray(e)) process.exit(1);
+  for (const k of ["agent_type", "agent_id", "session_id", "cwd", "tool_name", "tool_use_id"]) {
+    const v = Object.hasOwn(e, k) && typeof e[k] === "string" && !/[\n\r\0]/.test(e[k]) ? e[k] : "";
+    process.stdout.write(k + "=" + v + "\n");
+  }' 2>/dev/null)"; then
+  event_parsed=1
+elif command -v node >/dev/null 2>&1; then
+  # node ran and refused the input: it is not a JSON object, so not a hook event (null, an array, a string, a number,
+  # nothing or broken JSON). Exit 0 before anything runs (2.0.1, soak): the text match below found no agent type in such
+  # input and so ran the suite and could block on its failures.
+  exit 0
+fi
+# A string field of the event: from the parse above; without node, or for input that is not a JSON object (which the
+# parse refuses), the old text match, with its escapes \" \\ and \/ undone (sed -E only: it exists wherever the hook
 # runs). The value is a run of non-quote, non-backslash characters or backslash pairs, so an escaped quote does not
 # end it. The second sed scans left to right and replaces each pair once, so \\" reads as \ then the closing quote;
 # no bash pattern replacement is used, since bash 4.2 and older (macOS /bin/bash 3.2) keep quotes in its replacement.
 # Any other escape (\n, \uXXXX) is left as it is; for cwd that names no folder, so the project dir is used, as before.
-json_str() { # key
+json_str() { # key (one of the fields the parse prints)
+  if [ "$event_parsed" = 1 ]; then
+    printf '%s\n' "$event_fields" | sed -n "s/^$1=//p" | head -n1
+    return 0
+  fi
   printf '%s' "$input" | sed -n -E 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' | head -n1 | sed -E 's/\\(["\\/])/\1/g'
 }
 agent_type="$(json_str agent_type)"
@@ -611,6 +650,8 @@ agent_type="${agent_type##*:}" # plugin agents arrive namespaced ("orchestration
 if [ -n "$agent_type" ] && [ "$agent_type" != "implementer" ]; then
   exit 0
 fi
+# From here every way out of a stop leaves a record (on_exit): the gate is armed in both modes.
+armed=1
 
 # Test where the agent worked: an isolated worktree's cwd when the event reports one.
 agent_cwd="$(json_str cwd)"
@@ -1009,6 +1050,10 @@ blocks=0
 if [ -n "$agent_id" ] && [ -f "$state/gates.jsonl" ]; then
   # Only tests_failed blocks count here, since the agent's latest start; bugfix-check.mjs counts its own bugfix_ blocks.
   blocks="$(count_blocks tests_failed "\"decision\":\"block\",\"reason\":\"tests_failed\",.*\"agent_id\":\"$agent_id\"")"
+elif [ -f "$state/gates.jsonl" ]; then
+  # A stop with no agent id (2.0.1, soak): no start can be tied to it, so its blocks count over the whole session, as
+  # one agent's; without this the cap read 0 and such a stop was blocked at every try.
+  blocks="$(grep -aF '"decision":"block","reason":"tests_failed",' "$state/gates.jsonl" 2>/dev/null | grep -F '"agent_id":"",' | grep -cF "\"session_id\":\"${session_id:-}\"" || true)"
 fi
 if [ "${blocks:-0}" -ge "$MAX_BLOCKS" ]; then
   log_gate allow max_blocks_reached "$base_extra"

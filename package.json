@@ -1,6 +1,6 @@
 {
   "name": "claude-code-orchestration",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Native orchestrator for Claude Code (the main toolkit: agents, hooks, skills and a workflow, shipped as a plugin; npm start), plus the older, frozen SDK pipeline for code in git (npm run sdk).",
   "private": true,
   "type": "module",
@@ -24,6 +24,7 @@
     "install-statusline": "bash scripts/install-statusline.sh",
     "claude-update": "node scripts/claude-update.mjs",
     "skill-publish": "node scripts/skill-publish.mjs",
+    "soak": "node scripts/soak-gates.mjs",
     "bench": "node bench/run.mjs",
     "bench:validate": "node bench/validate.mjs",
     "bench:grade": "node bench/grade.mjs",
