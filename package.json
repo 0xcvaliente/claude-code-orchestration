@@ -1,7 +1,8 @@
 {
   "name": "claude-code-orchestration",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Native orchestrator for Claude Code (the main toolkit: agents, hooks, skills and a workflow, shipped as a plugin; npm start), plus the older, frozen SDK pipeline for code in git (npm run sdk).",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "scripts": {

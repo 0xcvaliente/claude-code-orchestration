@@ -12,7 +12,7 @@ The commands below were checked with `--help` on Claude Code 2.1.327. One form c
 | `dist/plugin/` | The plugin itself. The marketplace entry points at it with `"source": "./dist/plugin"`, so the built files are committed. |
 | `dist/dashboard/` | The pane alone, as the plugin `orchestration-dashboard`. It is not in the marketplace. `npm start` loads it from the checkout. |
 
-`npm run build-plugin` writes all three manifests. The facts they share (repository, homepage, keywords, owner, the marketplace's name) sit in one place, `SHARED` in `scripts/build-plugin.mjs`. `npm run check-plugin` fails when the committed marketplace file or `dist/` differs from what the build writes.
+`npm run build-plugin` writes all three manifests. The facts they share (repository, homepage, keywords, owner, license, the marketplace's name) sit in one place, `SHARED` in `scripts/build-plugin.mjs`. It also copies `LICENSE` into both builds, and the plugin's README and icon from `plugin-assets/`. `npm run check-plugin` fails when the committed marketplace file or `dist/` differs from what the build writes.
 
 ## Add the marketplace and install
 
@@ -23,7 +23,7 @@ claude plugin install orchestration@claude-code-orchestration
 
 - `claude plugin install orchestration --marketplace 0xcvaliente/claude-code-orchestration` does both steps in one command.
 - Inside a session, `/plugin` opens the same plugin manager.
-- Restart Claude Code after an install or an update.
+- A plugin installed or updated from your shell loads in the next session you start. In a session that is already open, run `/reload-plugins`.
 - A plugin cannot set two settings this one needs. Add them yourself, as [Install](../README.md#install) shows.
 
 ## Stable or latest
@@ -35,11 +35,11 @@ You get a new copy of the plugin only when a release changes its version. Betwee
 **Pinned to a release.** Add the marketplace at a release tag instead. It stays on that release until you add it again at a newer tag:
 
 ```bash
-claude plugin marketplace add 0xcvaliente/claude-code-orchestration#v2.0.2
+claude plugin marketplace add 0xcvaliente/claude-code-orchestration#v2.0.3
 ```
 
 - The `#<tag>` form comes from Claude Code's docs. The 2.1.327 help says only "a URL, path, or GitHub repo".
-- Release tags are `vX.Y.Z`. The `v2.0.2` tag exists once 2.0.2 is released.
+- Release tags are `vX.Y.Z`. The `v2.0.3` tag exists once 2.0.3 is released.
 - To move to a newer release, remove the marketplace (`claude plugin marketplace remove claude-code-orchestration`), add it again at the new tag, and install again.
 
 ## How updates reach people
@@ -55,7 +55,12 @@ claude plugin marketplace update claude-code-orchestration
 claude plugin update orchestration@claude-code-orchestration
 ```
 
-From a checkout, `npm run claude-update` says when the installed copy is older than the checkout, and `npm run claude-update -- --fix` updates it ([After a Claude Code update](claude-code-updates.md)).
+A plugin updated from your shell loads in the next session you start. In a session that is already open, run `/reload-plugins`.
+
+From a checkout, `npm run claude-update` says when the installed copy's version differs from the checkout's ([After a Claude Code update](claude-code-updates.md)). With `-- --fix` it then runs `claude plugin update` for that copy:
+
+- It installs nothing. When the plugin is not installed, `--enable` does that.
+- An install from a marketplace added at a tag stays on that tag until you add the marketplace again at a newer one, as [Stable or latest](#stable-or-latest) shows.
 
 ## What the plugin ships, and why
 
@@ -67,7 +72,10 @@ From a checkout, `npm run claude-update` says when the installed copy is older t
 | `workflows/` | The gated workflow, `/orchestration:orchestrate`. Only a person starts it. |
 | `types/` | The type file the pane's mod imports. `plugin.json` names it under `types`. |
 | `evals/` | The eval suite, for `npm run eval` (`claude plugin eval dist/plugin`). |
-| `.claude-plugin/plugin.json` | Name, version, description, author, homepage, repository, keywords and the 22 plugin settings (`userConfig`). |
+| `.claude-plugin/plugin.json` | Name, version, description, author, homepage, repository, license, keywords, icon and the 22 plugin settings (`userConfig`). |
+| `README.md` | What the plugin is, how to install it and where the documentation is. Built from `plugin-assets/README.md`. |
+| `icon.png` | The plugin's icon, a square PNG of 512 by 512 pixels. Built from `plugin-assets/icon.png`; its source is `plugin-assets/icon.svg`. |
+| `LICENSE` | The MIT License, a copy of the repository's `LICENSE`. |
 
 The plugin does not ship permission denies or the `worktree` setting. A plugin cannot set them.
 
@@ -76,13 +84,14 @@ The plugin does not ship permission denies or the `worktree` setting. A plugin c
 1. Set the new version in `package.json` and `package-lock.json`.
 2. Run `npm run build-plugin`. It writes the version into both plugin manifests. The marketplace entry carries none.
 3. Run `npm run check-plugin`. It must pass.
-4. Run `claude plugin validate .` and `claude plugin validate dist/plugin`. Neither may report an error.
+4. Run `claude plugin validate . --strict` and `claude plugin validate dist/plugin --strict`. Neither may report an error. Then run `claude plugin validate --profile directory dist/plugin`: it may report no blocking item.
 5. After the merge into `main`, tag the merge commit `vX.Y.Z` and push the tag.
 
 Every step, the changelog and the GitHub release included: [Release steps](development.md#release-steps).
 
 ## Not done here, for the owner
 
-- **Claude's plugin directory.** Nothing here submits the plugin anywhere. The owner submits it through the web portal (claude.ai/directory/manage). `claude plugin validate --profile directory dist/plugin` lists what the directory would refuse.
-- **A license.** None is set, so no right to reuse the code is stated. The directory refuses a plugin without one. Choosing one is the owner's decision.
-- **An icon.** The directory check also warns that the plugin has no square PNG icon. It is optional.
+Since 2.0.3 the plugin has a license (MIT, in `LICENSE` and in `plugin.json`), a README of its own and an icon. `claude plugin validate --profile directory dist/plugin` reports nothing for it. That command runs only part of the directory's checks: the directory also scans and reviews the plugin.
+
+- **Claude's plugin directory.** Nothing here submits the plugin anywhere. The owner submits it through the web portal (claude.ai/directory/manage) and answers the portal's questions, such as how the plugin handles data.
+- **The listing icon.** The validator says the icon may become the listing icon only the first time the plugin is saved or submitted in the portal. A later change of `icon.png` does not change it.
