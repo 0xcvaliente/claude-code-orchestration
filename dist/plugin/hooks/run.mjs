@@ -22,22 +22,35 @@ import { stateDir } from "./state.mjs";
  * @param {string} dir @param {string} name @param {string} [sessionId] @returns {any[]}
  */
 export function readJsonl(dir, name, sessionId) {
+  return readJsonlOrNull(dir, name, sessionId) ?? [];
+}
+
+/**
+ * readJsonl, but a log that exists and cannot be read is null instead of empty (2.0.1): for a caller that must not
+ * take "unreadable" for "no records", such as handback-check.mjs looking for its own earlier denial. A missing file
+ * is [] (nothing was ever written).
+ * @param {string} dir @param {string} name @param {string} [sessionId] @returns {any[] | null}
+ */
+export function readJsonlOrNull(dir, name, sessionId) {
   const needle = typeof sessionId === "string" ? JSON.stringify(sessionId) : null;
+  /** @type {string} */
+  let text;
   try {
-    return readFileSync(join(dir, name), "utf8")
-      .split("\n")
-      .filter((l) => l && (needle === null || l.includes(needle) || !l.includes('"session_id"')))
-      .map((l) => {
-        try {
-          return JSON.parse(l);
-        } catch {
-          return null;
-        }
-      })
-      .filter((e) => e && typeof e === "object");
-  } catch {
-    return [];
+    text = readFileSync(join(dir, name), "utf8");
+  } catch (e) {
+    return /** @type {any} */ (e)?.code === "ENOENT" ? [] : null;
   }
+  return text
+    .split("\n")
+    .filter((l) => l && (needle === null || l.includes(needle) || !l.includes('"session_id"')))
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter((e) => e && typeof e === "object");
 }
 
 /**
@@ -217,6 +230,32 @@ export function stopGateOf(stops, gates, start, allStops = stops) {
   if (blocks.length) return blocks.at(-1) ?? null; // rule 2
   return candidates.length === 1 && first === candidates[0] ? first : null; // rule 3
 }
+
+/**
+ * How long after an implementer's stop its SubagentStop test gate may still be running, in ms (2.0.1): the gate's time
+ * budget as verify.sh computes it (ORCH_HOOK_BUDGET_S when smaller, else min(870, stall limit in seconds - 60), at least
+ * 1; the stall limit CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS, 600 s when unset or not a positive whole number), plus
+ * GATE_OVERRUN_S for its worst case past the budget (B + 20 s, verify.sh's header) and the log write. verify.sh mirrors
+ * the rule in bash: change both together. Past this window a stop with no paired record has none to wait for.
+ * @param {Record<string, string | undefined>} [env] @returns {number}
+ */
+export function stopGateWindowMs(env = process.env) {
+  const posInt = (/** @type {unknown} */ v) => (typeof v === "string" && /^\d+$/.test(v) && Number(v) > 0 ? Number(v) : null);
+  const raw = env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS;
+  let stallS = 600;
+  if (typeof raw === "string" && /^\d+$/.test(raw)) stallS = raw.length > 15 ? 1_000_000 : Number(raw) < 1 ? 600 : Math.floor(Number(raw) / 1000);
+  const max = Math.max(1, Math.min(870, stallS - 60));
+  const budget = Math.min(posInt(env.ORCH_HOOK_BUDGET_S) ?? max, max);
+  return (budget + GATE_OVERRUN_S) * 1000;
+}
+/** Seconds a stop gate may run past its budget (verify.sh: at most B + 20 s), with room for its record's write. */
+export const GATE_OVERRUN_S = 60;
+
+/**
+ * Stop-gate reasons that say the gate ended without deciding (verify.sh on_exit, 2.0.1): an allow, not a result. The
+ * plan check tells the reviewer the gate left no result; never a block, so the review gate's reading is unchanged.
+ */
+export const NO_RESULT_REASONS = new Set(["test_gate_error"]);
 
 /** The agent's latest test-gate record is a block later than its latest stop. @param {{ stop: number, testAt: number, testBlock: boolean }} a */
 export const testBlocked = (a) => a.testBlock && a.testAt > a.stop;

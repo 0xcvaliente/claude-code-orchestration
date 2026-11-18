@@ -46,11 +46,13 @@
 //    STATUS: pass. Status is brief.mjs parseStatus (telemetry.mjs and journal.mjs both use it).
 // Loop guard: at most MAX_BLOCKS blocks per reason since the last implementer stopped (a gate record with no reason,
 // from older versions, counts for every reason). Then the reply goes out with a systemMessage saying the work is
-// unverified, so giving up is never silent. Exits 0 on malformed input.
+// unverified, so giving up is never silent. A block is made only when gates.jsonl could be read and the block's record
+// reads back from it (2.0.1, soak): else the reply goes out with the same unverified systemMessage (<reason>_unrecorded).
+// Exits 0 on malformed input.
 import { appendFileSync, existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { countedStatus, currentReviews, doubtSignals, hasOpusPass, isOpusModel, staleMinutes, stallGateOn } from "./brief.mjs";
-import { environmentBlock, implementerTestStates, notTestFailure, readJsonl, sessionRuns, sliceOfAgent, testBlocked } from "./run.mjs";
+import { appendJsonl, environmentBlock, implementerTestStates, notTestFailure, readJsonl, readJsonlOrNull, sessionRuns, sliceOfAgent, testBlocked } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // per reason since the last implementer finished; a new implementer stop resets the count
@@ -59,6 +61,8 @@ const ACTIVE_STATUS = new Set(["running", "pending", "queued"]);
 // Reasons that existed before slice A1 give up as "max_blocks_reached" (as before); the new ones as <reason>_gave_up.
 const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required", "implementer_unfinished"]);
 let sessionId = "";
+/** gates.jsonl exists and could not be read: earlier blocks cannot be counted, so this call never blocks (block()). */
+let gatesUnreadable = false;
 /** @param {string} decision @param {string} reason @param {number} code @param {Record<string, unknown>} [extra] @returns {never} */
 function decide(decision, reason, code, extra = {}) {
   try {
@@ -77,6 +81,32 @@ const say = (fd, text) => {
     // a closed stream must not change the decision
   }
 };
+
+/**
+ * Block the reply (exit 2 with `message`), but only once the block's record is written and reads back, and only when
+ * the earlier records could be read (2.0.1, soak): the loop guard counts blocks from that log, so a block it cannot count
+ * would block every Stop. Otherwise the reply goes out with a systemMessage that says the work is unverified, and an
+ * allow record (`<reason>_unrecorded`) is attempted.
+ * @param {string} reason @param {string} message @param {Record<string, unknown>} extra @returns {never}
+ */
+function block(reason, message, extra) {
+  const rec = { ts: new Date().toISOString(), gate: "review", decision: "block", reason, session_id: sessionId, ...extra };
+  let recorded = false;
+  try {
+    ensureStateDir();
+    recorded = !gatesUnreadable && appendJsonl(stateDir, "gates.jsonl", rec);
+  } catch {
+    recorded = false;
+  }
+  if (recorded) {
+    say(2, message);
+    process.exit(2);
+  }
+  const note = `Review gate: its log could not be read or written, so it cannot count its blocks and does not block. The work is unverified; treat it as failed until a reviewer passes it. ${message.replace(/^Review gate: /, "")}`;
+  say(1, JSON.stringify({ systemMessage: note }));
+  say(2, note);
+  decide("allow", `${reason}_unrecorded`, 0, extra);
+}
 
 const chunks = [];
 for await (const c of process.stdin) chunks.push(c);
@@ -101,7 +131,9 @@ const role = (e) => String(String(e.agent_type ?? e.role ?? "").split(":").pop()
 // Each log is read once per call: the session's lines of telemetry.jsonl and gates.jsonl (plus gate records with no
 // session_id, which the fold keeps) are read here and handed to sessionRuns.
 const telemetryRaw = readJsonl(stateDir, "telemetry.jsonl", sessionId);
-const gatesRaw = readJsonl(stateDir, "gates.jsonl", sessionId);
+const gatesRead = readJsonlOrNull(stateDir, "gates.jsonl", sessionId);
+gatesUnreadable = gatesRead === null;
+const gatesRaw = gatesRead ?? [];
 const telemetry = telemetryRaw.filter((e) => e.session_id === sessionId);
 
 // 1. Agents still running.
@@ -330,8 +362,7 @@ const live = problems.find((p) => spent(p) < MAX_BLOCKS);
 if (live) {
   const others = problems.filter((p) => p !== live).map((p) => p.message.replace(/^Review gate: /, ""));
   const last = spent(live) === MAX_BLOCKS - 1 ? " This is the last block: if no reviewer can pass the work, say in your reply that it is unverified and report the slice as failed." : "";
-  say(2, `${live.message}${others.length ? ` Also: ${others.join(" ")}` : ""}${last}`);
-  decide("block", live.reason, 2, { ...(live.slice ? { slice: live.slice } : {}), ...(unfinishedIds.length ? { unfinished: unfinishedIds } : {}), ...(skips.length ? { skips } : {}) });
+  block(live.reason, `${live.message}${others.length ? ` Also: ${others.join(" ")}` : ""}${last}`, { ...(live.slice ? { slice: live.slice } : {}), ...(unfinishedIds.length ? { unfinished: unfinishedIds } : {}), ...(skips.length ? { skips } : {}) });
 }
 
 const notes = [];

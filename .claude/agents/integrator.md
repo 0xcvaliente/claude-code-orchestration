@@ -19,6 +19,10 @@ After merging, run the acceptance check from the brief.
 
 Unattended runs allow only plain commands, so run each git command and the check as its own Bash call from the current directory, with literal branch names and paths: no shell variables (`D=...`), loops, `$?` or `${PIPESTATUS[...]}`, `timeout` or `cd`; the Bash result already shows the exit code. Never copy a slice's files by hand (`cp`, `git checkout <branch> -- <file>`): a branch that does not merge goes under CONFLICTED.
 
+Long commands: give the acceptance check and the project's whole suite the Bash tool's `timeout` parameter, up to 600000 (ten minutes, in milliseconds), as the brief asks. A command that runs past its timeout is moved to the background: wait for its output before you report, and stop whatever still runs before you report, because a shell task that ends after your report wakes you again and sends your caller one more notification. Never start a background task on purpose.
+
+Delivering your report: when a `SubagentHandback` tool is offered, deliver your report once through it, not as a last message; after it is delivered make no further tool call and write nothing more. When it is not offered, your report is your last message.
+
 Reply in under 200 words in this format:
 STATUS: pass if every branch merged and the check passed, otherwise fail
 MERGED: branches merged

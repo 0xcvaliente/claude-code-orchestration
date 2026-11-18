@@ -186,7 +186,7 @@ CHECKS: C1, C2                             (optional: answer one line per id)
 
 Parsed by `parseHeader` (`focus`, `checks`).
 
-**Test gate pending line (1.6.1).** The plan check may append one line to a slice reviewer's brief (never a PLAN REVIEW): `Test gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, ...`. It appears only while the slice's latest implementer has stopped and no test-gate record is paired with that stop: none was logged yet, or since 2.0.0 the pairing (`stopGateOf` in `run.mjs`) cannot tie one to it. It means the tests may still fail: the reviewer runs the acceptance check itself, does not rest a pass on the tests having passed, and says in its report that the gate had not reported. The line parses as no brief or reply line. While that implementer has a failed-tests block it never saw, the plan check refuses the reviewer instead (`tests_failed_after_report`, [gates.md, Plan check](gates.md#plan-check)).
+**Test gate pending line (1.6.1).** The plan check may append one line to a slice reviewer's brief (never a PLAN REVIEW): `Test gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, ...`. It appears only while the slice's latest implementer has stopped and no test-gate record is paired with that stop: none was logged yet, or since 2.0.0 the pairing (`stopGateOf` in `run.mjs`) cannot tie one to it. It means the tests may still fail: the reviewer runs the acceptance check itself, does not rest a pass on the tests having passed, and says in its report that the gate had not reported. Since 2.0.1 the line appears only while the gate may still be running (the stop is younger than `stopGateWindowMs` in `run.mjs`, 600 s by default); past that, or when the stop's record is `test_gate_error`, the plan check appends the no-result line instead, `Test gate (added by the plan check): the test gate left no result that can be tied to this slice's latest implementer stop, and it is no longer running, ...`, with the same instruction. Neither line parses as a brief or reply line. While that implementer has a failed-tests block it never saw, the plan check refuses the reviewer instead (`tests_failed_after_report`, [gates.md, Plan check](gates.md#plan-check)).
 
 ## Reply
 
@@ -322,7 +322,7 @@ The pane mirrors this rule in its run marks (`carry`, `done`).
 
 A retry may be a fresh implementer launch or a `SendMessage` resume of the same worker, which makes no launch. So a slice's attempts are counted from its implementer stop records (the slice is joined by `agent_id`), fresh launches and resumes alike.
 
-Stops with no review of the slice between them count as one attempt. A test-gate block makes the worker stop again.
+Stops with no review of the slice between them count as one attempt. A test-gate block makes the worker stop again. An implementer woken after its delivered report that only writes text and stops again gets no stop record (2.0.1, [Continued stops](#continued-stops)), so it adds no attempt; with a tool call since its previous stop, or headless with no transcript, it is recorded and counts.
 
 ### Final slice
 
@@ -446,7 +446,7 @@ A slice needs a passing opus review after its latest implementer launch when any
 
 ## Log records
 
-The run-model logs (`journal-launches.jsonl`, `journal.jsonl`, `journal-pending.jsonl`, `gates.jsonl`, `handbacks.jsonl`) hold parsed fields only, never brief or reply text. `telemetry.jsonl` is not one of them: it keeps the hook payload's strings clipped to 300 characters, `last_assistant_message` (the worker's reply) included. Readers accept older records that lack newer fields; those fold to empty values.
+The run-model logs (`journal-launches.jsonl`, `journal.jsonl`, `journal-pending.jsonl`, `gates.jsonl`, `handbacks.jsonl`) hold parsed fields only, never brief or reply text. `telemetry.jsonl` is not one of them: it keeps the hook payload's strings clipped to 300 characters; since 2.0.1 without `last_assistant_message` (the worker's reply), which records written before then still hold. Readers accept older records that lack newer fields; those fold to empty values.
 
 ### Launch record
 
@@ -503,10 +503,11 @@ Older records lack these fields, and readers treat a missing field as empty. `fo
 
 #### Continued stops
 
-`continues: true` means two things held: the SubagentStop payload had `stop_hook_active` true, and the worker already has a stop record in the session. So the stop ends the same turn as that earlier one: the stop after a forced hand-back, or after a test-gate block.
+`continues: true` means two things held: the SubagentStop payload had `stop_hook_active` true, and the worker already has a stop record in the session since its latest SubagentStart (2.0.1; a record from before a `SendMessage` resume does not count). So the stop ends the same turn as that earlier one: the stop after a forced hand-back, or after a test-gate block.
 
-- In the fold, a reviewer's continued stop replaces the slice's latest review when that review is the same worker's and no implementer launch or stop of the slice came after it. So one review recorded twice counts once.
-- A `SendMessage` resume (`stop_hook_active` false) is a new review.
+- In the fold, a reviewer's continued stop replaces the same worker's latest review of the slice. So one review recorded twice counts once. When that review is the slice's latest and no implementer launch or stop came after it, it is replaced at the end; otherwise (2.0.1) it is replaced where it stands and keeps its `ts` and `implAt`, so it stays a review of the attempt it read and never becomes a review of a later attempt.
+- A `SendMessage` resume (`stop_hook_active` false) is a new review. The journal knows a resume by the coordinator's message in the transcript after the previous stop record, and takes the report only from the turns after it.
+- A woken stop (2.0.1) is no review at all: a reviewer woken after its delivered report (a late shell task, a prompt) that stops with `stop_hook_active` false, no hand-back since its previous stop record, no STATUS line in its last message and no resume message gets no stop record. An implementer's such stop gets none either when its transcript shows no tool call since the previous stop ([logs.md, Journal](logs.md#journal)).
 - `npm run report` counts a continued record's skills in place of the earlier record's.
 - Records without the field fold as before.
 
