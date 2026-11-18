@@ -39,6 +39,9 @@ Soak findings ([soak page](docs/data/probes-2.0.1-soak.md); each test in `src/so
 - S8: with the whole-file read of `gates.jsonl` failing, `countBlocks` in `bugfix-check.mjs` returned 0, so the test gate blocked one implementer at every stop. It returns `null` for a log that exists and cannot be read, and `verify.sh` then counts with grep. "S8 test gate".
 - S9: a NUL byte in `gates.jsonl` (a torn write) made grep treat the log as binary and count 0, resetting the cap of a stop with no agent id. Both grep counts now use `-a`. "S9 test gate".
 
+CI ([ci page](docs/data/probes-2.0.1-ci.md)):
+- `src/test-gate-records.test.mjs`, "the hand-back's block names what failed ...", failed on CI at `4ecf82f` and on pull request #31 with `store` `recent_change`: the test made `.claude/state` after its 700 ms wait, so the watched `.claude` folder was the newest listed entry, and a hook that reached its L0 listing within 300 ms refused the store. The test now makes the folder before the wait and asserts that no listed entry changed within the guard; its assertions are unchanged and no hook changed.
+
 ### Limits
 
 No "Known and not fixed" list here: what 2.0.1 found and did not fix (Claude Code's own behaviour behind the reviewer loop, the test gate with no readable count, a headless woken implementer, the judge test's CPU bound under load, and the reviewers' notes below the cutoff) is on [docs/limits.md](docs/limits.md), I, each with its reason.
