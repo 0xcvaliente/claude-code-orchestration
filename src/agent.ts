@@ -189,7 +189,20 @@ export const makeRunAgent = (deps: AgentEnv = {}): RunAgent => async (req) => {
     const counted: JudgeDeps = {
       ...judgeDeps,
       ask: async (prompt) => {
-        const answer = await judgeDeps.ask(prompt);
+        let answer: Awaited<ReturnType<JudgeDeps["ask"]>>;
+        try {
+          answer = await judgeDeps.ask(prompt);
+        } catch (err) {
+          // A failed call still cost its tokens: askOpus throws an Error carrying them. Count them, then rethrow the
+          // same error, so judgeBash still denies. A missing or malformed field adds nothing, and reading it never throws.
+          try {
+            const spent: unknown = err instanceof Error && "tokens" in err ? (err as { tokens?: unknown }).tokens : undefined;
+            if (typeof spent === "number" && Number.isFinite(spent) && spent > 0) judgeTokens += spent;
+          } catch {
+            // a getter that throws: nothing to count
+          }
+          throw err;
+        }
         if (typeof answer?.tokens === "number" && Number.isFinite(answer.tokens) && answer.tokens > 0) judgeTokens += answer.tokens;
         return answer;
       },
