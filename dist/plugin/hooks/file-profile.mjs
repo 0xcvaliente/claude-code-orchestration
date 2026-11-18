@@ -5,7 +5,7 @@
 // Text conversions are cached under cacheDir (never in a .jsonl log), keyed by a sha1 of path, size and mtime.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -216,7 +216,20 @@ const errName = (err) => {
 function writeCache(cacheDir, file, text, reasons) {
   try {
     mkdirSync(cacheDir, { recursive: true });
-    writeFileSync(file, text);
+    if (!cacheDirSafe(cacheDir)) throw Object.assign(new Error("cache folder is a symlink"), { code: "ELINKDIR" });
+    // w3 item 3: never through a symlink (O_NOFOLLOW: ELOOP), and never into a FIFO, socket or device (refused first;
+    // O_NONBLOCK so an open of a FIFO never waits for a reader).
+    try {
+      if (!lstatSync(file).isFile()) throw Object.assign(new Error("cache entry is not a regular file"), { code: "ENOTREG" });
+    } catch (err) {
+      if (/** @type {any} */ (err)?.code !== "ENOENT") throw err;
+    }
+    const fd = openSync(file, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o644);
+    try {
+      writeFileSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
     return true;
   } catch (err) {
     reasons.push(`cache unwritable (${errName(err)}): no text conversion`);
@@ -224,12 +237,46 @@ function writeCache(cacheDir, file, text, reasons) {
   }
 }
 
-/** Cached text, or undefined when absent or unreadable. @param {string} file */
-function readCache(file) {
+/**
+ * w3 item 3: the cache folder is read and written only when it is a folder itself, not a symlink to one (its parents,
+ * such as macOS /var -> /private/var, may be links). Missing counts as safe: writeCache makes it and checks again.
+ * @param {string} cacheDir
+ */
+function cacheDirSafe(cacheDir) {
   try {
-    return existsSync(file) ? readFileSync(file, "utf8") : undefined;
+    const st = lstatSync(cacheDir);
+    return st.isDirectory() && !st.isSymbolicLink();
+  } catch (err) {
+    // Missing, or under a non-folder: nothing there to read, and writeCache's mkdir reports the error.
+    const code = /** @type {any} */ (err)?.code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+/**
+ * Cached text, undefined when absent or unreadable, or null when the entry or the cache folder must not be read: the
+ * folder is a symlink, or the entry is a symlink, FIFO, socket, device or folder (w3 item 3: the same rule as a SOURCES
+ * symlink, never read). Read with O_NOFOLLOW, so a link swapped in after the check is not followed either.
+ * @param {string} cacheDir @param {string} file @returns {string | undefined | null}
+ */
+function readCache(cacheDir, file) {
+  if (!cacheDirSafe(cacheDir)) return null;
+  try {
+    if (!lstatSync(file).isFile()) return null;
+  } catch (err) {
+    const code = /** @type {any} */ (err)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? undefined : null;
+  }
+  try {
+    const fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+    try {
+      if (!fstatSync(fd).isFile()) return null;
+      return readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -269,12 +316,14 @@ function profilePdf(p, abs, st, o) {
   p.pages = pages;
 
   const txtPath = cachePath(o.cacheDir, abs, st, ".txt");
-  const fromCache = readCache(txtPath);
-  let cached = fromCache !== undefined;
+  const fromCache = readCache(o.cacheDir, txtPath);
+  const refused = fromCache === null;
+  if (refused) reasons.push("cache entry is not a regular file in a plain folder: not read, no text conversion");
+  let cached = typeof fromCache === "string";
   if (cached) reasons.push("text from cache");
-  const text = fromCache ?? tool(o.run, "pdftotext", ["-layout", "-enc", "UTF-8", abs, "-"], t.extractTimeoutMs, reasons);
+  const text = (typeof fromCache === "string" ? fromCache : undefined) ?? tool(o.run, "pdftotext", ["-layout", "-enc", "UTF-8", abs, "-"], t.extractTimeoutMs, reasons);
   if (text === undefined) return byExtension(p, "sonnet", "pdftotext unavailable");
-  if (!cached && nonSpace(text) > 0) cached = writeCache(o.cacheDir, txtPath, text, reasons);
+  if (!cached && !refused && nonSpace(text) > 0) cached = writeCache(o.cacheDir, txtPath, text, reasons);
   const pageTexts = text.split("\f").slice(0, Math.max(pages, 1));
   const totalChars = nonSpace(text);
   p.charsPerPage = Math.round(totalChars / Math.max(pages, 1));
