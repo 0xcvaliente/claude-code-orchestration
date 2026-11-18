@@ -201,7 +201,7 @@ if [ "$skill_create" != off ]; then
   fi
 fi
 
-# Block Claude Code's built-in subagents (general-purpose, Explore, Plan, ...) in headless runs: this repo's own agents
+# Block Claude Code's built-in subagents (named in .claude/hooks/builtin-agents.mjs) in headless runs: this repo's own agents
 # do those jobs, with gates. DENIED_AGENTS in src/config.ts; src/policy.test.ts fails if this line goes away.
 export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
 # Fork subagents (on by default since v2.1.302) inherit the whole conversation and every tool; Agent(fork) is denied too.
@@ -255,20 +255,25 @@ args+=(--append-system-prompt "This run is unattended: nobody can answer a quest
 # that may hold spaces, so that `*` can also hold a whole subcommand, and an allowed word then matches as a later
 # argument: `git -C * status*` matches `git -C /r branch -D main status`. GIT_C_DESTRUCTIVE_DENY closes the plain
 # destructive forms of that kind (rows in src/orchestrate-sh.test.mjs). Its rules have no `*` inside: the folder's `*`,
-# the subcommand word, one space, a literal token, then the final `*` (for a word that is destructive by itself, a space
-# and the final `*`), because a `*` inside a rule refused ordinary commit messages (the test checks a corpus of commit
-# messages: each gets the decision it got before f3).
-# Denied: the subcommand word, one space, then one of these literal tokens:
-#   branch: -d, -D, -m, -M, -f, -C, --delete, --move, --force, --copy;
-#   checkout: -- (which covers --force and --ours), -f, -B, ., :/;  switch: -f, --force, --discard-changes, -C;
-#   restore: -, ., :/;  reset: --soft, --mixed, --keep, -N, -p, --patch (reset --hard is refused above);
-#   rebase: -;  fetch: --force, -f;  pull: --force, -f, --rebase;  rm: -;  tag: -d, --delete, -f;
-#   worktree remove: -;  stash: drop, clear;  gc: --prune;  reflog: expire, delete;
-#   config: - (which covers --), core., alias., hook., include, url., and set or unset followed by a space (remote.* is
-#   refused by `git * remote*` below); update-ref, symbolic-ref and filter-branch followed by a space.
+# a space, the subcommand word, one space, a literal token, then either the final `*` (an option or key prefix) or, for
+# a token that is a whole word or path, two rules: the token ends the command, or a space and the final `*` follow
+# (so `stash dropdown` and `checkout ...` pass). A `*` inside a rule refused ordinary commit messages (the test checks a
+# corpus of commit messages: each gets the decision it got before f3).
+# Denied: a space, the subcommand word, one space, then one of these literal tokens:
+#   as a prefix: branch -d, -D, -m, -M, -f, -C, --delete, --move, --force, --copy; checkout -- (which covers --force and
+#   --ours), -f, -B; switch -f, --force, --discard-changes, -C; restore -; reset --soft, --mixed, --keep, -N, -p,
+#   --patch (reset --hard is refused above); rebase -; fetch --force, -f; pull --force, -f, --rebase; rm -;
+#   tag -d, --delete, -f; worktree remove -; gc --prune (so --prune=now); config - (which covers --), core., alias.,
+#   hook., include, url. (remote.* is refused by `git * remote*` below);
+#   as a whole word, then a space or the end: checkout . and :/; restore . and :/; stash drop, clear; reflog expire,
+#   delete; config set, unset; and update-ref, symbolic-ref, filter-branch with no token.
 # And `git --git-dir` and `git --work-tree` as the first word (after it, the deny list below already refuses both).
-# Also refused (O1): any `git -C` command that holds one of those forms verbatim in an argument, for example a commit
-# message that quotes `branch -D`: reword it.
+# Also refused (O1): a `git -C` command in which, anywhere after `git -C`, a space, the subcommand word, one space and
+# the token follow each other (a whole-word token then a space or the end), inside one argument or across two:
+# `commit -m "see branch -D old"`,
+# `commit -m "use rm -r the folder"`, and `add config -f`, where two file names make up `config -`. A form at the very
+# start of a quoted argument is not caught (`commit -m "branch -D old"` passes): the quote stands where the space would.
+# Reword such a message.
 # Out of reach (each one a LIMITS row of the test, which asserts it passes):
 #   the destructive token inside a cluster or after another word: `branch -qD main status`, `branch main -D status`,
 #   `branch a b -m log`, `checkout -q -f main status`, `checkout -qf main status`, `checkout main -f status`,
@@ -277,7 +282,8 @@ args+=(--append-system-prompt "This run is unattended: nobody can answer a quest
 #   `switch -m main status`, `fetch -o status <path> main:main`, `branch --del main log`;
 #   a path after a revision or another path: `checkout HEAD . status`, `checkout main :/ status`,
 #   `checkout HEAD -- src status`, `restore src . status`, `restore src :/ status`;
-#   a plain path, revision or branch name: `restore src status`, `restore /abs/src status`, `reset main status`,
+#   a plain path, revision or branch name: `restore src status`, `restore /abs/src status`, `checkout ./src status`,
+#   `restore ./src status`, `checkout :/src status`, `restore :/src status`, `reset main status`,
 #   `reset --merge HEAD~3 status`, `rebase main status`, `checkout main src status`, `checkout /abs/src status`,
 #   `rm src status`, `pull <path> main status`, `worktree remove <worktree> status`;
 #   a refspec after a word: `fetch <path> main:main status`, `pull <path> main:main status` (in another repository a
@@ -291,11 +297,12 @@ GIT_C_DESTRUCTIVE_DENY=(
   "Bash(git -C * branch -d*)" "Bash(git -C * branch -D*)" "Bash(git -C * branch -m*)" "Bash(git -C * branch -M*)"
   "Bash(git -C * branch -f*)" "Bash(git -C * branch -C*)" "Bash(git -C * branch --delete*)" "Bash(git -C * branch --move*)"
   "Bash(git -C * branch --force*)" "Bash(git -C * branch --copy*)"
-  "Bash(git -C * checkout --*)" "Bash(git -C * checkout -f*)" "Bash(git -C * checkout -B*)" "Bash(git -C * checkout .*)"
-  "Bash(git -C * checkout :/*)"
+  "Bash(git -C * checkout --*)" "Bash(git -C * checkout -f*)" "Bash(git -C * checkout -B*)"
+  "Bash(git -C * checkout .)" "Bash(git -C * checkout . *)" "Bash(git -C * checkout :/)" "Bash(git -C * checkout :/ *)"
   "Bash(git -C * switch -f*)" "Bash(git -C * switch --force*)" "Bash(git -C * switch --discard-changes*)"
   "Bash(git -C * switch -C*)"
-  "Bash(git -C * restore -*)" "Bash(git -C * restore .*)" "Bash(git -C * restore :/*)"
+  "Bash(git -C * restore -*)"
+  "Bash(git -C * restore .)" "Bash(git -C * restore . *)" "Bash(git -C * restore :/)" "Bash(git -C * restore :/ *)"
   "Bash(git -C * reset --soft*)" "Bash(git -C * reset --mixed*)" "Bash(git -C * reset --keep*)" "Bash(git -C * reset -N*)"
   "Bash(git -C * reset -p*)" "Bash(git -C * reset --patch*)"
   "Bash(git -C * rebase -*)"
@@ -304,11 +311,14 @@ GIT_C_DESTRUCTIVE_DENY=(
   "Bash(git -C * rm -*)"
   "Bash(git -C * tag -d*)" "Bash(git -C * tag --delete*)" "Bash(git -C * tag -f*)"
   "Bash(git -C * worktree remove -*)"
-  "Bash(git -C * stash drop*)" "Bash(git -C * stash clear*)" "Bash(git -C * gc --prune*)"
-  "Bash(git -C * reflog expire*)" "Bash(git -C * reflog delete*)"
+  "Bash(git -C * stash drop)" "Bash(git -C * stash drop *)" "Bash(git -C * stash clear)" "Bash(git -C * stash clear *)"
+  "Bash(git -C * gc --prune*)"
+  "Bash(git -C * reflog expire)" "Bash(git -C * reflog expire *)" "Bash(git -C * reflog delete)" "Bash(git -C * reflog delete *)"
   "Bash(git -C * config -*)" "Bash(git -C * config core.*)" "Bash(git -C * config alias.*)" "Bash(git -C * config hook.*)"
-  "Bash(git -C * config include*)" "Bash(git -C * config url.*)" "Bash(git -C * config set *)" "Bash(git -C * config unset *)"
-  "Bash(git -C * update-ref *)" "Bash(git -C * symbolic-ref *)" "Bash(git -C * filter-branch *)"
+  "Bash(git -C * config include*)" "Bash(git -C * config url.*)"
+  "Bash(git -C * config set)" "Bash(git -C * config set *)" "Bash(git -C * config unset)" "Bash(git -C * config unset *)"
+  "Bash(git -C * update-ref)" "Bash(git -C * update-ref *)" "Bash(git -C * symbolic-ref)" "Bash(git -C * symbolic-ref *)"
+  "Bash(git -C * filter-branch)" "Bash(git -C * filter-branch *)"
   "Bash(git --git-dir*)" "Bash(git --work-tree*)"
 )
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"

@@ -141,15 +141,15 @@ const RULE_FORMS = [
   ["Bash(git -C * checkout --*)", ["checkout -- .", "checkout --force main", "checkout --ours ."]],
   ["Bash(git -C * checkout -f*)", ["checkout -f main", "checkout -fq main"]],
   ["Bash(git -C * checkout -B*)", ["checkout -B main HEAD~1"]],
-  ["Bash(git -C * checkout .*)", ["checkout .", "checkout ./src"]],
-  ["Bash(git -C * checkout :/*)", ["checkout :/", "checkout :/src"]],
+  ["Bash(git -C * checkout .)", []], ["Bash(git -C * checkout . *)", ["checkout .", "checkout . src"]],
+  ["Bash(git -C * checkout :/)", []], ["Bash(git -C * checkout :/ *)", ["checkout :/", "checkout :/ src"]],
   ["Bash(git -C * switch -f*)", ["switch -f main"]],
   ["Bash(git -C * switch --force*)", ["switch --force main"]],
   ["Bash(git -C * switch --discard-changes*)", ["switch --discard-changes main"]],
   ["Bash(git -C * switch -C*)", ["switch -Cmain HEAD~3"]],
   ["Bash(git -C * restore -*)", ["restore --staged x", "restore -W src", "restore --source=HEAD~3 src"]],
-  ["Bash(git -C * restore .*)", ["restore .", "restore ./src"]],
-  ["Bash(git -C * restore :/*)", ["restore :/", "restore :/src"]],
+  ["Bash(git -C * restore .)", []], ["Bash(git -C * restore . *)", ["restore .", "restore . src"]],
+  ["Bash(git -C * restore :/)", []], ["Bash(git -C * restore :/ *)", ["restore :/", "restore :/ src"]],
   ["Bash(git -C * reset --soft*)", ["reset --soft HEAD~3"]],
   ["Bash(git -C * reset --mixed*)", ["reset --mixed HEAD~3"]],
   ["Bash(git -C * reset --keep*)", ["reset --keep HEAD~3"]],
@@ -167,28 +167,35 @@ const RULE_FORMS = [
   ["Bash(git -C * tag --delete*)", ["tag --delete v1"]],
   ["Bash(git -C * tag -f*)", ["tag -f v1 HEAD~3"]],
   ["Bash(git -C * worktree remove -*)", ["worktree remove --force /r/wt", "worktree remove -f /r/wt"]],
-  ["Bash(git -C * stash drop*)", ["stash drop", "stash drop -q stash@{1}"]],
-  ["Bash(git -C * stash clear*)", ["stash clear", "stash clear -q"]],
-  ["Bash(git -C * gc --prune*)", ["gc --prune=now", "gc --prune=all"]],
-  ["Bash(git -C * reflog expire*)", ["reflog expire --expire=now --all", "reflog expire --all"]],
-  ["Bash(git -C * reflog delete*)", ["reflog delete HEAD@{1}", "reflog delete --rewrite HEAD@{1}"]],
+  ["Bash(git -C * stash drop)", []], ["Bash(git -C * stash drop *)", ["stash drop", "stash drop -q stash@{1}"]],
+  ["Bash(git -C * stash clear)", []], ["Bash(git -C * stash clear *)", ["stash clear", "stash clear -q"]],
+  ["Bash(git -C * gc --prune*)", ["gc --prune=now", "gc --prune=all", "gc --prune"]],
+  ["Bash(git -C * reflog expire)", []], ["Bash(git -C * reflog expire *)", ["reflog expire --expire=now --all", "reflog expire --all"]],
+  ["Bash(git -C * reflog delete)", []], ["Bash(git -C * reflog delete *)", ["reflog delete HEAD@{1}", "reflog delete --rewrite HEAD@{1}"]],
   ["Bash(git -C * config -*)", ["config --add core.x y", "config -f .git/config core.x y", "config --unset core.x"]],
   ["Bash(git -C * config core.*)", ["config core.hooksPath /tmp/h", "config core.sshCommand x", "config core.fsmonitor x"]],
   ["Bash(git -C * config alias.*)", ["config alias.st x", "config alias.p !sh"]],
   ["Bash(git -C * config hook.*)", ["config hook.x.command y"]],
   ["Bash(git -C * config include*)", ["config include.path /tmp/x", "config includeIf.onbranch:main.path /tmp/x"]],
   ["Bash(git -C * config url.*)", ["config url./tmp/x.insteadOf y"]],
-  ["Bash(git -C * config set *)", ["config set user.name x", "config set core.hooksPath /tmp/h"]],
-  ["Bash(git -C * config unset *)", ["config unset core.x", "config unset user.name"]],
-  ["Bash(git -C * update-ref *)", ["update-ref refs/heads/main HEAD~3", "update-ref -d refs/heads/main"]],
-  ["Bash(git -C * symbolic-ref *)", ["symbolic-ref HEAD refs/heads/x", "symbolic-ref -q HEAD refs/heads/x"]],
-  ["Bash(git -C * filter-branch *)", ["filter-branch --index-filter x HEAD", "filter-branch -f HEAD"]],
+  ["Bash(git -C * config set)", []], ["Bash(git -C * config set *)", ["config set user.name x", "config set core.hooksPath /tmp/h"]],
+  ["Bash(git -C * config unset)", []], ["Bash(git -C * config unset *)", ["config unset core.x", "config unset user.name"]],
+  ["Bash(git -C * update-ref)", []], ["Bash(git -C * update-ref *)", ["update-ref refs/heads/main HEAD~3", "update-ref -d refs/heads/main"]],
+  ["Bash(git -C * symbolic-ref)", []], ["Bash(git -C * symbolic-ref *)", ["symbolic-ref HEAD refs/heads/x", "symbolic-ref -q HEAD refs/heads/x"]],
+  ["Bash(git -C * filter-branch)", []], ["Bash(git -C * filter-branch *)", ["filter-branch --index-filter x HEAD", "filter-branch -f HEAD"]],
+];
+// f7 second attempt: tokens that are a whole word or path get a word boundary, as two rules each, the token ending the
+// command (no rows in RULE_FORMS: the BOUNDARY test judges those with a person's extra `Bash(git *)` allow rule) and the
+// token followed by a space and `*`.
+const BOUNDARY = [
+  "checkout .", "checkout :/", "restore .", "restore :/", "stash drop", "stash clear", "reflog expire", "reflog delete",
+  "config set", "config unset", "update-ref", "symbolic-ref", "filter-branch",
 ];
 /** The three spellings: the project folder and a later `status`, a quoted `-C` path holding a space and a later
  * `log`, a worktree and a later `add` (its pinned allow rule). @type {((f: string) => string)[]} */
 const SPELL = [(f) => `git -C ${R} ${f} status`, (f) => `git -C "/tmp/a b" ${f} log --oneline`, (f) => `git -C ${WT} ${f} add x`];
 /** @returns {[string, string][]} */
-const ruleRows = () => RULE_FORMS.flatMap(([rule, forms]) =>
+const ruleRows = () => RULE_FORMS.filter(([, forms]) => forms.length > 0).flatMap(([rule, forms]) =>
   Array.from({ length: Math.max(3, forms.length) }, (_, i) => /** @type {[string, string]} */ ([rule, SPELL[i % 3]?.(String(forms[i % forms.length])) ?? ""])));
 // The two first-word rules: no default allow rule starts with `git --`, so their rows are judged with a person's extra
 // allow rule `Bash(git *)` (ORCH_EXTRA_ALLOWED_TOOLS), which the base deny list let them through.
@@ -260,6 +267,10 @@ const LIMITS = [
   // f7: an option the list does not name, after another option, and subcommands not listed (plumbing included)
   `git -C ${R} checkout -q -f main status`, `git -C ${R} switch -m main status`,
   `git -C ${R} read-tree -u --reset HEAD status`, `git -C ${R} checkout-index -f -a status`, `git -C ${R} prune --expire=now status`,
+  // moved (f7 second attempt: the word boundary of `checkout .` and `restore .`; 2 rows of 3172119's RULE_FORMS), and a
+  // path that starts with `.` or `:/` but is longer
+  `git -C "/tmp/a b" checkout ./src log --oneline`, `git -C "/tmp/a b" restore ./src log --oneline`,
+  `git -C ${R} checkout ./src status`, `git -C ${R} restore ./src status`, `git -C ${R} checkout :/src status`, `git -C ${R} restore :/src status`,
   // the destructive token after another word (moved: branch main -D, branch a b -m, the reordered SHAPES spellings,
   // checkout main -f in a worktree, reset main --soft, gc --aggressive --prune=now)
   `git -C ${R} branch main -D status`, `git -C ${R} branch a b -m log`, `git -C ${R} branch main -d diff`, `git -C ${R} branch main old -m diff`,
@@ -339,7 +350,7 @@ const CORPUS_SUBJECTS = [
   "Worktree base check, turn warning, researcher coverage note and clearer gate messages (#16)",
   "Release 1.4.1: the Bash judge denies quoted exec-env assignments and find -rm, and no longer scans quadratically (#13)",
   "Bash judge: deny quoted exec-env assignments, find -rm, and fix the quadratic scan (#12)",
-  "Release 1.2.2: block the new web-fetch built-in, no auto memory in inner calls, a check for Claude Code updates (#5)",
+  "Let interactive sessions push; deny push on the command line for headless runs",
   "Merge slice r4-readme: README rewritten for 0.4.0 (diagrams, switch table, compare-040, limitations); baseline modes, skipped-skill and gap-cutoff wording",
   "s3-skill-prompts: restore missing space in nudge text",
   "h-test-gate: baseline inform by default (allow opt-in), runner-level crash markers, deps from the main worktree, process-group timeout, subdir in cache key",
@@ -408,14 +419,23 @@ const CORPUS_MESSAGES = [
   "restore src after the fix", "switch to opus for reviews", "switch main in the docs", "stash handling in the pane",
   "git stash list in the report", "worktree list shows the branch", "worktree remove after the merge", "gc notes",
   "reflog is not used", "add the branch name to the report", "docs: checkout flow -- notes", "checkout main and switch main",
+  // second attempt: a whole-word token followed by more letters or dots (the word boundary)
+  "fix stash dropdown styling", "Fix checkout ... flow", "stash cleared state in the pane", "reflog expired entries are ignored",
+  "config settings page", "config unsettled", "update-reference docs", "restore ... later",
+  // a form at the very start of a quoted argument: the quote stands where the rule's space would
+  "branch -D old", "rm -r the folder",
 ];
-// O1: messages that quote a denied form verbatim. Allowed before f3, refused now (the comment's "Also refused" line).
+// O1: messages that quote a denied form verbatim after a space. Allowed before f3, refused now (the comment's "Also
+// refused" line).
 const O1_MESSAGES = [
   "remove with git branch -D old", "never run git checkout -- .", "use git rm -r for folders", "rename with git branch -m old new",
   "git tag -d v1 removes the tag", "git rebase -i squashes", "git reset --soft HEAD~1 keeps the changes", "git stash drop loses the entry",
   "git config core.hooksPath in tests", "git restore --staged unstages", "git switch --discard-changes drops work",
   "git fetch --force overwrites", "git worktree remove --force cleans up", "git update-ref moves a ref",
+  "see branch -D old", "use rm -r the folder",
 ];
+// O1 across two arguments: two file names make up `config -` (the comment's example).
+const O1_COMMANDS = [`git -C ${WT} add config -f`];
 const corpus = () => [
   ...CORPUS_SUBJECTS.flatMap((s) => [
     `git -C ${WT} commit -m "${s}"`,
@@ -436,28 +456,53 @@ const corpus = () => [
 test("orchestrate.sh dry run (f3): the deny list is b0f1388's, in order, then GIT_C_DESTRUCTIVE_DENY, each rule with its rows", () => {
   const args = headless();
   assert.deepEqual(denied(args).slice(0, BASE_DENY.length), BASE_DENY);
-  assert.equal(newRules(args).length, 57, newRules(args).join("\n"));
+  assert.equal(newRules(args).length, 70, newRules(args).join("\n"));
   assert.deepEqual([...RULE_FORMS.map(([r]) => r), ...FIRST_WORD.map(([r]) => r)], newRules(args));
 });
 
-test("orchestrate.sh dry run (f7): each `git -C` deny rule is the folder's `*`, a literal with no `*`, then the final `*`", () => {
-  // The literal is the subcommand word (two words for `worktree remove`), one space and a token; for a word that is
-  // destructive by itself (update-ref, symbolic-ref, filter-branch, config set, config unset) the final `*` follows a
-  // space. Since a `*` stands for any run of characters, such a rule refuses a `git -C` command exactly when the
-  // literal occurs in it after `git -C ` (the O1 rows below show it for commit messages).
+test("orchestrate.sh dry run (f7): each `git -C` deny rule is the folder's `*`, a literal with no `*`, then one of three endings", () => {
+  // The literal is the subcommand word (two words for `worktree remove`), one space and a token (none for update-ref,
+  // symbolic-ref and filter-branch). An option or key prefix ends in `*`; a BOUNDARY token has exactly two rules, the
+  // literal ending the command and the literal, a space and `*`.
   const rules = newRules(headless()).filter((r) => !FIRST_WORD.some(([f]) => f === r));
-  assert.equal(rules.length, 55);
+  assert.equal(rules.length, 68);
   for (const rule of rules) {
-    const m = /^Bash\(git -C \* (.+)\*\)$/.exec(rule);
+    const m = /^Bash\(git -C \* (.+?)( \*|\*|)\)$/.exec(rule);
     assert.ok(m, rule);
     const literal = String(m?.[1]);
+    const ending = String(m?.[2]);
     assert.ok(!literal.includes("*"), `${rule}: a \`*\` inside the pattern`);
-    const words = literal.replace(/ $/, "").split(" ");
-    assert.ok(/^(worktree remove|[a-z-]+) [^\s*]+ ?$/.test(literal) || /^(update-ref|symbolic-ref|filter-branch) $/.test(literal), `${rule}: not "<subcommand> <token>*"`);
-    assert.ok(words.length <= 3 && words.every((w) => w.length > 0), rule);
+    assert.ok(/^(worktree remove|[a-z-]+)( [^\s*]+)?$/.test(literal), `${rule}: not "<subcommand> <token>"`);
+    if (BOUNDARY.includes(literal)) assert.notEqual(ending, "*", `${rule}: a whole-word token needs a word boundary`);
+    else assert.equal(ending, "*", `${rule}: a prefix token ends in \`*\``);
   }
+  for (const t of BOUNDARY) {
+    assert.ok(rules.includes(`Bash(git -C * ${t})`) && rules.includes(`Bash(git -C * ${t} *)`), t);
+  }
+  assert.equal(rules.filter((r) => !r.endsWith("*)")).length, BOUNDARY.length);
   // The two first-word rules keep their shape.
   assert.deepEqual(FIRST_WORD.map(([r]) => r), ["Bash(git --git-dir*)", "Bash(git --work-tree*)"]);
+});
+
+test("orchestrate.sh dry run (f7): each word-boundary pair denies the plain form, further arguments and a later allowed word", () => {
+  // The plain form and the form with arguments need a person's extra `Bash(git *)` allow rule to pass the base rules;
+  // the form with a later allowed word passes them with the default rules.
+  const extra = withGitStar();
+  const args = headless();
+  for (const t of BOUNDARY) {
+    for (const dir of [R, `"/tmp/a b"`, WT]) {
+      for (const cmd of [`git -C ${dir} ${t}`, `git -C ${dir} ${t} x`]) {
+        assert.ok(basePermitted(extra, cmd), `${cmd} must pass the rules before f3 with Bash(git *) allowed`);
+        assert.equal(permitted(extra, cmd), false, cmd);
+      }
+    }
+    const later = `git -C ${R} ${t} status`;
+    assert.ok(basePermitted(args, later), later);
+    assert.equal(permitted(args, later), false, later);
+    // the boundary: more letters or dots after the token pass
+    const longer = `git -C ${WT} commit -m "x ${t}x"`;
+    assert.equal(permitted(args, longer), basePermitted(args, longer), longer);
+  }
 });
 
 test("orchestrate.sh dry run (f7): the allow rules the comment names: seven with the folder as `*`, three with a worktree's name as `*`", () => {
@@ -495,6 +540,19 @@ test("orchestrate.sh dry run (f7): O1, a commit message that quotes a denied for
       assert.ok(basePermitted(args, cmd), `${cmd} must pass the rules before f3`);
       assert.equal(permitted(args, cmd), false, cmd);
     }
+  }
+  // across two arguments
+  for (const cmd of O1_COMMANDS) {
+    assert.ok(basePermitted(args, cmd), `${cmd} must pass the rules before f3`);
+    assert.deepEqual(hits(newRules(args), cmd), ["Bash(git -C * config -*)"], cmd);
+    assert.equal(permitted(args, cmd), false, cmd);
+  }
+  // the comment's pair: a form after a space is refused, the same form at the very start of the quoted argument passes
+  /** @type {[string, string][]} */
+  const pairs = [["see branch -D old", "branch -D old"], ["use rm -r the folder", "rm -r the folder"]];
+  for (const [refused, passes] of pairs) {
+    assert.equal(permitted(args, `git -C ${WT} commit -m "${refused}"`), false, refused);
+    assert.equal(permitted(args, `git -C ${WT} commit -m "${passes}"`), true, passes);
   }
 });
 
