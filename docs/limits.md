@@ -37,6 +37,10 @@ Over-blocks it states (refused although harmless; each is a row of `src/judge.te
 - a non-literal argument of `sg`, `su`, `runuser`, `flock`, `script` or `watch` (`sg docker -c "docker run $IMAGE"`, `flock /tmp/l ls *.ts`), and an option cluster of those that spells a refused command;
 - `echo {rm}`;
 - a command over 262,144 characters, or with more than 4,096 of one opener (`MAX_COMMAND_LENGTH`, `MAX_OPENERS`);
+- a shell option outside the guard's short list of known harmless ones (`set -o vi`, `setopt autocd`, `shopt -s histappend`, `bash -o vi`; `set -e` and `set -o pipefail` pass): set such an option in a script file, or leave it out;
+- `emulate` in any form but `emulate [-L] [-R] zsh` (`emulate sh` is refused);
+- a prompt variable set to a value with an expansion (`PS1=$PS1`);
+- assigning a variable named `options` (`options=1`, also after another assignment), zsh's options table: use another name;
 - in the native hook, a relative glob after a `cd` to a folder it cannot read as one plain path (`cd "$dir" && ls *.txt`; a row of `src/judge-hook.test.mjs`).
 
 ## C. Guards and gates
@@ -71,6 +75,7 @@ Also: a commit message that holds a denied form after a space is refused (`commi
 - Telling a typed prompt from other input rests on its opening text (A, K3).
 - A dollar cap can be overshot by one request (A, K8).
 - A session started without hooks is out of every gate's reach.
+- The pane reads the gates' settings (`ORCH_RUN_STALE_MIN`, `ORCH_GAP_MIN`, `ORCH_ESCALATION` and their plugin options) at each session start or reload (`loadSettings` in `dashboard/register.tsx`), while the hooks read them at each call. A setting changed during a session shows on the pane only after the next start or reload.
 - The workflow guard's reach (A, K9).
 - The startup warnings about rules with a `*` for a worktree's name (A, K10).
 - `strictMcpConfig` alone (A, K7).
@@ -93,3 +98,5 @@ Also: a commit message that holds a denied form after a space is refused (`commi
 ## H. Leftovers of the 2.0.0 development run
 
 Three slices of the 1.6.0 run carry stale test-gate blocks in the state log (`gates.jsonl` in the [state dir](glossary.md#s), which for the plugin is per user). They are state, not a code defect; `npm run report` shows them.
+
+The gates sequence diagram (`docs/diagrams/gates-sequence-light.svg` and `-dark.svg`) still says "[implementer allowed, or a researcher or reviewer (never blocked)]". That label predates the reviewer hold, which since 1.6.1 can refuse a reviewer's launch (`tests_failed_after_report`). The text of [docs/gates.md](gates.md) is correct.
