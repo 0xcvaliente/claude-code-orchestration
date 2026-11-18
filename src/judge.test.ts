@@ -7,7 +7,7 @@ import { basename, dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { HookInput } from "@anthropic-ai/claude-agent-sdk";
 import {
-  askOpus, bashGuard, classify, classifyDetail, tokenize, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
+  askOpus, bashGuard, classify, classifyDetail, tokenize, tooLarge, CONFIRM_PREFIX, HOOK_TIMEOUT_S, JUDGE_TIMEOUT_MS, JUDGE_POLICY, MAX_COMMAND_LENGTH, MAX_OPENERS, judgeBash, judgeEnabled, NO_TASK_REASON, NOT_AUTHORITY, RM_POLICY, parseVerdict, statPath,
   type BashClass, type JudgeContext, type JudgeDeps, type PathStat,
 } from "./judge.js";
 
@@ -2015,4 +2015,224 @@ test("classify (w2, third attempt): option setters read as an allowlist (G1, R1)
   assert.match(classifyDetail("timeout -s KILL 5 parallel echo", CWD).reason ?? "", /^parallel after a wrapper .* is always blocked wherever it stands/);
   assert.match(classifyDetail("git clone --template=/tmp/t u d", CWD).reason ?? "", /^git clone --template is always blocked: git copies the template folder's hooks/);
   assert.match(classifyDetail("GIT_TEMPLATE_DIR=/tmp/t git init", CWD).reason ?? "", /^setting GIT_TEMPLATE_DIR/);
+});
+
+// Release 2.0.0, slice w7: rule shapes, each tied to a finite source, instead of spellings. F1 to F5 are the confirmed
+// findings on the earlier slice's work, verbatim; each other row is a form inside a shape, and W7_PASS holds the
+// everyday commands that must keep passing. src/judge-differential.test.mjs reads W7_DENY (both copies deny every row,
+// alone and wrapped) and src/judge-hook.test.mjs's parity test reads every string here (both copies agree).
+// N1: a command starts after every reserved word and precommand modifier of zsh and bash that runs one (commandStarts).
+// N4: one list of wrappers; after any of them a refused program name later in the command is denied.
+// N5: PS0, PS1 and PS4 set through any builtin or expansion that assigns a named variable.
+const W7_DENY: string[] = [
+  // F1 (N1): repeat N, then a rule for the command word
+  "repeat 1 setopt globsubst; x=\"*(e{echo X})\"; echo $x",
+  "repeat 1 set -o kshglob",
+  "repeat 1 parallel x",
+  "repeat 1 sched +1 x",
+  "repeat 1 emulate sh",
+  // N1: the other starters, their options and arguments, and chains of them
+  "repeat 3 nocorrect noglob setopt globsubst",
+  "repeat $n setopt globsubst",
+  "repeat 1 at now",
+  "repeat 1 $X",
+  "repeat 1 bash",
+  "time -p setopt globsubst",
+  "time -p $X",
+  "time -p bash",
+  "command -p $X",
+  "builtin $X",
+  "exec -a x $X",
+  "exec -a x bash",
+  "exec -l -a x setopt promptsubst",
+  "nocorrect at now",
+  "noglob batch",
+  "- $X",
+  "if $X; then :; fi",
+  "while $X; do :; done",
+  "until $X; do :; done",
+  "if false; then :; elif $X; then :; fi",
+  "if false; then :; else repeat 1 emulate ksh; fi",
+  "if true; then alias ll=ls; fi",
+  "! $X",
+  "! su root",
+  "coproc $X",
+  "coproc N $X",
+  "if hash -p /tmp/x ls; then :; fi",
+  "if enable -f /tmp/x.so x; then :; fi",
+  "if . /dev/stdin; then :; fi",
+  "select x in a; do at now; done",
+  "for x in a; do repeat 2 sched +1 x; done",
+  "/usr/bin/time -p at now",
+  // F4 (N4): a refused program after a wrapper of the list
+  "flock /tmp/l parallel ::: 'echo X'",
+  "strace parallel x",
+  "chroot / parallel x",
+  "unshare parallel x",
+  "setpriv parallel x",
+  "fakeroot parallel x",
+  "nsenter parallel x",
+  "systemd-run parallel x",
+  // N4: the rest of the list, other refused names, options with separate values
+  "numactl -N 0 parallel x",
+  "ltrace -f parallel x",
+  "runcon -t t parallel x",
+  "faketime 2020-01-01 parallel x",
+  "proot -0 parallel x",
+  "sg grp parallel x",
+  "watch -n 1 parallel x",
+  "strace -o /tmp/o at now",
+  "chroot / su root",
+  "unshare -r runuser -l u",
+  "flock /tmp/l sem make",
+  "systemd-run --user batch",
+  "nsenter -t 1 pkexec id",
+  "strace -e trace=open cat at", // over-block: `at` after a wrapper, wherever it stands
+  // F5 (N5): a prompt set through a builtin
+  "printf -v PS4 '%s' '$(echo X)'; set -x; ls",
+  "read PS4 <<< '$(echo X)'; set -x; ls",
+  // N5: every builtin and expansion that assigns a named variable
+  "printf -vPS4 '%s' x",
+  "print -v PS1 x",
+  "read -r PS4 < f",
+  "read -ra PS4 < f",
+  "echo x | read PS4",
+  "IFS= read -r PS1",
+  "read 'PS4?prompt: '",
+  "vared PS4",
+  "getopts ab PS4",
+  "mapfile PS4 < f",
+  "readarray -t PS0 < f",
+  "zstyle -s :x y PS4",
+  "declare -n PS4=x",
+  "declare -n r=PS4",
+  "typeset -n PS1",
+  "local -n r=PS0",
+  "declare -a PS4=('$(echo X)')",
+  "PS4=('$(echo X)')",
+  "PS4[0]='$(echo X)'",
+  "PS4+='(echo X)'",
+  "for PS4 in a; do :; done",
+  "select PS1 in a; do :; done",
+  "foreach PS4 (a) :; end",
+  ": ${PS4:=x}",
+  ": ${PS4=x}",
+  ": ${PS4::=x}",
+  "echo \"${PS1:=x}\"",
+  "((PS4=1))",
+  "echo $((PS4+=1))",
+  "let PS4=1",
+  "let 'PS4 = 1'",
+];
+const W7_PASS: string[] = [
+  // the everyday commands of the slice
+  "set -euo pipefail",
+  "shopt -s nullglob",
+  "export PS1='$ '",
+  "xargs -P 4 -n 1 echo",
+  "find . -name '*.ts' -exec grep -l x {} +",
+  "timeout 60 npm test",
+  "env FOO=1 node x.js",
+  "nice -n 10 make",
+  "time npm test",
+  "npm run batch",
+  "grep -rn parallel src",
+  "echo at",
+  "for f in *.ts; do echo \"$f\"; done",
+  "if [ -f x ]; then cat x; fi",
+  "cd src && ls *.ts",
+  "bash -lc 'npm test'",
+  "read -r line < file",
+  "printf '%s\\n' x",
+  // neighbours of the new rules
+  "PS1='> '",
+  "export PS4",
+  "export PS1",
+  "readonly PS4",
+  "unset PS4",
+  "declare -p PS4",
+  "grep -rn PS4 src",
+  "git log --grep PS4",
+  "echo $PS4",
+  "echo ${PS1:-x}",
+  "printf -v out '%s' x",
+  "read -r a b c < f",
+  "repeat 3 echo hi",
+  "time -p make",
+  "exec node server.js",
+  "command -v git",
+  "builtin cd src",
+  "noglob echo *",
+  "nocorrect make",
+  "if true; then echo ok; fi",
+  "while read -r f; do echo \"$f\"; done < list",
+  "until make; do sleep 1; done",
+  "coproc cat",
+  "strace -f ls",
+  "nsenter -t 1 ls",
+  "unshare -r id",
+  "flock /tmp/l make test",
+  "watch -n 5 make",
+  "numactl -N 0 make",
+];
+
+test("classify (w7, N1, N4, N5): commands after reserved words and modifiers, wrapped refused programs, prompts set by builtins", () => {
+  assert.deepEqual(misread([
+    ...W7_DENY.map((c): [string, BashClass] => [c, "deny"]),
+    ...W7_PASS.map((c): [string, BashClass] => [c, "pass"]),
+  ]), []);
+  // The rule each finding meets.
+  assert.match(classifyDetail("repeat 1 sched +1 x", CWD).reason ?? "", /^sched runs a command later/);
+  assert.match(classifyDetail("repeat 1 $X", CWD).reason ?? "", /^a dynamic word could expand to rm|^a command word built from variables/);
+  assert.match(classifyDetail("if $X; then :; fi", CWD).reason ?? "", /^a dynamic word could expand to rm|^a command word built from variables/);
+  assert.match(classifyDetail("chroot / parallel x", CWD).reason ?? "", /^parallel after a wrapper/);
+  assert.match(classifyDetail("printf -v PS4 '%s' '$(echo X)'; set -x; ls", CWD).reason ?? "", /^setting PS4 through a builtin or an expansion that assigns it/);
+  assert.match(classifyDetail(": ${PS4:=x}", CWD).reason ?? "", /^setting PS4 through/);
+});
+
+// N6: the tokenizer's time is bounded. Its scans of nested `(`, `{` and `[` are linear (each answer kept by index), and
+// a command over MAX_COMMAND_LENGTH characters or with more than MAX_OPENERS of one opener is denied before parsing.
+// The worst commands under the caps (every opener at the cap, filled to the length cap) are decided well under 2 s.
+test("classify (w7, N6): the size caps deny before parsing, the worst command under them is decided in under 2 s, ordinary long commands pass", () => {
+  const timed = (cmd: string) => {
+    const t = performance.now();
+    const r = classifyDetail(cmd, CWD);
+    return { r, ms: performance.now() - t };
+  };
+  // F6, and the caps themselves
+  for (const cmd of ["[".repeat(40000), `echo ${"[".repeat(40000)}`, `${"(".repeat(32766)}${")".repeat(32766)}`, "x".repeat(MAX_COMMAND_LENGTH + 1), `echo ${"(".repeat(MAX_OPENERS + 1)}`, `echo ${"{".repeat(MAX_OPENERS + 1)}`, `echo ${"[".repeat(MAX_OPENERS + 1)}`]) {
+    const { r, ms } = timed(cmd);
+    assert.equal(r.cls, "deny", cmd.slice(0, 40));
+    assert.match(r.reason ?? "", /^a command (of|with) more than \d+ (characters|of [[{(]) is always blocked: the guard does not read one that long/);
+    assert.ok(ms < 100, `${cmd.slice(0, 20)}... decided in ${Math.round(ms)} ms`);
+  }
+  assert.equal(tooLarge("x".repeat(MAX_COMMAND_LENGTH)), undefined);
+  assert.equal(tooLarge("(".repeat(MAX_OPENERS) + "[".repeat(MAX_OPENERS) + "{".repeat(MAX_OPENERS)), undefined);
+  // The worst shapes under the caps: each opener at the cap, in one word, nested, paired, in quotes, in substitutions.
+  const C = MAX_OPENERS, fill = (n: number) => "a".repeat(Math.max(0, n));
+  const L = MAX_COMMAND_LENGTH;
+  const worst = [
+    `echo ${"[".repeat(C)}${fill(L - C - 5)}`,
+    `echo ${"{".repeat(C)}${fill(L - C - 5)}`,
+    `echo ${"{".repeat(C)}${fill(L - 2 * C - 5)}${"}".repeat(C)}`,
+    `${"(".repeat(C)} ${fill(L - 2 * C - 1)}${")".repeat(C)}`,
+    `echo $${"(".repeat(C)}${fill(L - 2 * C - 6)}${")".repeat(C)}`,
+    `echo ${"{\"".repeat(C)}${fill(L - 3 * C - 5)}${"\"".repeat(C)}`,
+    `echo ${"[{(".repeat(C)}${fill(L - 3 * C - 5)}`,
+    `echo ${"{$(".repeat(C)}${fill(L - 4 * C - 5)}${")".repeat(C)}`,
+    `echo ${"[ ".repeat(C)}${fill(L - 2 * C - 5)}`,
+    `cat <<E\n${"$(".repeat(C)}${fill(L - 3 * C - 10)}${")".repeat(C)}\nE`,
+  ];
+  for (const cmd of worst) {
+    assert.ok(cmd.length <= L && !tooLarge(cmd), `${cmd.slice(0, 20)}: under the caps`);
+    const { ms } = timed(cmd);
+    assert.ok(ms < 2000, `${cmd.slice(0, 20)}... (${cmd.length} characters) decided in ${Math.round(ms)} ms`);
+  }
+  // Ordinary long commands are not caught: 4,000 characters, 30 bracket expressions, a here-document of 4 KB of code.
+  const ordinary = [
+    `echo ${"word ".repeat(800)}`,
+    `ls ${"src/[a-z]*.ts ".repeat(30)}`,
+    `cat > f.js <<'EOF'\n${"function f(a) { return [a, (b) => b]; }\n".repeat(100)}EOF`,
+  ];
+  for (const cmd of ordinary) assert.equal(classify(cmd, CWD), "pass", cmd.slice(0, 40));
 });

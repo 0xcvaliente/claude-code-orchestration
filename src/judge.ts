@@ -88,8 +88,16 @@ export interface Script {
 const isSpace = (c: string) => c === " " || c === "\t";
 const ENDS_WORD = new Set([" ", "\t", "\n", ";", "&", "|", "(", ")", "<", ">", ""]);
 
-/** Index of the `)` closing the `(` at `open`, quote-aware and nesting-aware. */
-function closeParen(src: string, open: number): number {
+/**
+ * Index of the `)` closing the `(` at `open`, quote-aware and nesting-aware. With `memo` (one per source text), the
+ * result for every `(` this scan passes is kept by its index: a scan from such a `(` would visit exactly the
+ * characters this one visits after it and close at the `)` that closes it here, so a later call for it is answered
+ * at once and `((((...))))` is read in linear time, not quadratic.
+ */
+function closeParen(src: string, open: number, memo?: Map<number, number>): number {
+  const known = memo?.get(open);
+  if (known !== undefined) return known;
+  const opens: number[] | undefined = memo ? [] : undefined;
   let depth = 0;
   for (let j = open; j < src.length; j++) {
     const c = src.charAt(j);
@@ -99,8 +107,13 @@ function closeParen(src: string, open: number): number {
       if (j < 0) throw new Doubt("unterminated quote");
     } else if (c === '"') j = closeDouble(src, j);
     else if (c === "`") j = closeBacktick(src, j);
-    else if (c === "(") depth++;
-    else if (c === ")" && --depth === 0) return j;
+    else if (c === "(") {
+      depth++;
+      opens?.push(j);
+    } else if (c === ")") {
+      if (memo && opens?.length) memo.set(opens.pop()!, j);
+      if (--depth === 0) return j;
+    }
   }
   throw new Doubt("unterminated substitution");
 }
@@ -128,9 +141,72 @@ function closeBacktick(src: string, open: number): number {
 /**
  * `((` at `open` (a `((...))` command or the inside of `$((...))`) is arithmetic, where `<<` is a left shift: read as a
  * here document it would hide the lines after it (`((1<<EOF))` then `rm -rf .git`), so any `<<` in the span is a doubt.
+ * `parens` is closeParen's memo, `shiftFrom(k)` the index of the first `<<` at or after k (-1 for none): one lookup,
+ * not a scan of the span, so a run of `((` stays linear.
  */
-function arithShift(src: string, open: number): void {
-  if (src.slice(open, closeParen(src, open) + 1).includes("<<")) throw new Doubt("<< inside ((...)) is a left shift, not a here document");
+function arithShift(src: string, open: number, parens: Map<number, number>, shiftFrom: (k: number) => number): void {
+  const end = closeParen(src, open, parens);
+  const at = shiftFrom(open);
+  if (at >= 0 && at + 1 <= end) throw new Doubt("<< inside ((...)) is a left shift, not a here document");
+}
+
+/** For every index k of `src`, the first index at or after k that `hit` accepts (src.length when none): one pass from
+ * the end. */
+function firstFrom(src: string, hit: (k: number) => boolean): Int32Array {
+  const out = new Int32Array(src.length + 1);
+  out[src.length] = src.length;
+  for (let k = src.length - 1; k >= 0; k--) out[k] = hit(k) ? k : out[k + 1]!;
+  return out;
+}
+
+/**
+ * The brace-expansion scan of the `{` at `open` (see tokenize): true when the shell would expand it (a `}` closes it
+ * and its unquoted text holds `,` or `..`). Every `{` the scan passes is answered too and kept in `memo` by its index,
+ * as closeParen does: a scan from it would visit the same characters, collect the part of this scan's unquoted text
+ * between it and its `}`, and stop where this one stops when no `}` closes it. So nested braces are read in linear
+ * time. `parens` is closeParen's memo.
+ */
+function braceExpands(src: string, open: number, memo: Map<number, boolean>, parens: Map<number, number>): boolean {
+  const known = memo.get(open);
+  if (known !== undefined) return known;
+  const inner: number[] = []; // for each `{` still open inside: its index, then where its unquoted text starts
+  let length = 0, lastComma = -1, lastDots = -1, dot = false; // the unquoted text, by its length and last hits
+  let k = open + 1, depth = 1;
+  for (; k < src.length; k++) {
+    const d = src.charAt(k);
+    if (d === "\\") k++;
+    else if (d === "'") {
+      k = src.indexOf("'", k + 1);
+      if (k < 0) throw new Doubt("unterminated quote");
+    } else if (d === '"') k = closeDouble(src, k);
+    else if (d === "`") k = closeBacktick(src, k);
+    else if ((d === "$" || d === "<" || d === ">") && src.charAt(k + 1) === "(") k = closeParen(src, k + 1, parens);
+    else if (d === "$" && src.charAt(k + 1) === "{") {
+      k = src.indexOf("}", k + 2);
+      if (k < 0) throw new Doubt("unterminated ${...}");
+    } else if (d === "{") {
+      depth++;
+      inner.push(k, length);
+    } else if (d === "}" && --depth === 0) break;
+    else if (ENDS_WORD.has(d)) break;
+    else {
+      if (d === "}") {
+        const start = inner.pop()!;
+        memo.set(inner.pop()!, lastComma >= start || lastDots - 1 >= start);
+      }
+      if (d === ",") lastComma = length;
+      if (d === "." && dot) lastDots = length;
+      dot = d === ".";
+      length++;
+    }
+  }
+  while (inner.length) {
+    inner.pop();
+    memo.set(inner.pop()!, false); // its scan stops here too, with no `}`
+  }
+  const expands = src.charAt(k) === "}" && (lastComma >= 0 || lastDots >= 1);
+  memo.set(open, expands);
+  return expands;
 }
 
 /** `$'...'` starting at the quote after `$`: the decoded text and the index of the closing quote. */
@@ -184,6 +260,18 @@ export function tokenize(src: string): Script {
   let allAssign = true; // every word so far in this command is an assignment (kept, not rescanned: long commands)
   let bracketOpen = 0; // unquoted `[` not yet closed in this command: `$[...]` or a subscript, where `<<` is a shift
   const heredocs: Array<{ delim: string; strip: boolean; quoted: boolean }> = [];
+  // What the scans below learn about this text, so each character is scanned a bounded number of times (the scans of
+  // nested `(`, `{` and `[` used to rescan the rest of the text from each one): closeParen's and braceExpands' memos,
+  // and, built on first use, the first `<<` from each index and the first `]` or word end from each index.
+  const parens = new Map<number, number>();
+  const braces = new Map<number, boolean>();
+  let shifts: Int32Array | undefined;
+  let stops: Int32Array | undefined;
+  const shiftFrom = (k: number): number => {
+    shifts ??= firstFrom(src, (j) => src.charAt(j) === "<" && src.charAt(j + 1) === "<");
+    const at = shifts[k] ?? src.length;
+    return at < src.length ? at : -1;
+  };
 
   const piece = (p: Piece) => (pieces ??= []).push(p);
   const lit = (s: string, quoted: boolean) => {
@@ -219,8 +307,8 @@ export function tokenize(src: string): Script {
   const dollar = (i: number, inDouble: boolean): number => {
     const n = src.charAt(i + 1);
     if (n === "(") {
-      if (src.charAt(i + 2) === "(") arithShift(src, i + 1);
-      const end = closeParen(src, i + 1);
+      if (src.charAt(i + 2) === "(") arithShift(src, i + 1, parens, shiftFrom);
+      const end = closeParen(src, i + 1, parens);
       substitutions.push(src.slice(i + 2, end));
       plain = false;
       piece({ dyn: true });
@@ -309,9 +397,10 @@ export function tokenize(src: string): Script {
             break;
           }
           // An unquoted heredoc expands $(...) and backticks in its body: read them as scripts.
+          const lineParens = new Map<number, number>();
           if (!h.quoted) for (const m of line.matchAll(/\$\(|`/g)) {
             const at = m.index ?? 0;
-            const end = m[0] === "`" ? closeBacktick(line, at) : closeParen(line, at + 1);
+            const end = m[0] === "`" ? closeBacktick(line, at) : closeParen(line, at + 1, lineParens);
             substitutions.push(line.slice(at + (m[0] === "`" ? 1 : 2), end));
           }
         }
@@ -321,7 +410,7 @@ export function tokenize(src: string): Script {
       const eol = src.indexOf("\n", i);
       i = (eol < 0 ? src.length : eol) - 1;
     } else if (c === "(") {
-      if (next === "(") arithShift(src, i);
+      if (next === "(") arithShift(src, i, parens, shiftFrom);
       const word = pieces?.map((p) => ("lit" in p ? p.lit : "?")).join("") ?? "";
       if (/^\s*\)/.test(src.slice(i + 1)) && !word.endsWith("=")) defines = true; // name() { ... }
       else if (pieces && !word.endsWith("=")) throw new Doubt("a ( attached to a word (zsh glob qualifier or extglob)");
@@ -345,27 +434,8 @@ export function tokenize(src: string): Script {
       // Brace expansion turns one word into several (`{rm,-rf,.git}`): we cannot tell what runs.
       // The scan respects quotes, so `{rm,-rf,.git,' '}` is seen whole, and steps over substitutions and `${...}`, which
       // stay inside the word whatever they hold, so `{rm,$(:)-rf,.git}` and `{rm,`x y`-rf,.git}` are seen whole too; so
-      // does a process substitution (`{rm,-rf,x,<(:)}` expands to `rm -rf x /dev/fd/63`).
-      let unquoted = "";
-      let k = i + 1, depth = 1;
-      for (; k < src.length; k++) {
-        const d = src.charAt(k);
-        if (d === "\\") k++;
-        else if (d === "'") {
-          k = src.indexOf("'", k + 1);
-          if (k < 0) throw new Doubt("unterminated quote");
-        } else if (d === '"') k = closeDouble(src, k);
-        else if (d === "`") k = closeBacktick(src, k);
-        else if ((d === "$" || d === "<" || d === ">") && src.charAt(k + 1) === "(") k = closeParen(src, k + 1);
-        else if (d === "$" && src.charAt(k + 1) === "{") {
-          k = src.indexOf("}", k + 2);
-          if (k < 0) throw new Doubt("unterminated ${...}");
-        } else if (d === "{") depth++;
-        else if (d === "}" && --depth === 0) break;
-        else if (ENDS_WORD.has(d)) break;
-        else unquoted += d;
-      }
-      if (src.charAt(k) === "}" && /,|\.\./.test(unquoted)) throw new Doubt("brace expansion");
+      // does a process substitution (`{rm,-rf,x,<(:)}` expands to `rm -rf x /dev/fd/63`). See braceExpands.
+      if (braceExpands(src, i, braces, parens)) throw new Doubt("brace expansion");
       lit("{", false);
     } else if (c === "<" || c === ">" || c === "&") {
       if (pieces && pieces.length === 1 && "lit" in pieces[0]! && /^\d+$/.test((pieces[0] as { lit: string }).lit)) pieces = undefined; // 2>
@@ -373,7 +443,7 @@ export function tokenize(src: string): Script {
       plain = false;
       if (c === "&") i++; // &> and &>>
       if ((c === "<" || c === ">") && next === "(") {
-        const end = closeParen(src, i + 1);
+        const end = closeParen(src, i + 1, parens);
         substitutions.push(src.slice(i + 2, end));
         piece({ dyn: true });
         endWord();
@@ -406,7 +476,8 @@ export function tokenize(src: string): Script {
       let k = i + 1;
       if (src.charAt(k) === "!" || src.charAt(k) === "^") k++;
       if (src.charAt(k) === "]") k++;
-      while (k < src.length && src.charAt(k) !== "]" && !ENDS_WORD.has(src.charAt(k))) k++;
+      // The first `]` or word end from k (the scan `while (src.charAt(k) !== "]" && !ENDS_WORD.has(...)) k++`, looked up).
+      if (k < src.length) k = (stops ??= firstFrom(src, (j) => src.charAt(j) === "]" || ENDS_WORD.has(src.charAt(j))))[k] ?? src.length;
       if (src.charAt(k) === "]") {
         piece({ glob: "[]" });
         i = k;
@@ -859,11 +930,87 @@ function suOptionFollows(next: Word | undefined): boolean {
 }
 /** find actions whose next word is a command word. */
 const FIND_EXEC = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
-const WRAPPERS = new Set(["timeout", "env", "nice", "time", "command", "exec", "builtin", "nohup", "xargs", "busybox", "stdbuf", "ionice", "setsid", "unbuffer", "chrt", "taskset"]);
+/**
+ * The wrappers: programs and builtins that run their arguments as a command. One list, read by afterWrapper and the
+ * WRAPPED_DENY rule. A wrapper not on it (and `ssh host ...`, which runs its words on another machine) is out of reach.
+ */
+const WRAPPERS = new Set([
+  "timeout", "env", "nice", "time", "command", "exec", "builtin", "nohup", "xargs", "busybox", "stdbuf", "ionice", "setsid",
+  "unbuffer", "chrt", "taskset", "numactl", "flock", "script", "strace", "ltrace", "chroot", "unshare", "setpriv",
+  "fakeroot", "nsenter", "systemd-run", "watch", "doas", "runcon", "faketime", "proot", "sg",
+]);
+/**
+ * Reserved words and precommand modifiers of zsh and bash after which the shell runs the next word as a command (zsh
+ * manual, "Reserved Words" and "Precommand Modifiers"; bash's reserved words): `if`, `then`, `else`, `elif`, `do`,
+ * `while`, `until`, `!`, `{`, `always`, `nocorrect`, `noglob`, `-`, `builtin`, `command` and `exec` (their options
+ * skipped, exec's `-a NAME` with its value), `time` (its options skipped), `repeat N` (the count skipped) and
+ * `coproc` (with an optional name). `(`, `;`, `&&`, `||`, `|`, a newline and `}` start a new simple command in the
+ * tokenizer already, so `for`/`foreach`/`select` bodies (after `;`, `do` or `)`), `case` branches (after `)`) and
+ * `{ ... } always { ... }` are covered; `function name {` and `name() {` are denied whole.
+ */
+const STARTERS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "always", "nocorrect", "noglob", "-", "builtin", "command", "exec", "time", "repeat", "coproc"]);
+/** Builtins that declare a variable: a bare prompt name after them (`export PS1`) is not an assignment unless `-n`
+ * (a nameref) is given. */
+const DECLARERS = new Set(["export", "readonly", "declare", "typeset", "local"]);
+/**
+ * Which words of a simple command run as commands (STARTERS): the first word that is not a redirection or an
+ * assignment, and after each starter word the next such word, past the starter's own options or argument.
+ * Over-inclusive: a starter's case is ignored and so is its path (`/usr/bin/time`), and after `coproc NAME` both NAME
+ * and the word after it count.
+ */
+function commandStarts(ws: Word[]): boolean[] {
+  const out: boolean[] = new Array<boolean>(ws.length).fill(false);
+  const skippable = (w: Word) => w.redirect || w.assign || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(staticPrefix(w));
+  let i = 0;
+  while (i < ws.length) {
+    while (i < ws.length && skippable(ws[i]!)) i++;
+    if (i >= ws.length) break;
+    out[i] = true;
+    const w = ws[i]!;
+    if (w.dynamic) break;
+    const name = base(w.text);
+    if (!STARTERS.has(name)) break;
+    i++;
+    if (name === "repeat") {
+      while (i < ws.length && ws[i]!.redirect) i++;
+      i++; // the count, whatever it is
+    } else if (name === "time" || name === "command" || name === "builtin" || name === "exec") {
+      for (; i < ws.length && (ws[i]!.redirect || (!ws[i]!.dynamic && /^-./.test(ws[i]!.text))); i++) {
+        if (name === "exec" && !ws[i]!.redirect && /^-[A-Za-z]*a$/.test(ws[i]!.text)) i++; // -a NAME
+      }
+    } else if (name === "coproc" && i + 1 < ws.length && !ws[i]!.dynamic && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[i]!.text)) {
+      out[i] = true; // coproc NAME: NAME and the word after it
+      i++;
+    }
+  }
+  return out;
+}
+/** A word that may name PS0, PS1 or PS4 as the variable a builtin assigns: the bare name (`read PS4`, `printf -v PS4`,
+ * `for PS4 in`, `getopts ab PS4`, `zstyle -s c s PS4`), with an option attached (`-vPS4`) or zsh's prompt suffix
+ * (`read 'PS4?x'`); a nameref's value (`declare -n r=PS4`); an element (`PS4[0]=...`); or an append (`PS4+=...`, which
+ * can finish a construct an earlier value began). */
+function promptTarget(w: Word): string | undefined {
+  const p = staticPrefix(w);
+  if (/^PS[014]\+=/.test(p)) return p.slice(0, 3);
+  const next = w.pieces.find((x) => !("lit" in x));
+  if (/^PS[014]$/.test(p) && next && "glob" in next && next.glob === "[]") return p;
+  if (w.dynamic) return undefined;
+  const m = /^(?:-[A-Za-z]*)?(PS[014])(?:\?.*)?$/s.exec(w.text) ?? /^[A-Za-z_][A-Za-z0-9_]*=(PS[014])$/.exec(w.text);
+  return m?.[1];
+}
+/** A prompt variable assigned in the text itself: `${PS4:=...}`, `${PS4=...}`, `${PS4::=...}` (any `=` after the name
+ * inside the braces counts), an array value `PS4=(...)`, or arithmetic that names it with an assignment operator
+ * (`((PS4=1))`, `$((PS4+=1))`, `$[PS4=1]`). Backslashes are dropped first, so `${P\S4:=x}` counts. */
+function promptInText(src: string): string | undefined {
+  const t = src.replace(/\\/g, "");
+  const m = /\$\{[^}]*(PS[014])[^}]*=/.exec(t) ?? /(?:^|[^A-Za-z0-9_])(PS[014])\+?=\(/.exec(t) ?? ((t.includes("((") || t.includes("$[")) ? /(?:^|[^A-Za-z0-9_])(PS[014])\s*(?:\*\*|<<|>>|[-+*/%&|^])?=(?!=)/.exec(t) : null);
+  return m?.[1];
+}
+const promptDeny = (name: string) => deny(`setting ${name} through a builtin or an expansion that assigns it (read, printf -v, getopts, a loop variable, a nameref, \${${name}:=...}, an element, +=, an array or arithmetic) is always blocked: a traced or interactive shell expands it, also one a script starts later`);
 /** Programs the rules refuse wherever a wrapper may start them. A wrapper's options may take separate values
  * (`timeout -s KILL 5`, `xargs -d ,`, `env -u X`), and the guard does not model each wrapper's options: so after a
  * wrapper any later word of the command with one of these base names is refused (over-inclusive: `xargs grep
- * parallel`, `timeout 5 echo at`). */
+ * parallel`, `timeout 5 echo at`, `strace -o at ls`). */
 const WRAPPED_DENY = ["parallel", "sem", "su", "pkexec", "runuser", "at", "batch"];
 /** The word follows a wrapper prefix, skipping the wrapper's options, numbers and assignments (`timeout 5 su`), or a
  * find action that runs a command (`find . -exec su`, `-execdir`, `-ok`, `-okdir`). */
@@ -1156,14 +1303,18 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     while (i < ws.length && (ws[i]!.redirect || ws[i]!.assign || (!ws[i]!.dynamic && LEADERS.has(ws[i]!.text)))) i++;
     return i;
   });
-  const leads = (k: number) => k === at || k <= leaderRun() || afterWrapper(ws, k);
+  // The words that run as commands after reserved words and precommand modifiers (`repeat 1 setopt ...`,
+  // `time -p sched ...`, `if $X`): every rule for the command word applies to them too (commandStarts).
+  const starts = once(() => commandStarts(ws));
+  const cmdWord = (k: number) => k === at || starts()[k] === true;
+  const leads = (k: number) => cmdWord(k) || k <= leaderRun() || afterWrapper(ws, k);
   // The first wrapper of the command (ws.length when none): a wrapper in command position (also behind keywords) or
   // one of find's -exec actions.
   const wrapping = once(() => {
     for (let i = 0; i < ws.length; i++) {
       const x = ws[i]!;
       if (x.redirect || x.dynamic) continue;
-      if (FIND_EXEC.has(x.text) || (WRAPPERS.has(base(x.text)) && (i === at || i <= leaderRun()))) return i;
+      if (FIND_EXEC.has(x.text) || (WRAPPERS.has(base(x.text)) && (cmdWord(i) || i <= leaderRun()))) return i;
     }
     return ws.length;
   });
@@ -1189,6 +1340,21 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
       if (n === "set" ? aFrom[i + 1] : n === "printf" || n === "print" ? vFrom[i + 1] : true) return i;
     }
     return ws.length;
+  });
+  // A prompt name is text to a TEXT_ONLY command word (`grep PS4 f`) and to `unset`; a declaring builtin
+  // (DECLARERS) takes the bare name without assigning it, unless an option holds `n` (a nameref).
+  const nameref = once(() => ws.some((x) => !x.redirect && !x.dynamic && /^[-+][A-Za-z]*n/.test(x.text)));
+  const promptFree = (k: number, w: Word) => {
+    if (k <= at) return false;
+    if (textOnly()) return true;
+    const n = ws[at]!.dynamic ? "" : base(ws[at]!.text);
+    return n === "unset" || (DECLARERS.has(n) && /^PS[014]$/.test(w.text) && !w.dynamic && !nameref());
+  };
+  // letPrompt()[i]: a prompt name in nr[i] or a later word (`let PS4=1`, `let 'PS4 = 1'`), computed once.
+  const letPrompt = once(() => {
+    const out: Array<string | undefined> = new Array<string | undefined>(nr.length + 1).fill(undefined);
+    for (let i = nr.length - 1; i >= 0; i--) out[i] = /(?:^|[^A-Za-z0-9_])(PS[014])(?:[^A-Za-z0-9_]|$)/.exec(nr[i]!.text)?.[1] ?? out[i + 1];
+    return out;
   });
   // `-rm` is bfs's own name for -delete.
   const findAction = once(() => ws.find((x) => x.text === "-delete" || x.text === "-rm")?.text);
@@ -1225,6 +1391,12 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
         : "assigning zsh's functions, aliases, galiases, saliases or dis_functions table defines a function or alias: always blocked"));
       continue;
     }
+    // A declaring builtin with -n makes a prompt name a nameref (`declare -n PS4=x`): its value is another variable's.
+    const prompt = w.redirect ? undefined : promptTarget(w) ?? (k > at && nameref() && DECLARERS.has(ws[at]!.dynamic ? "" : base(ws[at]!.text)) ? /^(PS[014])\+?=/.exec(staticPrefix(w))?.[1] : undefined);
+    if (prompt && !promptFree(k, w)) {
+      push(promptDeny(prompt));
+      continue;
+    }
     if (!w.redirect && subscriptSubstitution(w.text)) {
       push(deny("a $(...) or backtick inside an array subscript runs when arithmetic evaluates it: always blocked"));
       continue;
@@ -1232,7 +1404,7 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     if (w.assign || w.redirect) continue; // NAME=value and redirection targets are not commands
     if (w.text.toLowerCase().startsWith("--no-preserve-root")) push(deny("--no-preserve-root is always blocked", "rm"));
     if (w.dynamic) {
-      const cp = k === at;
+      const cp = cmdWord(k);
       if (couldBe(w, DENY_NAMES, cp)) push(deny(`${w.text || "a dynamic word"} could expand to rm or a privilege command (sudo, doas, su, pkexec, runuser): the guard cannot tell what runs`, "rm"));
       else if (couldBe(w, ["git"], cp)) push(JUDGE_GIT);
       else if (cp) push(deny("a command word built from variables, substitutions or globs is always blocked: the guard cannot tell what runs"));
@@ -1245,9 +1417,9 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
     if (name === "sudo" || name === "doas") push(deny(`${name} is always blocked`));
     // su, pkexec, runuser are common words in text (`grep su file`), so they count only as the command word, when an
     // su-style option follows them, or after a wrapper prefix (`timeout 5 su`, `env su`, `xargs su`).
-    else if (PRIVILEGE.includes(name) && (k === at || suOptionFollows(nr[s]) || afterWrapper(ws, k))) push(deny(`${name} is always blocked`));
+    else if (PRIVILEGE.includes(name) && (cmdWord(k) || suOptionFollows(nr[s]) || afterWrapper(ws, k))) push(deny(`${name} is always blocked`));
     else if (name === "find" && findAction()) push(deny(`find ${findAction()} is always blocked; remove specific paths with a plain rm -r <path>`, "rm"));
-    else if (k === at && (name === "alias" || name === "function")) push(deny(`${name} definitions are always blocked: a later word could run anything`));
+    else if (cmdWord(k) && (name === "alias" || name === "function")) push(deny(`${name} definitions are always blocked: a later word could run anything`));
     else if (name === "shopt" && expandAliasesFrom()[s]) push(deny("shopt expand_aliases is always blocked"));
     else if (OPTION_SETTERS.has(name) && !optionsRead && leads(k) && (optionsRead = true) && optionVerdict(name, nr.slice(s))) push(optionVerdict(name, nr.slice(s))!);
     else if (name === "emulate" && leads(k) && !nr.slice(s).every((x) => !x.dynamic && ["-L", "-R", "-LR", "-RL", "zsh"].includes(x.text))) push(deny("emulate is always blocked except emulate [-L] [-R] zsh: sh, ksh and csh emulation turn on globsubst, and -c runs a string"));
@@ -1271,15 +1443,16 @@ function analyzeCommand(cmd: SimpleCommand, ctx: Ctx, depth: number, plainLine: 
         }
       }
     }
-    else if (name === "hash" && (k === at || afterWrapper(ws, k)) && remapFrom()[s]) push(deny("hash -p and hash name=path point a command name at another program, like an alias: always blocked"));
-    else if (name === "enable" && (k === at || afterWrapper(ws, k)) && loadFrom()[s]) push(deny("enable -f loads a builtin from a library: always blocked"));
-    else if ((name === "set" || name === "setopt" || name === "shopt") && (k === at || afterWrapper(ws, k)) && traceFrom()[s]) ctx.traced = true;
-    else if (k === at && (name === "at" || name === "batch")) push(deny(`${name} schedules commands the guard cannot see: always blocked`));
+    else if (name === "hash" && (cmdWord(k) || afterWrapper(ws, k)) && remapFrom()[s]) push(deny("hash -p and hash name=path point a command name at another program, like an alias: always blocked"));
+    else if (name === "enable" && (cmdWord(k) || afterWrapper(ws, k)) && loadFrom()[s]) push(deny("enable -f loads a builtin from a library: always blocked"));
+    else if ((name === "set" || name === "setopt" || name === "shopt") && (cmdWord(k) || afterWrapper(ws, k)) && traceFrom()[s]) ctx.traced = true;
+    else if (cmdWord(k) && (name === "at" || name === "batch")) push(deny(`${name} schedules commands the guard cannot see: always blocked`));
+    else if (name === "let" && letPrompt()[s]) push(promptDeny(letPrompt()[s]!));
     else if (name === "eval") {
       const rest = after(k);
       script(rest.map((x) => x.text).join(" "), rest.some((x) => x.dynamic), "eval");
-    } else if (SHELLS.has(name)) push(shellRule(cmd, nr, s, k === at, name, ctx, depth));
-    else if (name === "source" || (k === at && w.text === ".")) {
+    } else if (SHELLS.has(name)) push(shellRule(cmd, nr, s, cmdWord(k), name, ctx, depth));
+    else if (name === "source" || (cmdWord(k) && w.text === ".")) {
       const file = nr[s];
       if (!file || file.dynamic || STDIN_PATH.test(file.text)) push(deny(`${w.text} of stdin, a substitution or a dynamic path is always blocked`));
     } else if (name === "xargs") push(xargsRule(nr, s));
@@ -1394,6 +1567,27 @@ function xargsRule(nr: Word[], s: number): Classification {
   return PASS;
 }
 
+/** The size caps: a command longer than MAX_COMMAND_LENGTH characters, or with more than MAX_OPENERS of one of `[`, `{`
+ * and `(`, is refused before the tokenizer reads it. The tokenizer's scans are linear (see tokenize), so these bound
+ * the time of the judge and of the native hook's own scans (under 0.5 s for the worst command under them on the
+ * machine they were picked on), and are far above what a command line holds (a here-document of a few KB included). */
+export const MAX_COMMAND_LENGTH = 262_144;
+export const MAX_OPENERS = 4_096;
+
+/** The reason a command is over the size caps, or undefined. One pass, before anything else reads the command. */
+export function tooLarge(command: string): string | undefined {
+  if (command.length > MAX_COMMAND_LENGTH) return `a command of more than ${MAX_COMMAND_LENGTH} characters is always blocked: the guard does not read one that long; write long text to a file with the editor and run a short command`;
+  let square = 0, curly = 0, round = 0;
+  for (let i = 0; i < command.length; i++) {
+    const c = command.charCodeAt(i);
+    if (c === 91) square++;
+    else if (c === 123) curly++;
+    else if (c === 40) round++;
+  }
+  const over = square > MAX_OPENERS ? "[" : curly > MAX_OPENERS ? "{" : round > MAX_OPENERS ? "(" : "";
+  return over ? `a command with more than ${MAX_OPENERS} of ${over} is always blocked: the guard does not read one that long; write long text to a file with the editor and run a short command` : undefined;
+}
+
 /** Tokenize and apply the rules to every simple command, every substitution and every script payload. */
 function analyze(src: string, ctx: Ctx, depth: number): Classification {
   if (depth > MAX_DEPTH) return deny("commands nested more than 3 deep are always blocked");
@@ -1404,6 +1598,8 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
     return deny(`the guard cannot tell what runs (${err instanceof Error ? err.message : String(err)}): always blocked`);
   }
   if (script.defines) return deny("function definitions are always blocked: a later word could run anything");
+  const assigned = promptInText(src);
+  if (assigned) return promptDeny(assigned);
   if (tableExpansion(src)) return deny("an assigning ${...} of zsh's functions, aliases or commands table defines a function, alias or command path (a table name after ${ with an = anywhere later in the command): always blocked");
   // The first deny decides, so nothing after it is read (a long command stays fast once it is denied).
   const results: Classification[] = [];
@@ -1473,6 +1669,8 @@ function analyze(src: string, ctx: Ctx, depth: number): Classification {
  * pass: everything else, including `rm file` and `rm -f file` with literal arguments. deny wins over judge.
  */
 export function classifyDetail(command: string, cwd?: string): Classification {
+  const big = tooLarge(command);
+  if (big) return deny(big);
   const ctx: Ctx = { cwd, sensitive: false };
   const r = analyze(command, ctx, 0);
   if (r.cls !== "deny" && ctx.env && ctx.sensitive) return deny(
