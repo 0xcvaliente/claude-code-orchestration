@@ -57,7 +57,7 @@ npm run typecheck    # the type check only
   skills/            route, orchestration-conventions, skill-authoring
   workflows/         orchestrate.js (the gated workflow)
   settings.json, rules/
-.claude-plugin/      marketplace.json
+.claude-plugin/      marketplace.json (written by npm run build-plugin; docs/marketplace.md)
 dist/plugin/, dist/dashboard/   the built plugin, and the pane's mod alone (both committed)
 dashboard/           the pane (source for both builds)
 statusline/          statusline.sh
@@ -97,8 +97,9 @@ The full rules are in `CLAUDE.md` and `.claude/rules/agents.md`. `CLAUDE.md` hol
 ## Build the plugin
 
 ```bash
-npm run build-plugin    # assemble dist/plugin and dist/dashboard
-npm run check-plugin    # fail when the committed build is stale
+npm run build-plugin    # assemble dist/plugin and dist/dashboard, and write .claude-plugin/marketplace.json
+npm run check-plugin    # fail when the committed build or the marketplace file is stale
+claude plugin validate .              # check the marketplace manifest
 claude plugin validate dist/plugin    # check the built plugin
 claude --plugin-dir dist/plugin       # try it in a session
 ```
@@ -111,8 +112,9 @@ What the build does:
 - **Hooks.** It registers `judge-hook.mjs` (PreToolUse on `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`, and wraps the judge hook for `onFailure: "block"`. It also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`).
 - **Settings.** It writes the 22 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`. Since 1.6.1 it writes no plugin `settings.json`: the worker rows are the mod's `AgentRow` hook, and `.claude/hooks/subagent-statusline.mjs` ships for a person's own `subagentStatusLine` setting.
 - **The pane.** It builds `dashboard/` into the plugin (with its state owner renamed to `orchestration`) and alone as `dist/dashboard`.
+- **The marketplace.** Since 2.0.2 it writes `.claude-plugin/marketplace.json` (one entry, `orchestration` at `./dist/plugin`, with no `version`: it lives in `plugin.json` only, which Claude Code would take anyway), and adds `homepage`, `repository` and `keywords` to both plugin manifests. The facts they share are `SHARED` in `scripts/build-plugin.mjs`. No manifest carries a `license` or an email address ([Sharing the plugin](marketplace.md)).
 
-`npm run check-plugin` skips only `dist/plugin/evals/results` and the two paths Claude Code writes when it loads the pane from `dist/dashboard`: `tsconfig.json` at that folder's root and `.claude-plugin/types/` (git ignores both). A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
+`npm run check-plugin` also fails, with `.claude-plugin/marketplace.json is out of date`, when that file differs from what the build writes or is missing. It skips only `dist/plugin/evals/results` and the two paths Claude Code writes when it loads the pane from `dist/dashboard`: `tsconfig.json` at that folder's root and `.claude-plugin/types/` (git ignores both). A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
 
 ## Release steps
 
@@ -120,8 +122,8 @@ How releases 1.2.2 to 1.5.0 were made, and 1.5.1 on. `X.Y.Z` is the new version.
 
 1. Set `version` to `X.Y.Z` in `package.json` and in `package-lock.json`, which names it twice (at the top and under `packages[""]`).
 2. Add one entry `## [X.Y.Z] - <date>` to `CHANGELOG.md`, above the latest one: an opening paragraph that says what the release is and what a person upgrading has to know, then the sections the release needs, out of `### Added`, `### Changed`, `### Fixed` and, since 2.0.0, `### Limits`: one paragraph pointing to [limits.md](limits.md), which lists everything the release does not do with its reason (2.0.0 and later carry no `### Known and not fixed` list). When a changed behaviour asks something of a person, its item says what to do. Add `[X.Y.Z]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/vX.Y.Z` as the first line of the link definitions at the end. Never edit a released entry.
-3. Run `npm run build-plugin`. The plugin manifests in `dist/` take the version from `package.json`.
-4. Run `npm run check`. It must pass.
+3. Run `npm run build-plugin`. The plugin manifests in `dist/` take the version from `package.json`; the marketplace entry in `.claude-plugin/marketplace.json` carries none, so `plugin.json` alone sets it. People get the release only because the version changed.
+4. Run `npm run check`. It must pass; its `check-plugin` step compares the marketplace file too. Then run `claude plugin validate .` and `claude plugin validate dist/plugin`: neither may report an error.
 5. Commit on a branch, push it and open a pull request into `main`. Wait until CI passes.
 6. Squash-merge it with the title `Release X.Y.Z: <summary> (#N)`, where `N` is the pull request's number (only 1.4.3's title had no summary): `gh pr merge <N> --squash --subject "Release X.Y.Z: <summary> (#N)"`. Pass `--subject`: the repository's squash title setting takes the commit's subject when the pull request has one commit. To keep a private address out of the merge commit, switch on "Keep my email addresses private" in the GitHub account (Settings, Emails) before you merge. With it on, GitHub authors its web-based Git operations, such as a merge, with the account's noreply address, and that address cannot be changed. With it off, `--author-email` with the noreply address is refused with `Invalid email address` (seen on 2026-11-16).
 7. Tag the merge commit on `main` with a lightweight tag `vX.Y.Z` (`git tag vX.Y.Z <merge commit>`, no `-a`), and push that tag on its own (`git push origin vX.Y.Z`).
@@ -140,7 +142,7 @@ npm run eval -- --case t2-single --runs 1 --ablation none --max-cost-usd 2   # o
 
 `npm run bench:validate` makes no model call. It runs half the CPUs' worth of tasks at once (at least 2; `--parallel N` sets it), the three known slow tasks first, and stops at a deadline of 270 s (`--deadline-s S`, 0 for none): it prints the finished tasks, names each unfinished one (`NOT DONE`) and exits 3. `node bench/validate.mjs --task <id>` validates one task.
 
-The eval suite was smoke-run on 2026-11-10 with the bounded command above, twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed. How the benchmark works and every result: [bench/README.md](../bench/README.md).
+The eval suite was smoke-run on 2026-11-10 with the bounded command above, twice, at about $0.37 each. It runs end to end, and 4 of 7 graders passed. How the benchmark works: [bench/README.md](../bench/README.md); every result: [bench/RESULTS.md](../bench/RESULTS.md).
 
 ## Diagrams
 
