@@ -1,9 +1,19 @@
 {
   "name": "orchestration-dashboard",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.",
   "author": {
     "name": "0xcvaliente"
   },
+  "homepage": "https://github.com/0xcvaliente/claude-code-orchestration",
+  "repository": "https://github.com/0xcvaliente/claude-code-orchestration",
+  "keywords": [
+    "orchestration",
+    "multi-agent",
+    "subagents",
+    "code-review",
+    "test-gate",
+    "triage"
+  ],
   "types": "./types/index.d.ts"
 }
