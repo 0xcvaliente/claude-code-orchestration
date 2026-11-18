@@ -250,12 +250,43 @@ args+=(--append-system-prompt "This run is unattended: nobody can answer a quest
 # `git -C * status*` rule also matches `git -C /r branch -D main status`. A guard against mistakes, not a boundary.
 # `git * -c*` also refuses a commit whose message has " -c" in it. `git -C */../*` stops a path that climbs out of a
 # pinned folder (`<repo>/.claude/worktrees/../../x`); it also refuses an argument with `/../` in it. Variadic: keep it before --allowedTools.
+# Every `git -C` allow rule has a `*` before a later fixed word (the folder, or a worktree's name), and that `*` can stand
+# for a whole subcommand: `git -C * status*` also matches `git -C /r branch -D main status`. GIT_C_DESTRUCTIVE_DENY
+# names the destructive forms wherever they stand after `git -C`: branch delete, rename and force; checkout and switch
+# that drop work; restore with an option, `.`, `:` or an absolute path; reset beyond `--merge`; update-ref,
+# symbolic-ref, gc --prune, reflog expire|delete, worktree remove --force, stash drop|clear, rebase with an option or
+# HEAD/@, filter-branch; a fetch or pull with a refspec destination (a `:` in a later argument) or --force (in another
+# repository that is a push, audit J-11). `git --git-dir` and `--work-tree` as the first word are denied too (after it,
+# the denies above already do). Each rule names the subcommand and a flag or a form, so a commit message holding reset,
+# status, restore or `a:b` alone still passes; one holding the phrase a rule names is refused. Out of reach: a form whose
+# argument is a plain path or branch name (`git -C /r restore src status`, `reset main status`, `rebase main status`,
+# `checkout main src status`). No rule ends in `:*`, which Claude Code reads as its older prefix form, so the refspec
+# and pathspec-magic rules end in `:**`. src/orchestrate-sh.test.mjs pins the rows.
+GIT_C_DESTRUCTIVE_DENY=(
+  "Bash(git -C * branch* -d*)" "Bash(git -C * branch* -D*)" "Bash(git -C * branch* --d*)" "Bash(git -C * branch* -M*)"
+  "Bash(git -C * branch* -f*)" "Bash(git -C * branch* --forc*)" "Bash(git -C * branch* --mo*)" "Bash(git -C * branch -m*)"
+  "Bash(git -C * branch -* -m*)"
+  "Bash(git -C * checkout* -- *)" "Bash(git -C * checkout* -f*)" "Bash(git -C * checkout* --f*)" "Bash(git -C * checkout* -B*)"
+  "Bash(git -C * checkout .*)" "Bash(git -C * checkout :**)"
+  "Bash(git -C * switch* -f*)" "Bash(git -C * switch* --f*)" "Bash(git -C * switch* --di*)"
+  "Bash(git -C * restore -*)" "Bash(git -C * restore .*)" "Bash(git -C * restore :**)" "Bash(git -C * restore /*)"
+  "Bash(git -C * reset* --s*)" "Bash(git -C * reset* --mi*)" "Bash(git -C * reset* --k*)" "Bash(git -C * reset* -q*)"
+  "Bash(git -C * reset -- *)" "Bash(git -C * reset HEAD*)" "Bash(git -C * reset @*)"
+  "Bash(git -C * update-ref*)" "Bash(git -C * symbolic-ref*)" "Bash(git -C * gc *--prune*)"
+  "Bash(git -C * reflog expire*)" "Bash(git -C * reflog delete*)" "Bash(git -C * worktree remove*-f*)"
+  "Bash(git -C * stash drop*)" "Bash(git -C * stash clear*)"
+  "Bash(git -C * rebase -*)" "Bash(git -C * rebase HEAD*)" "Bash(git -C * rebase @*)" "Bash(git -C * filter-branch*)"
+  "Bash(git -C * fetch * *:**)" "Bash(git -C * fetch* -f*)" "Bash(git -C * fetch* --forc*)"
+  "Bash(git -C * pull * *:**)" "Bash(git -C * pull* -f*)" "Bash(git -C * pull* --forc*)"
+  "Bash(git --git-dir*)" "Bash(git --work-tree*)"
+)
 args+=(--disallowedTools "Bash(git push*)" "Bash(git * push*)" "Bash(git remote*)" "Bash(git * remote*)"
   "Bash(sudo*)" "Bash(rm -rf*)" "Bash(rm -fr*)" "Bash(rm -r -f*)" "Bash(rm -f -r*)"
   "Bash(git -c*)" "Bash(git * -c*)" "Bash(git --config-env*)" "Bash(git * --config-env*)"
   "Bash(git reset *--h*)" "Bash(git * reset *--h*)" "Bash(git clean*)" "Bash(git * clean -*)"
   "Bash(git * --namespace*)" "Bash(git * --git-dir*)" "Bash(git * --work-tree*)" "Bash(git * --exec-path*)"
-  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)" "Bash(git -C */../*)")
+  "Bash(git * --super-prefix*)" "Bash(git * --attr-source*)" "Bash(git * -C *)" "Bash(git -C */../*)"
+  "${GIT_C_DESTRUCTIVE_DENY[@]}")
 args+=(--allowedTools "${tools[@]}") # variadic: keep it last, or end it with `--`
 # `--` ends both the variadic --allowedTools and option parsing, so a dash-led task is the prompt.
 case "$task" in -*) args+=(-- "$task") ;; esac
