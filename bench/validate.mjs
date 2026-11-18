@@ -5,6 +5,7 @@
 // names each task it did not finish or did not reach, and exits 1, instead of being killed silently by an outer timeout.
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
 // scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
+import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { availableParallelism, cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -111,6 +112,41 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   const jobs = Math.max(1, Math.floor(cpus().length / 2));
   const ids = readdirSync(tasksDir).filter((d) => existsSync(join(tasksDir, d, "meta.json"))).sort().filter((d) => !only || d === only);
   if (!ids.length) { console.log(`no tasks found${only ? ` matching ${only}` : ""} in ${tasksDir}`); process.exit(1); }
+  // One scratch root for everything this run and its graders create (os.tmpdir() reads TMPDIR at each call); removed on every way out.
+  const root = mkdtempSync(join(tmpdir(), "bench-validate-run-"));
+  process.env.TMPDIR = root;
+  const cleanup = () => { try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ } };
+  // This process's direct children (graders are spawned detached, each in its own group): from /proc, else pgrep -P.
+  const childPids = () => {
+    try {
+      return readdirSync(`/proc/${process.pid}/task`).flatMap((t) => readFileSync(`/proc/${process.pid}/task/${t}/children`, "utf8").trim().split(/\s+/)).filter(Boolean).map(Number);
+    } catch {
+      const r = spawnSync("pgrep", ["-P", String(process.pid)], { encoding: "utf8" });
+      return (r.stdout ?? "").trim().split(/\s+/).filter(Boolean).map(Number);
+    }
+  };
+  const signal = (pids, sig) => { for (const p of pids) { try { process.kill(-p, sig); } catch { /* no group */ } try { process.kill(p, sig); } catch { /* gone */ } } };
+  // Processes under the scratch root (a grader's own children that left its group still name it on their command line).
+  const rootPids = () => {
+    try {
+      return readdirSync("/proc").filter((d) => /^\d+$/.test(d) && Number(d) !== process.pid).filter((d) => {
+        try { return readFileSync(`/proc/${d}/cmdline`, "utf8").includes(root); } catch { return false; }
+      }).map(Number);
+    } catch { return []; }
+  };
+  // Synchronous on purpose: the event loop does not turn, so no task can start a new grader while this runs.
+  const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const endChildren = async () => {
+    for (let round = 0; round < 3; round++) {
+      const pids = [...new Set([...childPids(), ...rootPids()])];
+      if (!pids.length) break;
+      signal(pids, "SIGTERM");
+      pause(round === 0 ? 2000 : 500);
+      signal(pids, "SIGKILL");
+      pause(200);
+    }
+  };
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { endChildren().finally(() => { cleanup(); process.exit(130); }); });
   let failures = 0;
   // Tasks run side by side (the whole run took over 280 s one task at a time); each task's lines print in task order.
   // At most half the CPUs (at least 2) at once; --parallel N overrides. The slowest known tasks start first.
@@ -131,10 +167,8 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     const left = ids.filter((_, i) => !done[i]);
     for (const [i, id] of ids.entries()) if (!done[i]) console.log(`NOT DONE ${id}: ${started[i] ? `still running after ${deadlineS} s` : "not reached"}`);
     console.log(`\ndeadline of ${deadlineS} s reached: ${left.length} task(s) not validated (${left.join(", ")})`);
-    // the graders still running are this process group's children: end them too, so none is left behind
-    process.on("SIGTERM", () => process.exit(1));
-    try { process.kill(0, "SIGTERM"); } catch { /* no group to signal */ }
-    setTimeout(() => process.exit(1), 2000).unref();
+    // End the graders still running (this process's own children and their groups, never the caller's), then the scratch root.
+    endChildren().finally(() => { cleanup(); process.exit(3); });
   }, deadlineS * 1000) : undefined;
   const counts = await pool(order, lanes, async ({ id, i }) => {
     started[i] = true;
@@ -146,5 +180,6 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   clearTimeout(deadlineTimer);
   for (const n of counts) failures += n;
   console.log(failures ? `\n${failures} problem(s)` : `\nall ${ids.length} task(s) valid`);
+  cleanup();
   process.exit(failures ? 1 : 0);
 }
