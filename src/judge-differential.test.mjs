@@ -171,6 +171,7 @@ for (const c of listIn("judge.test.ts", "W2R2_DENY")) HARDENED.push([c, ["deny"]
 // Slice w7: commands after reserved words and modifiers (N1), wrapped refused programs (N4), prompts (N5) (W7_DENY).
 const W7_DENY = listIn("judge.test.ts", "W7_DENY");
 for (const c of W7_DENY) HARDENED.push([c, ["deny"]]);
+for (const c of listIn("judge.test.ts", "W7_WRAPPERS")) HARDENED.push([c, ["deny"]]);
 const W2_JUDGE = listIn("judge.test.ts", "W2_JUDGE");
 for (const c of W2_JUDGE) HARDENED.push([c, ["judge", "deny"]]);
 /** J4 and J5 deny with reasons older rules already give (`sudo is always blocked`, ...), so their inputs count by name. */

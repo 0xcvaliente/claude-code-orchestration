@@ -860,6 +860,24 @@ const WRAPPERS = new Set([
   "fakeroot", "nsenter", "systemd-run", "watch", "doas", "runcon", "faketime", "proot", "sg",
 ]);
 /**
+ * zsh's alternate forms (manual, "Complex Commands" and "Alternate Forms For Complex Commands"): `then`, `do`, `else`
+ * and `elif` start a command wherever they stand as an unquoted whole word, with or without a separator before them
+ * (`if [[ x ]] then cmd`, `while [[ x ]] do cmd`), and so does a closing `]]` (`if [[ -n x ]] cmd`). Over-inclusive:
+ * `echo do parallel` counts too. The other forms start a new simple command in the tokenizer already: `((...))` ends
+ * at its `)`, `for i (a b) cmd` and `foreach` at the list's `)`, `for i in a; cmd` at the `;`, a case pattern at its
+ * `)`, and the brace forms (`if [[ x ]] { cmd }`, `repeat 2 { cmd }`, `case x { x) cmd ;; }`) at the `{`.
+ */
+const REOPENERS = new Set(["then", "do", "else", "elif"]);
+/**
+ * How each wrapper runs its command, from its manual. Not named here ("argv"): the words after its options run as a
+ * program, so the WRAPPED_DENY rule and the reading of a shell's `-c` string after it apply (`chroot / sh -c '...'`,
+ * nsenter, unshare, systemd-run, busybox sh -c, timeout, nice, env, ...). "-c": a string after -c runs through a shell
+ * (flock and script: read as a script; su and runuser: denied as privilege commands). "words": its arguments joined
+ * run through `sh -c` (watch: read as a script). "group": `sg [-] group [-c] string` runs the string through /bin/sh
+ * (read as a script, its words joined). A string the guard cannot read as a literal is denied.
+ */
+const WRAPPER_STRING = new Map([["flock", "-c"], ["script", "-c"], ["su", "-c"], ["runuser", "-c"], ["watch", "words"], ["sg", "group"]]);
+/**
  * Reserved words and precommand modifiers of zsh and bash after which the shell runs the next word as a command (zsh
  * manual, "Reserved Words" and "Precommand Modifiers"; bash's reserved words): `if`, `then`, `else`, `elif`, `do`,
  * `while`, `until`, `!`, `{`, `always`, `nocorrect`, `noglob`, `-`, `builtin`, `command` and `exec` (their options
@@ -881,27 +899,37 @@ const DECLARERS = new Set(["export", "readonly", "declare", "typeset", "local"])
 function commandStarts(ws) {
   const out = new Array(ws.length).fill(false);
   const skippable = (w) => w.redirect || w.assign || /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(staticPrefix(w));
-  let i = 0;
-  while (i < ws.length) {
-    while (i < ws.length && skippable(ws[i])) i++;
-    if (i >= ws.length) break;
-    out[i] = true;
-    const w = ws[i];
-    if (w.dynamic) break;
-    const name = base(w.text);
-    if (!STARTERS.has(name)) break;
-    i++;
-    if (name === "repeat") {
-      while (i < ws.length && ws[i].redirect) i++;
-      i++; // the count, whatever it is
-    } else if (name === "time" || name === "command" || name === "builtin" || name === "exec") {
-      for (; i < ws.length && (ws[i].redirect || (!ws[i].dynamic && /^-./.test(ws[i].text))); i++) {
-        if (name === "exec" && !ws[i].redirect && /^-[A-Za-z]*a$/.test(ws[i].text)) i++; // -a NAME
-      }
-    } else if (name === "coproc" && i + 1 < ws.length && !ws[i].dynamic && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[i].text)) {
-      out[i] = true; // coproc NAME: NAME and the word after it
+  // A chain of starters from `from`. It stops at a word already marked, so each word is walked a bounded number of
+  // times (a line of many `then` words stays linear).
+  const chain = (from) => {
+    let i = from;
+    while (i < ws.length) {
+      while (i < ws.length && skippable(ws[i])) i++;
+      if (i >= ws.length || out[i]) break;
+      out[i] = true;
+      const w = ws[i];
+      if (w.dynamic) break;
+      const name = base(w.text);
+      if (!STARTERS.has(name)) break;
       i++;
+      if (name === "repeat") {
+        while (i < ws.length && ws[i].redirect) i++;
+        i++; // the count, whatever it is
+      } else if (name === "time" || name === "command" || name === "builtin" || name === "exec") {
+        for (; i < ws.length && (ws[i].redirect || (!ws[i].dynamic && /^-./.test(ws[i].text))); i++) {
+          if (name === "exec" && !ws[i].redirect && /^-[A-Za-z]*a$/.test(ws[i].text)) i++; // -a NAME
+        }
+      } else if (name === "coproc" && i + 1 < ws.length && !ws[i].dynamic && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[i].text)) {
+        out[i] = true; // coproc NAME: NAME and the word after it
+        i++;
+      }
     }
+  };
+  chain(0);
+  // zsh's short forms: `if [[ x ]] cmd`, `if [[ x ]] then cmd`, `while [[ x ]] do cmd` (REOPENERS).
+  for (let k = 0; k < ws.length; k++) {
+    const w = ws[k];
+    if (!w.redirect && !w.dynamic && !w.quoted && (REOPENERS.has(w.text) || w.text === "]]")) chain(k + 1);
   }
   return out;
 }
@@ -1361,6 +1389,17 @@ function analyzeCommand(cmd, ctx, depth, plainLine) {
           else script(nr[i + 1]?.text ?? "", !nr[i + 1] || nr[i + 1].dynamic, `${name} -c`), i++;
         }
       }
+    }
+    else if (WRAPPER_STRING.get(name) === "group" && leads(k)) {
+      // sg [-] group [-c] string (WRAPPER_STRING): the string runs through /bin/sh.
+      let i = s;
+      const dash = nr[i];
+      if (dash && !dash.dynamic && dash.text === "-") i++;
+      i++; // the group
+      const c = nr[i];
+      if (c && !c.dynamic && c.text === "-c") i++;
+      const run = nr.slice(i);
+      if (run.length) script(run.map((x) => x.text).join(" "), run.some((x) => x.dynamic), "sg");
     }
     else if (name === "hash" && (cmdWord(k) || afterWrapper(ws, k)) && remapFrom()[s]) push(deny("hash -p and hash name=path point a command name at another program, like an alias: always blocked"));
     else if (name === "enable" && (cmdWord(k) || afterWrapper(ws, k)) && loadFrom()[s]) push(deny("enable -f loads a builtin from a library: always blocked"));

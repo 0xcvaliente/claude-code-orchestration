@@ -2088,6 +2088,26 @@ const W7_DENY: string[] = [
   "systemd-run --user batch",
   "nsenter -t 1 pkexec id",
   "strace -e trace=open cat at", // over-block: `at` after a wrapper, wherever it stands
+  // second review, gap 1 (N1): zsh's alternate forms, verbatim, then the rest of the shape
+  "if [[ x ]] then parallel x; fi",
+  "while [[ -n x ]] do setopt globsubst; done",
+  "until [[ x ]] do alias a=b; done",
+  "if [[ x ]] then at now; fi",
+  "if [[ -n x ]] parallel x",
+  "if (( 1 )) parallel x",
+  "[[ x ]] then parallel x",
+  "if false; then :; else parallel x; fi",
+  "if false; then :; elif [[ x ]] then parallel x; fi",
+  "while true { parallel x }",
+  "if [[ x ]] { parallel x }",
+  "for i (a) { parallel x }",
+  "repeat 2 { parallel x }",
+  "case x { x) parallel x ;; }",
+  "case x in x) parallel x ;; esac",
+  "for i (a b) parallel x",
+  "foreach i (a b) parallel x; end",
+  "for i in a b; parallel x",
+  "echo do parallel", // over-block: `do` counts as a starter wherever it stands unquoted
   // F5 (N5): a prompt set through a builtin
   "printf -v PS4 '%s' '$(echo X)'; set -x; ls",
   "read PS4 <<< '$(echo X)'; set -x; ls",
@@ -2188,6 +2208,50 @@ test("classify (w7, N1, N4, N5): commands after reserved words and modifiers, wr
   assert.match(classifyDetail("chroot / parallel x", CWD).reason ?? "", /^parallel after a wrapper/);
   assert.match(classifyDetail("printf -v PS4 '%s' '$(echo X)'; set -x; ls", CWD).reason ?? "", /^setting PS4 through a builtin or an expansion that assigns it/);
   assert.match(classifyDetail(": ${PS4:=x}", CWD).reason ?? "", /^setting PS4 through/);
+});
+
+// Second review, gap 2 (N4): each wrapper's way of running its command (WRAPPER_STRING). A string a wrapper runs
+// through a shell is read as a script; the argv wrappers meet `sh -c` and the WRAPPED_DENY rule. Both copies deny every
+// row, alone and wrapped (src/judge-differential.test.mjs reads this list).
+const W7_WRAPPERS: string[] = [
+  "sg group -c 'parallel x'",
+  "sg group 'sudo ls'",
+  "sg g 'rm -rf .git'",
+  "sg g \"$C\"",
+  "sg - g -c 'sudo id'",
+  "sg g -c 'setopt globsubst'",
+  "flock -c 'sudo ls'",
+  "flock /tmp/l -c 'sudo ls'",
+  "script -c 'sudo ls'",
+  "watch 'sudo ls'",
+  "watch -n 1 sudo ls",
+  "su -c 'make'",
+  "runuser -c x",
+  "chroot / sh -c 'sudo ls'",
+  "nsenter -t 1 sh -c 'parallel x'",
+  "unshare sh -c 'sudo ls'",
+  "busybox sh -c 'sudo ls'",
+  "systemd-run sh -c 'sudo ls'",
+  "timeout 5 sh -c 'sudo ls'",
+  "nice sh -c 'sudo id'",
+  "env sh -c 'sudo id'",
+];
+const W7_WRAPPERS_PASS: string[] = [
+  "sg group -c 'make test'",
+  "sg g make",
+  "flock /tmp/l -c 'make test'",
+  "watch -n 5 'make test'",
+  "timeout 5 sh -c 'make test'",
+  "grep sg file",
+];
+
+test("classify (w7, second review): zsh's alternate forms start commands (N1) and every wrapper's command string is read (N4)", () => {
+  assert.deepEqual(misread([
+    ...W7_WRAPPERS.map((c): [string, BashClass] => [c, "deny"]),
+    ...W7_WRAPPERS_PASS.map((c): [string, BashClass] => [c, "pass"]),
+    ...["if [[ -f x ]]; then cat x; fi", "if [[ -f x ]] then cat x; fi", "[[ -n \"$CI\" ]] && npm ci", "(( n > 0 )) && echo y", "for f in a b; do echo \"$f\"; done", "case \"$x\" in a) echo a;; esac", "echo \"then do else\""].map((c): [string, BashClass] => [c, "pass"]),
+  ]), []);
+  assert.match(classifyDetail("sg g \"$C\"", CWD).reason ?? "", /^sg with a string the guard cannot read is always blocked/);
 });
 
 // N6: the tokenizer's time is bounded. Its scans of nested `(`, `{` and `[` are linear (each answer kept by index), and
