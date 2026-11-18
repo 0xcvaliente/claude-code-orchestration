@@ -2456,7 +2456,10 @@ test("classify (w7, third review): every argument of a string wrapper is a comma
   const long = `sg g '-cc;${"echo x;".repeat(37000)}'`;
   const t = performance.now();
   assert.equal(classify(long, CWD), "deny");
-  assert.ok(performance.now() - t < 2000, `${Math.round(performance.now() - t)} ms`);
+  // The bound protects the budget on attached values: the refusal must stay far inside the hook's time (JUDGE_TIMEOUT_MS
+  // 60 s, HOOK_TIMEOUT_S 90 s). About 0.6 to 1 s alone; 2 s failed at 5.9 s while the whole suite ran beside it (f5,
+  // 2.0.0), so the bound is 15 s, still far below the hook's limit.
+  assert.ok(performance.now() - t < 15_000, `${Math.round(performance.now() - t)} ms`);
   // Every argument read on its own stays bounded too: distinct words (no answer to reuse) at the length cap, decided in
   // about 1 to 2 s (the bound here leaves room for a slow machine; chains and nesting measured the same).
   let words = "";
