@@ -6,7 +6,7 @@
 // Per task: meta.json is complete and well typed; setup/ alone scores pass:false; ref/ over setup/
 // scores pass:true; every mutant applied to the reference scores pass:false. Exits 1 on any failure.
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
-import { cpus, tmpdir } from "node:os";
+import { availableParallelism, cpus, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_TASKS_DIR, applyMutant, loadTask, scoreDir } from "./lib/score.mjs";
 
@@ -113,15 +113,21 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
   if (!ids.length) { console.log(`no tasks found${only ? ` matching ${only}` : ""} in ${tasksDir}`); process.exit(1); }
   let failures = 0;
   // Tasks run side by side (the whole run took over 280 s one task at a time); each task's lines print in task order.
-  const lanes = Math.max(1, Math.min(ids.length, Number(arg("parallel", "4")) || 1));
+  // At most half the CPUs (at least 2) at once; --parallel N overrides. The slowest known tasks start first.
+  const lanes = Math.max(1, Math.min(ids.length, Number(arg("parallel", String(Math.max(2, Math.floor(availableParallelism() / 2))))) || 1));
+  const SLOW_FIRST = ["h3-sql-engine", "k2-stdlib-toolkit-xl", "k1-stdlib-toolkit"];
+  const rank = (id) => { const r = SLOW_FIRST.indexOf(id); return r === -1 ? SLOW_FIRST.length : r; };
+  const order = ids.map((id, i) => ({ id, i })).sort((a, b) => rank(a.id) - rank(b.id) || a.i - b.i);
   const outputs = ids.map(() => []);
   const done = ids.map(() => false);
   let shown = 0;
-  const flush = () => { while (shown < ids.length && done[shown]) { for (const l of outputs[shown]) console.log(l); shown++; } };
+  // each task's lines print as one block as soon as that task ends
+  const printed = ids.map(() => false);
+  const flush = () => { for (let i = 0; i < ids.length; i++) if (done[i] && !printed[i]) { for (const l of outputs[i]) console.log(l); printed[i] = true; shown++; } };
   const started = ids.map(() => false);
   const deadlineS = Number(arg("deadline-s", "270"));
   const deadlineTimer = deadlineS > 0 ? setTimeout(() => {
-    for (let i = shown; i < ids.length; i++) if (done[i]) for (const l of outputs[i]) console.log(l);
+    flush();
     const left = ids.filter((_, i) => !done[i]);
     for (const [i, id] of ids.entries()) if (!done[i]) console.log(`NOT DONE ${id}: ${started[i] ? `still running after ${deadlineS} s` : "not reached"}`);
     console.log(`\ndeadline of ${deadlineS} s reached: ${left.length} task(s) not validated (${left.join(", ")})`);
@@ -130,7 +136,7 @@ if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith
     try { process.kill(0, "SIGTERM"); } catch { /* no group to signal */ }
     setTimeout(() => process.exit(1), 2000).unref();
   }, deadlineS * 1000) : undefined;
-  const counts = await pool(ids.map((id, i) => ({ id, i })), lanes, async ({ id, i }) => {
+  const counts = await pool(order, lanes, async ({ id, i }) => {
     started[i] = true;
     const n = await validateTask(id, tasksDir, jobs, (line) => outputs[i].push(line));
     done[i] = true;
