@@ -4,12 +4,12 @@
 import "./test-tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput } from "../.claude/hooks/judge-core.mjs";
+import { MAX_COMMAND_LENGTH, MAX_OPENERS, checkRmTargets, classifyDetail as coreClassify, decide, judgeTimeoutMs, nativePrompt, parseCliOutput, storeVerdict } from "../.claude/hooks/judge-core.mjs";
 import { stateKey } from "../.claude/hooks/state.mjs";
 import { classifyDetail as sdkClassify } from "./judge.js"; // tsx resolves it to judge.ts
 
@@ -87,15 +87,79 @@ const capture = (/** @type {string} */ session, /** @type {string} */ prompt, mo
 /** Deny-only: the hook never writes a decision (or anything) to stdout. */
 const assertNoDecision = (/** @type {{ stdout: string }} */ r) => assert.equal(r.stdout, "", `hook printed to stdout: ${r.stdout}`);
 
-test("off by default: no ORCH_JUDGE (or any other value) means no decision, no model call, no log", () => {
+// Runs in parallel (F7: the table tests ran one hook process after another). Each box is a project of its own, so its
+// state folder, its prompt store (keyed by the project path) and its stub log are its own; the store's folder
+// (configDir/orchestration/judge-prompts) is shared, and nothing below removes it while boxes run.
+let boxCount = 0;
+function box() {
+  const dir = join(scratch, "boxes", `b${++boxCount}`);
+  const proj = join(dir, "project");
+  mkdirSync(proj, { recursive: true });
+  const log = join(dir, "stub.jsonl");
+  const state = join(proj, ".claude", "state");
+  return {
+    env: { CLAUDE_PROJECT_DIR: proj, STUB_LOG: log },
+    calls: () => readJsonl(log),
+    judgeLog: (/** @type {string} */ session) => readJsonl(join(state, "gates.jsonl")).filter((g) => g.gate === "judge" && g.session_id === session),
+  };
+}
+/** @param {string} script @param {unknown} input @param {Record<string, string | undefined>} [extra] @returns {Promise<{ code: number | null, stdout: string, stderr: string }>} */
+function runAsync(script, input, extra = {}) {
+  return new Promise((done, fail) => {
+    const child = spawn(process.execPath, [script], { env: env(extra), stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 20000);
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("error", fail);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      done({ code, stdout, stderr });
+    });
+    child.stdin.end(typeof input === "string" ? input : JSON.stringify(input));
+  });
+}
+/** Each item through `fn`, at most `n` at a time; the first failure is thrown after all have settled. @template T
+ * @param {T[]} items @param {number} n @param {(item: T) => Promise<void>} fn */
+async function pool(items, n, fn) {
+  const queue = [...items];
+  /** @type {unknown[]} */
+  const errors = [];
+  await Promise.all(Array.from({ length: n }, async () => {
+    for (let item = queue.shift(); item !== undefined; item = queue.shift()) await fn(item).catch((e) => errors.push(e));
+  }));
+  if (errors.length) throw errors[0];
+}
+/** The hook on one command in a box of its own, with a typed request recorded first (through prompt-capture.mjs). */
+async function refusedInBox(/** @type {string} */ command, /** @type {string} */ cwd, /** @type {RegExp} */ message) {
+  const b = box();
+  assert.equal((await runAsync(CAPTURE, { session_id: "bx", hook_event_name: "UserPromptSubmit", prompt: "push feature/login to origin" }, { ...ON, ...b.env })).code, 0);
+  const r = await runAsync(HOOK, bash(command, "bx", { cwd }), { ...ON, ...b.env, STUB_MODE: "approve" });
+  assert.equal(r.code, 2, `${command}: ${r.stderr}`);
+  assertNoDecision(r);
+  assert.match(r.stderr, message, command);
+  assert.doesNotMatch(r.stderr, /ORCH_/, `${command}: the message names no switch`);
+  assert.equal(b.calls().length, 0, `${command}: no model call`);
+  assert.equal(b.judgeLog("bx")[0]?.decision, "deny", command);
+}
+/** The hook on one command in a box of its own: no decision, no output. */
+async function quietInBox(/** @type {string} */ command, /** @type {string} */ cwd, /** @type {Record<string, string>} */ extra = {}) {
+  const b = box();
+  const r = await runAsync(HOOK, bash(command, "bq", { cwd }), { ...ON, ...b.env, ...extra });
+  assert.equal(r.code, 0, `${command}: ${r.stderr}`);
+  assert.equal(r.stdout + r.stderr, "", command);
+  assert.equal(b.calls().length, 0, command);
+}
+
+test("off by default: no ORCH_JUDGE (or any other value) means no decision, no model call, no log", async () => {
   reset();
-  for (const extra of /** @type {Record<string, string>[]} */ ([{}, { ORCH_JUDGE: "off" }, { ORCH_JUDGE: "1" }, { ORCH_JUDGE: "sdk" }])) {
-    const r = run(HOOK, bash("sudo rm -rf /"), { ...extra, STUB_MODE: "refuse" });
+  await pool(/** @type {Record<string, string>[]} */ ([{}, { ORCH_JUDGE: "off" }, { ORCH_JUDGE: "1" }, { ORCH_JUDGE: "sdk" }]), 8, async (extra) => {
+    const r = await runAsync(HOOK, bash("sudo rm -rf /"), { ...extra, STUB_MODE: "refuse" });
     assert.equal(r.code, 0);
     assertNoDecision(r);
     assert.equal(r.stderr, "");
-    assert.equal(run(CAPTURE, { session_id: "off2", prompt: "push it" }, extra).code, 0);
-  }
+    assert.equal((await runAsync(CAPTURE, { session_id: "off2", prompt: "push it" }, extra)).code, 0);
+  });
   assert.equal(stubCalls().length, 0);
   assert.equal(judgeLog("s1").length, 0);
   assert.equal(readPrompts().filter((p) => p.session_id === "off2").length, 0);
@@ -130,30 +194,30 @@ test("duplicate(): the plugin copy exits when the project registers its own copy
   rmSync(join(scratch, "plugin-data"), { recursive: true, force: true });
 });
 
-test("malformed or non-Bash input: exit 0, no decision, no model call", () => {
+test("malformed or non-Bash input: exit 0, no decision, no model call", async () => {
   reset();
-  for (const input of ["not json", "", "null", "[]", {}, { tool_input: {} }, { tool_name: "Bash", tool_input: { command: 3 } }, { tool_name: "Read", tool_input: { command: "sudo ls" } }, bash("   ")]) {
-    const r = run(HOOK, input, { ...ON, STUB_MODE: "refuse" });
+  await pool(/** @type {unknown[]} */ (["not json", "", "null", "[]", {}, { tool_input: {} }, { tool_name: "Bash", tool_input: { command: 3 } }, { tool_name: "Read", tool_input: { command: "sudo ls" } }, bash("   ")]), 9, async (input) => {
+    const r = await runAsync(HOOK, input, { ...ON, STUB_MODE: "refuse" });
     assert.equal(r.code, 0, JSON.stringify(input));
     assertNoDecision(r);
-  }
+  });
   assert.equal(stubCalls().length, 0);
   assert.ok(readLog("gates.jsonl").every((g) => g.decision === "skip"));
 });
 
-test("corpus: floor without a model call, judged commands ask once, harmless commands get no decision", () => {
-  for (const c of corpus.cases) {
-    reset();
-    for (const p of c.requests) assert.equal(capture(c.id, p).code, 0);
-    const r = run(HOOK, bash(c.command, c.id), { ...ON, STUB_MODE: c.model === "allow" ? "approve" : "refuse" });
+test("corpus: floor without a model call, judged commands ask once, harmless commands get no decision", async () => {
+  await pool(corpus.cases, 8, async (c) => {
+    const b = box();
+    for (const p of c.requests) assert.equal((await runAsync(CAPTURE, { session_id: c.id, hook_event_name: "UserPromptSubmit", prompt: p }, { ...ON, ...b.env })).code, 0);
+    const r = await runAsync(HOOK, bash(c.command, c.id), { ...ON, ...b.env, STUB_MODE: c.model === "allow" ? "approve" : "refuse" });
     assertNoDecision(r);
-    const calls = stubCalls();
-    const log = judgeLog(c.id);
+    const calls = b.calls();
+    const log = b.judgeLog(c.id);
     if (c.expect === "none") {
       assert.equal(r.code, 0, c.id);
       assert.equal(calls.length, 0, c.id);
       assert.equal(log.length, 0, c.id);
-      continue;
+      return;
     }
     assert.equal(log.length, 1, `${c.id}: one log record`);
     assert.equal(log[0].command, c.command.slice(0, 200));
@@ -163,7 +227,7 @@ test("corpus: floor without a model call, judged commands ask once, harmless com
       assert.equal(r.code, 2, c.id);
       assert.equal(log[0].decision, "deny");
       assert.ok(r.stderr.includes(log[0].reason), c.id);
-      continue;
+      return;
     }
     assert.equal(calls.length, 1, `${c.id}: one model call`);
     for (const p of c.requests) assert.ok(calls[0].stdin.includes(p), `${c.id}: request in the prompt`);
@@ -172,7 +236,7 @@ test("corpus: floor without a model call, judged commands ask once, harmless com
     assert.equal(log[0].decision, c.model);
     if (c.model === "allow") assert.equal(r.stderr, "");
     else assert.match(r.stderr, /nobody asked for this/);
-  }
+  });
 });
 
 test("the judge runs claude -p with opus, one turn, no tools, project settings only, from an empty temp dir", () => {
@@ -197,7 +261,7 @@ test("the judge runs claude -p with opus, one turn, no tools, project settings o
   assert.equal(existsSync(call.cwd), false, "temp dir removed");
 });
 
-test("fail closed: refusal, garbage, prose, two objects, CLI error, exit code, timeout and a missing CLI all deny", () => {
+test("fail closed: refusal, garbage, prose, two objects, CLI error, exit code, timeout and a missing CLI all deny", async () => {
   /** @type {[string, Record<string, string>, RegExp][]} */
   const modes = [
     ["refuse", {}, /judge refused/],
@@ -209,19 +273,19 @@ test("fail closed: refusal, garbage, prose, two objects, CLI error, exit code, t
     ["timeout", { ORCH_JUDGE_TIMEOUT_MS: "400" }, /judge_timeout: timed out after 400 ms/],
     ["approve", { ORCH_JUDGE_CLAUDE_BIN: join(scratch, "no-such-claude") }, /claude CLI not found/],
   ];
-  for (const [mode, extra, why] of modes) {
-    reset();
-    capture("fc", "push feature/login to origin");
+  await pool(modes, 8, async ([mode, extra, why]) => {
+    const b = box();
+    assert.equal((await runAsync(CAPTURE, { session_id: "fc", hook_event_name: "UserPromptSubmit", prompt: "push feature/login to origin" }, { ...ON, ...b.env })).code, 0);
     const t0 = Date.now();
-    const r = run(HOOK, bash("git push origin feature/login", "fc"), { ...ON, STUB_MODE: mode, ...extra });
+    const r = await runAsync(HOOK, bash("git push origin feature/login", "fc"), { ...ON, ...b.env, STUB_MODE: mode, ...extra });
     assert.equal(r.code, 2, `${mode}: ${r.stderr}`);
     assertNoDecision(r);
     assert.match(r.stderr, why, mode);
-    const [rec] = judgeLog("fc");
+    const [rec] = b.judgeLog("fc");
     assert.equal(rec.decision, "deny", mode);
     assert.match(rec.reason, why, mode);
     if (mode === "timeout") assert.ok(Date.now() - t0 < 10000, "the timeout kills the CLI");
-  }
+  });
 });
 
 test("only this session's typed requests count, and agent_id is logged when present", () => {
@@ -388,7 +452,7 @@ test("J-12: prompt capture writes to the per-user store outside the project, pro
   rmSync(join(scratch, "plugin-data"), { recursive: true, force: true });
 });
 
-test("J-12: while the judge is on, a Bash command that names the prompt store is refused; while off it is not", () => {
+test("J-12: while the judge is on, a Bash command that names the prompt store is refused; while off it is not", async () => {
   const abs = promptStoreFile();
   const commands = [
     `cat ${abs}`,
@@ -402,23 +466,14 @@ test("J-12: while the judge is on, a Bash command that names the prompt store is
     "ls judge\\-prompts",
     "ls judge'-'prompts",
   ];
-  for (const command of commands) {
-    reset();
-    capture("ns", "push feature/login to origin");
-    const r = run(HOOK, bash(command, "ns"), { ...ON, STUB_MODE: "approve" });
-    assert.equal(r.code, 2, command);
-    assertNoDecision(r);
-    assert.match(r.stderr, /record of the user's requests/, command);
-    assert.equal(stubCalls().length, 0, `${command}: no model call`);
-    const [rec] = judgeLog("ns");
-    assert.equal(rec.decision, "deny", command);
-    const off = run(HOOK, bash(command, "ns"), { STUB_MODE: "approve" });
+  await pool(commands, 8, async (command) => {
+    await refusedInBox(command, work, /record of the user's requests/);
+    const off = await runAsync(HOOK, bash(command, "ns"), { ...box().env, STUB_MODE: "approve" });
     assert.equal(off.code, 0, command);
     assert.equal(off.stdout + off.stderr, "", command);
-  }
+  });
   // A harmless command that only looks alike is not refused.
-  reset();
-  assert.equal(run(HOOK, bash("cat prompts.txt judge.md", "ns"), ON).code, 0);
+  await quietInBox("cat prompts.txt judge.md", work);
   // Malformed or non-Bash input naming the store still exits 0 with no decision.
   for (const input of ["judge-prompts not json", { tool_name: "Read", tool_input: { command: "cat judge-prompts" } }, { tool_name: "Bash", tool_input: { command: ["judge-prompts"] } }]) {
     const r = run(HOOK, input, ON);
@@ -429,7 +484,7 @@ test("J-12: while the judge is on, a Bash command that names the prompt store is
 
 // fix-guards-2 item 1: the text check dropped quotes and backslashes only, so `$'...'` and `$"..."` quoting, which leave
 // a `$` behind in the raw text, hid the name. The words as the tokenizer decodes them are checked too.
-test("J-12: a store name spelled with $'...', $\"...\" or escapes, in any word of any command, is refused with no model call", () => {
+test("J-12: a store name spelled with $'...', $\"...\" or escapes, in any word of any command, is refused with no model call", async () => {
   const commands = [
     "cat ~/.claude/orchestration/judge-$'prompts'/x/prompts.jsonl",
     'cat ~/.claude/orchestration/judge-$"prompts"/x/prompts.jsonl',
@@ -442,31 +497,16 @@ test("J-12: a store name spelled with $'...', $\"...\" or escapes, in any word o
     "echo `ls judge-$'prompts'`",
     "X=judge-$'prompts' true",
   ];
-  for (const command of commands) {
-    reset();
-    capture("ns2", "push feature/login to origin");
-    const r = run(HOOK, bash(command, "ns2"), { ...ON, STUB_MODE: "approve" });
-    assert.equal(r.code, 2, command);
-    assertNoDecision(r);
-    assert.match(r.stderr, /always blocked: the command names the judge's record of the user's requests/, command);
-    assert.equal(stubCalls().length, 0, `${command}: no model call`);
-    assert.equal(judgeLog("ns2")[0]?.decision, "deny", command);
-  }
+  await pool(commands, 8, (command) => refusedInBox(command, work, /always blocked: the command names the judge's record of the user's requests/));
   // Neighbours that only look alike keep passing: the name split over two words, or joined to a value only known at
   // run time (out of reach of a static check, left to the judge as before).
-  for (const command of ["ls judge-$'notes' prompts.txt", 'cat "judge"-"notes"/prompts.jsonl', "ls judge-$P"]) {
-    reset();
-    const r = run(HOOK, bash(command, "ns2"), ON);
-    assert.equal(r.code, 0, `${command}: ${r.stderr}`);
-    assert.equal(r.stdout + r.stderr, "", command);
-    assert.equal(stubCalls().length, 0, command);
-  }
+  await pool(["ls judge-$'notes' prompts.txt", 'cat "judge"-"notes"/prompts.jsonl', "ls judge-$P"], 8, (command) => quietInBox(command, work));
 });
 
 // fix-guards-2 item 1, review gap: a quoted spelling inside a string that a command of the line runs as a script
 // (`bash -c`, `sh -c`, `zsh -c`, `eval`) decodes to the name only in the inner shell. Each form below, with `cat`
 // replaced by `echo` and run in a real bash, prints a path holding `judge-prompts`.
-test("J-12: a store name spelled with quoting inside a script string, one or two levels deep, is refused with no model call", () => {
+test("J-12: a store name spelled with quoting inside a script string, one or two levels deep, is refused with no model call", async () => {
   const commands = [
     `bash -c "cat ~/.claude/orchestration/judge-\\$'prompts'/x"`,
     `sh -c 'cat ~/.claude/orchestration/judge-$'"'"'prompts'"'"'/x'`,
@@ -475,23 +515,9 @@ test("J-12: a store name spelled with quoting inside a script string, one or two
     `zsh -c "cat judge-\\$'prompts'/x"`,
     `bash -c "cat judge-\\$'\\x70rompts'/x"`,
   ];
-  for (const command of commands) {
-    reset();
-    capture("ns3", "push feature/login to origin");
-    const r = run(HOOK, bash(command, "ns3"), { ...ON, STUB_MODE: "approve" });
-    assert.equal(r.code, 2, command);
-    assertNoDecision(r);
-    assert.match(r.stderr, /always blocked: the command names the judge's record of the user's requests/, command);
-    assert.equal(stubCalls().length, 0, `${command}: no model call`);
-  }
+  await pool(commands, 8, (command) => refusedInBox(command, work, /always blocked: the command names the judge's record of the user's requests/));
   // Script strings that do not name the store keep passing.
-  for (const command of [`bash -c "cat notes-\\$'prompts'/x && echo judge"`, "eval echo judge prompts", `sh -c 'ls judge-$'"'"'notes'"'"' prompts'`]) {
-    reset();
-    const r = run(HOOK, bash(command, "ns3"), ON);
-    assert.equal(r.code, 0, `${command}: ${r.stderr}`);
-    assert.equal(r.stdout + r.stderr, "", command);
-    assert.equal(stubCalls().length, 0, command);
-  }
+  await pool([`bash -c "cat notes-\\$'prompts'/x && echo judge"`, "eval echo judge prompts", `sh -c 'ls judge-$'"'"'notes'"'"' prompts'`], 8, (command) => quietInBox(command, work));
   // A long command still decides quickly.
   const long = `echo ${"'a b' \"c d\" e\\$'f' ".repeat(5263)}x`;
   assert.ok(long.length >= 100000);
@@ -627,4 +653,308 @@ test("parity: judge-core's floor and classification agree with src/judge.ts", ()
   assert.ok(strings.length > 500, `only ${strings.length} strings found`);
   const differ = strings.filter((s) => JSON.stringify(coreClassify(s, "/w")) !== JSON.stringify(sdkClassify(s, "/w")));
   assert.deepEqual(differ, []);
+});
+
+// Release 2.0.0, slice w2: one table fed to both copies. Each row is the class both must give, and the two decisions
+// (class, reason, kind, targets) must be equal. Items 1 to 4 of the slice; src/judge.test.ts has the longer lists.
+/** @type {Array<[string, string]>} */
+const W2_TABLE = [
+  // item 1: zsh options that run text as code, in the forms zsh takes, and sched
+  ["setopt globsubst; echo $x", "deny"],
+  ["setopt GLOB_SUBST", "deny"],
+  ["unsetopt noglobsubst", "deny"],
+  ["unsetopt NO_PROMPT_SUBST", "deny"],
+  ["set -o glob_subst", "deny"],
+  ["set +o noglobsubst", "deny"],
+  ["setopt -m '*subst'", "deny"],
+  ["if setopt promptsubst; then print -P x; fi", "deny"],
+  ["emulate ksh", "deny"],
+  ["emulate sh -c 'echo $x'", "deny"],
+  ["zsh -o globsubst -c 'echo $x'", "deny"],
+  ["options[globsubst]=on", "deny"],
+  ["sched +1 'rm -rf ../victim'", "deny"],
+  ["setopt extendedglob", "pass"],
+  ["set -euo pipefail", "pass"],
+  ["emulate -L zsh", "pass"],
+  ["sched", "pass"],
+  // item 2: a prompt that can expand, on any line; a fetch that writes a branch (J-11)
+  ["PS4='$(rm -rf ../victim)' ./x.sh", "deny"],
+  ["export PS4='$(sudo id)'", "deny"],
+  ["PS4='+ ' ./x.sh", "pass"],
+  ["git -C ../origin.git fetch \"$PWD\" main:main", "judge"],
+  ["git fetch origin main:main", "judge"],
+  ["git fetch origin main", "pass"],
+  // item 3: parallel, flock -c, script -c; the tool and browser keys (denied already)
+  ["parallel 'rm -rf {}' ::: a", "deny"],
+  ["parallel ::: 'sudo id'", "deny"],
+  ["flock /tmp/l -c 'rm -rf ../victim'", "deny"],
+  ["script -c 'sudo id' /dev/null", "deny"],
+  ["git -c difftool.x.cmd=evil difftool", "deny"],
+  ["git -c browser.x.cmd=evil help -w log", "deny"],
+  ["flock /tmp/l make test", "pass"],
+  ["script -q -c 'make test' log", "pass"],
+  // item 4: more git routes to a program
+  ["git clone -c core.fsmonitor='rm -rf ../v' ../o.git x", "deny"],
+  ["git send-email --to-cmd='rm -rf ../v' x.patch", "deny"],
+  ["git instaweb --httpd='rm -rf ../v'", "deny"],
+  ["git -c instaweb.httpd=x instaweb", "deny"],
+  ["git config guitool.x.cmd x", "deny"],
+  ["GIT_ALLOW_PROTOCOL=ext git fetch 'ext::sh -c id'", "deny"],
+  ["LESSOPEN='|rm -rf ../v %s' git log", "deny"],
+  ["git clone -c user.name=x ../o.git x", "pass"],
+  ["git send-email --to a@example.com x.patch", "pass"],
+  // w2 review: attached and bundled options, clone -c attached and abbreviated, parallel after find -exec,
+  // send-email prefixes, update-ref, prompts that only look like expansions
+  ["set -oglobsubst", "deny"],
+  ["set -Coglobsubst", "deny"],
+  ["set +onoglobsubst", "deny"],
+  ["setopt -oPROMPT_SUBST", "deny"],
+  ["zsh -oglobsubst -c 'echo $x'", "deny"],
+  ["git clone -ccore.fsmonitor=x u d", "deny"],
+  ["git clone --co core.fsmonitor=x u d", "deny"],
+  ["find . -exec parallel 'rm -rf {}' ::: a \\;", "deny"],
+  ["find . -execdir parallel echo ::: a \\;", "deny"],
+  ["git send-email --sendmail 'rm -rf ../v' x.patch", "deny"],
+  ["git send-email --header 'sudo id' x.patch", "deny"],
+  ["git -C ../origin.git update-ref refs/heads/main FETCH_HEAD", "judge"],
+  ["set -x", "pass"],
+  ["setopt extendedglob", "pass"],
+  ["export PS1='$ '", "pass"],
+  ["xargs -P 4 -n 1 gzip", "pass"],
+];
+
+test("parity (w2): both copies give each new row the same decision, and the class the table names", () => {
+  const wrong = [];
+  for (const [c, want] of W2_TABLE) {
+    const core = coreClassify(c, "/w");
+    const sdk = sdkClassify(c, "/w");
+    if (JSON.stringify(core) !== JSON.stringify(sdk)) wrong.push(`${c}: judge-core ${JSON.stringify(core)}, judge.ts ${JSON.stringify(sdk)}`);
+    if (core.cls !== want) wrong.push(`${c}: want ${want}, got ${core.cls}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+// Item 5: a glob reaches the store without its name. Each command below, with the judge on, is refused with no model
+// call; the neighbours that only list a folder above the store, or glob elsewhere, are not.
+test("J-12 (w2): a glob that matches the prompt store's folder is refused with no model call; other globs are not", async () => {
+  const orch = join(configDir, "orchestration");
+  mkdirSync(join(orch, STORE_NAME), { recursive: true });
+  /** @type {Array<[string, string]>} */
+  const refused = [
+    [`cat ${orch}/judge-*/*/prompts.jsonl`, work],
+    [`echo x >> ${orch}/*/*/prompts.jsonl`, work],
+    [`cd ${orch} && cat judge-*/*/prompts.jsonl`, work],
+    [`cd ${configDir} && cat orchestration/j*/*/*`, work],
+    ["cat j*/*/prompts.jsonl", orch], // the shell's folder moved to the parent in an earlier call
+    [`cat ${configDir}/**/judge-pro*/x`, work],
+    [`cat ${relative(work, orch)}/J*/x`, work],
+    ["cat $CLAUDE_CONFIG_DIR/orchestration/judge-*/x", work],
+    ['cat "$D"/j*/x', work],
+    ["cd - && cat orchestration/j*/x", work], // a cd target the guard cannot know
+    [`bash -c 'cat ${orch}/judge-*/x'`, work],
+    [`echo $(cat ${orch}/judge-*/x)`, work],
+    // w2 review: a directory change wherever a shell performs one
+    [`if cd ${orch}; then cat j*/*/*; fi`, work],
+    [`builtin cd ${orch} && cat j*/*/*`, work],
+    [`command cd ${orch} && cat j*/*/*`, work],
+    [`env -C ${orch} cat j*/*/*`, work],
+    [`env --chdir=${orch} cat j*/*/*`, work],
+    [`HOME=${orch}; cd; cat j*/*/*`, work],
+    [`(cd ${orch}; cat j*/*/*)`, work],
+    [`{ cd ${orch}; cat j*/*/*; }`, work],
+    [`for d in x; do cd ${orch}; cat j*/*/*; done`, work],
+    [`while cd ${orch}; do cat j*/*/*; break; done`, work],
+    [`D=${orch}; cd "$D" && cat j*/*/*`, work],
+    [`CDPATH=${configDir} cd orchestration && cat j*/*/*`, work],
+    [`pushd ${orch} && cat j*/*/*`, work],
+    ["popd && cat j*/*/*", work],
+    [`cd ${orch}; echo $(cat j*/*/*)`, work],
+    [`bash -c 'cd ${orch} && cat j*/*/*'`, work],
+    ['cd "$dir" && ls *.txt', work], // over-block: a relative glob after a cd the guard cannot read
+  ];
+  // A relative glob after a change to a folder the guard cannot read gets the message with the way around (w2, third
+  // attempt); a glob that reaches the store gets the older one.
+  await pool(refused, 8, ([command, cwd]) => refusedInBox(command, cwd, /record of the user's requests( \(through a glob\)|\. Run the directory change as its own Bash call)/));
+  /** @type {Array<[string, string]>} */
+  const allowed = [
+    [`ls ${configDir}/*`, work],
+    ["cat src/*.ts", work],
+    ["ls *", work],
+    ['for f in "$dir"/*; do echo "$f"; done', work],
+    ["cd build && ls *", work],
+    ["ls *", configDir],
+    [`git -C ${orch} status && ls *`, work], // git -C changes no shell folder
+    ["cd build && ls *.js", work],
+  ];
+  await pool(allowed, 8, ([command, cwd]) => quietInBox(command, cwd));
+});
+
+// Release 2.0.0, slice w2, third attempt. R1, R4 and R5 in both copies (one table, same decision), and in the native
+// hook R2 (cd, pushd and chdir read as the shells read them: their own options and one `--` skipped, then one plain
+// literal target or the folder is unknown) and R3 (every character a shell may expand counts as a glob: `{`, `}`, and
+// zsh's extendedglob `^`, `#`, `~` inside a word). G1 to G5 are the confirmed gaps of the second review.
+/** @type {Array<[string, string]>} */
+const W2R2_TABLE = [
+  // G1, R1
+  ["o=oglobsubst; set -$o; x='*(e{echo X})'; echo $x", "deny"],
+  ["o=-oglobsubst; set $o", "deny"],
+  ["set -e$o", "deny"],
+  ["set $(echo -oglobsubst)", "deny"],
+  ["setopt autocd", "deny"],
+  ["shopt -s $o", "deny"],
+  ["zsh -o autocd -c ls", "deny"],
+  ["set -euo pipefail", "pass"],
+  ["set -x", "pass"],
+  ["set -- a b c", "pass"],
+  ["set a b", "pass"],
+  ["setopt extendedglob", "pass"],
+  ["shopt -s nullglob globstar", "pass"],
+  // G3, R4
+  ["timeout -s KILL 5 parallel echo", "deny"],
+  ["timeout --signal KILL 5 parallel echo", "deny"],
+  ["env -u X parallel echo", "deny"],
+  ["env -C /tmp parallel echo", "deny"],
+  ["xargs -a f parallel", "deny"],
+  ["xargs -d , parallel", "deny"],
+  ["stdbuf -o L parallel echo", "deny"],
+  ["xargs grep parallel", "deny"],
+  ["xargs -P 4 -n 1 gzip", "pass"],
+  ["find . -name '*.ts' -exec grep -l x {} +", "pass"],
+  ["export PS1='$ '", "pass"],
+  // G5, R5
+  ["git clone --template=/tmp/t u d", "deny"],
+  ["git init --template /tmp/t", "deny"],
+  ["GIT_TEMPLATE_DIR=/tmp/t git init", "deny"],
+  ["git clone https://example.com/r.git d", "pass"],
+  ["git fetch origin", "pass"],
+];
+
+test("parity (w2, third attempt): both copies give each row the same decision, and the class the table names", () => {
+  const wrong = [];
+  for (const [c, want] of W2R2_TABLE) {
+    const core = coreClassify(c, "/w");
+    const sdk = sdkClassify(c, "/w");
+    if (JSON.stringify(core) !== JSON.stringify(sdk)) wrong.push(`${c}: judge-core ${JSON.stringify(core)}, judge.ts ${JSON.stringify(sdk)}`);
+    if (core.cls !== want) wrong.push(`${c}: want ${want}, got ${core.cls}`);
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test("J-12 (w2, third attempt): cd targets read as the shells read them (G2, R2) and extended globs (G4, R3) are refused", async () => {
+  const orch = join(configDir, "orchestration");
+  const store = join(orch, STORE_NAME);
+  /** @type {Array<[string, string, RegExp]>} */
+  const refused = [
+    // G2: `--` ends cd's options; the word after it is the target
+    [`cd -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    [`pushd -- ${orch} && cat j*/*/*`, work, /through a glob/],
+    [`cd -L -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    [`cd -P -- ${orch} && cat j*/*/*`, work, /through a glob/],
+    [`chdir -- ${orch}; cat j*/*/*`, work, /through a glob/],
+    // R2: targets that are not one plain literal path
+    [`cd ${orch} x; cat j*/*/*`, work, /Run the directory change as its own Bash call/],
+    ["cd a^b; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ["cd --; cat j*/*/*", orch, /through a glob/], // `cd --` alone is the home folder, and the hook's folder stays a base
+    ["pushd; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ["cd ''; cat j*/*/*", work, /Run the directory change as its own Bash call/],
+    ['cd "$dir" && ls *.txt', work, /directory change on this line .* goes to a folder the guard cannot read as one plain path.*Run the directory change as its own Bash call and the command in the next call, or give the glob an absolute path\./],
+    // G4, R3: zsh's extendedglob and brace expansion reach the store without its name
+    [`setopt extendedglob; cat ${orch}/^x/^x/^x`, work, /through a glob/],
+    [`cat ${orch}/^x`, work, /through a glob/],
+    [`cat ${orch}/judge-prompt#s/x`, work, /through a glob/],
+    // brace expansion with a comma or a range: the floor refuses it first (J2), the glob check would too
+    [`cat ${orch}/{judge-p,x}rompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${configDir}/{orchestration/judge-p,x}rompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${orch}/{j..j}udge-prompts/x`, work, /through a glob|brace expansion/],
+    [`cat ${orch}/x~y`, work, /through a glob/],
+    [`cat ${configDir}/*~x/judge-p*`, work, /through a glob/],
+    ["cat ^x/^x/^x", orch, /through a glob/],
+    ["cat orchestration/^x/x", configDir, /through a glob/],
+  ];
+  mkdirSync(store, { recursive: true });
+  await pool(refused, 8, ([command, cwd, message]) => refusedInBox(command, cwd, message));
+  /** @type {Array<[string, string]>} */
+  const allowed = [
+    ["cd src && ls *.ts", work],
+    ["cd -- src && ls *.ts", work],
+    ["cd -P build && ls *.js", work],
+    ["echo '{a,b}' a#b ^x x~y", work],
+    ["git log --format='%h {x}'", work],
+    [`ls ${configDir}/^x`, work], // one level above the store's parent: lists ~/.claude's children only
+  ];
+  await pool(allowed, 8, ([command, cwd]) => quietInBox(command, cwd));
+});
+
+// Release 2.0.0, slice w7. N2: env's options read as GNU env documents them (F2: `-u X` no longer ends the reading).
+// N3: a bracket expression counts as any one character up to any later `]` of its segment (F3: POSIX classes, which the
+// tokenizer splits after their first `]`). N6: a command over the size caps is refused before any scan reads it.
+// The decision function is called directly for every row; the hook process runs on a few rows of each kind.
+test("w7 (N2, N3): env options and bracket expressions reach the store; their neighbours do not", async () => {
+  const orch = join(configDir, "orchestration");
+  mkdirSync(join(orch, STORE_NAME), { recursive: true });
+  const opts = { store: promptStoreFile(), name: STORE_NAME, home, cdpath: false };
+  /** @type {Array<[string, string, string]>} [command, cwd, verdict] */
+  const rows = [
+    // F2 and N2
+    [`env -u X -C ${orch} sh -c 'cat j*/k/*'`, work, "reaches"],
+    [`env -iu X -C ${orch} cat j*/*/*`, work, "reaches"],
+    [`env -u X --chdir ${orch} cat j*/*/*`, work, "reaches"],
+    [`env --ch=${orch} cat j*/*/*`, work, "reaches"],
+    [`env -0v -C${orch} cat j*/*/*`, work, "reaches"],
+    [`env --unset=X -C ${orch} cat j*/*/*`, work, "reaches"],
+    [`env --ignore-signal -C ${orch} cat j*/*/*`, work, "reaches"],
+    [`env --block-signal=INT --default-signal -C ${orch} cat j*/*/*`, work, "reaches"],
+    [`env - -C ${orch} cat j*/*/*`, work, "reaches"],
+    [`/usr/bin/env -C ${orch} cat j*/*/*`, work, "reaches"],
+    ["env -S 'x' cat j*/*/*", work, "unknown"],
+    ["env --split-string=x cat j*/*/*", work, "unknown"],
+    ["env -P /x cat j*/*/*", work, "unknown"],
+    ["env --frob cat j*/*/*", work, "unknown"],
+    ["env --i cat j*/*/*", work, "unknown"], // ambiguous: --ignore-environment or --ignore-signal
+    ['env "$O" cat j*/*/*', work, "unknown"],
+    ['env -C"$D" cat j*/*/*', work, "unknown"],
+    ["env -u X npm test && ls *", work, ""],
+    ["env FOO=1 node x.js *.ts", work, ""],
+    ["env -i PATH=/usr/bin ls *.ts", work, ""],
+    // F3 and N3
+    [`cat ${orch}/[[:alpha:]]udge-prompts/k/*`, work, "reaches"],
+    [`cat ${orch}/[[:lower:]]*/k/*`, work, "reaches"],
+    [`cat ${orch}/[[.j.]]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[[=j=]]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[]j]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[\\]j]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[!x]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[^x]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[i-k]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[j\\ ]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/[[:alpha:][:digit:]]udge-prompts/x`, work, "reaches"],
+    [`cat ${orch}/judge-prompt[[:alpha:]]/x`, work, "reaches"],
+    ["cat [[:alpha:]]udge-prompts/x", orch, "reaches"],
+    [`cat ${orch}/[[:alpha:]]x/k`, work, ""],
+    [`cat ${configDir}/[[:alpha:]]*`, work, ""],
+    ["ls src/[a-z]*.ts", work, ""],
+  ];
+  const wrong = rows.filter(([c, cwd, want]) => storeVerdict(c, cwd, opts) !== want).map(([c, cwd, want]) => `${c}: want ${JSON.stringify(want)}, got ${JSON.stringify(storeVerdict(c, cwd, opts))}`);
+  assert.deepEqual(wrong, []);
+  // The literal reading of a bracket that holds a slash: it reaches a store whose path holds `[` (and only then).
+  const odd = { ...opts, store: "/s/a[b/c]d/judge-prompts/k/prompts.jsonl" };
+  assert.equal(storeVerdict("cat /s/a[b/c]d/j*", "/w", odd), "reaches");
+  assert.equal(storeVerdict("cat /s/a[b/c]d/j*", "/w", { ...opts, store: "/s/x/judge-prompts/k/prompts.jsonl" }), "");
+  // The hook process on F2, F3 and their neighbours: refused with no model call, or no decision.
+  await pool([rows[0], rows[20], rows[21]], 8, (row) => refusedInBox(row?.[0] ?? "", row?.[1] ?? "", /record of the user's requests/));
+  await pool([rows[17], rows[33]], 8, (row) => quietInBox(row?.[0] ?? "", row?.[1] ?? ""));
+});
+
+test("w7 (N6): the hook refuses a command over the size caps before reading it, and decides the worst one under them quickly", async () => {
+  await refusedInBox("x".repeat(MAX_COMMAND_LENGTH + 1), work, /^orchestration judge denied this command: always blocked: a command of more than \d+ characters is always blocked/);
+  await refusedInBox(`echo ${"(".repeat(MAX_OPENERS + 1)}`, work, /a command with more than \d+ of \( is always blocked/);
+  // Under the caps: every opener at the cap, filled to the length cap; a 4,000-character command; 30 bracket expressions.
+  const C = MAX_OPENERS;
+  const worst = `echo ${"[{(".repeat(C)}${"a".repeat(MAX_COMMAND_LENGTH - 3 * C - 5)}`;
+  const t = Date.now();
+  const r = await runAsync(HOOK, bash(worst, "w7"), { ...ON, ...box().env });
+  assert.ok(Date.now() - t < 2000 + 1000, `the hook decided in ${Date.now() - t} ms`); // 2 s for the scans, 1 s for node's start
+  assert.equal(r.code, 2, "the floor refuses it (a `(` attached to a word)");
+  await quietInBox(`echo ${"word ".repeat(800)}`, work);
+  await quietInBox(`ls ${"src/[a-z]*.ts ".repeat(30)}`, work);
 });
