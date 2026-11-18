@@ -46,7 +46,9 @@ npm run typecheck    # the type check only
                      judge-core.mjs, prompt-capture.mjs, test-cmd.sh, builtin-agents.mjs (the one list of Claude Code's
                      built-in subagent types), skill-gate.mjs (the skill gate), skill-seal.mjs (a draft skill's seal),
                      skill-scan.mjs (a library shared by the skill gate and npm run skill-publish),
-                     subagent-statusline.mjs (the plugin's subagent status line)
+                     workflow-guard.mjs and workflow-hash.mjs (the workflow guard and the saved workflow's hashes),
+                     subagent-statusline.mjs (kept for a person who names it in their own subagentStatusLine; the
+                     plugin ships no settings.json, and the worker rows come from the mod's AgentRow hook)
   skills/            route, orchestration-conventions, skill-authoring
   workflows/         orchestrate.js (the gated workflow)
   settings.json, rules/
@@ -102,7 +104,7 @@ What the build does:
 - **Workflows.** It ships `.claude/workflows/*.js` as plugin workflows, with every `agentType` rewritten to `orchestration:<role>`.
 - **Evals.** It copies the repo-root `evals/` into the plugin, for `claude plugin eval`.
 - **Hooks.** It registers `judge-hook.mjs` (PreToolUse on `Bash`) and `prompt-capture.mjs` (UserPromptSubmit) in `hooks/hooks.json` only when those files exist in `.claude/hooks`, and wraps the judge hook for `onFailure: "block"`. It also registers `compact-context.mjs`, `researcher-guard.mjs`, `egress-guard.mjs`, `read-log.mjs` and `quote-check.mjs` (matcher `orchestration:researcher`).
-- **Settings.** It writes the 21 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`, and ships `.claude/hooks/subagent-statusline.mjs` through the plugin's `settings.json`.
+- **Settings.** It writes the 22 `userConfig` settings (`OPTIONS` in `scripts/build-plugin.mjs`) into `plugin.json`. Since 1.6.1 it writes no plugin `settings.json`: the worker rows are the mod's `AgentRow` hook, and `.claude/hooks/subagent-statusline.mjs` ships for a person's own `subagentStatusLine` setting.
 - **The pane.** It builds `dashboard/` into the plugin (with its state owner renamed to `orchestration`) and alone as `dist/dashboard`.
 
 `npm run check-plugin` skips only `dist/plugin/evals/results` and the two paths Claude Code writes when it loads the pane from `dist/dashboard`: `tsconfig.json` at that folder's root and `.claude-plugin/types/` (git ignores both). A stale file under any other `results` path fails it. A failure lists `Files differ: <path>` and `Only in <dir>: <path>` lines.
@@ -119,7 +121,7 @@ How releases 1.2.2 to 1.5.0 were made, and 1.5.1 on. `X.Y.Z` is the new version.
 6. Squash-merge it with the title `Release X.Y.Z: <summary> (#N)`, where `N` is the pull request's number (only 1.4.3's title had no summary): `gh pr merge <N> --squash --subject "Release X.Y.Z: <summary> (#N)"`. Pass `--subject`: the repository's squash title setting takes the commit's subject when the pull request has one commit. To keep a private address out of the merge commit, switch on "Keep my email addresses private" in the GitHub account (Settings, Emails) before you merge. With it on, GitHub authors its web-based Git operations, such as a merge, with the account's noreply address, and that address cannot be changed. With it off, `--author-email` with the noreply address is refused with `Invalid email address` (seen on 2026-11-16).
 7. Tag the merge commit on `main` with a lightweight tag `vX.Y.Z` (`git tag vX.Y.Z <merge commit>`, no `-a`), and push that tag on its own (`git push origin vX.Y.Z`).
 8. Create a GitHub Release from the tag, titled `X.Y.Z: <summary>`, with the changelog entry, without its heading line, as its notes. In the notes, rewrite each relative link of the entry to `https://github.com/0xcvaliente/claude-code-orchestration/blob/vX.Y.Z/<path>`, since a relative link leads nowhere on a release page; the link in `CHANGELOG.md` stays relative (`gh release create vX.Y.Z --title "X.Y.Z: <summary>" --notes-file <file>`).
-9. On each machine that uses the plugin, run `npm run claude-update`; `-- --fix` updates a stale plugin install ([docs/claude-code-updates.md](claude-code-updates.md)).
+9. On each machine that uses the plugin, run `npm run claude-update`; `-- --fix` updates a stale plugin install and adds a missing sandbox `allowWrite` entry ([docs/claude-code-updates.md](claude-code-updates.md)).
 
 ## Benchmark and eval suite
 

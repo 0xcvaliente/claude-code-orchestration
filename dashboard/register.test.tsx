@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 // Written by scripts/test-dashboard.mjs from src/fixtures/briefs (the harness lets a test import only its plugin's own code files: no node:fs, no .json).
 import fixtures from '../fixtures/briefs/fixtures'
-import { parseHeader, parsePlan, parseReply, parseStatus } from './register'
+import { displayWidth, parseHeader, parsePlan, parseReply, parseStatus, shortTokens, workerRole, workerRow } from './register'
 
 const PANE = {
   plugin: 'orchestration-dashboard',
@@ -1581,14 +1581,14 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
   await s.tool.call({ tool: 'mcp__claude_ai_Google_Drive__search_files', query: 'q' })
   await s.tool.call({ tool: 'mcp__notion__notion-search', query: 'q' })
   await s.tool.call({ tool: 'Skill', skill: 'x' }) // counted by skill.prompt, not as a tool
-  await spawnWith($, 'e1', 'look around', 'Explore') // any agent type is listed, not only the four roles
+  await spawnWith($, 'e1', 'look around', 'scout') // any agent type is listed, not only the four roles
   await spawnWith($, 'b1', brief('s1'), IMPL)
   await s.tool.call({ tool: 'Grep', pattern: 'x', agentId: 'b1' }) // an agent's tools count too
   await s.tool.call({ tool: NAME, ...VERDICT }) // the pane's own route tool is a connector too
   const want = [
     'skills     ', 'orchestration:route · plugin-authoring',
     'connectors ', 'Google Drive · notion · orchestration-dashboard',
-    'agents     ', 'Explore 1 · implementer 1',
+    'agents     ', 'scout 1 · implementer 1',
     'tools      ', 'Read 2 · Bash 2 · Edit 1 · Grep 1', // broken.ts errored, so two reads ran
     'edited     ', 'a.ts',
     'read       ', '1 file',
@@ -1601,7 +1601,7 @@ test('used in this session: skills, connectors, agents, tools and files, from ca
   await spawnWith($, 'b2', brief('s9'), IMPL)
   const t = await texts($)
   expect(t.some(x => /^[●✔✖◆◌⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] s1$/.test(x))).toBe(false)
-  expect(usedOf(t).slice(4, 6)).toEqual(['agents     ', 'implementer 2 · Explore 1'])
+  expect(usedOf(t).slice(4, 6)).toEqual(['agents     ', 'implementer 2 · scout 1'])
 })
 
 test('used in this session: on a narrow pane a row keeps as many names as fit and ends in +N', async ($, on) => {
@@ -1965,16 +1965,20 @@ test('blocked launches: a gate denial of an Agent call is logged with its reason
   on('tool.call', (_: unknown, e: any) => ({
     deny: e.prompt?.includes('s9') ? 'Plan check: slice s9 is not in the plan (not_in_plan). Re-plan with REPLAN first.'
       : e.prompt?.includes('s8') ? 'Plan check: no plan review has finished in this session. Send the plan to a reviewer.'
-      : e.prompt?.includes('s7') ? 'Review gate: let not_in_plan_gave_up through' : 'The user rejected this tool call',
+      : e.prompt?.includes('s7') ? 'Review gate: let not_in_plan_gave_up through'
+      : e.prompt?.includes('s5') ? 'Plan check: slice s5: the tests failed after the worker had reported. Resume that implementer first with SendMessage (to: a1), then launch the review.'
+      : 'The user rejected this tool call',
   }))
   await boot($, on)
   const call = ($ as any).tool.call
   await spawnWith($, 'b1', brief('s1'), IMPL)
   for (const s of ['s9', 's8', 's7', 's6']) await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief(s), description: s })
+  await call({ tool: 'Agent', subagent_type: 'orchestration:reviewer', prompt: 'SLICE: s5\nReview it.', description: 'review s5' }) // the reviewer hold (1.6.1)
   const t = await texts($, 100, 200)
   expect(t.some(x => /⊘ blocked not_in_plan · s9 · implementer$/.test(x))).toBe(true)
   expect(t.some(x => /⊘ blocked no_plan_review · s8 · implementer$/.test(x))).toBe(true)
-  expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(2) // a gave-up form and a person's denial are not gate blocks
+  expect(t.some(x => /⊘ blocked tests_failed_after_report · s5 · reviewer$/.test(x))).toBe(true)
+  expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(3) // a gave-up form and a person's denial are not gate blocks
 })
 
 test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as done; an implementer reply with none still is', async ($, on) => {
@@ -2204,4 +2208,106 @@ test('slice diagram: side by side, the bus counts every card nothing depends on,
   expect(await colorsOf(ui, /└[─┬]+$/)).toContain('error')
   expect(await colorsOf(ui, /^┘$/)).toEqual(['success'])
   await ui.unmount()
+})
+
+// ---- Worker rows (AgentRow): the same cases as src/subagent-statusline.test.mjs, for the port in register.tsx. The records are the mod's own, as
+// its agent.spawn hook writes them: plan1 a plan review, impl1 and impl2 two fresh launches of slice a (RISKY), rev1 a VALIDATE review, res1 research.
+const REC = (id: string, role: string, startedAt: number, more: Record<string, unknown> = {}) =>
+  ({ id, role, model: 'sonnet', label: id, deps: [], files: 1, startedAt, status: 'running', tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0, ...more }) as never
+const RECORDS = [
+  REC('plan1', 'reviewer', 0, { label: 'plan review', plan: true }),
+  REC('impl1', 'implementer', 1, { slice: 'a', risky: true }),
+  REC('rev1', 'reviewer', 5, { slice: 'a', validate: true }),
+  REC('impl2', 'implementer', 9, { slice: 'a', risky: true }),
+  REC('res1', 'researcher', 9, { slice: 'r1' }),
+]
+const row = (id: string, type: unknown, more: Record<string, unknown> = {}) =>
+  ({ id, type, status: 'running', description: 'Build slice a', label: 'Running the tests', tokenCount: 41200, ...more }) as never
+
+test('worker rows: shortTokens prints each value in the tier its rounded form belongs to', async () => {
+  const cases: [number, string][] = [
+    [999, '999'], [999.5, '1.0k'], [1049, '1.0k'], [1050, '1.1k'], [99_949, '99.9k'], [99_950, '100k'], [100_500, '101k'],
+    [999_499, '999k'], [999_500, '1.0M'], [1_050_000, '1.1M'], [0, '0'], [941, '941'], [12345, '12.3k'], [128400, '128k'],
+  ]
+  for (const [n, want] of cases) expect(shortTokens(n)).toBe(want)
+  for (const bad of [NaN, -1, -Infinity]) expect(shortTokens(bad)).toBe('0')
+})
+
+test('worker rows: role, slice, attempt and flags from the records; model, tokens, context share and progress from the props', async () => {
+  expect(workerRow(row('impl1', IMPL, { model: 'claude-sonnet-5-5', contextWindowSize: 200000 }), RECORDS)).toBe('implementer a risky · sonnet · 41.2k (21%) · Running the tests')
+  // the second fresh launch of the slice is attempt 2; a resume (a later record with the same id) keeps its number
+  expect(workerRow(row('impl2', 'implementer', { model: 'claude-opus-5-5' }), RECORDS)).toBe('implementer a #2 risky · opus · 41.2k · Running the tests')
+  expect(workerRow(row('impl1', 'implementer'), [...RECORDS, REC('impl1', 'implementer', 12, { slice: 'a', risky: true })])).toBe('implementer a risky · 41.2k · Running the tests')
+  expect(workerRow(row('rev1', REVQ, { model: 'claude-fable-5-2', label: '' }), RECORDS)).toBe('reviewer a validate · fable · 41.2k · Build slice a')
+  expect(workerRow(row('plan1', 'reviewer', { status: 'completed' }), RECORDS)).toBe('reviewer plan · 41.2k · completed · Running the tests')
+  expect(workerRow(row('plan1', 'reviewer'), [REC('plan1', 'reviewer', 0, { label: 'plan review', plan: true, replan: true })])).toBe('reviewer replan · 41.2k · Running the tests')
+  expect(workerRow(row('res1', 'researcher'), RECORDS)).toBe('researcher r1 · 41.2k · Running the tests')
+  // no record (spawned before the mod loaded): the role alone
+  expect(workerRow(row('new', 'orchestration:integrator', { label: 'merging\n  two   branches' }), RECORDS)).toBe('integrator · 41.2k · merging two branches')
+  // cut to the row's columns
+  const cut = workerRow(row('impl1', 'implementer', { model: 'claude-sonnet-5-5', columns: 30 }), RECORDS) ?? ''
+  expect([cut.length, cut.endsWith('…')]).toEqual([30, true])
+})
+
+test('worker rows: cut by display width, whole characters only (wide CJK and emoji count two columns)', async () => {
+  const at40 = (label: string) => workerRow(row('impl1', 'implementer', { label, columns: 40 }), RECORDS)
+  // "implementer a risky · 41.2k · " is 30 columns; at 40, 9 are left before the "…"
+  expect(at40('修正 '.repeat(20))).toBe('implementer a risky · 41.2k · 修正 修正…')
+  for (const e of ['😀', '🚀', '✅', '⌛', '☕', '🛠️', '❤️', '👩‍💻', '🇳🇴', '1️⃣']) expect(at40(e.repeat(10))).toBe(`implementer a risky · 41.2k · ${e.repeat(4)}…`)
+  expect(at40('☕︎'.repeat(12))).toBe(`implementer a risky · 41.2k · ${'☕︎'.repeat(9)}…`) // text presentation: one column
+  expect(at40('ok 👩‍💻 ❤️ 漢字 done')).toBe('implementer a risky · 41.2k · ok 👩‍💻 ❤️ …')
+  const accents = 'é'.repeat(9) // fits by width though it has more code units than columns
+  expect(workerRow(row('impl1', 'implementer', { label: accents, columns: 39 }), RECORDS)).toBe(`implementer a risky · 41.2k · ${accents}`)
+  expect([displayWidth('漢字'), displayWidth('é'), displayWidth('👩‍💻'), displayWidth('ㄱ')]).toEqual([4, 1, 2, 2])
+})
+
+test("worker rows: only this plugin's four workers, plain or under the plugin's name, get a row of the mod", async () => {
+  expect(['researcher', IMPL, 'reviewer', 'orchestration:integrator'].map(workerRole)).toEqual(['researcher', 'implementer', 'reviewer', 'integrator'])
+  for (const type of ['scout', 'helper-agent', 'other-plugin:reviewer', 'orchestration:orchestrator', 'orchestration:reviewer-bot', '', undefined]) {
+    expect(workerRow(row('x', type), RECORDS)).toBe(null)
+  }
+  expect(workerRow({ type: 'implementer' } as never, RECORDS)).toBe(null)
+})
+
+const AGENT_ROW = (id: string, type: string, more: Record<string, unknown> = {}): any =>
+  ({
+    plugin: 'orchestration-dashboard', component: 'AgentRow', requestId: id,
+    props: { id, type, description: 'build a', label: 'Running the tests', status: 'running', kind: 'local_agent', taskStatus: 'running', startTime: 0, cwd: '/', model: 'claude-opus-5-5', contextWindowSize: 200000, tokenCount: 50000, tokenSamples: [50000], hasRow: true, rowIds: [id], columns: 120, isHidden: false, ...more },
+  })
+// Draws one AgentRow through the mod; the test's own hook beneath it records the props the mod handed down.
+const drawRow = async ($: any, id: string, type: string, more: Record<string, unknown> = {}) => {
+  const ui = await $.ui.mount({ ...AGENT_ROW(id, type, more), surface: 'terminal' })
+  await ui.unmount()
+}
+
+test("worker rows: the AgentRow hook draws a worker's row with the pane off, and leaves other rows and a body the person's settings drew alone", SLOW, async ($, on) => {
+  const seen: any[] = []
+  on('ui.render', { component: 'AgentRow' }, (_: unknown, e: any, next: any) => (seen.push(e.props), next(e)))
+  await boot($, on) // the pane stays off: the command never ran
+  await spawnWith($, 'a1', brief('s1'), IMPL)
+  await finish($, 'a1', FAIL)
+  await spawnWith($, 'a2', `${brief('s1')}\nRISKY: yes`, IMPL)
+  await drawRow($, 'a2', IMPL)
+  expect(seen.at(-1)?.body).toBe('implementer s1 #2 risky · opus · 50.0k (25%) · Running the tests')
+  await drawRow($, 'x1', 'scout')
+  expect(seen.at(-1)?.id).toBe('x1')
+  expect(seen.at(-1)?.body).toBe(undefined)
+  await drawRow($, 'a2', IMPL, { body: "the person's own line" })
+  expect(seen.at(-1)?.body).toBe("the person's own line")
+})
+
+test("worker rows: a state read that fails keeps Claude Code's own row", SLOW, async ($, on) => {
+  const seen: any[] = []
+  let refuse = false
+  on('ui.render', { component: 'AgentRow' }, (_: unknown, e: any, next: any) => (seen.push(e.props), next(e)))
+  on('state.get', (_: unknown, e: any, next: any) => (refuse ? ({ deny: 'state read refused' }) as never : next(e)))
+  await boot($, on)
+  await spawnWith($, 'a1', brief('s1'), IMPL)
+  await drawRow($, 'a1', IMPL)
+  expect(seen.at(-1)?.body).toBe('implementer s1 · opus · 50.0k (25%) · Running the tests')
+  refuse = true
+  await drawRow($, 'a1', IMPL)
+  refuse = false
+  expect(seen.at(-1)?.id).toBe('a1')
+  expect(seen.at(-1)?.body).toBe(undefined)
 })

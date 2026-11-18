@@ -10,6 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+
 const PLUGIN = "orchestration"; // the plugin name in scripts/build-plugin.mjs
 
 // Plugin userConfig reaches hooks as CLAUDE_PLUGIN_OPTION_<KEY>; the hooks read ORCH_<KEY>. verify.sh has the same list.
@@ -17,6 +18,7 @@ export const OPTION_KEYS = Object.freeze([
   "TEST_CMD", "ESCALATION", "JUDGE", "JUDGE_TIMEOUT_MS", "READ_ROUTER", "GAP_MIN", "STALL_GATE", "GUARDS",
   "ALLOW_BUILTINS", "RUN_STALE_MIN", "BASELINE", "BUGFIX_CHECK", "QUOTE_CHECK", "GATE_ISOLATED", "SKILL_HINTS",
   "HANDBACK_CHECK", "ALLOW_HAIKU", "SKILL_CREATE", "SKILLS_REPO_PRIVATE", "SKILLS_REPO_PUBLIC", "WORKFLOW_GUARD",
+  "REVIEW_HOLD",
 ]);
 
 /**
@@ -118,9 +120,22 @@ export const promptStore = join(promptStoreDir(project), "prompts.jsonl");
 // `source: "poll_event"`), so the text decides: a subagent's hand-back arrives as `Another Claude session sent a
 // message:` and an `<agent-message ...>` line, a notification as `<task-notification>`. An origin-like field is honoured
 // too, in case a later version adds one. Unknown shapes count as typed. A person can still type such an opening.
+// Both rules look only at the start of the prompt: a header line ("Another Claude session sent a message:", and the
+// "... while you were working:" forms of it and of "A peer session sent a message"; since 1.6.1 also "The <name> plugin
+// sent a message:" and its "... while you were working:" form, "The coordinator sent a message while you were working:",
+// "Your background observer (<x>) sent a report" and "A message arrived in the bound thread while you were working:",
+// read from the 2.1.326 binary, none shown to reach this hook), which marks the prompt as not typed whatever follows it, or a known tag (task-notification, system-reminder, or any `<...-message>` tag such as
+// agent-message, peer-message, teammate-message, channel-message and cross-session-message, the tag 2.1.326 gives
+// another session's message). A prompt that only mentions one of them further down counts as typed.
+// No transcript lookup: a probe on 2.1.326 (docs/data/live-checks-2026-11-17-b.md, K3) found the record of the prompt not yet in the
+// transcript when UserPromptSubmit fires (the file does not exist at a session's first prompt; at a task notification
+// its last lines are the queue's enqueue and dequeue records, which carry no origin), so the lookup would only ever see
+// the previous prompt's record.
 const ORIGIN_KEYS = ["origin", "prompt_origin", "prompt_source", "source", "kind", "prompt_kind", "sender"];
 const NOT_PERSON = /notification|system|peer|agent|teammate|hook|tool|background|scheduled|cron|automat|bot|poll/i;
-const NOT_PERSON_TAG = /^\s*(?:Another Claude session sent a message:\s*)?<(task-notification|system-reminder|teammate-message|peer-message|agent-message|channel-message)\b/i;
+const NOT_PERSON_HEADER =
+  /^\s*(?:(?:another(?: claude)?|a peer) session sent (?:you )?a message\b[^\n:]{0,80}:|the [^\n:]{1,80} plugin sent a message(?: while you were working)?:|the coordinator sent a message while you were working:|your background observer \([^\n)]{0,200}\) sent a report\b|a message arrived in the bound thread while you were working:)/i;
+const NOT_PERSON_TAG = /^\s*<(?:task-notification|system-reminder|[a-z]+(?:-[a-z]+)*-message)\b/i;
 
 /** True unless the UserPromptSubmit input shows the prompt came from somewhere other than the person. @param {any} input */
 export function typedPrompt(input) {
@@ -129,7 +144,8 @@ export function typedPrompt(input) {
     const value = typeof v === "string" ? v : typeof v?.kind === "string" ? v.kind : typeof v?.type === "string" ? v.type : "";
     if (value && NOT_PERSON.test(value)) return false;
   }
-  return !NOT_PERSON_TAG.test(typeof input?.prompt === "string" ? input.prompt : "");
+  const prompt = typeof input?.prompt === "string" ? input.prompt : "";
+  return !NOT_PERSON_HEADER.test(prompt) && !NOT_PERSON_TAG.test(prompt);
 }
 
 /** @param {{ dir: string, inProject: boolean }} [state] */
@@ -146,6 +162,28 @@ export function ensureStateDir(state = own) {
 // stop and may run at the same time): it belongs to a stop when it is newer than that hook's own previous stop record
 // of the agent, so a resumed agent whose next run ends without a hand-back falls back to today's sources.
 export const HANDBACK_LOG = "handbacks.jsonl";
+
+/**
+ * The hand-back a stop follows (2.0.0): the tool_use_id of the agent's latest SubagentHandback capture in handbacks.jsonl
+ * (handback-check.mjs writes it at PreToolUse, before the stop) since its latest SubagentStart in telemetry.jsonl, or
+ * null when it has handed nothing back since (a worker that only stops). verify.sh (through test-gate-cache.mjs),
+ * telemetry.mjs and journal.mjs read the same two logs at one stop, so they store the same value as after_handback, and
+ * run.mjs pairs a stop with its test-gate record by it. (A transcript-based key did not work: live, the transcript was
+ * still being written while the stop hooks ran, docs/data/probes-2.0.0-b1.md.)
+ * @param {unknown} sessionId @param {unknown} agentId @param {string} [dir] @returns {string | null}
+ */
+export function latestHandbackId(sessionId, agentId, dir = stateDir) {
+  if (typeof sessionId !== "string" || typeof agentId !== "string" || !agentId) return null;
+  let start = -Infinity;
+  for (const e of agentRecords(dir, "telemetry.jsonl", sessionId, agentId)) {
+    if (e.hook_event_name === "SubagentStart") start = Math.max(start, Date.parse(e.ts) || -Infinity);
+  }
+  const id = agentRecords(dir, HANDBACK_LOG, sessionId, agentId)
+    .filter((c) => typeof c.tool_use_id === "string" && c.tool_use_id && !(Date.parse(c.ts) < start))
+    .at(-1)?.tool_use_id;
+  const clean = typeof id === "string" ? id.replace(/[^A-Za-z0-9_.:-]/g, "") : "";
+  return clean || null;
+}
 
 /** Records of a JSON-lines log in `dir` for one session and agent; [] when unreadable. @param {string} dir @param {string} name @param {string} sessionId @param {string} agentId */
 function agentRecords(dir, name, sessionId, agentId) {

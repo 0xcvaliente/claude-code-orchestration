@@ -144,7 +144,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 ## N
 
-**Nudge.** The plugin's SessionStart hook (`nudge.mjs`): it tells a new main session to run `orchestration:route` before a non-trivial task. [docs/native-mode.md "The plugin"]
+**Nudge.** The plugin's SessionStart hook (`nudge.mjs`): it tells a new main session to run `orchestration:route` before a non-trivial task. The same file, at UserPromptSubmit, refuses a typed prompt holding the word `ultracode` (since 1.6.1). [docs/native-mode.md "The plugin"; docs/gates.md "Nudge"]
 
 ## O
 

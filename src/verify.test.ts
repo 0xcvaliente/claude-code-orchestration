@@ -18,7 +18,7 @@ const HEADLESS_GIT_DENY = [
   "Bash(git -c*)", "Bash(git * -c*)", "Bash(git --config-env*)", "Bash(git * --config-env*)",
   "Bash(git reset *--h*)", "Bash(git * reset *--h*)", "Bash(git clean*)", "Bash(git * clean -*)",
   "Bash(git * --namespace*)", "Bash(git * --git-dir*)", "Bash(git * --work-tree*)", "Bash(git * --exec-path*)",
-  "Bash(git * --super-prefix*)", "Bash(git * --attr-source*)", "Bash(git * -C *)",
+  "Bash(git * --super-prefix*)", "Bash(git * --attr-source*)", "Bash(git * -C *)", "Bash(git -C */../*)",
 ];
 function detect(files: Record<string, string>, env: Record<string, string> = {}) {
   const dir = tmp();
@@ -282,7 +282,13 @@ test("auto.sh reviewed route: the reviewer gets the detected runner's rules and 
   // match `git -C . commit -am diff`. reviewer.md tells reviewers to use git -C <path> diff with literal paths.
   const repoAbs = realpathSync(repo);
   for (const sub of ["diff", "status", "log", "show"]) assert.ok(reviewer.split("\n").includes(`Bash(git -C ${repoAbs} ${sub}*)`), sub);
-  assert.doesNotMatch(reviewer, /^Bash\(git -C \*/m);
+  // Allow rules only: the deny list holds `Bash(git -C */../*)`, which narrows.
+  const lines = reviewer.split("\n");
+  const from = lines.indexOf("--allowedTools") + 1;
+  const end = lines.indexOf("--", from);
+  const allowed = lines.slice(from, end < 0 ? undefined : end).join("\n");
+  assert.ok(from > 0 && allowed.length > 0, "the reviewer call has an allow list");
+  assert.doesNotMatch(allowed, /^Bash\(git -C \*/m);
   assert.doesNotMatch(reviewer, /^(Edit|Write|Bash\(git add\*\)|Bash\(npm \*\))$/m);
 });
 

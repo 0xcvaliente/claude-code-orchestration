@@ -17,19 +17,19 @@ A [gate](glossary.md#g) is a hook that blocks a worker launch, a worker's stop o
 
 | Gate or guard | Hook file | When it runs | What it blocks | Switch |
 |---|---|---|---|---|
-| [Plan check](#plan-check) | `plan-check.mjs` | PreToolUse on `Agent\|Task` (timeout 60 s) | An implementer launch that breaks the run's plan; a fork or built-in subagent while a run is open | see the reasons |
+| [Plan check](#plan-check) | `plan-check.mjs` | PreToolUse on `Agent\|Task` (timeout 60 s) | An implementer launch that breaks the run's plan; a fork or built-in subagent while a run is open; a reviewer of a slice whose implementer has failing tests it never saw (1.6.1) | see the reasons |
 | [Test gate](#test-gate) | `verify.sh` | SubagentStop of an implementer (timeout 900 s) | The implementer's stop while the tests fail, or a `KIND: bugfix` slice without a reproduction test | `ORCH_TEST_CMD`, `ORCH_GATE_ISOLATED`, `ORCH_BASELINE`, `ORCH_BUGFIX_CHECK` |
 | [Review gate](#review-gate) | `review-gate.mjs` | Stop of the main session | The final reply until every slice of the run has a passing review | `ORCH_ESCALATION`, `ORCH_STALL_GATE`, `ORCH_GAP_MIN` |
 | [Report check](#report-check) | `handback-check.mjs` | PreToolUse on `SubagentHandback` (auto mode) | A [reply](glossary.md#r) with no STATUS line, or a reviewer's pass that leaves a checked id unanswered (once) | `ORCH_HANDBACK_CHECK` |
 | [Quote check](#quote-check) | `quote-check.mjs` | PreToolUse on `SubagentHandback`, and SubagentStop of a researcher | A researcher reply whose `QUOTE:` text is not in its source (once) | `ORCH_QUOTE_CHECK` |
 | [Researcher guard](#researcher-guard) | `researcher-guard.mjs` | PreToolUse on `Bash`, researcher only | Any researcher command outside its read-only list | `ORCH_GUARDS` |
 | [Egress guard](#egress-guard) | `egress-guard.mjs` | PreToolUse on `WebFetch`, reviewer only | A reviewer fetch to a host its own work does not name | `ORCH_GUARDS` |
-| [Workflow guard](#workflow-guard) | `workflow-guard.mjs` | PreToolUse on `Workflow`, every session | Every Workflow launch except this repo's saved `orchestrate` workflow: a script written on the spot (the `ultracode` keyword), a script path, any other name | `ORCH_WORKFLOW_GUARD` |
+| [Workflow guard](#workflow-guard) | `workflow-guard.mjs` | PreToolUse on `Workflow`, every session | Every Workflow launch except this repo's saved `orchestrate` workflow, matched by content (a resume of it included): a script written on the spot (the `ultracode` keyword), any other script path, any other name | `ORCH_WORKFLOW_GUARD` |
 | Skill gate | `skill-gate.mjs` | SubagentStop of an implementer (timeout 120 s) | The stop of a skill slice whose draft fails its checks; see [skills.md, The skill gate](skills.md#the-skill-gate) | `ORCH_SKILL_CREATE` |
 | Native Bash judge | `judge-hook.mjs`, `prompt-capture.mjs` | PreToolUse on `Bash`, UserPromptSubmit | Pushes, remote changes and recursive deletes the person did not ask for (opt-in); see [bash-judge.md, Native hook](bash-judge.md#native-hook) | `ORCH_JUDGE` |
 | [Turn warning](#turn-warning) | `turn-budget.mjs` | PostToolUse, no matcher | Nothing: advice at 80% of a worker's turns | `ORCH_TURN_WARNING` |
 | [Context after compaction](#context-after-compaction) | `compact-context.mjs` | SessionStart, matcher `compact` | Nothing: puts the open run back in context | none |
-| [Nudge](#nudge) | `nudge.mjs` | SessionStart (plugin only); UserPromptSubmit | Nothing: tells a new session to route its task, and adds one line when a typed prompt holds the word `ultracode` | `ORCH_NO_NUDGE` (SessionStart text only) |
+| [Nudge](#nudge) | `nudge.mjs` | SessionStart (plugin only); UserPromptSubmit | A typed prompt holding the word `ultracode` (refused before any model turn); otherwise nothing: tells a new session to route its task | `ORCH_NO_NUDGE` (SessionStart text only); `ORCH_WORKFLOW_GUARD` (the refusal) |
 
 Two more hooks write logs and never block: `journal.mjs` and `telemetry.mjs` ([logs.md](logs.md)). The gates read those logs, so a gate decides from records, never from what a worker says.
 
@@ -37,7 +37,7 @@ Two more hooks write logs and never block: `journal.mjs` and `telemetry.mjs` ([l
 
 The plan check (`.claude/hooks/plan-check.mjs`) runs before every `Agent` or `Task` launch. It checks each implementer launch against the open [run](glossary.md#r) and its reviewed plan. It reads the first lines of the [brief](glossary.md#b): `SLICE: <id>`, `FILES: <owned files>` and `DEPENDS: <slice ids or none>` (parsed by `brief.mjs`).
 
-- It checks implementer launches, and fork or built-in launches. A researcher, reviewer or integrator launch is never blocked.
+- It checks implementer launches, and fork or built-in launches. A researcher or integrator launch is never blocked; a reviewer launch only by `tests_failed_after_report` (below).
 - A brief with an `ORCHESTRATION: workflow` line (the [gated workflow](glossary.md#g)) is not checked.
 - Every check is scoped to a run, not to the session ([Run scope](#run-scope)).
 - Every decision goes to `plan-check.jsonl` with the run it was scoped to.
@@ -58,6 +58,7 @@ Reasons, in the order the code checks them:
 | `file_overlap` | A FILES entry overlaps a file another slice of the run owns, and the two slices are in no order in the run's DEPENDS graph, either way. Also when a retry's DEPENDS line drops the only order between two other slices that share a file. | blocks every time |
 | `dependency_cycle` | DEPENDS closes a cycle in the run's order graph. | blocks every time |
 | `worktree_base_not_head` | The launch has `isolation: "worktree"`, the effective `worktree.baseRef` is not `"head"`, and HEAD differs from `refs/remotes/origin/HEAD`. The worktree would start from the remote default branch and miss the checked-out work. | 2 blocks per slice |
+| `tests_failed_after_report` (1.6.1) | A launch of this plugin's reviewer whose brief names `SLICE:` and is not a PLAN REVIEW, while the test-gate record of the latest stop of the slice's latest implementer is a block for failed tests (`tests_failed`, or a record with no reason) and that implementer has not started since (a `SendMessage` resume is a start). The message gives the gate's reason, the failing-test counts its record holds, and the agent id to resume. A `bugfix_` block never refuses. Only the implementers of the run the review lands in count: the latest run that holds the slice, as the run model places a review; a slice carried whole into a new plan keeps its implementers, one that starts clean has none. The latest stop's test-gate record is matched to it by count since the agent's latest start, not by time, since the stop hooks run side by side and a fast gate record can carry an earlier time than telemetry's stop. A refusal is made only when its record in `review-hold.jsonl` was written and reads back; otherwise the launch goes through. Switch `ORCH_REVIEW_HOLD=off` (plugin setting `review_hold`). Records in `review-hold.jsonl`, never in `plan-check.jsonl`. | 2 blocks per slice, agent and block |
 
 A launch that passes every check is allowed with `ok`, or `light_path` for a light launch before any plan review. A give-up is allowed and logged as `<reason>_gave_up`.
 
@@ -97,6 +98,7 @@ The plan check is the only hook that ever returns an allow. It returns `permissi
 | [Read router](#read-router) | Raises a researcher's model to the tier its sources need, and adds a note listing the converted text files | Our researcher, when the brief names `SOURCES:` | `ORCH_READ_ROUTER=on` turns it on |
 | Coverage note | Asks the researcher to read every file in full and end its reply with a `FILES-READ:` line, listing a file not read under OPEN | Our researcher, when `SOURCES:` names two or more local regular files | `ORCH_SOURCES_NOTE=off` turns it off |
 | Skill suggestions | Appends a block naming installed skills; see [skills.md, Suggestions](skills.md#suggestions). Bug words in the goal do not suggest the bugfix skill when every FILES entry is prose or the brief has a KIND other than `bugfix`. | Our implementer (only on `ok` or `light_path`), researcher and reviewer | `ORCH_SKILL_HINTS=off` turns it off |
+| Test gate pending note (1.6.1) | Appends one line: the test gate has not reported yet on the slice's latest implementer stop, so the reviewer must not rest a pass on the tests having passed and says so in its report. Nothing is added once the gate has reported. | Our reviewer, when its brief names `SLICE:` (not a PLAN REVIEW) and the slice's latest implementer of that run stopped and the test gate has no record for that stop yet. A gate killed at its hook timeout leaves no record, so the note stays for that stop: the tests were never judged, which is what the note says. | `ORCH_REVIEW_HOLD=off` turns it off |
 | Skill facts and DRAFTS lines | Appends the draft worktree facts to a skill slice, and one line per draft named on `DRAFTS:`; see [skills.md, What the plan check does](skills.md#what-the-plan-check-does) | Our implementer, researcher and reviewer | `ORCH_SKILL_CREATE=off` blocks skill slices |
 
 Rules that hold for every change:
@@ -153,6 +155,8 @@ These are not prose, so the tests run:
 A rename or copy is judged by both its old and new path. Any doubt keeps the tests: a clean tree, a folder outside git, a failing `git`. The gate never reads the triage fact `code` and never reads what the worker says. So work that changes no code still runs the tests outside git, with `ORCH_TEST_CMD` set, or when a non-prose file (a `.csv`, say) changed.
 
 **Blocks.** A failing run blocks with `tests_failed`. After 2 such blocks for one implementer, counted since its latest SubagentStart, it allows with `max_blocks_reached`. A `SendMessage` resume starts the implementer again, so each attempt gets its own two blocks. With no start recorded, every block counts. pytest exit code 5 (no tests collected) allows with `no_tests_collected`.
+
+**The report comes first (1.6.1).** The journal records the implementer's stop, and its report reaches the orchestrator, when SubagentStop starts; this gate then runs the suite for minutes, so a block lands after the worker has ended. The worker never sees it until it is resumed. The [plan check](#plan-check) therefore refuses the slice's reviewer while such a block stands (`tests_failed_after_report`) and adds a note to a reviewer launched while the gate is still running; the [review gate](#review-gate) still holds the final reply (`implementer_unfinished`), as before. The two hooks match a block to a stop differently: the plan check pairs a gate record with its stop by count since the agent's latest start (`stopGate`), so a record stamped just before its own stop still counts for it, while the review gate keeps comparing times (`testBlocked`). What they share, in `run.mjs`, is the reading of the logs (`implementerTestStates`), the classification of block reasons (failed tests, the four environment reasons, other `bugfix_` reasons) and the choice of the slice's implementers.
 
 **Whole suite once per stop.** The test gate runs the whole suite at every implementer stop, and the integrator runs it once more after the merge. So a slice's [acceptance check](glossary.md#a) is the narrowest command that proves the slice, and a brief never also asks a worker to run the whole suite.
 
@@ -269,6 +273,10 @@ A test that fails on the base only as a whole file that does not load (an import
 
 When a base run cannot be used, the gate record carries a `cause`: `lock_mismatch` (naming the lock file), `worktree_add_failed`, `base_timeout` or `no_test_names`.
 
+A lock file that differs from the base's is something no worker can fix, so since 1.6.1 `lock_mismatch` never blocks: the gate logs an allow with `bugfix_unverified_gave_up` and `"cause":"lock_mismatch"` at once. That is a doubt signal, so the slice needs a passing opus review.
+
+The four environment blocks (`bugfix_base_unusable`, `bugfix_no_base`, `bugfix_timeout`, `bugfix_tmp_lost`) leave the implementer looking unfinished to the review gate. A later passing opus review of the slice clears that for the review gate only; the skip is logged as `implementer_unfinished:<slice>:<reason>_cleared_by_review`. `tests_failed`, `bugfix_no_test`, `bugfix_test_passes_on_base`, and a missing or unknown reason are never cleared that way.
+
 - The check may make two base runs. They share what is left of the budget after the test run.
 - Stopped at its limit, the helper gets SIGTERM (SIGKILL 5 s later) and removes its base worktree first.
 - The bugfix cap and the `tests_failed` cap are counted separately.
@@ -303,7 +311,7 @@ It checks in this order and blocks on the first problem that still has blocks le
 | 2 | `no_telemetry` | allow | the state dir has no `telemetry.jsonl` |
 | 3 | `no_implementer_in_session` | allow | no implementer stopped in this session and none is unfinished |
 | 4 | `run_state_unreadable` | block | the run state cannot be folded from the logs |
-| 5 | `implementer_unfinished` | block | an implementer launched with the Agent tool started and never stopped (a turn-limit stop fires no SubagentStop), or its latest test-gate record is a block with no later SubagentStop. It blocks until the implementer is resumed and stops, or a later implementer stop of the same slice takes over. |
+| 5 | `implementer_unfinished` | block | an implementer launched with the Agent tool started and never stopped (a turn-limit stop fires no SubagentStop), or its latest test-gate record is a block with no later SubagentStop. It blocks until the implementer is resumed and stops, or a later implementer stop of the same slice takes over. The message names the test gate's reason (the text for `tests_failed` is unchanged); after one of the four environment blocks of the [bugfix check](#bugfix-check), a later passing opus review of the slice also clears it. |
 | 6 | `no_reviewer_after_last_implementer` | block | per slice: no review after its latest attempt |
 | 7 | `replan_required` | block | per slice: its latest counted review failed and it is a stalled slice ([Stall gate](#stall-gate)) |
 | 8 | `last_reviewer_failed` | block | per slice: its latest counted review failed |
@@ -512,28 +520,35 @@ WebSearch is not gated. Decisions go to `gates.jsonl` as gate `egress`, with the
 
 The workflow guard (`.claude/hooks/workflow-guard.mjs`, 1.6.0) runs at PreToolUse on `Workflow`, in the project's settings and in the plugin, for every session. Claude Code's keyword `ultracode` in a typed prompt, or a plain request for a workflow, makes the model write a workflow script on the spot and run it with Claude Code's own agents, outside the plan check, the run journal and the review rules. Claude Code's own off switches (the `disableWorkflows` setting, `CLAUDE_CODE_DISABLE_WORKFLOWS=1`) would also remove the saved workflows, and with them the [gated workflow](native-mode.md#the-gated-workflow). A plugin cannot ship `permissions.deny`. So the guard narrows the tool instead.
 
-**It stays silent (exit 0, no output) only when all of these hold:**
-1. `tool_input` is an object with `name` and, optionally, `args` and a string `resumeFromRunId`, and no other key.
-2. `name` is exactly `orchestrate` or `orchestration:orchestrate`.
-3. The saved file exists where Claude Code loads it from, where the hook can tell: for `orchestrate`, `.claude/workflows/orchestrate.js` under `CLAUDE_PROJECT_DIR` or the input's `cwd`; for `orchestration:orchestrate`, the plugin copy checks `workflows/orchestrate.js` in its own plugin folder. The project copy cannot see where the plugin is installed and lets that name through.
+**Identity by content (1.6.1).** A saved name passes only when the file Claude Code loads for it matches one of two stored SHA-256 hashes in `.claude/hooks/workflow-hash.mjs` (CRLF read as LF): `PROJECT_WORKFLOW_SHA256` for `.claude/workflows/orchestrate.js`, `PLUGIN_WORKFLOW_SHA256` for the plugin's copy in `dist/plugin/workflows/`. After any edit of the workflow, run `npm run build-plugin`, then `node --test src/workflow-guard.test.mjs`, and paste the two hashes the test prints into `workflow-hash.mjs`.
+
+**It stays silent (exit 0, no output) only for these shapes:**
+1. A launch or a resume by name: `name` and optional `args` and `resumeFromRunId` (a run id of Claude Code's form, `wf_` then at least six of `[a-z0-9-]`), no other key, and
+   - `name` exactly `orchestrate`: every one of `<CLAUDE_PROJECT_DIR>/.claude/workflows/orchestrate.js` and `<cwd>/.claude/workflows/orchestrate.js` that exists matches the project hash, and at least one exists;
+   - `name` exactly `orchestration:orchestrate`, plugin copy of the hook: the plugin's own `workflows/orchestrate.js` matches the plugin hash;
+   - `name` exactly `orchestration:orchestrate`, project copy: it cannot see where the plugin is installed, so it passes only in this repository's layout, where a project root holds both `.claude/workflows/orchestrate.js` with the project hash and `dist/plugin/workflows/orchestrate.js` with the plugin hash, and no root holds either file with other content. With the plugin on, the plugin copy steps aside (`duplicate()`), so here the project copy alone decides.
+2. A resume by Claude Code's saved script copy: exactly `scriptPath`, `resumeFromRunId` and optional `args`, with an absolute `scriptPath` ending in `.../workflows/scripts/<anything>-<resumeFromRunId>.js`, a run id of Claude Code's form, and a file there that matches either hash.
 
 Everything else is refused with exit 2:
 
 | Reason | When |
 |---|---|
 | `inline_script` | the input has `script`: a script written on the spot (what the `ultracode` keyword produces) |
-| `script_path` | the input has `scriptPath`: a script file on disk, also a resume by path |
+| `script_path` | the input has `scriptPath` in any other shape, or its file does not match |
 | `name_not_allowed` | another name, Claude Code's bundled workflows included; names are compared exactly |
 | `workflow_file_missing` | the name is allowed but its saved file is not there |
-| `unknown_shape` | no `tool_input` object, no string `name`, a key the guard does not know, or a crash while deciding (fail closed) |
+| `workflow_content_mismatch` | the saved file is there but matches neither stored hash |
+| `workflow_unreadable` | a file at the path exists but cannot be hashed (unreadable, not a regular file, over 4 MB) |
+| `plugin_not_located` | the project copy got `orchestration:orchestrate` outside this repository's layout |
+| `unknown_shape` | no `tool_input` object, no string `name`, a key the guard does not know, a `resumeFromRunId` not of Claude Code's form beside `name`, or a crash while deciding (fail closed) |
 
-**Observed shapes** (Claude Code 2.1.326, [live checks 2026-11-17](data/live-checks-2026-11-17.md), Check 5): a script written on the spot reaches PreToolUse as `{"script": "<the whole script>"}`; a saved launch as `{"name": "orchestrate", "args": {...}}`, and through a plugin as `{"name": "orchestration:orchestrate", "args": {...}}`. `scriptPath` and `resumeFromRunId` come from the tool's schema text, not from a probe.
+**Observed shapes** (Claude Code 2.1.326; [live checks 2026-11-17](data/live-checks-2026-11-17.md), Check 5, and [live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K9): a script written on the spot reaches PreToolUse as `{"script": "<the whole script>"}`; a saved launch as `{"name": "orchestrate", "args": {...}}`, and through a plugin as `{"name": "orchestration:orchestrate", "args": {...}}`; a resume by name as `{name, args, resumeFromRunId}`, which runs the saved file as it is now; a resume by file as `{args, scriptPath, resumeFromRunId}`, where `scriptPath` is Claude Code's saved copy, byte for byte the saved file.
 
 - The block message says, in plain words, that workflows started by a keyword or written on the spot are off in this project and that the task goes through the orchestrator (the orchestrator agent, or the saved workflow, which the person starts). It names no switch.
 - Deny-only: it never prints an allow. Input that is not JSON, another tool's event and another hook event exit 0. The plugin copy exits on `duplicate()` where the project registers its own.
 - One record per decision in `workflow-guard.jsonl` in the state dir: `gate: "workflow"`, `decision`, `reason`, the workflow `name` (at most 80 characters) and the input's key names. Never the script or the arguments.
 - `ORCH_WORKFLOW_GUARD=off` (plugin setting `workflow_guard`) turns it off.
-- The [nudge](#nudge) adds one line of context to a typed prompt that holds the word `ultracode`, so the model is told before it writes a script.
+- The [nudge](#nudge) refuses a typed prompt that holds the word `ultracode` before any model turn (1.6.1), so the keyword never reaches the model.
 
 ## Turn warning
 
@@ -557,9 +572,15 @@ It is capped at about 1,500 characters. Over the cap the slice lines give way fi
 
 ## Nudge
 
-The plugin's SessionStart hook `nudge.mjs` tells a new main session to route a non-trivial task first. It blocks nothing. Details: [native-mode.md, The plugin](native-mode.md#the-plugin).
+The plugin's SessionStart hook `nudge.mjs` tells a new main session to route a non-trivial task first. That text blocks nothing. Details: [native-mode.md, The plugin](native-mode.md#the-plugin).
 
-Since 1.6.0 the same file also runs at UserPromptSubmit, in the project and the plugin (the plugin copy exits on `duplicate()` where the project registers its own). When the typed prompt holds the word `ultracode` (a whole word, any case) it adds one line of context: workflows started by that keyword are off in this project, and the task goes through the orchestrator. Any other prompt gets nothing. The event also fires for a subagent's report, a task notification and another session's message, with no field that says so; `typedPrompt` in `state.mjs` tells them apart by how their text opens, and they get nothing (a reviewer's report that quoted the word drew the line before this check). It never blocks the prompt, and `ORCH_NO_NUDGE` does not silence this line.
+Since 1.6.0 the same file also runs at UserPromptSubmit, in the project and the plugin (the plugin copy exits on `duplicate()` where the project registers its own). 1.6.0 added one line of context to a typed prompt holding the word `ultracode` (a whole word, any case). Since 1.6.1 it refuses such a prompt instead (`{"decision":"block"}`): the prompt never reaches the model, and the message says to type the request again without the word or to use the orchestrator. A question that only names the word ("what is ultracode?") is refused too. `ORCH_WORKFLOW_GUARD=off` turns this refusal off along with the guard. `ORCH_NO_NUDGE` does not.
+
+The event also fires for a subagent's report, a task notification and another session's message, with no field that says so. `typedPrompt` in `state.mjs` decides by how the text opens, and the refusal applies only to a typed prompt. A prompt is not typed when it opens with one of these, whatever follows:
+- a header line: `Another Claude session sent a message:`, `Another session ...`, `A peer session sent a message ...` (with or without `while you were working`), `The <name> plugin sent a message:` and its `while you were working:` form, `The coordinator sent a message while you were working:`, `Your background observer (<x>) sent a report`, `A message arrived in the bound thread while you were working:`;
+- a tag: `<task-notification>`, `<system-reminder>`, or any `<...-message>` tag (`agent-message`, `peer-message`, `teammate-message`, `channel-message`, `cross-session-message`).
+
+An origin-like field naming a non-person source counts too, in case Claude Code adds one. A person who types such an opening is skipped as well. A prompt that only mentions one further down is typed. The transcript is not read: a probe showed the prompt's own record is written after the hook fires ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K3). Such a message is never refused, and gets no context line.
 
 ## Limits
 
@@ -569,11 +590,11 @@ What each gate and guard does not catch. [safety.md](safety.md) links here.
 - The guards narrow what a researcher or reviewer can do. They are not a security boundary: Bash can still reach the network. Run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist.
 
 **Workflow guard**
-- Claude Code still highlights the `ultracode` keyword and the prompt still reaches the model; only the Workflow launch is refused. A refused model may do the task another way: in probe (b) it fell back to launching subagents itself, which the plan check blocks only while a run is open and the project's `permissions.deny` blocks only where it is copied.
+- A typed prompt with `ultracode` is refused before the model sees it (1.6.1). A plain request for a workflow still reaches the model, and a refused model may do the task another way: in probe (b) of Check 5 it fell back to launching subagents itself, which the plan check blocks only while a run is open and the project's `permissions.deny` blocks only where it is copied.
 - A hook that does not load guards nothing: a session with neither this project's `.claude/settings.json` nor the plugin, or with hooks turned off.
-- It trusts the name. A file a model writes at `.claude/workflows/orchestrate.js` passes as the saved workflow; another project's own `orchestrate` workflow passes too, where the plugin is on.
-- Resuming a stopped run by `scriptPath` is refused (`script_path`); start the saved workflow again.
-- The nudge's line tells a typed prompt from a report or notification by its opening text only (Claude Code documents no field for it): a new kind of message would draw the line, and a person who types such an opening gets none.
+- A file changed between the guard's check and Claude Code's read of it is not seen.
+- When the project copy decides the plugin name, it checks the built copy in `dist/plugin`, not the installed plugin's file: an installed plugin of another version is trusted as installed. Any project that holds both matching files meets that rule.
+- The refusal tells a typed prompt from a report or notification by its opening text only (Claude Code documents no field for it): a new kind of message, or a changed opening, counts as typed until `typedPrompt` learns it, and a person who types such an opening is skipped.
 
 **Plan check**
 - `file_overlap` and `dependency_cycle` block every time, with no give-up. A plan that cannot be fixed stalls those launches until the orchestrator changes the plan. A retry of a planned slice is judged against the run's DEPENDS order, so a sound retry passes; a broken plan still blocks every time.

@@ -336,7 +336,7 @@ These are all errors, and an error is a deny: two objects, an array, extra or mi
 
 - model `ORCH_MODEL_JUDGE`, default `claude-opus-5-5`; effort `medium`; `maxTurns: 1`;
 - `tools: []`, `allowedTools: []`;
-- `settingSources: []` (no settings, no CLAUDE.md); `mcpServers: {}` with `strictMcpConfig`, sent with `mcpServersDelivery: "initialize"`; `plugins: []`;
+- `settingSources: []` (no settings, no CLAUDE.md); `mcpServers: {}` with `strictMcpConfig`, sent with `mcpServersDelivery: "initialize"`; `plugins: []`; `settings: { disableClaudeAiConnectors: true }`, so no claude.ai account connector (1.6.1);
 - `permissionMode: "dontAsk"`; `persistSession: false`; no Claude Code auto memory (`env: workerEnv()`);
 - a one-line system prompt, and `cwd` set to the system temp folder.
 
@@ -618,7 +618,11 @@ Code: `.claude/hooks/judge-hook.mjs` (PreToolUse, matcher `Bash`), `.claude/hook
 
 The folder is created with mode 0700 and the file with mode 0600. The project key is the same as for the per-user state folder (`stateKey`). The project copy and the plugin copy use the same store. It is outside the project, so the judged worker's own folder never holds its judge's authority. A `prompts.jsonl` in `<project>/.claude/state` is ignored.
 
-- The capture skips prompts that are not from the person (`typedPrompt` in `state.mjs`, shared with the nudge). UserPromptSubmit also fires for a background subagent's report, a task notification, a scheduled task and another session's message, and on 2.1.326 its input carries no field that says which, so the text decides: one that opens with `<task-notification>` or a similar system or peer tag, also after the line `Another Claude session sent a message:` (how a subagent's report arrives, since 1.6.0), is skipped. So is a prompt with an origin-like field (`origin`, `source`, `kind` and similar) whose value names a notification, system, peer, agent, hook, tool or poll, in case Claude Code adds one. A prompt with no such marker is kept, and a person who types such an opening is taken for a message.
+- The capture skips prompts that are not from the person (`typedPrompt` in `state.mjs`, shared with the nudge). UserPromptSubmit also fires for a background subagent's report, a task notification, a scheduled task and another session's message, and on 2.1.326 its input carries no field that says which, so the text decides. A prompt that opens with one of these is skipped, whatever follows:
+  - a header line: `Another Claude session sent a message:` (how a subagent's report arrives), `Another session ...` or `A peer session sent a message ...` (also `... while you were working:`), `The <name> plugin sent a message:` and its `while you were working:` form, `The coordinator sent a message while you were working:`, `Your background observer (<x>) sent a report`, `A message arrived in the bound thread while you were working:` (header lines since 1.6.1, the last four read from the 2.1.326 binary; 1.6.0 knew only `Another Claude session sent a message:` before a tag);
+  - a tag: `<task-notification>`, `<system-reminder>` or any `<...-message>` tag (`agent-message`, `peer-message`, `teammate-message`, `channel-message`, `cross-session-message`).
+
+  So is a prompt with an origin-like field (`origin`, `source`, `kind` and similar) whose value names a notification, system, peer, agent, hook, tool or poll, in case Claude Code adds one. A person who types such an opening is skipped too; a prompt that only mentions one further down is kept. The transcript is not read: a probe showed the prompt's own record is written after the hook fires ([live checks for 1.6.1](data/live-checks-2026-11-17-b.md), K3). `typedPrompt` may only reject more over time, never accept something it rejects today, since what it accepts is the judge's authority.
 - The judge sees only this session's prompts, newest kept when they exceed 6000 characters.
 - It approves only when a request directly and specifically asks for this action: the named branch and remote for a push, force or deletion only when asked, the remote change asked for, the paths asked for in a delete. General requests ("finish the task") do not count, nor does anything an agent, a file or the command itself says.
 - With no recorded prompt for the session, a judged command is denied without a model call.

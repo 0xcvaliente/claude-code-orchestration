@@ -4,7 +4,8 @@
 //
 //   npm run claude-update                      check only; exit 1 when something needs attention
 //   npm run claude-update -- --fix             also repair this machine: block newly found built-in agents at once
-//                                              (a per-user file the plan check reads) and update a stale plugin install
+//                                              (a per-user file the plan check reads), update a stale plugin install and
+//                                              add the orchestration folder to the sandbox's allowWrite
 //   npm run claude-update -- --enable          install and enable the plugin when it is off (the plugin is opt-in, so
 //                                              --fix alone never turns it on)
 //   npm run claude-update -- --write-source    for a maintainer: also add newly found built-in agents to
@@ -20,14 +21,17 @@
 //   flags     the options scripts/orchestrate.sh and the native judge pass are still in `claude --help`
 //   sdk       the Agent SDK the SDK pipeline uses carries the same Claude Code as the installed one
 //   plugin    the orchestration plugin, when installed, is at this checkout's version; off is a note, not a failure
-//   dist      dist/plugin and dist/dashboard match the sources
+//   sandbox   with sandbox.enabled in the user settings (<config dir>/settings.json), sandbox.filesystem.allowWrite covers
+//             <config dir>/orchestration (state, skill drafts, the judge's record); a note naming the entry otherwise,
+//             which --fix adds. Managed settings are never edited; a file that cannot be read or parsed is a note only
+//   dist     dist/plugin and dist/dashboard match the sources
 //
 // The result is written to <claude config dir>/orchestration/claude-update.json. Node built-ins only.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BUILTIN_AGENTS, FORK, OWN_AGENTS, learnedBuiltins, learnedFile } from "../.claude/hooks/builtin-agents.mjs";
 
@@ -113,6 +117,95 @@ export function writeSource(root, names) {
   writeFileSync(listFile, list);
   writeFileSync(settingsFile, text);
   return true;
+}
+
+/** Claude Code's config dir: CLAUDE_CONFIG_DIR, else ~/.claude. @param {NodeJS.ProcessEnv} env */
+const configDir = (env) => env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
+
+/**
+ * `p` with symlinks resolved: the longest existing leading part goes through realpath and the rest is kept, so a path
+ * that does not exist yet still compares equal to its linked spelling.
+ * @param {string} p an absolute path
+ */
+function realish(p) {
+  let head = p;
+  let tail = "";
+  for (;;) {
+    try {
+      return join(realpathSync(head), tail);
+    } catch {
+      const up = dirname(head);
+      if (up === head) return p;
+      tail = join(basename(head), tail);
+      head = up;
+    }
+  }
+}
+
+/**
+ * Whether one sandbox.filesystem.allowWrite entry of the user settings covers `dir`. Entries resolve as Claude Code
+ * resolves sandbox.filesystem paths: absolute (`//` too), `~` expanded, or relative to the settings file's folder; a
+ * trailing `/**` or `/*` counts as the folder itself. Both sides are compared with symlinks resolved.
+ * @param {unknown} entry @param {string} dir @param {string} base the settings file's folder @param {string} home
+ */
+export function coversPath(entry, dir, base, home) {
+  if (typeof entry !== "string" || !entry.trim()) return false;
+  let p = entry.trim().replace(/\/\*\*?$/, "");
+  if (p === "~" || p.startsWith("~/")) p = join(home, p.slice(1));
+  else if (p.startsWith("//")) p = p.slice(1);
+  const abs = realish(isAbsolute(p) ? resolve(p) : resolve(base, p));
+  const rel = relative(abs, realish(resolve(dir)));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/**
+ * The `sandbox` check: with the sandbox on in the user settings, sandbox.filesystem.allowWrite must cover the per-user
+ * orchestration folder. --fix adds the entry. Managed settings are never edited; a file that cannot be read or parsed is
+ * a note and is never rewritten.
+ * @param {{ fix?: boolean, env?: NodeJS.ProcessEnv }} [opts]
+ * @returns {{ status: Check["status"], text: string }}
+ */
+export function sandboxCheck({ fix = false, env = process.env } = {}) {
+  const base = configDir(env);
+  const file = join(base, "settings.json");
+  const dir = join(base, "orchestration");
+  const home = env.HOME || homedir();
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") return { status: "ok", text: `no user settings file (${file}), so the sandbox is off` };
+    return { status: "warn", text: `${file} could not be read (${/** @type {Error} */ (e).message}), so whether the sandbox can write to ${dir} is unknown` };
+  }
+  let settings;
+  try {
+    settings = JSON.parse(text);
+  } catch {
+    return { status: "warn", text: `${file} could not be parsed as JSON, so whether the sandbox can write to ${dir} is unknown; it was left as it is` };
+  }
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+    return { status: "warn", text: `${file} is not a JSON object, so whether the sandbox can write to ${dir} is unknown; it was left as it is` };
+  }
+  const sb = settings.sandbox;
+  if (sb?.enabled !== true) return { status: "ok", text: "the sandbox is off in the user settings" };
+  const fs = sb.filesystem;
+  const list = fs?.allowWrite;
+  if (Array.isArray(list) && list.some((e) => coversPath(e, dir, base, home))) {
+    return { status: "ok", text: `the sandbox is on and sandbox.filesystem.allowWrite covers ${dir}` };
+  }
+  const need = `the sandbox is on in ${file} and sandbox.filesystem.allowWrite does not cover ${dir}, where this repo keeps its state, skill drafts and the judge's record`;
+  const fixable = (fs === undefined || (typeof fs === "object" && fs !== null && !Array.isArray(fs))) && (list === undefined || Array.isArray(list)) && typeof sb === "object" && !Array.isArray(sb);
+  if (fix && fixable) {
+    sb.filesystem = fs ?? {};
+    sb.filesystem.allowWrite = [...(list ?? []), dir];
+    const indent = /^[ \t]+(?=")/m.exec(text)?.[0] ?? "  ";
+    // A symlinked settings.json (a dotfiles link) is written at its target, so the link stays and the linked file changes.
+    const out = realpathSync(file);
+    writeFileSync(`${out}.tmp`, `${JSON.stringify(settings, null, indent)}${text.endsWith("\n") ? "\n" : ""}`);
+    renameSync(`${out}.tmp`, out);
+    return { status: "fixed", text: `added ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite in ${file}; restart Claude Code` };
+  }
+  return { status: "warn", text: `${need}: add ${JSON.stringify(dir)} to sandbox.filesystem.allowWrite${fixable ? ", or run with --fix" : ` (${file} has a sandbox.filesystem block of another shape, so --fix leaves it to you)`}` };
 }
 
 /**
@@ -254,6 +347,10 @@ export function check({ fix = false, source = false, enable = false, env = proce
       else add("plugin", done.length ? "fixed" : "ok", `${id} ${versionOf(p)} is enabled${done.length ? ` (${done.join(", ")}; restart Claude Code)` : ""}`);
     }
   }
+
+  // sandbox: needs no `claude`, so it runs even when the cli check failed.
+  const sb = sandboxCheck({ fix, env });
+  add("sandbox", sb.status, sb.text);
 
   if (existsSync(join(root, "scripts", "build-plugin.mjs"))) {
     const built = exec(process.execPath, [join(root, "scripts", "build-plugin.mjs"), "--check"], { cwd: root });
