@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // Offline validation of benchmark tasks (no model calls).
-//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N] [--deadline-s S]   (N tasks side by side, default 4)
+//   node bench/validate.mjs [--task <id>] [--tasks-dir <dir>] [--parallel N] [--deadline-s S]
+// --parallel N: N tasks side by side (default half the CPUs, at least 2; never more than the tasks found; a value that is
+// not a number or is below 1 means 1). Within a task, its mutants are scored half the CPUs at a time (at least 1).
 // --deadline-s (default 270, 0 = none): when the run has not finished by then, it prints the lines of the tasks that did finish,
 // names each task it did not finish or did not reach (NOT DONE lines), ends its graders and exits 3, instead of being killed
 // silently by an outer timeout.

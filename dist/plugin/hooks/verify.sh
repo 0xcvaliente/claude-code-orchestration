@@ -205,7 +205,7 @@ run_limited() { # limit infile outfile errfile cmd...
   pid=$!
   lim_pid="$pid" # for on_signal: a TERM, INT or HUP to the hook ends this group first
   # Under the suite lock, the lock's companion file names this run's process group, so that a hook killed with SIGKILL
-  # leaves a lock that is not taken over while its suite still runs (lock_stale).
+  # leaves a lock that is not taken over while its suite still runs (lock_stale), until the lock is LOCK_STALE_S old.
   [ "$lock_held" != 1 ] || { printf '%s\n%s\n' "$lock_token" "$pid" >"$lock.run"; } 2>/dev/null
   set +m
   # The watchdog and the timeout verdict below share it. SECONDS ticks at whole wall-clock seconds, so SECONDS+limit
@@ -259,7 +259,8 @@ lim_pid="" lim_wd=""
 # runs in a group of its own and would outlive the hook) is ended the way a limit ends it, SIGTERM and SIGKILL after
 # LIM_GRACE_S while its leader is still there, before the EXIT trap releases the lock, so the next gate's suite never
 # overlaps it. bash runs the trap at once while it waits for the job. A hook killed with SIGKILL runs no trap: its lock
-# is then taken over as stale, and its suite may still be running.
+# stays, and lock_stale counts it stale only once no process is left in the group test-gate.lock.run names (or once the
+# lock is older than LOCK_STALE_S, when that group may still run); the next waiter then takes it over (lock_takeover).
 on_signal() { # exit status
   local g=0
   trap '' TERM INT HUP
@@ -287,10 +288,11 @@ fi
 # never from the agent's cwd), so a lock file there makes the gates of one wave run their suites, and the base run or
 # bugfix check that follows, one after the other instead of all at once (four at once took 554 to 590 s each, live).
 # The lock is "<pid> <start epoch seconds>" of its holder, made whole in a private file and hard-linked into place (ln
-# fails when the name exists: atomic, and never seen half written). A lock whose holder is gone, or that is older than
-# the hook timeout (LOCK_STALE_S), is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) removes
-# it and all try again. The EXIT trap releases it on every way out (exit, the test run's limit, SIGTERM), and only
-# while it still holds this hook's own token; a hook killed with SIGKILL leaves it to the stale rule.
+# fails when the name exists: atomic, and never seen half written). A lock that is older than the hook timeout
+# (LOCK_STALE_S), or whose holder is gone and whose companion file (test-gate.lock.run) names no process group that
+# still has a member, is stale: one waiter at a time (a takeover dir, itself broken after 2 minutes) removes it and all
+# try again. The EXIT trap releases it on every way out (exit, the test run's limit, SIGTERM), and only while it still
+# holds this hook's own token; a hook killed with SIGKILL leaves it to the stale rule.
 lock="$state/test-gate.lock"
 lock_token="" lock_held=0
 LOCK_STALE_S=900 # the hook timeout in the settings
@@ -318,6 +320,8 @@ take_lock() { # 0: taken; 1: held by another; 2: no lock can be made here (the g
   return 2
 }
 lock_stale() { # $1: the lock's content as read; true when its holder is gone or it is older than the hook timeout
+  # (holder gone: only once no member of the process group its companion file names is left, below; content that does
+  # not read as "<pid> <start>" is stale too)
   local pid start
   pid="${1%% *}" start="${1#* }"
   case "$pid" in '' | *[!0-9]*) return 0 ;; esac
@@ -334,9 +338,11 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
   fi
   return 0
 }
-# One taker at a time (the guard folder). The stale lock is renamed away first, an atomic step, and only then compared
-# with what was judged stale: a lock some other gate made in between is put back with ln (never over another), not
-# removed, so a fresh lock is never deleted.
+# One taker at a time (the guard folder; a waiter that finds it older than 2 minutes removes it and does not take over
+# that round). The stale lock is renamed away first, an atomic step, and only then compared with what was judged stale:
+# a lock some other gate made in between is put back with ln (never over another), not removed, and that gate keeps it.
+# While the name is free, a third gate's take_lock can link its own lock there; ln then fails and the renamed lock is
+# removed, so the gate that made it runs on without its file and two suites can overlap: that race stays open.
 take_over() { # 0 when a stale lock was removed
   local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$"
   if ! mkdir "$guard" 2>/dev/null; then
