@@ -697,6 +697,13 @@ function jsonl(state, file) {
  */
 export function countBlocks(state, id, reason) {
   if (!id) return 0;
+  // gates.jsonl that exists and cannot be read is an unknown count (null), never 0 (2.0.1, soak S8): verify.sh then
+  // counts with its own reader (grep), so the two-block cap holds whenever either reader can read the log.
+  try {
+    readFileSync(join(state, "gates.jsonl"));
+  } catch (e) {
+    if (/** @type {any} */ (e)?.code !== "ENOENT") return null;
+  }
   let start = -Infinity;
   for (const e of jsonl(state, "telemetry.jsonl")) {
     if (e.hook_event_name !== "SubagentStart" || e.agent_id !== id) continue;
@@ -732,7 +739,7 @@ export function changedTestFiles(top, base) {
 export async function bugfix({ cwd, cmd, isolated, state, event }) {
   if (agentKind(state, event) !== "bugfix") return null;
   const id = typeof event?.agent_id === "string" ? event.agent_id : "";
-  const blocks = countBlocks(state, id, "bugfix_");
+  const blocks = countBlocks(state, id, "bugfix_") ?? 0; // unknown: as before (it keeps blocking; docs/data/probes-2.0.1-soak.md)
   const block = (/** @type {string} */ reason, /** @type {string} */ message, extra = "") =>
     blocks >= MAX_BUGFIX_BLOCKS
       ? { decision: "allow", reason: "bugfix_unverified_gave_up", extra, message: "" }

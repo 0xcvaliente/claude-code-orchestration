@@ -145,6 +145,9 @@ It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7
 ```bash
 npm install
 npm run check    # typecheck, tests, check-agents and check-plugin at the same time; CI runs it, then the dashboard test, on push and pull request to main
+npm run soak     # model-free soak of the gates: 10 minutes by default, --minutes N up to 60, --seed S to replay a round
 ```
+
+The soak drives random worker life cycles through the real hooks in temp projects and checks nine invariants (caps, the Stop can end, one review per report, none lost, exit codes, time, a record per stop, no report text in the logs, only the plan check allows); it exits 1 with a replayable sequence for each violation ([docs/data/probes-2.0.1-soak.md](docs/data/probes-2.0.1-soak.md)).
 
 Versions are tagged from `v1.1.0` onward. Scripts, layout and contributor rules: [docs/development.md](docs/development.md) and [CLAUDE.md](CLAUDE.md).

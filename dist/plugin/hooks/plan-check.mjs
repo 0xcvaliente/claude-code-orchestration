@@ -130,7 +130,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { agentModel, isPlanReview, isSkillName, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
 import { builtinAgents, OWN_AGENTS } from "./builtin-agents.mjs";
-import { appendJsonl, implementerTestStates, implementersOfRun, latestImplementerOf, notTestFailure, readJsonl, sessionRuns } from "./run.mjs";
+import { NO_RESULT_REASONS, appendJsonl, implementerTestStates, implementersOfRun, latestImplementerOf, notTestFailure, readJsonl, readJsonlOrNull, sessionRuns, stopGateWindowMs } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // loop guard: two blocks per reason and scope, then the launch goes through as <reason>_gave_up
@@ -170,6 +170,10 @@ const HOLD_REASON = "tests_failed_after_report";
 // Appended to our reviewer's brief while the slice's implementer has stopped and the test gate has not reported yet.
 const PENDING_NOTE =
   "\n\nTest gate (added by the plan check): the test gate has not reported yet on this slice's latest implementer stop, so its tests may still fail. Do not rest a pass on the tests having passed; say in your report that the test gate had not reported.";
+// Appended instead once the gate can no longer be running (2.0.1): the stop is older than the gate's time budget and no
+// record is paired with it, or its record says the gate ended without deciding (run.mjs NO_RESULT_REASONS).
+const NO_RESULT_NOTE =
+  "\n\nTest gate (added by the plan check): the test gate left no result that can be tied to this slice's latest implementer stop, and it is no longer running, so no test-gate run backs the worker's report. Do not rest a pass on the tests having passed; say in your report that the test gate left no result.";
 const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
 // The authoring skill a skill slice loads: the plugin's namespaced copy for the plugin's hook, else the project's.
 const AUTHORING = process.argv.includes("--plugin") ? "orchestration:skill-authoring" : "skill-authoring";
@@ -260,7 +264,10 @@ function holdLog(rec) {
  *     review; a pass stands only when it is the only candidate; anything else is pending), and no start since the
  *     block: refused with tests_failed_after_report (exit 2), twice per
  *     slice, agent and block, then let through and logged as tests_failed_after_report_gave_up;
- *   - stopped, and the test gate has logged nothing for that stop yet: the returned note (test_gate_pending) is appended;
+ *   - stopped, and the test gate has logged nothing for that stop yet: the returned note (test_gate_pending) is appended
+ *     while the gate may still be running (the stop is younger than run.mjs stopGateWindowMs: the gate's budget plus its
+ *     overrun); past that window, or when the stop's record says the gate ended without deciding (NO_RESULT_REASONS), the
+ *     no-result note (test_gate_no_result) is appended instead (2.0.1);
  *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an
  *     unreadable log): "" and no record.
  * @param {string} slice @returns {string}
@@ -283,8 +290,14 @@ function reviewHold(slice) {
   if (g && g.decision === "block" && !notTestFailure({ testReason: reason })) {
     const blockAt = new Date(Date.parse(String(g.ts ?? "")) || 0).toISOString();
     const same = (/** @type {any} */ e) => e.session_id === sid && e.slice === slice && e.agent_id === a?.id && e.block_at === blockAt;
-    const prior = readJsonl(stateDir, HOLD_LOG, sid).filter((e) => same(e) && e.decision === "block").length;
+    const held = readJsonlOrNull(stateDir, HOLD_LOG, sid);
     const fields = { slice, agent_id: a.id, block_at: blockAt, gate_reason: reason || null };
+    // Earlier refusals that cannot be read cannot be counted (2.0.1, soak): no refusal then, as with an unwritable log.
+    if (held === null) {
+      holdLog({ decision: "allow", reason: `${HOLD_REASON}_unrecorded`, ...fields });
+      return "";
+    }
+    const prior = held.filter((e) => same(e) && e.decision === "block").length;
     if (prior >= MAX_BLOCKS) {
       holdLog({ decision: "allow", reason: `${HOLD_REASON}_gave_up`, ...fields });
       return "";
@@ -299,9 +312,13 @@ function reviewHold(slice) {
     }
     process.exit(2);
   }
-  if (!g) {
+  if (!g && Date.now() - a.stop <= stopGateWindowMs(process.env)) {
     holdLog({ decision: "note", reason: "test_gate_pending", slice, agent_id: a.id });
     return PENDING_NOTE;
+  }
+  if (!g || NO_RESULT_REASONS.has(reason)) {
+    holdLog({ decision: "note", reason: "test_gate_no_result", slice, agent_id: a.id });
+    return NO_RESULT_NOTE;
   }
   return "";
 }
@@ -898,7 +915,11 @@ try {
   // unreadable logs: decide as if nothing ran
 }
 const { runs, open, records } = state;
-const prior = readJsonl(stateDir, LOG, sessionId).filter((e) => e.session_id === sessionId); // unreadable: as if nothing was launched
+const priorRead = readJsonlOrNull(stateDir, LOG, sessionId);
+// A log that exists and cannot be read reads as nothing launched, but then no block can be counted: decide() makes none
+// (2.0.1, soak).
+const priorUnreadable = priorRead === null;
+const prior = (priorRead ?? []).filter((e) => e.session_id === sessionId);
 
 // The run this launch is scoped to. With no run open, launches since the last run share the key none-<last run id>;
 // a light launch then opens run <last id + 1> (foldRuns opens it at this launch's record) and sees both keys.
@@ -919,12 +940,30 @@ const skips = [];
 
 /** @param {string} decision @param {string} reason @param {string} [message] @returns {never} */
 function decide(decision, reason, message) {
-  try {
-    ensureStateDir();
-    const extra = { ...(gaveUp.length ? { gave_up: gaveUp } : {}), ...(skips.length ? { skips } : {}) };
-    appendFileSync(join(stateDir, LOG), `${JSON.stringify({ ts: new Date().toISOString(), session_id: sessionId, decision, reason, slice, files, depends, agent_type: type, run: runKey, ...extra })}\n`);
-  } catch {
-    // logging must never change the decision
+  const record = () => ({ ts: new Date().toISOString(), session_id: sessionId, decision, reason, slice, files, depends, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}), ...(skips.length ? { skips } : {}) });
+  // A block is made only when the earlier records could be read and its own record reads back (2.0.1, soak): the loop
+  // guard counts blocks from this log, so a block it cannot count would be made at every try. Such a launch goes
+  // through as <reason>_unrecorded. Logging never changes any other decision.
+  let recorded = false;
+  if (decision === "block") {
+    try {
+      ensureStateDir();
+      recorded = !priorUnreadable && appendJsonl(stateDir, LOG, record());
+    } catch {
+      recorded = false;
+    }
+    if (!recorded) {
+      decision = "allow";
+      reason = `${reason}_unrecorded`;
+    }
+  }
+  if (!recorded) {
+    try {
+      ensureStateDir();
+      appendFileSync(join(stateDir, LOG), `${JSON.stringify(record())}\n`);
+    } catch {
+      // logging must never change the decision
+    }
   }
   // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
   // A ready skill slice gets its facts on every allow; DRAFTS lines go to every allow. The haiku rule's raised model

@@ -2,6 +2,50 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-18
+
+2.0.1 answers a report that a reviewer "goes on" after its report reached the orchestrator, fixes the test gate's stops that left no record, and adds a model-free soak of the gates (`npm run soak`) with the nine defects it found. The probes are in [probes-2.0.1-reviewer-loop.md](docs/data/probes-2.0.1-reviewer-loop.md), [probes-2.0.1-stop-gate.md](docs/data/probes-2.0.1-stop-gate.md) and [probes-2.0.1-soak.md](docs/data/probes-2.0.1-soak.md). Upgrading: pull, `npm install`, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person; what the release does not do is on [docs/limits.md](docs/limits.md), I.
+
+### Added
+
+- **`npm run soak`** (`scripts/soak-gates.mjs`): a seeded, model-free soak of the real hooks in `.claude/hooks`. It drives random worker life cycles (launch, text stop, hand-back, forced hand-back and continued stop, refusals, wakes after delivery, `SendMessage` resumes, passing and failing tests, malformed payloads, torn log lines, faults on a state log) in temp projects and checks nine invariants (I1 to I9) after every step. `--minutes N` (default 10; above 60, or not a positive number, exits 2 and runs nothing), `--seed`, `--sequences`, `--concurrency`, `--replay FILE`, `--save FILE`, `--hooks DIR`, `--plant`. Exit 0 clean, 1 with a violation (each printed with a `REPLAY` line), 2 on a usage error. It never reads or writes the project's `.claude/state`. Tested in `src/soak-gates.test.mjs` (the 60-minute cap, a fixed-seed round with no violation, a planted violation reported with a replayable sequence).
+
+### Changed
+
+- **Workers report once and end** (D1, D2; `src/reviewer-loop.test.mjs`, "D1 bodies", "D2 bodies", "D1 orchestrator, route skill and nudge"). The reviewer, researcher and integrator bodies now carry the implementer's background-shell rule: give a long command the Bash tool's `timeout` (up to 600000 ms), never start a background task on purpose, and wait for and stop a command Claude Code moved to the background before reporting, since a shell task that ends after the report wakes the worker and sends the orchestrator one more notification. Every worker body and the conventions skill say to deliver the report once through `SubagentHandback` when it is offered and then make no tool call. The orchestrator, the route skill and the nudge say that a `completed` notification from a worker that already handed back is no new report and needs no review, retry or reply.
+- Version 2.0.1 in `package.json`, `package-lock.json` and both plugin manifests.
+
+### Fixed
+
+Reviewer loop ([reviewer-loop page](docs/data/probes-2.0.1-reviewer-loop.md)):
+- The report check read an unreadable `gates.jsonl` as "no earlier denial", so it could deny one worker at every try and lose its report (D3, H1). An earlier denial that cannot be ruled out now counts as one; the record carries `log_unreadable`, and a deny record that does not read back is followed by an allow `<reason>_unconfirmed` with `voids` (the time of the record it corrects). `src/reviewer-loop.test.mjs`, "D3 handback check".
+- A reviewer's continued stop that landed after a retry's stop was counted as a review of the retry (D4, H2). It now replaces the same reviewer's review where it stands and keeps its time and attempt (`brief.mjs` fold; the pane mirrors it). `src/reviewer-loop.test.mjs`, "D4 fold"; `dashboard/register.test.tsx`, "2.0.1 D4".
+- A reviewer woken after its delivered hand-back (a late shell task, a typed prompt) stopped again with no STATUS line, and the journal recorded that stop as a second review, copied from the transcript or with no status (H6). Such a stop gets no stop record now, and the pane keeps the review as it was and adds only the tokens. A resume (a coordinator message in the transcript after the previous stop) still counts as a new review. `src/reviewer-loop.test.mjs`, the two "H6 journal" tests; `dashboard/register.test.tsx`, "2.0.1 H6".
+- `telemetry.jsonl` kept `last_assistant_message`, the worker's report text, clipped to 300 characters (D6). The field is dropped; the parsed `status` stays. `src/reviewer-loop.test.mjs`, "D6 telemetry".
+
+Test gate at the stop ([stop-gate page](docs/data/probes-2.0.1-stop-gate.md)):
+- `verify.sh` read the event's fields with a text match that kept the last `"agent_type"` in the event. When the stop event's `background_tasks` listed another agent last, the gate read that agent's type and exited with no record: 30 of 102 implementer stops of the recorded session, whose reviewers then got the pending note and ran the suite themselves. node now parses the event once and the gate reads its top-level fields (`agent_type`, `agent_id`, `session_id`, `cwd`, `tool_name`, `tool_use_id`); the text match stays only where node is missing. `src/stop-gate-record.test.mjs`, the five "a stop whose event lists a reviewer last ..." tests, "the shared tree: failing tests ..." and "the agent's own fields win ...".
+- A stop gate ended by a TERM, INT or HUP, or by a failed `cd` into the agent's folder, left no record. Once the event is an implementer's, every undecided exit of the stop gate logs allow `test_gate_error`, with `"interrupted":1` after a signal. `src/stop-gate-record.test.mjs`, "a stop gate ended by a TERM ...". A SIGKILL still writes nothing ([docs/limits.md](docs/limits.md), I).
+- The plan check told every reviewer of a stop with no paired record that the gate "has not reported yet", however old the stop. The pending note (`test_gate_pending`) now stays only within the gate's window (`stopGateWindowMs` in `run.mjs`: the gate's budget, 540 s by default, plus 60 s); past it, or when the stop's record is `test_gate_error`, the reviewer gets the no-result note and `review-hold.jsonl` records `test_gate_no_result`. `src/stop-gate-record.test.mjs`, the "plan check: pending only while the test gate may still run" tests.
+
+Soak findings ([soak page](docs/data/probes-2.0.1-soak.md); each test in `src/soak-findings.test.mjs` failed on the hooks before the fix):
+- S1: the quote check read an unreadable `quotes.jsonl` as no earlier refusal, and refused at a stop whose record was not written, so a researcher could be refused at every try. It now never refuses when its earlier records cannot be read, and refuses only once its record reads back, at a hand-back and at a stop. "S1 quote check" (two tests).
+- S2: an implementer woken after its delivered hand-back that only wrote text counted as a new attempt and left the slice's review behind. Its stop gets no stop record now; a headless implementer (no transcript) still counts. "S2 journal", "S2 controls".
+- S3: a resumed reviewer whose new report had its STATUS line only in an earlier transcript turn, or none, was dropped as a wake. A coordinator message after the previous stop marks a resume: the stop is recorded, its report taken only from the turns after that message. "S3 journal".
+- S4: a resumed reviewer's forced hand-back was marked `continues` against its stop from before the resume and replaced that review. `continues` now needs an earlier stop record since the agent's latest SubagentStart. "S4 journal".
+- S5: the test gate had no cap for a stop with no agent id. Its `tests_failed` blocks now count per session. "S5 test gate".
+- S6: the review gate, the plan check and the reviewer hold made a block at every try when their own log could not be read or written. Each now blocks only when its earlier records were read and the block's record reads back, else lets the reply or launch through as `<reason>_unrecorded` (the review gate with its unverified `systemMessage`). "S6 review gate", "S6 plan check", "S6 reviewer hold".
+- S7: `verify.sh` ran the suite, and could block, on input that is not a JSON object. With node present such input now exits 0 before anything runs. "S7 test gate".
+- S8: with the whole-file read of `gates.jsonl` failing, `countBlocks` in `bugfix-check.mjs` returned 0, so the test gate blocked one implementer at every stop. It returns `null` for a log that exists and cannot be read, and `verify.sh` then counts with grep. "S8 test gate".
+- S9: a NUL byte in `gates.jsonl` (a torn write) made grep treat the log as binary and count 0, resetting the cap of a stop with no agent id. Both grep counts now use `-a`. "S9 test gate".
+
+CI ([ci page](docs/data/probes-2.0.1-ci.md)):
+- `src/test-gate-records.test.mjs`, "the hand-back's block names what failed ...", failed on CI at `4ecf82f` and on pull request #31 with `store` `recent_change`: the test made `.claude/state` after its 700 ms wait, so the watched `.claude` folder was the newest listed entry, and a hook that reached its L0 listing within 300 ms refused the store. The test now makes the folder before the wait and asserts that no listed entry changed within the guard; its assertions are unchanged and no hook changed.
+
+### Limits
+
+No "Known and not fixed" list here: what 2.0.1 found and did not fix (Claude Code's own behaviour behind the reviewer loop, the test gate with no readable count, a headless woken implementer, the judge test's CPU bound under load, and the reviewers' notes below the cutoff) is on [docs/limits.md](docs/limits.md), I, each with its reason.
+
 ## [2.0.0] - 2026-11-18
 
 2.0.0 is the reviewed fixes of the audit after 1.6.1: the test gate, the plan check and its guards, the Bash judge, the headless git rules, the skill scan, the pane, the scripts and the benchmark tooling.
@@ -559,6 +603,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.0.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.1
 [1.6.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.6.0
 [1.5.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.1
 [1.5.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v1.5.0

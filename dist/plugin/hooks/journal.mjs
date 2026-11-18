@@ -220,13 +220,49 @@ try {
 const launch = agentId ? readJsonl(stateDir, "journal-launches.jsonl").filter((e) => e.agent_id === agentId).pop() : undefined;
 const slice = (typeof launch?.slice === "string" && launch.slice) || sliceOfBrief(textOf(entries.find((e) => e.type === "user")?.message?.content)) || null;
 
-// The report: the last message when it has a STATUS line, else the latest transcript message that has one, else the
-// last message (no status; its answers and OPEN still count).
+// This agent's earlier stop records (journal.jsonl and journal-pending.jsonl) and its latest SubagentStart (telemetry):
+// a woken or resumed agent stops again under the same id (2.0.1, soak findings S2 to S4).
+/** @type {number[]} */
+let earlierStops = [];
+let latestStart = -Infinity;
+if (agentId) {
+  try {
+    earlierStops = [...readJsonl(stateDir, "journal.jsonl", sessionId), ...readJsonl(stateDir, "journal-pending.jsonl", sessionId)]
+      .filter((r) => r.agent_id === agentId && (r.session_id ?? "") === sessionId)
+      .map((r) => Date.parse(r.ts))
+      .filter(Number.isFinite);
+  } catch {
+    // none readable: a stop of its own
+  }
+  try {
+    for (const e of readJsonl(stateDir, "telemetry.jsonl", sessionId)) {
+      if (e.agent_id === agentId && e.hook_event_name === "SubagentStart" && (e.session_id ?? "") === sessionId) latestStart = Math.max(latestStart, Date.parse(e.ts) || -Infinity);
+    }
+  } catch {
+    // no start known
+  }
+}
+const prevStop = earlierStops.length ? Math.max(...earlierStops) : null;
+/** A transcript entry's own time (Claude Code writes `timestamp` on each), or NaN. @param {any} e */
+const entryTime = (e) => Date.parse(typeof e?.timestamp === "string" ? e.timestamp : "");
+// The coordinator's SendMessage as a resumed subagent's transcript holds it (egress-guard.mjs laterUserTexts reads the
+// same shape): a user record with isMeta true and origin.kind "coordinator", not a compaction summary. The latest one
+// written after the agent's previous stop record marks a resume: what follows it is the new turn's report.
+const resumeAt =
+  prevStop === null
+    ? -1
+    : entries.findLastIndex((e) => e?.type === "user" && e.isMeta === true && e.origin?.kind === "coordinator" && e.isCompactSummary !== true && entryTime(e) > prevStop);
+/** The turn this stop ends: after the resume message when there is one, else the whole transcript. */
+const turn = resumeAt >= 0 ? entries.slice(resumeAt + 1) : entries;
+
+// The report: the last message when it has a STATUS line, else the latest transcript message of this turn that has one,
+// else the last message (no status; its answers and OPEN still count). After a resume an older report in the transcript
+// is not this turn's.
 const last = typeof p.last_assistant_message === "string" ? p.last_assistant_message : "";
 let report = parseStatus(last) !== null ? last : undefined;
-for (let i = entries.length - 1; report === undefined && i >= 0; i--) {
-  if (entries[i].type !== "assistant") continue;
-  const text = textOf(entries[i].message?.content);
+for (let i = turn.length - 1; report === undefined && i >= 0; i--) {
+  if (turn[i].type !== "assistant") continue;
+  const text = textOf(turn[i].message?.content);
   if (parseStatus(text) !== null) report = text;
 }
 
@@ -247,6 +283,25 @@ try {
 // delivered: the record says so (status null, report "handback_refused", refused_by the check) and takes nothing from
 // the refused report, the transcript (which holds that refused hand-back) or an older report.
 const undelivered = !handback && refusedBy !== null && parseStatus(last) === null;
+// A worker woken after its report was delivered (2.0.1, H6: a shell task Claude Code moved to the background ends, or a
+// prompt reaches the finished agent) writes a text turn and stops again: stop_hook_active false, no hand-back since its
+// previous stop record and no STATUS line in its last message. That stop holds no new report, so it gets no stop record:
+// from the transcript it would copy the delivered report as a second review (of a later attempt, when the slice's
+// implementer stopped meanwhile), and without one it would be a review with no status. For an implementer (soak S2) it
+// would count as a new attempt and leave the delivered review behind. A stop of the same shape is a new report, and is
+// recorded as before, when the agent was resumed: the transcript holds the coordinator's message after its previous
+// stop (soak S3: the new report's STATUS line may be only in the transcript, or missing). An implementer's stop is
+// recorded too when it did anything but write text since its previous stop (a tool call: it may have changed files), or
+// when its transcript cannot be read (headless runs: whether it worked is unknown, so it counts, as before).
+if (agentId && prevStop !== null && p.stop_hook_active !== true && !handback && refusedBy === null && parseStatus(last) === null && resumeAt < 0) {
+  const worked = () =>
+    !transcriptRead ||
+    entries.some((e) => {
+      const t = entryTime(e);
+      return e?.type === "assistant" && (!Number.isFinite(t) || t > prevStop) && Array.isArray(e.message?.content) && e.message.content.some((/** @type {any} */ b) => b?.type === "tool_use");
+    });
+  if (role === "reviewer" || (role === "implementer" && !worked())) process.exit(0);
+}
 const touched = role === "implementer" ? filesTouched(transcriptRead ? entries : null, p.cwd) : null;
 let rec = stopRecord({ sessionId, agentId, role, slice, reply: handback || undelivered ? "" : (report ?? last), run: slice ? runOf(slice) : null, filesTouched: touched?.files });
 if (undelivered) rec = /** @type {typeof rec} */ ({ ...rec, status: null, report: "handback_refused", refused_by: refusedBy });
@@ -260,10 +315,14 @@ if (handback) {
 // block) with an earlier stop record of this agent: `continues: true` (G-8, audit 2026-11-16). The fold lets a reviewer's
 // continued stop replace its previous review instead of adding one; a SendMessage resume (stop_hook_active false) is a
 // new review. Only set when it applies, so other stops keep the record they had.
+// The earlier record must be one of this run of the agent (since its latest SubagentStart, 2.0.1 soak S4): after a
+// SendMessage resume the agent starts again, and a resumed reviewer whose text turn was held back (its stop got no
+// record above, or no transcript showed the resume) hands back and stops with stop_hook_active true: that is its new
+// review, not the earlier one going on.
 if (p.stop_hook_active === true && agentId) {
   try {
     const log = slice ? "journal.jsonl" : "journal-pending.jsonl";
-    if (readJsonl(stateDir, log, sessionId).some((r) => r.session_id === sessionId && r.agent_id === agentId)) rec = /** @type {typeof rec} */ ({ ...rec, continues: true });
+    if (readJsonl(stateDir, log, sessionId).some((r) => r.session_id === sessionId && r.agent_id === agentId && !(Date.parse(r.ts) < latestStart))) rec = /** @type {typeof rec} */ ({ ...rec, continues: true });
   } catch {
     // no earlier record readable: a stop of its own
   }

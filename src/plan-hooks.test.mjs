@@ -81,7 +81,8 @@ test("journal: records slice, role and status from the subagent transcript; plan
     };
     /** @param {string} type @param {unknown} brief @param {string} report @param {string} [last] */
     const stop = (type, brief, report, last) =>
-      run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: "s1", agent_id: "a1", agent_type: type, agent_transcript_path: transcript(brief, report), last_assistant_message: last });
+      // each stop is another agent (2.0.1: a reviewer's later stop with no STATUS line and no hand-back adds no record)
+      run(dir, "journal.mjs", { hook_event_name: "SubagentStop", session_id: "s1", agent_id: `a-${Math.random()}`, agent_type: type, agent_transcript_path: transcript(brief, report), last_assistant_message: last });
     assert.equal(stop("implementer", "SLICE: toml\nFILES: toolkit/toml.py\nDEPENDS: none", "STATUS: pass\nDONE").status, 0);
     assert.equal(stop("orchestration:reviewer", [{ type: "text", text: "SLICE: toml\nFOCUS: dates" }], "x", "STATUS: fail\nGAPS: ...").status, 0);
     assert.equal(stop("reviewer", "PLAN REVIEW\nTask: ...", "Reply in this format: STATUS: pass or fail\n\nSTATUS: pass").status, 0);
