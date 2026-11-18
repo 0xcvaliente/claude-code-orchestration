@@ -24,9 +24,10 @@ import { totalTokens, usageFromResult } from "./tokens.js";
  * and anything else the tokenizer cannot see.
  * Over-blocked on purpose: an unquoted rm word anywhere (`echo rm -rf x`, `grep rm -r src`, `nice rm file`), a glob that
  * could name rm or a privilege command (`ls r*`, `ls s*`, `ls p*`), and rm with a glob or variable argument (`rm *.o`).
- * Also not covered: `su`, `pkexec` or `runuser` after a shell keyword or in an unlisted wrapper form (`until su; do :;
- * done`, `if true; then su root; fi`, `then pkexec ls`, `do runuser -u r ls`, `exec -a foo su`, `env -u X su root`):
- * they are interactive and need a password or a polkit agent a headless worker does not have. See README Limits.
+ * Covered since 2.0.0: `su`, `pkexec` or `runuser` after a shell keyword or a wrapper (`until su; do :; done`,
+ * `if true; then su root; fi`, `then pkexec ls`, `do runuser -u r ls`, `exec -a foo su`, `env -u X su root`) are denied,
+ * here and in judge-core.mjs alike (a command word after a keyword is read as one; the wrapper and string-wrapper
+ * rules, WRAPPED_DENY and WRAPPER_STRING).
  */
 
 export type BashClass = "deny" | "judge" | "pass";

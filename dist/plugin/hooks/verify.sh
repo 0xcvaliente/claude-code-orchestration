@@ -341,8 +341,19 @@ lock_stale() { # $1: the lock's content as read; true when its holder is gone or
 # One taker at a time (the guard folder; a waiter that finds it older than 2 minutes removes it and does not take over
 # that round). The stale lock is renamed away first, an atomic step, and only then compared with what was judged stale:
 # a lock some other gate made in between is put back with ln (never over another), not removed, and that gate keeps it.
-# While the name is free, a third gate's take_lock can link its own lock there; ln then fails and the renamed lock is
-# removed, so the gate that made it runs on without its file and two suites can overlap: that race stays open.
+# An empty or unreadable read means the lock changed under this gate (the name was free, or the file went between the
+# test and the read): the takeover returns 1 and the caller tries take_lock again; that value is never judged stale and
+# never reaches the mv. (Before, an empty read counted as stale: a gate that read the name while another taker had just
+# moved the stale lock away then moved that taker's fresh lock aside, and when a third gate linked its own lock first,
+# the put-back failed and the fresh lock was removed, so two suites ran at once; src/test-gate-lock.test.mjs, "a takeover
+# that reads the lock while its name is free never moves the fresh lock that appears there".) Every read here happens
+# under the guard, and take_lock links only a whole file, so a non-empty read is a lock some gate made; it changes before
+# the mv only when something outside the guard removes it, which leaves three cases open (docs/limits.md): its holder,
+# still alive when the lock is LOCK_STALE_S old, releases it in that window, or after its lock was taken over removes a
+# successor's lock in the moment between release_lock's read and its rm; two gates are in the takeover at once once a
+# guard left by a gate killed (or stopped) inside its takeover is 2 minutes old (the age test and the rmdir are two
+# steps, so a waiter can remove a newer taker's guard); a lock file that is empty for good (take_lock never makes one) is
+# never stale, so every gate waits until its floor, as for a live holder.
 take_over() { # 0 when a stale lock was removed
   local guard="$lock.takeover" seen="" now_seen="" rc=1 grab="$lock.stale.$$"
   if ! mkdir "$guard" 2>/dev/null; then
@@ -350,7 +361,7 @@ take_over() { # 0 when a stale lock was removed
     return 1
   fi
   { IFS= read -r seen <"$lock"; } 2>/dev/null
-  if [ -e "$lock" ] && lock_stale "$seen" && mv "$lock" "$grab" 2>/dev/null; then
+  if [ -n "$seen" ] && [ -e "$lock" ] && lock_stale "$seen" && mv "$lock" "$grab" 2>/dev/null; then
     { IFS= read -r now_seen <"$grab"; } 2>/dev/null
     if [ "$now_seen" = "$seen" ]; then
       rc=0 took_over=1

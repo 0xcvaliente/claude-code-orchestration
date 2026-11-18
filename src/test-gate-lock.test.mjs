@@ -163,6 +163,56 @@ test("a fresh lock made between the stale check and the removal is never removed
   }
 });
 
+test("a takeover that reads the lock while its name is free never moves the fresh lock that appears there", async () => {
+  const project = tmp("orch-glk-free-");
+  const box = tmp("orch-glk-box-");
+  const bin = tmp("orch-glk-bin-");
+  const lock = lockFile(project);
+  // The read in take_over returns empty, as when another taker has just moved the stale lock away, and the name then
+  // holds a lock (an empty file stands for that moment, since no external command runs between the read and the test).
+  // A gate that judges the empty value stale reaches mv: the mv shim lets the other taker's fresh lock A (a live holder:
+  // this process) take the name just before the real mv, and the ln shim lets a third gate link its lock C just before
+  // the put-back, which then fails and removes A.
+  const A = `${process.pid} ${nowS()}`;
+  const C = `${process.pid} ${nowS() + 1}`;
+  const guardSeen = join(bin, "guard");
+  const moved = join(bin, "moved");
+  mkdirSync(join(project, ".claude", "state"), { recursive: true });
+  writeFileSync(lock, "");
+  const real = (/** @type {string} */ n) => spawnSync("sh", ["-c", `command -v ${n}`], { encoding: "utf8" }).stdout.trim();
+  const shim = (/** @type {string} */ n, /** @type {string} */ body) => writeFileSync(join(bin, n), `#!/bin/sh\n${body}\nexec '${real(n)}' "$@"\n`, { mode: 0o755 });
+  shim("mkdir", `for a in "$@"; do [ "$a" != '${lock}.takeover' ] || : > '${guardSeen}'; done`);
+  shim("mv", `if [ "$1" = '${lock}' ] && [ ! -e '${moved}' ]; then : > '${moved}'; '${real("rm")}' -f '${lock}'; echo '${A}' > '${lock}'; fi`);
+  shim("ln", `if [ "$2" = '${lock}' ] && [ -e '${moved}' ] && [ ! -e '${bin}/linked' ]; then : > '${bin}/linked'; echo '${C}' > '${lock}'; fi`);
+  const started = join(box, "started");
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let child;
+  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `date +%s%3N > '${started}'` }, onStart: (c) => (child = c) });
+  try {
+    const t = Date.now() + 20000;
+    while (!existsSync(guardSeen) && Date.now() < t) await sleep(50);
+    assert.ok(existsSync(guardSeen), "the gate reached its takeover");
+    await sleep(500);
+    // The other taker links A now, if the gate has not moved anything (under the fix it read the name as changed).
+    if (readFileSync(lock, "utf8") === "") writeFileSync(lock, `${A}\n`);
+    await sleep(2500);
+    assert.equal(existsSync(moved), false, "the gate never moved the lock");
+    assert.equal(readFileSync(lock, "utf8").trim(), A, "the fresh lock is still in place");
+    assert.equal(existsSync(started), false, "no suite while the fresh lock's holder runs");
+    const released = Date.now();
+    rmSync(lock, { force: true }); // A's holder releases its lock
+    const r = await run;
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(num(started) >= released, `the suite started only after the release (${num(started) - released} ms)`);
+  } finally {
+    child?.kill("SIGKILL");
+    await run;
+    rmSync(project, { recursive: true, force: true });
+    rmSync(box, { recursive: true, force: true });
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 // bugfix_timeout: the message says what the gate's time budget went to, from the facts verify.sh has (the wait for
 // the suite lock, the test run, the check), so a block caused by another gate's suite does not blame this suite.
 /** A KIND: bugfix agent's transcript. @param {string} box */
