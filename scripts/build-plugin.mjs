@@ -10,12 +10,31 @@
 // agent_type to SubagentStart/SubagentStop hooks (probed on Claude Code 2.1.314), which the plugin verify.sh matcher
 // below already matches. A repo-root evals/ directory ships as evals/ when it exists. The judge hooks are registered
 // only when their files exist in .claude/hooks. Plugin settings are declared as userConfig (see OPTIONS).
-// --out <dir>: build into <dir>/plugin and <dir>/dashboard instead of dist/ (ignored with --check).
+// It also writes the marketplace manifest .claude-plugin/marketplace.json (this repository is the marketplace people
+// add), and --check compares it like dist/ (docs/marketplace.md).
+// --out <dir>: build into <dir>/plugin and <dir>/dashboard, and the marketplace manifest into <dir>/marketplace.json,
+// instead of dist/ and .claude-plugin/ (ignored with --check).
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const NAME = "orchestration";
+// The facts every manifest shares, in one place. The marketplace name and owner are the ones people already added:
+// renaming the marketplace would drop it for them. No owner email, and no license: the owner has not chosen one.
+const REPO = "https://github.com/0xcvaliente/claude-code-orchestration";
+const SHARED = {
+  owner: { name: "0xcvaliente" },
+  homepage: REPO,
+  repository: REPO,
+  keywords: ["orchestration", "multi-agent", "subagents", "code-review", "test-gate", "triage"],
+  marketplace: {
+    name: "claude-code-orchestration",
+    description: "Claude Code orchestration: an orchestrator agent with test and review gates, and a router that picks plain or multi-agent per task.",
+    category: "development",
+  },
+};
+const PLUGIN_DESCRIPTION =
+  "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.";
 const src = join(process.cwd(), ".claude");
 // --check builds into a temp dir and fails when the committed dist/plugin differs, like `npm run check-agents`.
 const check = process.argv.includes("--check");
@@ -172,7 +191,7 @@ const userConfig = Object.fromEntries(
 
 writeFileSync(
   join(out, ".claude-plugin", "plugin.json"),
-  `${JSON.stringify({ name: NAME, version, description: "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
+  `${JSON.stringify({ name: NAME, version, description: PLUGIN_DESCRIPTION, author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, keywords: SHARED.keywords, types: "./types/index.d.ts", userConfig }, null, 2)}\n`,
 );
 
 // No plugin settings.json since 1.6.1: Claude Code 2.1.326 lists `subagentStatusLine` as deprecated in favour of mods,
@@ -184,8 +203,36 @@ cpSync(join(dashSrc, "types", "index.d.ts"), join(dash, "types", "index.d.ts"));
 writeFileSync(join(dash, "hooks", "hooks.json"), `${JSON.stringify({ modules: ["./register.tsx"] }, null, 2)}\n`);
 writeFileSync(
   join(dash, ".claude-plugin", "plugin.json"),
-  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: { name: "0xcvaliente" }, types: "./types/index.d.ts" }, null, 2)}\n`,
+  `${JSON.stringify({ name: "orchestration-dashboard", version, description: "Live pane of the orchestration agents: progress through the plan, a flow diagram of the slices, tokens per task, what each reported, a session log and what the session used.", author: SHARED.owner, homepage: SHARED.homepage, repository: SHARED.repository, keywords: SHARED.keywords, types: "./types/index.d.ts" }, null, 2)}\n`,
 );
+
+// The marketplace manifest: one entry, the plugin under ./dist/plugin (relative to the repository root, so the built
+// files must be committed). No version here: it lives in plugin.json only, since Claude Code silently takes plugin.json's
+// when both set one, and people get a new copy only when that version changes.
+const marketplace = `${JSON.stringify(
+  {
+    name: SHARED.marketplace.name,
+    owner: SHARED.owner,
+    description: SHARED.marketplace.description,
+    plugins: [
+      {
+        name: NAME,
+        source: "./dist/plugin",
+        description: PLUGIN_DESCRIPTION,
+        category: SHARED.marketplace.category,
+        tags: SHARED.keywords,
+        homepage: SHARED.homepage,
+        repository: SHARED.repository,
+      },
+    ],
+  },
+  null,
+  2,
+)}\n`;
+const committedMarketplace = join(process.cwd(), ".claude-plugin", "marketplace.json");
+const marketplaceOut = check || outArg ? join(outRoot, "marketplace.json") : committedMarketplace;
+if (!check && !outArg) mkdirSync(join(process.cwd(), ".claude-plugin"), { recursive: true });
+writeFileSync(marketplaceOut, marketplace);
 /**
  * The differences between two folders, one line per path: only in one of them, a file against a folder, or different
  * contents (a symbolic link compares by its target). Each path in `skip` (relative to both roots, `/`-separated, matched
@@ -238,12 +285,16 @@ if (check) {
     const d = treeDiff(join(outRoot, name), join(committedRoot, name), skip);
     return d.length === 0 ? [] : [`dist/${name} is out of date; run npm run build-plugin\n${d.join("\n")}\n`];
   });
+  const committedText = existsSync(committedMarketplace) ? readFileSync(committedMarketplace, "utf8") : null;
+  if (committedText !== marketplace) {
+    stale.push(`.claude-plugin/marketplace.json is out of date; run npm run build-plugin\n${committedText === null ? "Missing: .claude-plugin/marketplace.json" : "Files differ: .claude-plugin/marketplace.json"}\n`);
+  }
   rmSync(outRoot, { recursive: true, force: true });
   if (stale.length) {
     console.error(stale.join("\n"));
     process.exit(1);
   }
-  console.log("dist/plugin and dist/dashboard are up to date");
+  console.log("dist/plugin, dist/dashboard and .claude-plugin/marketplace.json are up to date");
 } else {
-  console.log(`built ${out} and ${dash}`);
+  console.log(`built ${out}, ${dash} and ${marketplaceOut}`);
 }

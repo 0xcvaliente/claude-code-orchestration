@@ -1,12 +1,25 @@
 {
   "name": "claude-code-orchestration",
-  "owner": { "name": "0xcvaliente" },
-  "metadata": { "description": "Claude Code orchestration: an orchestrator agent with test and review gates, and a router that picks plain or multi-agent per task." },
+  "owner": {
+    "name": "0xcvaliente"
+  },
+  "description": "Claude Code orchestration: an orchestrator agent with test and review gates, and a router that picks plain or multi-agent per task.",
   "plugins": [
     {
       "name": "orchestration",
       "source": "./dist/plugin",
-      "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first."
+      "description": "Orchestrator agent that delegates to researcher, implementer, integrator and reviewer agents with test and review gates, plus a /route skill that sizes a task first.",
+      "category": "development",
+      "tags": [
+        "orchestration",
+        "multi-agent",
+        "subagents",
+        "code-review",
+        "test-gate",
+        "triage"
+      ],
+      "homepage": "https://github.com/0xcvaliente/claude-code-orchestration",
+      "repository": "https://github.com/0xcvaliente/claude-code-orchestration"
     }
   ]
 }

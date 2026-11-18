@@ -75,7 +75,7 @@ It asks twice: once as it is, for the `builtins` check, and once with the two he
 - It updates an installed plugin whose version differs from this checkout's. Restart Claude Code afterwards.
 - With the sandbox on in your user settings, it adds `<config dir>/orchestration` to `sandbox.filesystem.allowWrite` (the `sandbox` row above).
 
-`--enable` installs the plugin from this checkout's marketplace when it is missing, and enables it when it is disabled. `--fix` never does that: whether the plugin is on is your choice, and an update check must not change it.
+`--enable` installs the plugin from this checkout's marketplace when it is missing, and enables it when it is disabled. `--fix` never does that: whether the plugin is on is your choice, and an update check must not change it. It adds the checkout folder as the marketplace (`claude plugin marketplace add <checkout>`) when no marketplace of that name is known; installing from GitHub instead, at `main` or at a release tag: [Sharing the plugin](marketplace.md).
 
 `--write-source` is for whoever maintains the repo. It adds the new types to `BUILTIN_AGENTS` in `.claude/hooks/builtin-agents.mjs` and to `permissions.deny` in `.claude/settings.json`, and runs `npm run build-plugin`. Then run `npm run check`, commit and release, so every install gets the list.
 
