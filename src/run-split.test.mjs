@@ -82,9 +82,11 @@ test("run split: every stop gets run 1, the number journal.mjs writes", () => {
 
 const T0 = t("2026-10-31T10:00:00.000Z");
 const at = (/** @type {number} */ min) => new Date(T0 + min * 60000).toISOString();
+// These fold tests pin the one-review rule; the second review rule (a RISKY slice needs two passes) is off here and
+// covered by src/second-review.test.mjs.
 /** @param {number} min @param {string} slice @param {string} [extra] @param {string} [model] */
 const impl = (min, slice, extra = "", model) => ({
-  launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.md\nDEPENDS: none\nPATH: light\n${extra}`, ...(model ? { model } : {}) }, { ts: at(min), sessionId: "s1", agentId: `impl-${min}` }),
+  launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.md\nDEPENDS: none\nPATH: light\n${extra}`, ...(model ? { model } : {}) }, { ts: at(min), sessionId: "s1", agentId: `impl-${min}`, env: { ORCH_SECOND_REVIEW: "off" } }),
 });
 /** @param {number} min @param {string} agentId */
 const implStop = (min, agentId) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "implementer", reply: "STATUS: pass\nOPEN: none" }) });

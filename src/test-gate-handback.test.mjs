@@ -145,6 +145,12 @@ const records = (dir) => {
 };
 /** @param {string} dir */
 const lastRec = (dir) => records(dir).at(-1);
+/** Stamp every stored result as stored now: a step that judges the tree is not cut short as too_old on a loaded machine
+ * (expiry has its own case). @param {string} dir */
+function fresh(dir) {
+  const entries = readCache(stateOf(dir)).map((e) => ({ ...e, ts: new Date().toISOString() }));
+  writeFileSync(join(stateOf(dir), CACHE_FILE), `${JSON.stringify({ entries })}\n`);
+}
 /** Make every stored result `sec` seconds older. @param {string} dir @param {number} sec */
 function age(dir, sec) {
   const entries = readCache(stateOf(dir)).map((e) => ({ ...e, ts: new Date(Date.parse(e.ts) - sec * 1000).toISOString() }));
@@ -173,8 +179,11 @@ async function gateAsync(s, o = {}) {
   const exit = new Promise((r) => child.on("exit", (c) => r(c)));
   child.stdin.end(JSON.stringify(event));
   if (o.during) {
-    const deadline = Date.now() + 30000;
+    // Waits for the suite itself to start (up to the gate's whole default budget): with a 30 s cap a loaded machine let
+    // the change come before the suite had read its inputs (2.1.0 probe: the hand-back then failed, exit 2).
+    const deadline = Date.now() + 540000;
     while (runs(s) === before && Date.now() < deadline) await pause(50);
+    assert.notEqual(runs(s), before, "the suite started, so the change comes during its run");
     await pause(200);
     o.during();
   }
@@ -475,8 +484,11 @@ describe("test gate at the hand-back", { concurrency: CONCURRENCY }, () => {
       // The worker resends with the same tree, the test would now pass, but the hand-back runs it (no reuse there).
       writeFileSync(join(s.base, "pass"), "");
       assert.equal((await handBack(s, "toolu_2")).status, 0);
-      const key = readCache(stateOf(s.dir)).find((e) => e.by === "toolu_1")?.key ?? "";
-      const q = { key, session: "s1", agent: "a1", handback: "toolu_1", roots: scanRoots(s.dir), exclude: [stateOf(s.dir)] };
+      const first = readCache(stateOf(s.dir)).find((e) => e.by === "toolu_1");
+      const key = first?.key ?? "";
+      // Taken at the time it was stored (`now`): on a loaded machine the second hand-back's run can take longer than
+      // REUSE_MAX_S, and an expired entry would hide what this asserts (expiry has its own case above).
+      const q = { key, session: "s1", agent: "a1", handback: "toolu_1", roots: scanRoots(s.dir), exclude: [stateOf(s.dir)], now: Date.parse(first?.ts ?? "") };
       assert.equal(cacheTake(stateOf(s.dir), q)?.result, "fail", "a fail stays a fail");
       rmSync(join(s.base, "pass"));
       assert.equal((await handBack(s2, "toolu_D", { cmd: `echo run >> '${s2.counter}'; date +%N > during.txt` })).status, 0);
@@ -687,14 +699,22 @@ describe("test gate at the hand-back", { concurrency: CONCURRENCY }, () => {
         mkdirSync(d, { recursive: true });
         writeFileSync(join(d, "in.txt"), "ok\n");
         await settle();
-        // The suite reads its inputs first, then works on (sleeps) while the other process changes one.
-        const cmd = `grep -q ok '${d}/in.txt' && test ! -e '${d}/extra.txt'; r=$?; echo run >> '${s.counter}'; sleep ${when === "during" ? 1.5 : 0}; exit $r`;
-        const change = () => CHANGES[how]?.(d);
+        // The suite reads its inputs first, then works on while the other process changes one. "During": it runs until
+        // the change is made (a marker outside the trees, at most 30 s), not for a fixed 1.5 s, which a loaded machine
+        // could let pass before the change came (the run then ended first and its outcome was stored).
+        const changed = join(s.base, "changed");
+        const wait = `i=0; while [ ! -e '${changed}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done`;
+        const cmd = `grep -q ok '${d}/in.txt' && test ! -e '${d}/extra.txt'; r=$?; echo run >> '${s.counter}'; ${when === "during" ? wait : ":"}; exit $r`;
+        const change = () => {
+          CHANGES[how]?.(d);
+          writeFileSync(changed, "");
+        };
         const hb = await gateAsync(s, { handback: true, toolUseId: "toolu_G", cmd, cwd: wt, ...(when === "during" ? { during: change } : {}) });
         const what = `${how} ${when} the run (${where})`;
         assert.equal(hb, 0, `${what}: the report goes through`);
         assert.equal(lastRec(s.dir).store, when === "during" ? "tree_changed" : "stored", what);
         if (when === "after") change();
+        fresh(s.dir); // the reason below is the tree's, not the age's (REUSE_MAX_S passed between the two under load)
         // The stop ran the suite, which now fails: a block in the shared tree, the isolated warn in a linked worktree.
         const stop = await gateAsync(s, { cmd, cwd: wt });
         assert.equal(stop, where === "main" ? 0 : 2, `${what}: the stop's exit`);
@@ -778,17 +798,28 @@ describe("test gate at the hand-back", { concurrency: CONCURRENCY }, () => {
   });
 
   test("an entry changed within RECENT_MS before the run: nothing stored (recent_change), the stop runs the suite", async () => {
-    // A guard of 8 s (settled for it first): the fresh entry stays recent at L0 however loaded the machine is.
+    // A guard of 8 s (settled for it first), and the fresh entry is made at the last moment before L0: a `node` first on
+    // PATH writes it when the gate starts its L0 listing (test-gate-cache.mjs list), then runs the real node. Written
+    // before the hand-back instead, the gate's start, key and link (seconds on a loaded machine: a full suite run
+    // stored the outcome) all came between the change and L0; now only the listing's own start does.
     const guard = 8000;
     const s = await setup(undefined, true);
+    const bin = join(s.base, "bin");
+    const mark = join(bin, "written");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "node"),
+      `#!/bin/sh\ncase " $* " in *"test-gate-cache.mjs list "*) [ -e '${mark}' ] || { : > '${mark}'; mkdir -p '${join(s.dir, "ignored")}'; echo 1 > '${join(s.dir, "ignored", "fresh.txt")}'; } ;; esac\nexec '${process.execPath}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    const env = { PATH: `${bin}:${process.env.PATH}` };
     try {
       await settle(guard);
       writeFileSync(join(s.base, "pass"), "");
-      mkdirSync(join(s.dir, "ignored"));
-      writeFileSync(join(s.dir, "ignored", "fresh.txt"), "1\n");
-      assert.equal((await handBack(s, "toolu_RC", { recentMs: guard })).status, 0);
+      assert.equal((await handBack(s, "toolu_RC", { recentMs: guard, env })).status, 0);
+      assert.ok(existsSync(join(s.dir, "ignored", "fresh.txt")), "the fresh entry was made at the L0 listing");
       assert.deepEqual([lastRec(s.dir).reason, lastRec(s.dir).store], ["tests_passed", "recent_change"]);
-      assert.equal((await gate(s)).status, 0);
+      assert.equal((await gate(s, { env })).status, 0);
       assert.deepEqual([lastRec(s.dir).reused, lastRec(s.dir).reuse, runs(s)], [undefined, "no_entry", 2]);
     } finally {
       rmSync(s.base, { recursive: true, force: true });

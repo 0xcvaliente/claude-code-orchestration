@@ -62,6 +62,8 @@ These have no plugin setting: set them in the environment.
 | Variable | Read by | Default | Effect |
 |---|---|---|---|
 | `ORCH_HANDBACK_GATE` | `verify.sh --handback` | on | `off` turns off the test gate's run at an implementer's hand-back ([gates.md, Hand-back gate](gates.md#hand-back-gate)), logged as `handback_gate_off`; the SubagentStop gate still runs. Compared exactly, in lower case. |
+| `ORCH_WAVE_MAX` | `plan-check.mjs` (through `limits.mjs`) | 4 | How many of this plugin's implementers may run at once in a session before the plan check blocks a launch with `wave_full` (2.1.0). A whole number from 1 to 8; anything else counts as unset. Environment only: there is no plugin setting for it, so the plugin keeps 22. For a launch in an isolated worktree the plan check may allow fewer, from the latest `suite_s` ([gates.md, Wave cap](gates.md#wave-cap)). It does not bound the gated workflow, whose own argument is `waveMax`. |
+| `ORCH_SECOND_REVIEW` | `journal.mjs` (through `launchRecord` in `brief.mjs`), the pane | on | `off` (any case) turns off the second review rule (2.1.0): the journal writes no `reviews_needed` on implementer launch records, so a RISKY slice needs one passing review again, plus the opus rule ([gates.md, Second review rule](gates.md#second-review-rule)). Only launches recorded while it is off are affected. The pane reads it from its own environment at session start. Environment only: there is no plugin setting for it, so the plugin keeps 22. |
 | `ORCH_SOURCES_NOTE` | `plan-check.mjs` | on | `off` drops the coverage note added to our researcher's launch when its `SOURCES:` names two or more local files. |
 | `ORCH_READ_ROUTER_BUDGET_MS` | `plan-check.mjs` | 15000 | The read router's profiling budget, in ms, at most 40000 (under the hook's 60 s timeout). |
 | `ORCH_TURN_WARNING` | `turn-budget.mjs` | on | `off` turns off the [turn warning](gates.md#turn-warning). |
@@ -96,7 +98,7 @@ Read by `scripts/orchestrate.sh` (so by `npm run native`) and by `scripts/auto.s
 | `ORCH_TEST_CMD` | detected | Also adds the permission rules the test command needs to the allowlist. |
 | `ORCH_SKILL_CREATE`, `ORCH_SKILLS_REPO_PRIVATE`, `ORCH_SKILLS_REPO_PUBLIC` | as the plugin settings | Unless skill creation is `off`, each skills repository set here and the draft home get `--add-dir`, and the Skill tool, the validator and the seal command join the allowlist. `CLAUDE_CONFIG_DIR` also moves the draft home that `scripts/skill-publish.mjs` reads. |
 
-Every headless run also exports `ORCH_NO_NUDGE=1`, `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`.
+Every headless run also exports `ORCH_NO_NUDGE=1`, `CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1` and `CLAUDE_CODE_FORK_SUBAGENT=0`, and since 2.1.0 `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=3600000` (how long `claude -p` waits for background agents after its last turn; Claude Code's default is 10 minutes) unless the environment already sets it; 0, no limit, is kept.
 
 ### Skills and the route skill
 

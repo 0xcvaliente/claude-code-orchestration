@@ -446,7 +446,8 @@ test("FILES of a skill slice resolve against its draft worktree in the launch an
 test("DRAFTS: one SKILL.md line per draft of this run for implementer, researcher and reviewer; unknown names dropped and logged", () => {
   const s = setup();
   try {
-    assert.equal(launch(s, skillBrief("release-notes")).status, 0);
+    const made = launch(s, skillBrief("release-notes"));
+    assert.equal(made.status, 0, `the skill slice's launch: ${made.stderr}`);
     const draftMd = join(s.cfg, "orchestration", "skill-drafts", "private", "release-notes", "skills", "release-notes", "SKILL.md");
     const lines = `\n\nDraft skills of this run (added by the plan check): read each SKILL.md below before starting.\n- ${draftMd} (draft skill release-notes)`;
     for (const type of ["reviewer", "orchestration:researcher", "implementer"]) {

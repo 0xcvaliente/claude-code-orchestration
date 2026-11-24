@@ -29,8 +29,11 @@
 //             have moved or changed meaning, so this finds a rename or a removal, not every change of shape
 //   memory    CLAUDE_CODE_DISABLE_AUTO_MEMORY, which the judge hook and the SDK workers set, is still named there.
 //             Presence only: whether it still turns auto memory off is not tested
+//   bgwait    CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS, which scripts/orchestrate.sh exports so claude -p waits for a
+//             background implementer and its test gate past Claude Code's default 10 minutes (2.1.328), is still named
+//             there. Presence only: how long claude -p then waits is not tested
 //             A program file that cannot be found or read, or that names none of the fields (a wrapper script), is a
-//             note for both, never ok
+//             note for all three, never ok
 //   sandbox   with sandbox.enabled in the user settings (<config dir>/settings.json), sandbox.filesystem.allowWrite covers
 //             <config dir>/orchestration (state, skill drafts, the judge's record); a note naming the entry otherwise,
 //             which --fix adds. Managed settings are never edited; a file that cannot be read or parsed is a note only
@@ -67,6 +70,11 @@ export const HOOK_FIELDS = Object.freeze([
 ]);
 /** The switch the judge hook and workerEnv() set so no inner call starts Claude Code's auto memory. */
 export const MEMORY_SWITCH = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+/**
+ * The setting scripts/orchestrate.sh exports so `claude -p` waits longer than its default 10 minutes for background agents
+ * after its last turn (Claude Code 2.1.328 counts a background subagent and the agents it waits for against one wait).
+ */
+export const WAIT_SWITCH = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
 const INIT = `${JSON.stringify({ type: "control_request", request_id: "claude-update", request: { subtype: "initialize" } })}\n`;
 const INIT_ARGS = ["-p", "--safe-mode", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence"];
 
@@ -176,27 +184,22 @@ export function missingStrings(file, names) {
 /** @typedef {{ status: Check["status"], text: string }} Outcome */
 
 /**
- * The `payload` and `memory` checks from one read of the program file. A file that names none of HOOK_FIELDS is not
- * the program (a wrapper script, a shim): both are notes then, never ok.
+ * The `payload`, `memory` and `bgwait` checks from one read of the program file. A file that names none of HOOK_FIELDS
+ * is not the program (a wrapper script, a shim): all three are notes then, never ok.
  * @param {string | null} file
- * @returns {{ payload: Outcome, memory: Outcome }}
+ * @returns {{ payload: Outcome, memory: Outcome, bgwait: Outcome }}
  */
 export function programChecks(file) {
   /** @param {string} text @returns {Outcome} */
   const note = (text) => ({ status: "warn", text });
-  if (!file) {
-    const why = "the program file of `claude` was not found on PATH, so this could not be checked";
-    return { payload: note(why), memory: note(why) };
-  }
-  const missing = missingStrings(file, [...HOOK_FIELDS, MEMORY_SWITCH]);
-  if (!missing) {
-    const why = `${file} could not be read, so this could not be checked`;
-    return { payload: note(why), memory: note(why) };
-  }
-  const fields = missing.filter((n) => n !== MEMORY_SWITCH);
+  /** @param {string} why */
+  const notes = (why) => ({ payload: note(why), memory: note(why), bgwait: note(why) });
+  if (!file) return notes("the program file of `claude` was not found on PATH, so this could not be checked");
+  const missing = missingStrings(file, [...HOOK_FIELDS, MEMORY_SWITCH, WAIT_SWITCH]);
+  if (!missing) return notes(`${file} could not be read, so this could not be checked`);
+  const fields = missing.filter((n) => n !== MEMORY_SWITCH && n !== WAIT_SWITCH);
   if (fields.length === HOOK_FIELDS.length) {
-    const why = `${file} names none of the hook payload fields, so it is not Claude Code's program (a wrapper?) and this could not be checked`;
-    return { payload: note(why), memory: note(why) };
+    return notes(`${file} names none of the hook payload fields, so it is not Claude Code's program (a wrapper?) and this could not be checked`);
   }
   /** @type {Outcome} */
   const payload = fields.length
@@ -206,7 +209,11 @@ export function programChecks(file) {
   const memory = missing.includes(MEMORY_SWITCH)
     ? { status: "fail", text: `Claude Code no longer names ${MEMORY_SWITCH} (in ${file}): the judge hook and the SDK workers may now start auto memory. Read the memory docs for what replaced it.` }
     : { status: "ok", text: `${MEMORY_SWITCH} is named in ${file} (presence only; whether it still turns auto memory off is not tested)` };
-  return { payload, memory };
+  /** @type {Outcome} */
+  const bgwait = missing.includes(WAIT_SWITCH)
+    ? { status: "fail", text: `Claude Code no longer names ${WAIT_SWITCH} (in ${file}): scripts/orchestrate.sh sets it so a headless run keeps waiting for a background implementer and its test gate, and without it claude -p may stop them after its default wait. Read the headless docs for what replaced it.` }
+    : { status: "ok", text: `${WAIT_SWITCH} is named in ${file} (presence only; how long claude -p then waits is not tested)` };
+  return { payload, memory, bgwait };
 }
 
 /** Claude Code's config dir: CLAUDE_CONFIG_DIR, else ~/.claude. @param {NodeJS.ProcessEnv} env */
@@ -375,6 +382,7 @@ export function check({ fix = false, source = false, enable = false, env = proce
     const prog = programChecks(programFile(bin, env));
     add("payload", prog.payload.status, prog.payload.text);
     add("memory", prog.memory.status, prog.memory.text);
+    add("bgwait", prog.bgwait.status, prog.bgwait.text);
 
     // sdk: 0.3.N of the Agent SDK carries Claude Code 2.1.N.
     // Resolved as Node resolves it from the checkout, so a parent folder's node_modules counts (a worktree). The

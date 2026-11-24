@@ -484,7 +484,8 @@ test("review gate: a reviewer still running defers the reply (agents_running), f
 });
 
 test("review gate: nothing running and an unreviewed implementer blocks; every slice of the run needs its own review", () => {
-  const s = session();
+  // Slice b is RISKY in the plan: the one-review rule is pinned here, the second review rule in src/second-review.test.mjs.
+  const s = session({ ORCH_SECOND_REVIEW: "off" });
   s.plan();
   s.impl("a");
   s.impl("b");
@@ -544,7 +545,8 @@ test("review gate: constraints_unchecked until the reviewer answers every CHECKS
 });
 
 test("review gate: a doubt signal needs a passing opus review (tool_input model or the agent file); ORCH_ESCALATION off and always", () => {
-  const s = session();
+  // The opus rule on its own: the second review rule (RISKY slice b needs two passes) is off here, see src/second-review.test.mjs.
+  const s = session({ ORCH_SECOND_REVIEW: "off" });
   s.plan();
   s.impl("b"); // RISKY: yes in the plan
   s.review("b", "STATUS: pass", { model: "sonnet" });
@@ -568,7 +570,7 @@ test("review gate: a doubt signal needs a passing opus review (tool_input model 
   assert.match(JSON.parse(r.stdout).systemMessage, /gave up after 2 blocks \(opus_review_required\)/);
 
   // The model from the project's agent file when the launch names none.
-  const f = session();
+  const f = session({ ORCH_SECOND_REVIEW: "off" });
   mkdirSync(join(f.dir, ".claude", "agents"), { recursive: true });
   writeFileSync(join(f.dir, ".claude", "agents", "reviewer.md"), "---\nname: reviewer\nmodel: opus\n---\nbody\n");
   f.plan();

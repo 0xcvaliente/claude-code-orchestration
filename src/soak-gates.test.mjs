@@ -1,7 +1,7 @@
 // The gate soak (scripts/soak-gates.mjs, docs/data/probes-2.0.1-soak.md) in the suite: a fixed-seed round of a few
 // sequences, the 60-minute limit, and a planted violation reported with its seed and a replayable sequence. Each run is
 // a child process with its own deadline, so a loaded machine only cuts a round short (a cut sequence is not checked),
-// never fails it; the planted runs stop when their one sequence ends, within a 1-minute cap.
+// never fails it; the planted runs stop when their one sequence ends, within a 5-minute cap (PLANTED_MINUTES).
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -15,8 +15,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "scripts", "soak-gates.mjs");
 /** @type {Record<string, string>} */
 const env = Object.fromEntries(Object.entries(process.env).filter(/** @returns {e is [string, string]} */ (e) => e[1] !== undefined && !/^(ORCH_|NODE_OPTIONS$|NODE_TEST)/.test(e[0])));
-/** @param {string[]} args */
-const soak = (args) => spawnSync(process.execPath, [script, ...args], { env, encoding: "utf8", timeout: 60_000 });
+/** @param {string[]} args @param {number} [timeout] */
+const soak = (args, timeout = 60_000) => spawnSync(process.execPath, [script, ...args], { env, encoding: "utf8", timeout });
+// The planted runs: the soak cuts a sequence at its time box, and the planted step sits at a random place in it (seed 7),
+// so on a loaded machine a 1-minute box ended the sequence before that step and the run found nothing (exit 0, 2.1.0
+// probe). A 5-minute box, and the child's timeout above it, leaves room for that; an unloaded run still ends as soon as
+// its one sequence does, in seconds. What stays: a machine slow enough to need more than 5 minutes for one sequence.
+const PLANTED_MINUTES = "5";
+const PLANTED_TIMEOUT_MS = 5 * 60_000 + 30_000;
 /** The summary line's fields. @param {string} out */
 const summary = (out) => Object.fromEntries([...(out.match(/^soak: (.*)$/m)?.[1] ?? "").matchAll(/(\w+)=(\S+)/g)].map((m) => [m[1], m[2]]));
 
@@ -46,7 +52,7 @@ test("a fixed-seed round of two sequences finds no violation", () => {
 test("a planted violation is reported with its invariant, its seed and a sequence that replays it", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-soak-test-"));
   try {
-    const r = soak(["--minutes", "1", "--seed", "7", "--sequences", "1", "--plant"]);
+    const r = soak(["--minutes", PLANTED_MINUTES, "--seed", "7", "--sequences", "1", "--plant"], PLANTED_TIMEOUT_MS);
     assert.equal(r.status, 1, `exit 1 with a violation:\n${r.stdout.slice(-2000)}`);
     assert.match(r.stdout, /^VIOLATION I5_exitCodes seed=7 sequence=0 step=\d+: planted\.mjs exited 1/m);
     assert.match(summary(r.stdout).violations ?? "", /^[1-9]/);
@@ -58,8 +64,8 @@ test("a planted violation is reported with its invariant, its seed and a sequenc
     // The printed sequence replays the violation.
     const file = join(dir, "seq.json");
     writeFileSync(file, `${line}\n`);
-    const again = soak(["--minutes", "1", "--replay", file]);
-    assert.equal(again.status, 1);
+    const again = soak(["--minutes", PLANTED_MINUTES, "--replay", file], PLANTED_TIMEOUT_MS);
+    assert.equal(again.status, 1, `the replay finds it again:\n${again.stdout.slice(-2000)}`);
     assert.match(again.stdout, /^VIOLATION I5_exitCodes seed=7 sequence=0 step=\d+: planted\.mjs exited 1/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });

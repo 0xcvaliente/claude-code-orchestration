@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import * as limits from "../.claude/hooks/limits.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = readFileSync(join(root, ".claude", "workflows", "orchestrate.js"), "utf8");
@@ -164,15 +165,15 @@ test("the plan's suite command: the integrator runs it after merging; missing, n
   for (const bad of [42, ["npm test"], { cmd: "npm test" }, "", "   ", "npm test\nrm x", "x".repeat(301)]) assert.equal(await brief(bad), without, `suite ${JSON.stringify(bad)} counts as empty`);
 });
 
-test("the plan is bounded to 6 slices by default and by args.maxSlices", async () => {
+test("the plan is bounded to the plan slice cap of limits.mjs by default and by args.maxSlices", async () => {
   /** @param {number} [maxSlices] */
   const planCall = async (maxSlices) => {
     const r = await run({ args: maxSlices ? { maxSlices } : {}, slices: [slice("a")] });
     return r.calls.find((c) => c.opts.label === "plan:slices");
   };
   const def = await planCall();
-  assert.equal(def.opts.schema.properties.slices.maxItems, 6);
-  assert.match(def.prompt, /at most 6 slices/);
+  assert.equal(def.opts.schema.properties.slices.maxItems, limits.PLAN_SLICE_CAP);
+  assert.match(def.prompt, new RegExp(`at most ${limits.PLAN_SLICE_CAP} slices`));
   const three = await planCall(3);
   assert.equal(three.opts.schema.properties.slices.maxItems, 3);
   assert.match(three.prompt, /at most 3 slices/);
@@ -192,12 +193,119 @@ test("a failing review retries with the gaps, then reports failed after maxRetri
   assert.equal(r.result.failed, 1);
 });
 
-test("maxRetries: 0 means no retries; a non-positive maxSlices keeps the default of 6", async () => {
+test("maxRetries: 0 means no retries; a non-positive maxSlices keeps the default plan slice cap", async () => {
   const r = await run({ args: { maxRetries: 0 }, slices: [slice("a")], verdict: () => ({ pass: false, gaps: ["g"], evidence: "x" }) });
   assert.equal(implementers(r.calls).length, 1, "one attempt, no retry");
   assert.equal(r.result.slices[0].attempts, 1);
   const z = await run({ args: { maxSlices: 0 }, slices: [slice("a")] });
-  assert.equal(z.calls.find((c) => c.opts.label === "plan:slices").opts.schema.properties.slices.maxItems, 6);
+  assert.equal(z.calls.find((c) => c.opts.label === "plan:slices").opts.schema.properties.slices.maxItems, limits.PLAN_SLICE_CAP);
+});
+
+test("caps: each number the script copies from limits.mjs equals it", () => {
+  /** @type {Array<[string, number]>} */
+  const pins = [["PLAN_SLICE_CAP", limits.PLAN_SLICE_CAP], ["RESEARCH_QUESTION_CAP", limits.RESEARCH_QUESTION_CAP], ["WAVE_CAP_DEFAULT", limits.WAVE_CAP_DEFAULT], ["WAVE_CAP_CEILING", limits.WAVE_CAP_CEILING]];
+  for (const [name, value] of pins) {
+    const m = source.match(new RegExp(`^const ${name} = (\\d+)$`, "m"));
+    assert.ok(m, `orchestrate.js defines ${name}`);
+    assert.equal(Number(m[1]), value, `orchestrate.js ${name} equals limits.mjs`);
+  }
+  // No other numeric literal stands in for a cap in the planner's or the explorer's text.
+  assert.doesNotMatch(source, /up to \d+ specific questions|at most \d+ slices/, "the prompts interpolate the caps");
+});
+
+test("research questions: at most the question cap of limits.mjs; more are dropped and logged", async () => {
+  const qs = Array.from({ length: limits.RESEARCH_QUESTION_CAP + 2 }, (_, i) => `question ${i + 1}`);
+  const r = await run({ slices: [slice("a")], questions: qs });
+  const ask = r.calls.find((c) => c.opts.label === "plan:questions");
+  assert.equal(ask.opts.schema.properties.questions.maxItems, limits.RESEARCH_QUESTION_CAP);
+  assert.match(ask.prompt, new RegExp(`up to ${limits.RESEARCH_QUESTION_CAP} specific questions`));
+  const explored = r.calls.filter((c) => c.opts.agentType === "researcher");
+  assert.deepEqual(explored.map((c) => c.prompt), qs.slice(0, limits.RESEARCH_QUESTION_CAP));
+  assert.ok(r.logs.some((m) => m.startsWith(`explore: dropped 2 question(s) over the cap of ${limits.RESEARCH_QUESTION_CAP}: `)));
+  const plan = r.calls.find((c) => c.opts.label === "plan:slices");
+  assert.doesNotMatch(plan.prompt, new RegExp(`question ${limits.RESEARCH_QUESTION_CAP + 1}`), "a dropped question reaches no finding");
+});
+
+// Wave bound. `implement` holds each build until the test releases it, so the test sees how many build at once.
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+/** @param {number} [n] */
+const drain = async (n = 40) => {
+  for (let i = 0; i < n; i++) await tick();
+};
+/** @param {Record<string, unknown>} args @param {number} n */
+function heldWave(args, n) {
+  const ids = Array.from({ length: n }, (_, i) => `s${i}`);
+  /** @type {Map<string, () => void>} */
+  const held = new Map();
+  /** @type {string[]} */
+  const started = [];
+  const state = { running: 0, peak: 0, done: false };
+  /** @param {string} label @param {any} opts */
+  const implement = (label, opts) =>
+    new Promise((resolve) => {
+      started.push(label);
+      state.running++;
+      state.peak = Math.max(state.peak, state.running);
+      held.set(label, () => {
+        held.delete(label);
+        state.running--;
+        resolve({ status: "pass", branch: opts.isolation ? `wt-${label}` : "", evidence: "ok", open: "" });
+      });
+    });
+  const p = run({ args, slices: ids.map((id) => slice(id)), implement }).then((r) => {
+    state.done = true;
+    return r;
+  });
+  const releaseAll = async () => {
+    while (!state.done) {
+      for (const release of [...held.values()]) release();
+      await drain();
+    }
+    return p;
+  };
+  return { ids, held, started, state, releaseAll };
+}
+
+test("wave: at most the wave cap of limits.mjs build at once, and the next ready slice starts as soon as one ends", async () => {
+  const cap = limits.WAVE_CAP_DEFAULT;
+  /** @type {Array<Record<string, unknown>>} */
+  const modes = [{ code: false }, { baseRefHead: true }];
+  for (const args of modes) {
+    const w = heldWave(args, cap + 2);
+    await drain();
+    assert.equal(w.state.running, cap, `${JSON.stringify(args)}: the cap builds at once`);
+    assert.deepEqual(w.started, w.ids.slice(0, cap).map((id) => `build:${id}#1`));
+    // One ends: the next ready slice starts at once, the one after it still waits.
+    w.held.get("build:s1#1")?.();
+    await drain();
+    assert.equal(w.state.running, cap, `${JSON.stringify(args)}: a freed place is taken`);
+    assert.ok(w.started.includes(`build:s${cap}#1`), "the next ready slice started");
+    assert.ok(!w.started.includes(`build:s${cap + 1}#1`), "the one after it waits");
+    const r = await w.releaseAll();
+    assert.equal(w.state.peak, cap, `${JSON.stringify(args)}: never more than the cap`);
+    assert.deepEqual(r.result.slices.map((/** @type {any} */ s) => [s.id, s.status]), w.ids.map((id) => [id, "passed"]), "results keep the plan order");
+    if (args.baseRefHead === true) {
+      const merge = r.calls.find((c) => c.opts.label === "integrate");
+      assert.deepEqual(merge.prompt.split("\nChecks:")[0].split("\n").slice(1), w.ids.map((id) => `wt-build:${id}#1`), "the integrator merges the branches in plan order");
+    }
+    assert.ok(r.logs.some((m) => m.endsWith(`: ${cap + 2} slices, at most ${cap} building at a time`)));
+  }
+});
+
+test("wave: args.waveMax, a whole number from 1 to the ceiling of limits.mjs, sets the bound; anything else counts as unset", async () => {
+  const n = limits.WAVE_CAP_CEILING + 1;
+  /** @param {unknown} waveMax */
+  const peak = async (waveMax) => {
+    const w = heldWave(waveMax === undefined ? { code: false } : { code: false, waveMax }, n);
+    await w.releaseAll();
+    return w.state.peak;
+  };
+  for (const v of [1, 2, limits.WAVE_CAP_CEILING]) assert.equal(await peak(v), v, `waveMax ${v}`);
+  for (const v of [undefined, 0, -1, limits.WAVE_CAP_CEILING + 1, 2.5, "3", null, NaN]) assert.equal(await peak(v), limits.WAVE_CAP_DEFAULT, `waveMax ${String(v)} counts as unset`);
+  // Code in the shared tree still builds one slice at a time, whatever waveMax says.
+  const shared = heldWave({ waveMax: limits.WAVE_CAP_CEILING }, 3);
+  await shared.releaseAll();
+  assert.equal(shared.state.peak, 1);
 });
 
 test("risky slices get an extra opus review; a review that fails then passes ends passed on attempt 2", async () => {
@@ -530,7 +638,7 @@ test("gap cutoff: a failing verdict fails a slice only with a gap at or above ga
   const once = (confidence, args = {}) =>
     run({ args: { maxRetries: 1, refute: false, ...args }, slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? { pass: false, gaps: [{ text: "gap", confidence }], evidence: "", answers: [], open: "" } : answered([])) });
   const below = await once(79);
-  assert.deepEqual(labels(below.calls).filter((x) => /^(build|review)/.test(x)), ["build:a#1", "review:a#1"]);
+  assert.deepEqual(labels(below.calls).filter((x) => /^(build|review)/.test(x)), ["build:a#1", "review:a#1", "review:a#1:opus"], "a pass with a doubt signal: the opus review decides");
   assert.equal(below.result.slices[0].status, "passed");
   assert.ok(logged(below.logs, /a: ignoring 1 reviewer gap\(s\) below confidence 80: gap \(79\)/));
   for (const c of [80, 81]) {
@@ -564,9 +672,12 @@ test("refute pass: only standing gaps go to the implementer; when none stand the
   assert.match(fix, /Fix:\ngap two\n/);
   assert.doesNotMatch(fix, /gap one/);
   assert.ok(logged(some.logs, /a: refute pass dropped 1 gap\(s\): gap one/));
+  // Every gap refuted: the opus review follows; here it fails with the same gaps, which an opus refute pass drops.
   const none = await run({ slices: [slice("a")], verdict: () => two, refute: () => ({ gaps: [{ n: 1, stands: false, reason: "" }, { n: 2, stands: false, reason: "" }] }) });
   assert.deepEqual(none.result.slices, [{ id: "a", status: "passed", attempts: 1, gaps: [] }]);
-  assert.ok(logged(none.logs, /a: no reviewer gap stands after the refute pass; passing/));
+  assert.deepEqual(labels(none.calls).filter((x) => /^(build|review|refute)/.test(x)), ["build:a#1", "review:a#1", "refute:a#1", "review:a#1:refuted:opus", "refute:a#1:opus"]);
+  assert.ok(logged(none.logs, /a: no reviewer gap stands after the refute pass; the earlier failure is a doubt signal, escalating to an opus review/));
+  assert.ok(logged(none.logs, /a: no gap of the opus review stands after an opus refute pass; passing/));
   // Failed constraint answers are never sent to the refute pass.
   const hard = await run({ args: { maxRetries: 1 }, constraints: C, slices: [slice("a", { checks: ["C1"] })], verdict: () => ({ ...answered([]), answers: [] }) });
   assert.ok(!labels(hard.calls).some((x) => x.startsWith("refute:")));
@@ -648,6 +759,58 @@ test("refute pass: a risky slice's gaps are refuted by an opus reviewer", async 
   assert.equal(risky.calls.find((c) => c.opts.label === "refute:a#1").opts.model, "opus");
   const plain = await run({ slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? gap : answered([])) });
   assert.equal(plain.calls.find((c) => c.opts.label === "refute:a#1").opts.model, undefined);
+});
+
+// Escalation as in the orchestrator's steps 5 and 6.
+const lowGaps = { pass: false, gaps: [{ text: "minor nit", confidence: 40 }], evidence: "", answers: [], open: "" };
+const highGap = { pass: false, gaps: [{ text: "real gap", confidence: 95 }], evidence: "", answers: [], open: "" };
+/** @param {any[]} calls */
+const flow = (calls) => labels(calls).filter((x) => /^(build|review|refute)/.test(x));
+
+test("escalation: a failing review whose gaps are all below the cutoff is a pass with a doubt signal; the opus review decides", async () => {
+  const pass = await run({ slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? lowGaps : answered([])) });
+  assert.deepEqual(flow(pass.calls), ["build:a#1", "review:a#1", "review:a#1:opus"]);
+  assert.equal(reviewers(pass.calls)[1].opts.model, "opus");
+  assert.deepEqual(pass.result.slices, [{ id: "a", status: "passed", attempts: 1, gaps: [] }]);
+  assert.ok(logged(pass.logs, /a: escalating to an opus review \(doubt signal: a failing review with every gap below confidence 80\)/));
+  // The opus review fails: its gap goes through the refute pass, then the slice is rebuilt.
+  const fail = await run({ args: { maxRetries: 1 }, slices: [slice("a")], verdict: (l, o) => (o.model === "opus" ? highGap : l === "review:a#1" ? lowGaps : answered([])) });
+  assert.deepEqual(flow(fail.calls).slice(0, 5), ["build:a#1", "review:a#1", "review:a#1:opus", "refute:a#1", "build:a#2"]);
+  assert.match(implementers(fail.calls)[1].prompt, /Fix:\nreal gap\n/);
+  // A risky slice is reviewed on opus from the start: no further review, as before.
+  const risky = await run({ slices: [slice("a", { risky: true })], verdict: () => lowGaps });
+  assert.deepEqual(reviewers(risky.calls).map((c) => c.opts.model), [undefined, "opus"]);
+  assert.equal(risky.result.slices[0].status, "passed");
+  // A failed checked id still fails the review, whatever the gaps' confidence.
+  const hard = await run({ args: { maxRetries: 1, refute: false }, constraints: C, slices: [slice("a", { checks: ["C1"] })], verdict: (l) => (l === "review:a#1" ? { ...lowGaps, answers: [{ id: "C1", verdict: "fail", mode: "cmd", detail: "x" }] } : answered(["C1"])) });
+  assert.deepEqual(flow(hard.calls).slice(0, 3), ["build:a#1", "review:a#1", "build:a#2"]);
+});
+
+test("escalation: a failing review whose every gap is refuted gets an opus review before the slice passes", async () => {
+  const dropAll = () => ({ gaps: [1, 2, 3].map((n) => ({ n, stands: false, reason: "handled" })) });
+  const pass = await run({ slices: [slice("a")], verdict: (l) => (l === "review:a#1" ? highGap : answered([])), refute: dropAll });
+  assert.deepEqual(flow(pass.calls), ["build:a#1", "review:a#1", "refute:a#1", "review:a#1:refuted:opus"]);
+  const opus = reviewers(pass.calls)[1];
+  assert.equal(opus.opts.model, "opus");
+  assert.match(opus.prompt, /Then run the acceptance check, not the project's whole suite/, "the same review brief as the slice's review");
+  assert.deepEqual(pass.result.slices, [{ id: "a", status: "passed", attempts: 1, gaps: [] }]);
+  // The opus review fails and its gap stands in an opus refute pass: the slice is rebuilt with that gap.
+  const fail = await run({
+    args: { maxRetries: 1 },
+    slices: [slice("a")],
+    verdict: (l, o) => (l === "review:a#1" || (l === "review:a#1:refuted:opus" && o.model === "opus") ? highGap : answered([])),
+    refute: (l) => (l === "refute:a#1:opus" ? { gaps: [{ n: 1, stands: true, reason: "missing" }] } : dropAll()),
+  });
+  assert.deepEqual(flow(fail.calls).slice(0, 6), ["build:a#1", "review:a#1", "refute:a#1", "review:a#1:refuted:opus", "refute:a#1:opus", "build:a#2"]);
+  assert.equal(fail.calls.find((c) => c.opts.label === "refute:a#1:opus").opts.model, "opus", "only an opus verdict refutes the opus review's gaps");
+  assert.match(implementers(fail.calls)[1].prompt, /Fix:\nreal gap\n/);
+  assert.ok(flow(fail.calls).includes("review:a#2:opus"), "the retry is escalated as before");
+  assert.equal(fail.result.slices[0].status, "passed");
+  // A risky slice's reviews and refute pass already ran on opus: it passes as before, with no further review.
+  const risky = await run({ slices: [slice("a", { risky: true })], verdict: (l) => (l.startsWith("review:a#1") ? highGap : answered([])), refute: dropAll });
+  assert.deepEqual(flow(risky.calls), ["build:a#1", "review:a#1", "review:a#1:opus", "refute:a#1"]);
+  assert.equal(risky.result.slices[0].status, "passed");
+  assert.ok(logged(risky.logs, /a: no reviewer gap stands after the refute pass; passing/));
 });
 
 test("skills: a slice's skills become a SKILLS line after the existing header lines of its implementer and reviewer briefs", async () => {
@@ -774,8 +937,25 @@ test("isolated wave: a failed merged review gets the refute pass; when it drops 
   assert.match(rf.prompt, /1\. a: edge case wrong \(confidence 90\)/);
   assert.match(rf.prompt, /merged into the current branch/);
   assert.ok(!l.includes("build:a#2") && !l.includes("plan:replan"));
+  const opus = reviewers(r.calls).find((c) => c.opts.label === "review:a#1:refuted:opus");
+  assert.ok(opus && opus.opts.model === "opus" && at(l, "refute:a#1") < at(l, "review:a#1:refuted:opus"), "the refuted failure is a doubt signal: an opus review of the merged work follows");
+  assert.match(opus.prompt, /The work is merged into the current branch/);
   assert.deepEqual(r.result.slices, [{ id: "a", status: "passed", attempts: 1, gaps: [] }, { id: "b", status: "passed", attempts: 1, gaps: [] }]);
-  assert.ok(logged(r.logs, /a: no reviewer gap stands after the refute pass; passing/));
+  assert.ok(logged(r.logs, /a: the opus review passed; passing/));
+});
+
+test("isolated wave: when the opus review after a refuted failure fails and its gap stands, the slice is rebuilt", async () => {
+  const r = await run({
+    args: { baseRefHead: true },
+    slices: [slice("a"), slice("b")],
+    verdict: (l, o) => (l === "review:a" || (l.startsWith("review:a#1:refuted") && o.model === "opus") ? edge : answered([])),
+    refute: (l) => ({ gaps: [{ n: 1, stands: l.endsWith(":opus"), reason: "" }] }),
+  });
+  const l = labels(r.calls);
+  assert.equal(r.calls.find((c) => c.opts.label === "refute:a#1:opus").opts.model, "opus");
+  assert.ok(at(l, "refute:a#1:opus") < at(l, "build:a#2"));
+  assert.match(implementers(r.calls).find((c) => c.opts.label === "build:a#2").prompt, /Fix:\na: edge case wrong\n/);
+  assert.deepEqual(r.result.slices.map((/** @type {any} */ s) => [s.id, s.status, s.attempts]), [["a", "passed", 2], ["b", "passed", 1]]);
 });
 
 test("isolated wave: a standing gap rebuilds the slice in a new worktree, merges and reviews it again; a passing retry passes", async () => {

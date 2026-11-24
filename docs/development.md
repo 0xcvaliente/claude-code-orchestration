@@ -11,7 +11,7 @@ npm test             # the tests only (fake model, no API calls)
 npm run typecheck    # the type check only
 ```
 
-`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main, then, since 2.0.0, installs the Claude Code CLI (2.1.326) and runs `npm run test-dashboard` (the 2.0.0 changelog notes that this step was not run on a CI runner before the release). `npm run check` must finish in under 5 minutes on the maintainer's machine.
+`npm run check` runs its four steps side by side (`scripts/check.mjs`). It prints each step's whole output under a `=== <step>: pass|FAIL, N s ===` header, and its last line is `check passed` or `check failed: <names>`. The tests take nearly all of its time. CI (`.github/workflows/ci.yml`) runs it on push and on pull request to main, then, since 2.0.0, installs the Claude Code CLI (2.1.331) and runs `npm run test-dashboard` (the 2.0.0 changelog notes that this step was not run on a CI runner before the release). `npm run check` must finish in under 5 minutes on the maintainer's machine.
 
 **Test rules (2.0.0).**
 - Tests never read this repository's git history. A comparison with an older version reads stored files under `src/fixtures/`: `judge-core-1.4.0.mjs`, `judge-core-1.6.1.mjs.txt` and `gates-1.6.1/` (`brief.mjs`, `run.mjs`, `state.mjs`). A test under `src/` never skips because history is missing; `bench/arms.test.mjs` still skips one test in a clone without the 0.3.0 ref ([limits.md](limits.md), G).
@@ -86,10 +86,17 @@ The full rules are in `CLAUDE.md` and `.claude/rules/agents.md`. `CLAUDE.md` hol
 
 **Texts that must agree.** The nudge, the `route` skill and the orchestrator describe the same three routes and the same output rule. Change them together. Name switches (`ORCH_*`) only in maintainer text, never in agent bodies, skills or the nudge's context; `src/contracts.test.ts` checks this.
 
+<a id="a-new-block-reason"></a>
+
+**A new block reason (2.1.0).** `.claude/hooks/reasons.mjs` lists every reason the plan check (`PLAN_CHECK_BLOCK_REASONS`) and the review gate (`REVIEW_GATE_BLOCK_REASONS`) block with. It imports nothing and no hook imports it: `plan-check.mjs` and `review-gate.mjs` keep their own string literals, so a copy of the hooks without it blocks as before. A reason a hook adds goes into four places together: the hook, `reasons.mjs`, the "Block reasons" section of `.claude/agents/orchestrator.md`, and the pane's `GATE_REASONS` and `GATE_PHRASES` in `dashboard/register.tsx`. `src/contracts.test.ts` compares the hooks' code, the module and the orchestrator's list both ways; `src/reasons.test.mjs` compares the pane's lists (and the built `dist/dashboard`) with the module.
+
 **Tests.**
-- `npm test` runs `scripts/run-tests.mjs`. It runs two suites (`tsx --test src/*.test.ts src/*.test.mjs` and `node --test bench/*.test.mjs`) with one temp root as `TMPDIR`, and removes the root at the end. `ORCH_KEEP_TEST_TMP=1` keeps it.
+- `npm test` runs `scripts/run-tests.mjs`. It runs two suites (the `src/*.test.ts` and `src/*.test.mjs` files, then `node --test bench/*.test.mjs`) with one temp root as `TMPDIR`, and removes the root at the end. `ORCH_KEEP_TEST_TMP=1` keeps it.
+- Since 2.1.0 the src suite runs through `node:test` `run()` under tsx, at the CLI's concurrency (available parallelism − 1), and starts the files `SLOW_FIRST` names first, slowest first, then the rest in name order. `node --test` alone sorts by name, which started the four slow `skill-*` files about 125 s in; a replay of measured file times gave about 326 s against 367 s ([probes 2.1.0, suite](data/probes-2.1.0-suite.md)). `src/run-tests.test.mjs` fails when `SLOW_FIRST` names a file that no longer exists; add a new slow file there.
+- The suite's wall time depends on the machine's load: a test that waits for a hook uses a marker or a poll, never a fixed sleep or a tight wall-clock window ([Limits](limits.md), J).
 - Every test file imports `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) as its first import, so a file run on its own makes and removes its own `orch-test-*` root. `src/test-tmp.test.mjs` fails when one does not.
 - The test gate's hardening tests are split in three files: `src/gate-hardening-time.test.mjs` (time limit and hook budget), `src/gate-hardening-trap.test.mjs` (temp folder, `run_limited`) and `src/gate-hardening-logs.test.mjs` (the rest).
+- To hit a race in a shell script at an exact line, set a DEBUG trap in a file named by `BASH_ENV`: bash runs the trap before each command, and the trap can send the signal when `$BASH_COMMAND` is the command under test. `src/statusline.test.ts` sends a TERM just before `STATUS_PID=$!` and `WATCH_PID=$!` this way (2.1.0), with no timing window.
 - To test a hook script by hand in zsh, pass the JSON with `printf '%s'`, not `echo`: zsh expands `\n`.
 
 **After a change under `.claude/` or `dashboard/`,** rebuild the plugin (next section) and bump `version` in `package.json`, so installed copies pick up the change.

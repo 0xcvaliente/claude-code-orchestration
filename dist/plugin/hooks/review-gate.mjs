@@ -41,6 +41,12 @@
 //    a VALIDATE: gaps review supersedes the earlier reviews of the same attempt. Stall gate (ORCH_STALL_GATE, on unless
 //    "off"): a slice whose last two counted failed reviews share a gap key at or above the cutoff, with no REPLAN plan
 //    review finished since, blocks with replan_required instead of last_reviewer_failed.
+//    Second review rule (2.1.0): a RISKY slice whose latest implementer launch record carries reviews_needed (journal.mjs;
+//    ORCH_SECOND_REVIEW=off leaves it out) needs two passing reviews of its latest attempt from two different reviewer
+//    agents, each begun after the attempt's hand-back (or its stop record without one). Any such review that fails
+//    fails the slice, in whatever order; one pass alone blocks with second_review_required. The fold decides
+//    (brief.mjs secondReviewVerdict, s.secondReview), so this gate and the plan check read one result. Records without
+//    the field, and an unreadable handbacks.jsonl, keep the one-review rule above.
 // 3. Fallback, the old rule, when the session's last implementer has no slice in the run model (workflow agents, old
 //    briefs, launches outside a run): a reviewer must have finished after the last implementer (telemetry.jsonl) with
 //    STATUS: pass. Status is brief.mjs parseStatus (telemetry.mjs and journal.mjs both use it).
@@ -51,7 +57,7 @@
 // Exits 0 on malformed input.
 import { appendFileSync, existsSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { countedStatus, currentReviews, doubtSignals, hasOpusPass, isOpusModel, staleMinutes, stallGateOn } from "./brief.mjs";
+import { countedStatus, countingReviews, currentReviews, doubtSignals, hasOpusPass, isOpusModel, staleMinutes, stallGateOn } from "./brief.mjs";
 import { appendJsonl, environmentBlock, implementerTestStates, notTestFailure, readJsonl, readJsonlOrNull, sessionRuns, sliceOfAgent, testBlocked } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
@@ -59,7 +65,7 @@ const MAX_BLOCKS = 2; // per reason since the last implementer finished; a new i
 const ACTIVE_TYPES = new Set(["subagent", "workflow", "teammate"]);
 const ACTIVE_STATUS = new Set(["running", "pending", "queued"]);
 // Reasons that existed before slice A1 give up as "max_blocks_reached" (as before); the new ones as <reason>_gave_up.
-const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required", "implementer_unfinished"]);
+const NEW_REASONS = new Set(["constraints_unchecked", "opus_review_required", "replan_required", "implementer_unfinished", "second_review_required"]);
 let sessionId = "";
 /** gates.jsonl exists and could not be read: earlier blocks cannot be counted, so this call never blocks (block()). */
 let gatesUnreadable = false;
@@ -190,7 +196,7 @@ if (!lastImpl && !neverStopped.length) decide("allow", "no_implementer_in_sessio
 /** @type {ReturnType<typeof sessionRuns>["runs"]} */
 let runs = [];
 /** @type {ReturnType<typeof sessionRuns>["records"]} */
-let records = { launches: [], stops: [], gates: [], starts: [] };
+let records = { launches: [], stops: [], gates: [], starts: [], handbacks: [] };
 let foldFailed = false;
 try {
   ({ runs, records } = sessionRuns(sessionId, { now, env: process.env, raw: { "telemetry.jsonl": telemetryRaw, "gates.jsonl": gatesRaw } }));
@@ -300,11 +306,81 @@ if (lastImpl && !lastState) {
   else if (last.status !== "pass") problems.push({ reason: "last_reviewer_no_status", message: noStatusMessage("", last.agent_id) });
 }
 
+/**
+ * Every pass of `passes` must answer each id of its own CHECKS with pass; the first that does not is a problem.
+ * @param {string} name @param {import("./brief.mjs").SliceState} s @param {import("./brief.mjs").Review[]} passes @returns {boolean} a problem was added
+ */
+function checkPasses(name, s, passes) {
+  for (const review of passes) {
+    if (review.lowConfidence) skips.push(`last_reviewer_failed:${s.slice}:low_confidence`);
+    if (!review.checks.length) {
+      skips.push(`constraints_unchecked:${s.slice}:no_checks`);
+      continue;
+    }
+    const missing = review.checks.filter((id) => !review.answers[id]);
+    const failed = review.checks.filter((id) => review.answers[id]?.verdict === "fail");
+    if (missing.length || failed.length) {
+      const what = [missing.length ? `without answering ${missing.join(", ")}` : "", failed.length ? `with ${failed.join(", ")} answered fail` : ""].filter(Boolean).join(" and ");
+      problems.push({
+        slice: s.slice,
+        reason: "constraints_unchecked",
+        message: `Review gate: ${name}: the reviewer passed it ${what}. Rerun the review with one line per CHECKS id: \`C1: pass (cmd) <command> -> <result>\`, \`C1: pass (read) <file:line or URL>\` or \`C1: fail <reason>\`, or fix the slice.`,
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
 for (const { run, s } of gated.values()) {
   const name = `slice ${s.slice} (run ${run.id})`;
   const review = currentReviews(s).at(-1);
   if (s.gaveUp) {
     failedForGood.push(s.slice);
+    continue;
+  }
+  // The second review rule (brief.mjs settle: the fold's verdict, s.secondReview, which passed, gaveUp and final follow):
+  // a RISKY slice whose latest implementer launch record carries reviews_needed needs two passing reviews of its latest
+  // attempt from two different reviewers, and any counting fail fails it whatever the order. Reviews that began before
+  // the attempt's hand-back do not count.
+  if (s.reviewsNeeded === 2) {
+    const counting = countingReviews(s);
+    if (!counting.length) {
+      const last = currentReviews(s).filter((r) => r.early !== true).at(-1);
+      if (last && countedStatus(last) === null && !last.superseded) problems.push({ slice: s.slice, reason: "last_reviewer_no_status", message: noStatusMessage(`${name}: `, last.agent) });
+      else problems.push({ slice: s.slice, reason: "no_reviewer_after_last_implementer", message: `Review gate: ${name}: an implementer finished but no reviewer has run since. Send the result to a reviewer (brief starting SLICE: ${s.slice}) before replying.` });
+      continue;
+    }
+    if (s.secondReview === "fail") {
+      if (s.stalled && stallGateOn(process.env)) {
+        problems.push({
+          slice: s.slice,
+          reason: "replan_required",
+          message: `Review gate: ${name}: its last two failed reviews report the same gap, so another retry is unlikely to fix it. Send the plan to the plan reviewer in a brief that starts with PLAN REVIEW and REPLAN: <n>, with a changed approach for the slice, before retrying; or report the slice as failed with the reviewer's gaps.`,
+        });
+      } else {
+        problems.push({ slice: s.slice, reason: "last_reviewer_failed", message: `Review gate: ${name}: a reviewer of its latest attempt reported STATUS: fail. Retry the implementer with the gaps, or report the slice as failed with evidence.` });
+      }
+      continue;
+    }
+    if (checkPasses(name, s, counting.filter((r) => countedStatus(r) === "pass"))) continue;
+    const signals = doubtSignals(s, process.env);
+    if (s.secondReview !== "pass") {
+      const opus = signals.length > 0 && !hasOpusPass(s);
+      problems.push({
+        slice: s.slice,
+        reason: "second_review_required",
+        message: `Review gate: ${name} is risky and needs two passing reviews of its latest implementer attempt from two different reviewers; it has one. Launch one more fresh reviewer (a new agent, not a resume of the one that passed)${opus ? ` with model: "opus"` : ""} and the slice's CHECKS.`,
+      });
+      continue;
+    }
+    if (signals.length && !hasOpusPass(s)) {
+      problems.push({
+        slice: s.slice,
+        reason: "opus_review_required",
+        message: `Review gate: ${name} needs a passing review by an opus reviewer after its latest implementer attempt (doubt signals: ${signals.join(", ")}). Launch the reviewer with model: "opus" and the slice's CHECKS.`,
+      });
+    }
     continue;
   }
   if (!review) {

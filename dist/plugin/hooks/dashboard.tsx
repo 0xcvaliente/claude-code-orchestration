@@ -24,6 +24,8 @@ const COLOR = { running: 'warning', pass: 'success', fail: 'error', done: 'subtl
 type State = keyof typeof GLYPH
 
 const bare = (type: string) => type.split(':').pop() ?? type
+// This plugin's implementer, bare or with the plugin prefix (brief.mjs OWN_IMPLEMENTER): the launches the second review rule marks.
+const OWN_IMPLEMENTER = /^(?:orchestration:)?implementer$/
 // ---- Brief and reply grammar: a mirror of .claude/hooks/brief.mjs (spec: docs/brief-grammar.md). The mod cannot import it (the standalone
 // dist/dashboard has no hooks/brief.mjs), so register.test.tsx parses every fixture in src/fixtures/briefs with these and checks expected.json.
 // No parser throws: empty, malformed or non-string input gives null, [], {} or false.
@@ -489,10 +491,31 @@ const stateOf = (n: Node): State => {
   const review = lastOf(n, 'reviewer')
   // A reviewer reply with no STATUS line (it hit maxTurns) is stored as 'done' and gave no verdict: show it as failed, not green. This is done here
   // and not in statusOf because sliceRunOf must keep seeing 'done' (neither pass nor fail, as brief.mjs counts it) so the pane never signs off before the gate.
-  if (review) return review.status === 'done' ? 'fail' : review.status
+  if (review) {
+    // A slice that needs two reviews (needsTwo): the attempt's counting reviews decide. Any fail is failed, two reviewer agents' passes passed, and
+    // otherwise (one reviewer's pass, or no review that counts yet) it is still under way: 'running', with the "review 1/2" mark on its slice line.
+    const two = secondStateOf(n)
+    if (two === 'pass' || two === 'fail') return two
+    if (two !== undefined && review.status !== 'done') return 'running'
+    return review.status === 'done' ? 'fail' : review.status
+  }
   const build = lastOf(n, 'implementer')
   if (build) return build.status === 'fail' ? 'fail' : 'done'
   return (n.agents[n.agents.length - 1] as Agent).status // a research or merge slice: its own report decides
+}
+// The second review verdict of one attempt (a diagram node), undefined when its slice needs one review. The node holds the attempt's agents only, so
+// "RISKY" is what its implementers knew (their brief, and the plan and earlier implementers at their launch: riskyAt).
+const secondStateOf = (n: Node): 'pass' | 'fail' | 'one' | null | undefined => {
+  const builds = n.agents.filter(a => a.role === 'implementer')
+  if (!needsTwo(builds, false)) return undefined
+  const impls = implsOf(n.agents)
+  const lastImpl = Math.max(-Infinity, ...impls.map(a => a.endedAt ?? a.startedAt))
+  const superseded = supersededOf(n.agents)
+  const early = earlyOf(impls)
+  const counting = n.agents.filter(
+    r => r.role === 'reviewer' && r.endedAt !== undefined && r.endedAt > lastImpl && !superseded.has(r) && (r.status === 'pass' || r.status === 'fail') && !early(r),
+  )
+  return secondVerdictOf(counting).verdict
 }
 // A failure a later attempt made good, keyed by node id (a failed attempt that a later attempt of the slice, or else a later slice depending on it
 // that started after it ended, passed) or, for an agent with no slice (a plan review), by agent id (a later agent with the same role and label
@@ -751,8 +774,9 @@ type Ctx = Parameters<Hook<'agent.spawn'>>[0]
 // environment variable when it is set (even empty), else the plugin option when it is not empty, else the default. The mod reads the environment
 // of the Claude Code process with `$.env.get` (the hooks inherit the same one) and the options from `register(on, options)` (the plugin's userConfig;
 // the standalone dist/dashboard declares none, so there only the environment and the defaults apply). Read at every session start (a reload runs it again).
-export type Settings = { staleMs: number; gapMin: number; escalation: 'off' | 'always' | 'auto' }
-export type SettingsEnv = { run?: string; gap?: string; escalation?: string }
+// secondReview: the second review rule is on (brief.mjs secondReviewOn: ORCH_SECOND_REVIEW, environment only, no plugin option; off only for "off").
+export type Settings = { staleMs: number; gapMin: number; escalation: 'off' | 'always' | 'auto'; secondReview: boolean }
+export type SettingsEnv = { run?: string; gap?: string; escalation?: string; second?: string }
 const RUN_STALE_MIN_DEFAULT = 30
 const GAP_MIN_DEFAULT = 80
 const pickSetting = (env: string | undefined, opt: unknown) =>
@@ -766,6 +790,7 @@ export const settingsOf = (env: SettingsEnv, options: Readonly<Record<string, un
     staleMs: (Number.isFinite(stale) && stale > 0 ? stale : RUN_STALE_MIN_DEFAULT) * 60_000,
     gapMin: gap >= 0 && gap <= 100 ? gap : GAP_MIN_DEFAULT,
     escalation: esc === 'off' || esc === 'always' ? esc : 'auto',
+    secondReview: String(env.second ?? '').trim().toLowerCase() !== 'off',
   }
 }
 let CFG: Settings = settingsOf({})
@@ -844,7 +869,10 @@ let OPTIONS: Readonly<Record<string, unknown>> = {}
 async function loadSettings($: Ctx) {
   try {
     CFG = settingsOf(
-      { run: await $.env.get('ORCH_RUN_STALE_MIN'), gap: await $.env.get('ORCH_GAP_MIN'), escalation: await $.env.get('ORCH_ESCALATION') },
+      {
+        run: await $.env.get('ORCH_RUN_STALE_MIN'), gap: await $.env.get('ORCH_GAP_MIN'), escalation: await $.env.get('ORCH_ESCALATION'),
+        second: await $.env.get('ORCH_SECOND_REVIEW'),
+      },
       OPTIONS,
     )
   } catch {
@@ -871,7 +899,13 @@ const MAX_RETRIES = 2 // 1 + MAX_RETRIES implementer attempts, then a failed rev
 // (`doubt`); a counted fail keeps the keys of its gaps at or above the cutoff (`gapKeys`, brief.mjs gapKey's normalised text before the hash) for
 // the stall check. The cutoff is the gates' (CFG.gapMin, read at session start). `replan` marks a PLAN REVIEW with REPLAN; `validate` a reviewer
 // launched with VALIDATE: gaps; `resumed` a record opened by the main loop's SendMessage to an agent that had ended (a resume, which fires no agent.spawn).
-type Rec = Agent & { name?: string; doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean; resumed?: boolean }
+// The second review rule (an implementer's launch): `second` marks a launch whose record carries reviews_needed (this plugin's implementer, not the
+// workflow's, the rule not off), `riskyAt` that its slice was RISKY as the pane knew it then (its brief, the plan, an earlier implementer of the
+// slice); `handedAt` the time of the implementer's latest SubagentHandback call in its run (handbacks.jsonl's capture, which the hook writes first).
+type Rec = Agent & {
+  name?: string; doubt?: boolean; gapKeys?: string[]; plan?: boolean; replan?: boolean; validate?: boolean; resumed?: boolean
+  second?: boolean; riskyAt?: boolean; handedAt?: number
+}
 const gapText = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 120)
 // A resume still running: the gates see its stop only (brief.mjs foldRuns moves lastImplAt at a launch or a stop), so it does not move the attempt yet.
 const pendingResume = (a: Agent) => !!(a as Rec).resumed && a.endedAt === undefined
@@ -885,6 +919,8 @@ export const countedOf = (reply: Reply, gapMin = CFG.gapMin): { status: 'pass' |
 type SliceRun = {
   attempts: number; final: boolean; risky: boolean; signals: string[]; opusPass: boolean; checks: string[]; answers: Record<string, Answer>; doubt: boolean
   stalled: boolean; latest: 'pass' | 'fail' | null; built: boolean; isolated: boolean; gaveUp: boolean
+  // The second review rule: two reviews needed; their verdict (secondVerdictOf) and how many reviewer agents passed (at most 2).
+  two: boolean; second: 'pass' | 'fail' | 'one' | null; passes: number
 }
 // The implementer launches and stops the gates have seen of a slice (a resume still running is not one yet), and the time a review follows: the
 // latest of them before it ended.
@@ -901,6 +937,49 @@ const supersededOf = (mine: Agent[]) => {
     for (const p of ended) if (p !== v && (p.endedAt as number) < (v.endedAt as number) && (p.endedAt as number) > implAt(v)) out.add(p)
   }
   return out
+}
+// ---- The second review rule (brief.mjs settle, countingReviews, secondReviewVerdict). A slice needs two reviews when its latest implementer launch
+// carries reviews_needed (`second`) and the slice is RISKY; then the reviews that count are those of its latest attempt that are not superseded, have a
+// verdict and began after the attempt's boundary. Any counting fail fails it, in whatever order; it passes only with passes from two different reviewer
+// agents; one reviewer's pass alone is no pass yet. Where the pane cannot know what the fold knows it keeps to the one-review rule: a handbacks.jsonl the
+// hooks cannot read (they then ask for one review) and a slice that turns RISKY only after its latest launch through a plan the pane saw later.
+export const needsTwo = (impls: readonly Agent[], risky: boolean) => {
+  const last = [...impls].sort((p, q) => p.startedAt - q.startedAt).at(-1) as Rec | undefined
+  return !!last?.second && (risky || !!last.riskyAt || impls.some(a => a.risky))
+}
+// The attempt boundary a review must begin after (brief.mjs fold, `early`): the slice's latest implementer event the gates had seen when the review
+// ended (a launch, or a stop; a resume still running is none) and, when that event is a stop, the hand-back the stop followed, when the pane saw it.
+// Without a hand-back the stop stands in for it, which is the fold's own fallback (a hand-back the pane missed makes the pane stricter, never laxer).
+const boundaryOf = (impls: readonly Agent[]) => (r: Agent) => {
+  const end = r.endedAt as number
+  let at = -Infinity
+  let by: Rec | undefined
+  for (const i of impls as Rec[]) {
+    const t = i.endedAt !== undefined && i.endedAt < end ? i.endedAt : !i.resumed && i.startedAt < end ? i.startedAt : undefined
+    if (t !== undefined && t > at) {
+      at = t
+      by = i
+    }
+  }
+  const h = by?.handedAt
+  return by && by.endedAt === at && h !== undefined && h >= by.startedAt && h <= at ? h : at
+}
+// A review that began at or before its attempt's boundary: it looked at an older state and counts neither as a pass nor as a fail.
+const earlyOf = (impls: readonly Agent[]) => {
+  const boundary = boundaryOf(impls)
+  return (r: Agent) => r.endedAt !== undefined && r.startedAt <= boundary(r)
+}
+// The verdict of the counting reviews of a slice that needs two: 'fail', 'pass' (two different reviewer agents passed), 'one' (one agent's passes), null.
+const secondVerdictOf = (counting: readonly Agent[]): { verdict: 'pass' | 'fail' | 'one' | null; passes: number } => {
+  const passes = new Set(counting.filter(r => r.status === 'pass').map(r => r.id)).size
+  return { verdict: counting.some(r => r.status === 'fail') ? 'fail' : passes >= 2 ? 'pass' : passes === 1 ? 'one' : null, passes: Math.min(2, passes) }
+}
+// The reviews of a slice the second review rule sets aside (they began before their attempt's boundary), for a slice that needs two; none otherwise.
+const setAsideEarly = (mine: Agent[], plannedRisky: boolean) => {
+  const impls = implsOf(mine)
+  if (!needsTwo(mine.filter(a => a.role === 'implementer'), plannedRisky)) return []
+  const early = earlyOf(impls)
+  return mine.filter(a => a.role === 'reviewer' && early(a))
 }
 const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number], cfg: Settings = CFG, gates: readonly GateRec[] = GATES): SliceRun => {
   const mine = list.filter(a => a.slice === id)
@@ -931,8 +1010,15 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number],
   const reviews = ended.filter(r => !superseded.has(r))
   const current = reviews.filter(r => (r.endedAt as number) > lastImpl).sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
   const latest = current[current.length - 1]
-  const pass = current.filter(r => r.status === 'pass').pop()
   const risky = !!planned?.risky || impls.some(a => a.risky)
+  // The second review rule (see needsTwo): with two needed, the counting reviews stand in for the latest one wherever the gates read it.
+  const two = needsTwo(mine.filter(a => a.role === 'implementer'), risky)
+  const early = earlyOf(impls)
+  const counting = two ? current.filter(r => (r.status === 'pass' || r.status === 'fail') && !early(r)) : current
+  const second = two ? secondVerdictOf(counting) : { verdict: null, passes: 0 }
+  const verdict = two ? (second.verdict === 'pass' || second.verdict === 'fail' ? second.verdict : null) : latest?.status === 'pass' || latest?.status === 'fail' ? latest.status : null
+  // The passing reviews the doubt signals read: every pass that counts toward the two, else the latest pass.
+  const passes = two ? counting.filter(r => r.status === 'pass') : current.filter(r => r.status === 'pass').slice(-1)
   const ids = new Set(mine.filter(a => a.role === 'implementer').map(a => a.id))
   const mineGates = gates.filter(g => ids.has(g.agent) && g.at > attemptFrom)
   const isolated = mineGates.some(g => g.reason === 'tests_failed_isolated')
@@ -946,38 +1032,58 @@ const sliceRunOf = (list: Agent[], id: string, planned?: Plan['slices'][number],
         : [
             ...(risky ? ['risky'] : []),
             ...(reviews.some(r => r.status === 'fail') ? ['retry'] : []),
-            ...(pass && Object.values(pass.answers ?? {}).some(a => a.mode === 'read') ? ['read_answer'] : []),
-            ...(pass?.open?.length ? ['open_items'] : []),
+            ...(passes.some(p => Object.values(p.answers ?? {}).some(a => a.mode === 'read')) ? ['read_answer'] : []),
+            ...(passes.some(p => p.open?.length) ? ['open_items'] : []),
             ...(isolated ? ['tests_failed_isolated'] : []),
             ...(gaveUp ? ['test_gate_gave_up'] : []),
-            ...(current.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
+            ...(counting.some(r => (r as Rec).doubt) ? ['low_confidence_fail'] : []),
           ]
   // Final (brief.mjs settle): failed for good, or the latest review passed and the escalation rule is met: an opus pass after the latest attempt or
-  // no doubt signal.
-  const opusPass = current.some(r => r.status === 'pass' && SENIOR.has(family(r.model)))
-  const final = (latest?.status === 'pass' && (opusPass || signals.length === 0)) || (latest?.status === 'fail' && attempts >= 1 + MAX_RETRIES)
+  // no doubt signal. With two reviews needed, "the latest review" is the second review verdict and the opus pass one of the counting reviews.
+  const opusPass = counting.some(r => r.status === 'pass' && SENIOR.has(family(r.model)))
+  const final = (verdict === 'pass' && (opusPass || signals.length === 0)) || (verdict === 'fail' && attempts >= 1 + MAX_RETRIES)
   // Stall (brief.mjs finish): the latest counted review and the latest counted review of an earlier implementer attempt both fail, every counted review
-  // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one.
+  // between them fails, they share a gap key, and no REPLAN plan review ended after the latest one. With two reviews needed: the reviews that began after
+  // their attempt's boundary, by attempt; the latest attempt with such reviews and the one before it both have a fail, and their fails share a key.
   const counted = reviews.filter(r => r.status === 'pass' || r.status === 'fail').sort((p, q) => (p.endedAt as number) - (q.endedAt as number))
-  const b = counted[counted.length - 1] as Rec | undefined
-  const ai = b ? counted.findLastIndex(r => implAt(r) !== implAt(b)) : -1
-  const a = (ai >= 0 ? counted[ai] : undefined) as Rec | undefined
-  const shared = a && b && a.status === 'fail' && counted.slice(ai + 1).every(r => r.status === 'fail') ? (b.gapKeys ?? []).filter(k => (a.gapKeys ?? []).includes(k)) : []
-  const replanned = !!b && list.some(x => (x as Rec).replan && x.endedAt !== undefined && x.endedAt > (b.endedAt as number))
+  let shared: string[] = []
+  let stallAt = -Infinity
+  if (two) {
+    const byAttempt = new Map<number, Rec[]>()
+    for (const r of counted.filter(r => !early(r)) as Rec[]) byAttempt.set(implAt(r), [...(byAttempt.get(implAt(r)) ?? []), r])
+    const groups = [...byAttempt.values()]
+    const fb = (groups.at(-1) ?? []).filter(r => r.status === 'fail')
+    const fa = (groups.at(-2) ?? []).filter(r => r.status === 'fail')
+    if (fb.length && fa.length) {
+      const keysA = new Set(fa.flatMap(r => r.gapKeys ?? []))
+      shared = [...new Set(fb.flatMap(r => r.gapKeys ?? []))].filter(k => keysA.has(k))
+      stallAt = Math.max(...fb.map(r => r.endedAt as number))
+    }
+  } else {
+    const b = counted[counted.length - 1] as Rec | undefined
+    const ai = b ? counted.findLastIndex(r => implAt(r) !== implAt(b)) : -1
+    const a = (ai >= 0 ? counted[ai] : undefined) as Rec | undefined
+    shared = a && b && a.status === 'fail' && counted.slice(ai + 1).every(r => r.status === 'fail') ? (b.gapKeys ?? []).filter(k => (a.gapKeys ?? []).includes(k)) : []
+    stallAt = b ? (b.endedAt as number) : -Infinity
+  }
+  const replanned = shared.length > 0 && list.some(x => (x as Rec).replan && x.endedAt !== undefined && x.endedAt > stallAt)
   return {
     attempts,
     final,
-    doubt: current.some(r => (r as Rec).doubt),
+    doubt: counting.some(r => (r as Rec).doubt),
     stalled: !final && shared.length > 0 && !replanned,
     risky,
     signals,
     opusPass,
     checks: [...new Set([...(planned?.checks ?? []), ...mine.flatMap(a => a.checks ?? [])])],
     answers: latest?.answers ?? {},
-    latest: latest?.status === 'pass' || latest?.status === 'fail' ? latest.status : null,
+    latest: verdict,
     built: impls.length > 0,
     isolated,
     gaveUp,
+    two,
+    second: second.verdict,
+    passes: second.passes,
   }
 }
 // G-1 (brief.mjs foldRuns): a PLAN REVIEW without REPLAN that closes an open run hands the new run each slice it names again that is not final and
@@ -1066,12 +1172,26 @@ async function newRun($: Ctx, t: number, keepVerdict: boolean) {
 // Blocked Agent launches: the gate's reason code when its message names one, else the reason the plan check's message stands for.
 const GATE_REASONS = [
   'not_in_plan', 'builtin_agent_in_run', 'agents_running', 'constraints_unchecked', 'opus_review_required', 'missing_lines', 'no_plan_review', 'light_path_multi',
-  'file_overlap', 'dependency_cycle', 'tests_failed_after_report',
-]
+  'file_overlap', 'dependency_cycle', 'tests_failed_after_report', 'replan_required', 'worktree_base_not_head', 'implementer_unfinished', 'wave_full',
+  'skill_create_off', 'skill_name_invalid', 'skill_repo_missing', 'skill_exists', 'skill_limit',
+  'no_reviewer_after_last_implementer', 'last_reviewer_failed', 'last_reviewer_no_status', 'run_state_unreadable', 'second_review_required',
+] // every block reason of .claude/hooks/reasons.mjs, plus the allow agents_running (src/reasons.test.mjs pins it)
 const GATE_PHRASES: [RegExp, string][] = [
   [/every implementer brief starts with SLICE/i, 'missing_lines'], [/PATH: light is only for/i, 'light_path_multi'], [/no plan review has finished/i, 'no_plan_review'],
   [/would change files another slice owns/i, 'file_overlap'], [/forms a cycle/i, 'dependency_cycle'],
   [/tests failed after the worker had reported/i, 'tests_failed_after_report'],
+  [/is stalled in run/i, 'replan_required'], [/worktree\.baseRef is not "head"/i, 'worktree_base_not_head'],
+  [/started and never finished|never finished after that/i, 'implementer_unfinished'], [/may run at once/i, 'wave_full'],
+  [/creating skills is turned off/i, 'skill_create_off'], [/a KIND: skill brief needs a line SKILL:/i, 'skill_name_invalid'],
+  [/skills repository is not set up/i, 'skill_repo_missing'], [/a skill named \S+ already exists/i, 'skill_exists'],
+  [/a run creates at most one new skill/i, 'skill_limit'],
+  [/an implementer finished but no reviewer has run since/i, 'no_reviewer_after_last_implementer'],
+  [/the last reviewer reported STATUS: fail|a reviewer of its latest attempt reported STATUS: fail/i, 'last_reviewer_failed'],
+  [/needs two passing reviews of its latest implementer attempt/i, 'second_review_required'],
+  [/the last reviewer returned no STATUS line|the last reviewer's report was refused at its hand-back/i, 'last_reviewer_no_status'],
+  [/run state could not be folded/i, 'run_state_unreadable'],
+  [/Launch the slice as planned, or send the change to the plan reviewer/i, 'not_in_plan'], [/is a Claude Code built-in or a fork/i, 'builtin_agent_in_run'],
+  [/Rerun the review with one line per CHECKS id/i, 'constraints_unchecked'], [/needs a passing review by an opus reviewer/i, 'opus_review_required'],
 ]
 const denialOf = (ran: unknown) => {
   const text = stringsOf(ran).join('\n').slice(0, 20_000)
@@ -1359,9 +1479,16 @@ export const register: Register = (on, options) => {
         ...(plan ? { plan: true } : {}), ...(parsed && parsed.replan !== null ? { replan: true } : {}),
         ...(!plan && role === 'reviewer' && header.validate ? { validate: true } : {}),
         ...(typeof e.name === 'string' && e.name ? { name: e.name } : {}), // what SendMessage may address it by
+        // the launch record carries reviews_needed (brief.mjs launchRecord): this plugin's implementer, not the workflow's, the rule not off
+        ...(!plan && role === 'implementer' && OWN_IMPLEMENTER.test(String(e.subagentType)) && !header.workflow && CFG.secondReview ? { second: true } : {}),
       }
       const t = agent.startedAt
       const before = await read($, agents)
+      if (agent.second && slice) {
+        const known = await read($, planAtom)
+        if (header.risky || !!known?.slices.some(s => s.id === slice && s.risky) || before.some(a => a.slice === slice && a.role === 'implementer' && (a.risky || (a as Rec).riskyAt)))
+          agent.riskyAt = true
+      }
       const run0 = await read($, runAtom)
       const open0 = runOpen(before, await read($, planAtom), run0, t)
       // A new plan (a PLAN REVIEW without REPLAN that names slices) closes the run on the pane once it holds slices; one that names none, or the fixed
@@ -1466,6 +1593,15 @@ export const register: Register = (on, options) => {
           const i = list.findLastIndex(a => a.id === id && a.status === 'running')
           return i < 0 ? list : list.map((a, j) => (j === i ? { ...a, tool } : a))
         })
+        // An implementer's hand-back: the boundary its attempt's reviews must begin after (the second review rule). Taken before the call runs, as
+        // handback-check.mjs writes its capture before its own check; the latest record of the agent takes it (a turn-end resume closes it later).
+        if ((e.tool as string) === 'SubagentHandback') {
+          const at = await $.clock.now()
+          await update($, agents, list => {
+            const i = latestOf(list, id)
+            return i < 0 || (list[i] as Agent).role !== 'implementer' ? list : list.map((a, j) => (j === i ? ({ ...a, handedAt: at } as Rec) : a))
+          })
+        }
       } catch {
         // the agent's latest tool is the pane's: the call goes on
       }
@@ -1492,6 +1628,7 @@ export const register: Register = (on, options) => {
           const again: Rec = {
             ...a, startedAt: Math.max(now, a.endedAt), status: 'running', endedAt: undefined, tool: undefined, tokens: 0, inTokens: 0, outTokens: 0, cacheTokens: 0,
             result: undefined, answers: undefined, open: undefined, doubt: undefined, gapKeys: undefined, resumed: true,
+            ...(a.handedAt === undefined ? {} : { handedAt: undefined }), // the resumed run hands back on its own
           }
           hold.one = again
           return kept([...l, again])
@@ -1603,7 +1740,12 @@ export const register: Register = (on, options) => {
           // It starts when the old one ended, or after the last other end in its slice, so a retry after a reviewer's verdict starts after that verdict.
           const from = Math.max(a.endedAt, ...l.filter(x => a.slice && x.slice === a.slice && x !== a).map(x => x.endedAt ?? 0))
           const status = statusOf(a)
-          const again = { ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said }
+          // a hand-back of this new turn (after the old record ended) is the new record's; an older one is not
+          const handed = (a as Rec).handedAt
+          const again = {
+            ...a, ...review(a), startedAt: Math.min(from, now), status, endedAt: now, tool: undefined, ...spent, result: result || undefined, answers: undefined, open: undefined, ...said,
+            ...(handed === undefined ? {} : { handedAt: handed > a.endedAt ? handed : undefined }),
+          }
           hold.one = again
           hold.resumed = true
           return kept([...l, again])
@@ -1655,8 +1797,14 @@ export const register: Register = (on, options) => {
     const attemptOf = new Map<Agent, string>() // the diagram node (attempt) each slice agent sits in
     for (const n of map.values()) for (const a of n.agents) attemptOf.set(a, n.id)
     const fixedOf = (a: Agent) => (a.status === 'fail' || (a.role === 'reviewer' && a.status === 'done') ? fix.get(a.slice ? (attemptOf.get(a) ?? a.slice) : a.id) : undefined)
-    // Reviews a gap validation set aside (brief.mjs fold: they count as nothing).
-    const setAside = new Set([...new Set(all.flatMap(a => (a.slice ? [a.slice] : [])))].flatMap(s => [...supersededOf(all.filter(a => a.slice === s))]))
+    // Reviews a gap validation set aside (brief.mjs fold: they count as nothing), and, for a slice that needs two reviews, those that began before
+    // their attempt's boundary (they count neither as a pass nor as a fail).
+    const setAside = new Set(
+      [...new Set(all.flatMap(a => (a.slice ? [a.slice] : [])))].flatMap(s => {
+        const mine = all.filter(a => a.slice === s)
+        return [...supersededOf(mine), ...setAsideEarly(mine, !!plan?.slices.find(p => p.id === s)?.risky)]
+      }),
+    )
     // What a cell, the header and a stage read for one agent: a failure fixed later or a review set aside counts as done, not as a failure; a reviewer
     // reply with no STATUS line gave no verdict and reads as failed, as on its card (stateOf), whatever cell shows it.
     const eff = (a: Agent): State => (fixedOf(a) || setAside.has(a) ? 'done' : a.role === 'reviewer' && a.status === 'done' ? 'fail' : a.status)
@@ -1686,7 +1834,8 @@ export const register: Register = (on, options) => {
         const a = sr.answers[c]
         return `${c}${!a ? '·' : a.verdict === 'fail' ? '✖' : a.mode === 'read' ? '✓' : '✔'}`
       })
-      return [...(sr.risky ? ['⚑'] : []), ...(sr.stalled ? ['↻replan'] : []), ...(sr.doubt ? ['doubt'] : []), ...(sr.isolated ? ['⚠isolated'] : []), ...(sr.gaveUp ? ['⚠gate gave up'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
+      // review k/2: the slice needs two reviews (the second review rule) and k reviewer agents passed its latest attempt; gone once a counting review fails.
+      return [...(sr.risky ? ['⚑'] : []), ...(sr.two && sr.second !== 'fail' ? [`review ${sr.passes}/2`] : []), ...(sr.stalled ? ['↻replan'] : []), ...(sr.doubt ? ['doubt'] : []), ...(sr.isolated ? ['⚠isolated'] : []), ...(sr.gaveUp ? ['⚠gate gave up'] : []), ...(sr.signals.length ? [sr.opusPass ? '⇧opus✔' : '⇧opus?'] : []), ...ticks].join(' ')
     }
     const steps = [...new Set([...(plan?.slices ?? []).map(s => s.id), ...[...map.values()].map(n => n.slice)])].map(id => {
       const n = resolve(map, id)

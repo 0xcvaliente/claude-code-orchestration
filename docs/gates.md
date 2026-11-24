@@ -17,7 +17,7 @@ A [gate](glossary.md#g) is a hook that blocks a worker launch, a worker's stop o
 
 | Gate or guard | Hook file | When it runs | What it blocks | Switch |
 |---|---|---|---|---|
-| [Plan check](#plan-check) | `plan-check.mjs` | PreToolUse on `Agent\|Task` (timeout 60 s) | An implementer launch that breaks the run's plan; a fork or built-in subagent while a run is open; a reviewer of a slice whose implementer has failing tests it never saw (1.6.1) | see the reasons |
+| [Plan check](#plan-check) | `plan-check.mjs` | PreToolUse on `Agent\|Task` (timeout 60 s) | An implementer launch that breaks the run's plan, or one more than the [wave cap](#wave-cap) allows (2.1.0); a fork or built-in subagent while a run is open; a reviewer of a slice whose implementer has failing tests it never saw (1.6.1) | see the reasons |
 | [Test gate](#test-gate) | `verify.sh` | SubagentStop of an implementer (timeout 900 s); with `--handback`, PreToolUse on `SubagentHandback` of an implementer ([Hand-back gate](#hand-back-gate), timeout 900 s) | The implementer's stop while the tests fail, or a `KIND: bugfix` slice without a reproduction test; at a hand-back, a report while the tests fail | `ORCH_TEST_CMD`, `ORCH_GATE_ISOLATED`, `ORCH_BASELINE`, `ORCH_BUGFIX_CHECK`, `ORCH_HANDBACK_GATE` |
 | [Review gate](#review-gate) | `review-gate.mjs` | Stop of the main session | The final reply until every slice of the run has a passing review | `ORCH_ESCALATION`, `ORCH_STALL_GATE`, `ORCH_GAP_MIN` |
 | [Report check](#report-check) | `handback-check.mjs` | PreToolUse on `SubagentHandback` (auto mode) | A [reply](glossary.md#r) with no STATUS line, or a reviewer's pass that leaves a checked id unanswered (once) | `ORCH_HANDBACK_CHECK` |
@@ -60,6 +60,7 @@ Reasons, in the order the code checks them:
 | `dependency_cycle` | DEPENDS closes a cycle in the run's order graph. | blocks every time |
 | `worktree_base_not_head` | The launch has `isolation: "worktree"`, the effective `worktree.baseRef` is not `"head"`, and HEAD differs from `refs/remotes/origin/HEAD`. The worktree would start from the remote default branch and miss the checked-out work. | 2 blocks per slice |
 | `tests_failed_after_report` (1.6.1) | A launch of this plugin's reviewer whose brief names `SLICE:` and is not a PLAN REVIEW, while the test-gate record of the latest stop of the slice's latest implementer is a block for failed tests (`tests_failed`, or a record with no reason) and that implementer has not started since (a `SendMessage` resume is a start). The message gives the gate's reason, the failing-test counts its record holds, and the agent id to resume. A `bugfix_` block never refuses. Only the implementers of the run the review lands in count: the latest run that holds the slice, as the run model places a review; a slice carried whole into a new plan keeps its implementers, one that starts clean has none. The latest stop's test-gate record is matched to it by key and count since the agent's latest start, not by time, since the stop hooks run side by side and a fast gate record can carry an earlier time than telemetry's stop; since 2.0.0 the match follows the four rules under [The report comes first](#test-gate) (`stopGateOf` in `run.mjs`). A refusal is made only when its record in `review-hold.jsonl` was written and reads back, and (2.0.1) only when the earlier records of that log could be read; otherwise the launch goes through (an unreadable log is logged as `tests_failed_after_report_unrecorded`). Switch `ORCH_REVIEW_HOLD=off` (plugin setting `review_hold`). Records in `review-hold.jsonl`, never in `plan-check.jsonl`. | 2 blocks per slice, agent and block |
+| `wave_full` (2.1.0) | Checked last, for this plugin's implementer only: the session's implementers that are running, plus its implementer launches that are on their way, reach the cap ([Wave cap](#wave-cap)). A launch refused for another reason takes no slot. | 2 blocks per slice |
 
 A launch that passes every check is allowed with `ok`, or `light_path` for a light launch before any plan review. A give-up is allowed and logged as `<reason>_gave_up`.
 
@@ -82,6 +83,21 @@ A launch that passes every check is allowed with `ok`, or `light_path` for a lig
 - More links, or a folder that cannot be listed, cannot be decided and count as an overlap.
 - Since 2.0.0 `file_overlap`, not `not_in_plan`, also reads a symlink reached through `**` or a wildcard segment after the first, a hard link, and the NFC and NFD forms of one name.
 - What this does not see is under [Limits](#limits).
+
+### Wave cap
+
+Since 2.1.0 the plan check limits how many of this plugin's implementers run at once in a session. The caps live in `.claude/hooks/limits.mjs`, the one home of the native caps (12 slices per plan, 6 researcher questions per run, 4 implementers at once).
+
+- **The count.** `waveLoad` in `run.mjs`, over the session's telemetry and `plan-check.jsonl`:
+  - *running*: implementers whose latest SubagentStart has no later SubagentStop, read as the review gate reads them (`implementerTestStates`). A start older than the run-stale window (`ORCH_RUN_STALE_MIN`, 30 minutes) is not counted.
+  - *pending*: implementer launches the plan check allowed in the last 120 s (`WAVE_PENDING_MS`) that no start has followed yet. A wave sent in one message reaches the plan check before any of its agents starts. Each allow, oldest first, takes the first start of an agent after it that no earlier allow took; a later start of the same agent is a resume, not a launch.
+- **The cap.** 4 (`WAVE_CAP_DEFAULT`), or `ORCH_WAVE_MAX` when it is a whole number from 1 to 8 (`WAVE_CAP_CEILING`). For a launch with `isolation: "worktree"` it narrows to 1 + floor((budget − floor) / `suite_s`), never below 1 and never above the base, where budget and floor are the test gate's ([Time budget and suite lock](#time-budget-and-suite-lock); `gateBudgetS`, `gateFloorS` in `run.mjs`) and `suite_s` is the project's latest on record (`latestSuiteS`). Isolated slices run their test gates side by side and one suite runs at a time, so the last of n stops waits for n − 1 suites; past the floor its tests do not run. With no `suite_s` on record it does not narrow. A launch in the shared folder is never narrowed.
+- **Blocks when** running + pending reaches the cap. The message gives the count and the cap, and asks the orchestrator to wait for a running implementer's report and launch the slice again.
+- **The lock.** The count and the launch's record run under `plan-check-wave.lock`, so launches judged at the same moment count each other. It waits at most 3 s and takes over a lock older than 10 s; not taken in time, the launch is judged without it and the record says `lock: "not_taken"`.
+- **Loop guard.** 2 blocks per slice, then the launch goes through as `wave_full_gave_up`.
+- **Never blocks** when `limits.mjs` cannot be loaded (a copy of the hooks without it; the record then has no `wave`, as before 2.1.0), when `telemetry.jsonl` or `plan-check.jsonl` cannot be read (`skipped: "log_unreadable"`), or on an error (`skipped: "wave_error"`).
+- **The record.** Each implementer launch's record in `plan-check.jsonl` carries `wave`: `running`, `pending`, `cap`, `base`, `suite_s` (whenever a launch with `isolation: "worktree"` read the project's latest one, narrowed or not), `lock`, `full` and `narrowed`, or `skipped` ([logs.md](logs.md#log-files)).
+- **Workflow agents** make no Agent call and never reach it. The gated workflow bounds its own waves (`waveMax`, [native-mode.md](native-mode.md#the-gated-workflow)).
 
 **`worktree.baseRef`.** The effective value is the first of these that sets it: `<project>/.claude/settings.local.json`, `<project>/.claude/settings.json`, the user `settings.json` (`<CLAUDE_CONFIG_DIR or ~/.claude>/settings.json`). An unreadable settings file or commits it cannot resolve let the launch through.
 
@@ -221,6 +237,8 @@ The base of an isolated worktree is its fork point from the main worktree's HEAD
 | Isolated worktree, `warn` mode | Logs `tests_failed_isolated` with `not_run: 1` and `lock_wait_s`, and exits 0. The run model counts it as an isolated test failure, so the slice needs an [opus review](glossary.md#o). |
 | Shared folder, or isolated worktree in `block` mode | Runs the suite anyway, without the lock. It never skips. |
 
+**`suite_s` (2.1.0).** Every test-gate record written after a suite run carries `suite_s`, the whole seconds the test command ran (bash `SECONDS`), without the lock wait, the listings or the base run, at a stop and at a hand-back: a pass, a fail, a timeout, the isolated warn, `max_blocks_reached`, the bugfix records and `test_gate_error` after a run. A stop that reuses the hand-back's result carries that run's value. A record with no suite run (a lock-wait give-up, a skip, no test command) has none, and neither has a record from before 2.1.0 or a stop that reuses an entry stored before it. The [wave cap](#wave-cap) reads the project's latest one.
+
 **The test run.** It gets min(`ORCH_TEST_TIMEOUT_S`, time left). `ORCH_TEST_TIMEOUT_S` defaults to 600, so with the default budget the time left (at most 540 s) decides.
 - At the limit the test command and its children (its own process group) get SIGTERM, and SIGKILL 5 s later.
 - The stop then blocks as `tests_failed` with `timed_out: 1` and `limit_s`, whatever status the suite exits with (`tests_failed_isolated` in an isolated worktree in `warn` mode).
@@ -319,7 +337,7 @@ On 2026-11-16, in this repository, four isolated implementers of one wave stoppe
 
 ## Review gate
 
-The [review gate](glossary.md#r) (`.claude/hooks/review-gate.mjs`) runs at Stop of the main session. It blocks the final reply until every slice of the run has a passing review after its latest attempt, its checked ids answered, and any needed opus review and replan done.
+The [review gate](glossary.md#r) (`.claude/hooks/review-gate.mjs`) runs at Stop of the main session. It blocks the final reply until every slice of the run has a passing review after its latest attempt (two for a RISKY slice since 2.1.0), its checked ids answered, and any needed opus review and replan done.
 
 It checks in this order and blocks on the first problem that still has blocks left. The block message lists every open problem.
 
@@ -336,7 +354,8 @@ It checks in this order and blocks on the first problem that still has blocks le
 | 8 | `last_reviewer_failed` | block | per slice: its latest counted review failed |
 | 9 | `last_reviewer_no_status` | block | per slice: its latest reviewer returned no STATUS line. Such a reply does not pass; it is neither a pass nor a fail. |
 | 10 | `constraints_unchecked` | block | per slice: a passing review left a `CHECKS:` id unanswered, or answered it fail. A brief without CHECKS skips this (logged). |
-| 11 | `opus_review_required` | block | per slice: a doubt signal fired and no opus reviewer passed the slice after its latest attempt |
+| 11 | `second_review_required` | block | per slice (2.1.0): a RISKY slice under the [second review rule](#second-review-rule) has one passing review of its latest attempt, or passes from one reviewer agent only, and no counted fail |
+| 12 | `opus_review_required` | block | per slice: a doubt signal fired and no opus reviewer passed the slice after its latest attempt |
 | — | `slice_failed_for_good` | allow | a slice whose latest review failed after 3 attempts is named in a `systemMessage`, so the reply reports it as failed |
 | — | `reviewer_passed` | allow | every gated slice passed |
 
@@ -350,13 +369,23 @@ It checks in this order and blocks on the first problem that still has blocks le
 
 **What it does not see.** The review gate only sees implementers. When the orchestrator writes the result itself, no implementer runs; the orchestrator's prompt tells it to send that result to a reviewer first, and no hook checks that.
 
+### Second review rule
+
+Since 2.1.0 a RISKY slice in a native run needs two passing reviews of its latest attempt, from two different reviewer agents. `foldRuns` in `.claude/hooks/brief.mjs` decides it (`countingReviews`, `secondReviewVerdict`, `settle`); the review gate reads the fold's verdict. Tests: `src/second-review.test.mjs`.
+
+- **Which slices.** The [journal](logs.md#journal) writes `reviews_needed` on the launch record of this plugin's implementer: 2 when the brief says `RISKY: yes`, otherwise 1. A slice needs two reviews when its latest implementer launch record carries the field and the slice is RISKY. A record without the field (an older log, or `ORCH_SECOND_REVIEW=off`) folds as before: one review, and the opus rule.
+- **Which reviews count.** Reviews of the latest attempt that are not superseded by a gap validation and have a counted status, and that began after the attempt's implementer handed back (its record in `handbacks.jsonl`, otherwise its stop record). A review begins at the reviewer's latest start the logs show (its resume, when the orchestrator resumed it), otherwise at its launch. A review that began earlier counts neither as a pass nor as a fail.
+- **The verdict.** Any counted fail fails the slice, in whatever order the reports arrive. A pass needs two passes from two different reviewer agents: a resumed reviewer is one agent. One pass alone blocks the reply with `second_review_required`, and the message asks for one more fresh reviewer, on opus when the slice still lacks an opus pass. A [gap validation's](glossary.md#g) pass counts as one of the two.
+- **Unchanged.** The opus rule still applies on top (a RISKY slice carries the doubt signal `risky`, so one of the passes must be on opus), and so do `ORCH_ESCALATION` and the stall gate (two failing reviews of one attempt never stall on their own). An unreadable `handbacks.jsonl` gives every slice the one-review rule, so a log the gate cannot read never asks for more. The [gated workflow](native-mode.md#the-gated-workflow) already runs a default and an opus reviewer at once on a risky slice and is unchanged; the SDK pipeline is unchanged.
+- **Switch.** `ORCH_SECOND_REVIEW=off` (environment only, no plugin setting) stops the journal writing the field.
+
 ## Doubt signals
 
 A [doubt signal](glossary.md#d) means a passing slice needs a second look. Any one of them makes the slice final only after an opus review passes after its latest implementer launch or stop. The review gate blocks with `opus_review_required` until then. The exact rule is [brief-grammar.md, Doubt signals](brief-grammar.md#doubt-signals); `doubtSignals` in `.claude/hooks/brief.mjs` computes them.
 
 | Signal | When |
 |---|---|
-| `risky` | `RISKY: yes` on its planned slice or its implementer brief. Such a slice is reviewed on opus from the start. |
+| `risky` | `RISKY: yes` on its planned slice or its implementer brief. Such a slice is reviewed on opus from the start; in a native run since 2.1.0 by two reviewers at once, one on opus ([Second review rule](#second-review-rule)). |
 | `retry` | an earlier review of the slice counted as a fail |
 | `read_answer` | its latest passing review answered a constraint with `(read)` |
 | `open_items` | its latest passing review has a non-empty OPEN |
@@ -421,7 +450,7 @@ A [loop guard](glossary.md#l) keeps a gate from blocking forever. After its limi
 | Plan check: `file_overlap`, `dependency_cycle` | none: blocks every time | — |
 | Test gate | 2 `tests_failed` blocks per implementer since its latest start (a stop with no agent id: per session) | `max_blocks_reached` |
 | Bugfix check | 2 `bugfix_` blocks per implementer since its latest start | `bugfix_unverified_gave_up` |
-| Review gate | 2 blocks per reason since the last implementer stopped (a record with no reason counts for every reason) | `max_blocks_reached` for `no_reviewer_after_last_implementer`, `last_reviewer_failed`, `last_reviewer_no_status` and `run_state_unreadable`; `<reason>_gave_up` for `constraints_unchecked`, `opus_review_required`, `replan_required` and `implementer_unfinished`. The record is named after the first open problem. |
+| Review gate | 2 blocks per reason since the last implementer stopped (a record with no reason counts for every reason) | `max_blocks_reached` for `no_reviewer_after_last_implementer`, `last_reviewer_failed`, `last_reviewer_no_status` and `run_state_unreadable`; `<reason>_gave_up` for `constraints_unchecked`, `opus_review_required`, `replan_required`, `implementer_unfinished` and `second_review_required`. The record is named after the first open problem. |
 | Review gate: `implementer_unfinished` | 2 blocks and 1 give-up per implementer for the whole session, then it is left alone | `implementer_unfinished_gave_up` |
 | Report check | 1 refusal per worker; none when its log cannot be read | — |
 | Hand-back gate | the `tests_failed` cap above, and no refusal once two other hand-backs of the agent were refused since its latest start | `max_blocks_reached`, `handback_resend_cap` |
@@ -626,6 +655,7 @@ What each gate and guard does not catch. [safety.md](safety.md) links here.
 - `file_overlap` and `dependency_cycle` block every time, with no give-up. A plan that cannot be fixed stalls those launches until the orchestrator changes the plan. A retry of a planned slice is judged against the run's DEPENDS order, so a sound retry passes; a broken plan still blocks every time.
 - Path identity does not see every name of one file. Since 2.0.0 `file_overlap` reads a symlink reached through a `**` segment or a wildcard segment after the first (`**/link/a.ts` or `t*/l*/a.ts` beside `src/a.ts`, where `link` points to `src`), a hard link, and two Unicode normal forms (NFC, NFD) of one name (`src/plan-check-paths.test.mjs`, the `w3 item 4` tests). Still out of reach (the comment on `canon()` in `plan-check.mjs`): a link or hard link made after the launch, a hard link whose other name lies outside every entry's walk, and, in `not_in_plan`, every name that reading adds; a launch naming such a name is refused there as before.
 - An `Agent` call without `subagent_type` counts as a built-in subagent, so it is blocked while a run is open.
+- `wave_full` is a brake, not a guarantee ([Limits](limits.md), J): it does not count a start older than the run-stale window, a `SendMessage` resume (which never passes the plan check), or the workflow's agents; after two blocks per slice it lets the launch through; and launches judged without the wave lock (its 3 s wait ran out) can pass the cap together.
 - Gated workflow agents make no Agent tool call, so the plan check never sees them: no plan checks, no read router, no skill suggestions. A probe showed a mod's `agent.spawn` hook could route them under `claude -p`; that is not built ([live-checks-workflow.md](data/live-checks-workflow.md)).
 
 **Read router**
@@ -653,7 +683,7 @@ What each gate and guard does not catch. [safety.md](safety.md) links here.
 - On a Claude Code without `background_tasks`, an implementer still fixing its tests after a test-gate block can be gated (`implementer_unfinished`) before it stops again.
 
 **Stall gate**
-- It is native-only. The gated workflow makes no Agent call, so it never sees this gate, and it does not count a failing review whose gaps are all below the cutoff as a doubt signal.
+- It is native-only. The gated workflow makes no Agent call, so it never sees this gate. Since 2.1.0 the workflow does count a failing review whose gaps are all below the cutoff as a doubt signal (an opus review follows), but it has no stall rule of its own.
 
 **Report check and quote check**
 - A refusal without a `tool_use_id` in the payload is tied by its `report_key` to the capture with that key nearest in time (2.0.0; `deliverableCaptures` in `state.mjs`, `handbackState` in `journal.mjs`): a match by key and time, not by identity, so of two hand-backs with the same report text the nearer one is marked. A refusal with no `report_key` marks the agent's latest capture written at or before it, in both. They differ for a refusal whose key matches no capture: `state.mjs` falls back to that latest capture, `journal.mjs` marks nothing.
