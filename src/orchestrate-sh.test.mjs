@@ -510,8 +510,12 @@ test("orchestrate.sh dry run (f7): the allow rules the comment names: seven with
   const folderStar = rules.filter((r) => r.startsWith("Bash(git -C * "));
   assert.equal(folderStar.length, 7, folderStar.join("\n"));
   for (const r of folderStar) assert.ok(/^Bash\(git -C \* [a-z-]+\*\)$/.test(r), r);
+  // Three per pinned folder: the script pins the folder as given and its real path (and the git top level, none here),
+  // which are two folders where the temp dir is reached through a symlink (macOS: /var is /private/var).
+  const pinned = [...new Set([dryRepo, R])];
   const worktreeStar = rules.filter((r) => r.includes("/.claude/worktrees/* "));
-  assert.equal(worktreeStar.length, 3, worktreeStar.join("\n"));
+  assert.equal(worktreeStar.length, 3 * pinned.length, worktreeStar.join("\n"));
+  for (const d of pinned) assert.equal(worktreeStar.filter((r) => r.startsWith(`Bash(git -C ${d}/.claude/worktrees/* `)).length, 3, d);
   // that `*` holds a whole subcommand: the docs' example passes the base rules through `git -C * status*`
   assert.deepEqual(hits(allowed(headless()), `git -C /r branch -D main status`), ["Bash(git -C * status*)"]);
   assert.ok(basePermitted(headless(), `git -C ${WT} branch -D main add x`));

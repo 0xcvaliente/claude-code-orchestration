@@ -28,6 +28,8 @@
 #      ORCH_ADVISOR (e.g. opus; passes --advisor to claude, experimental),
 #      ORCH_SESSION_PERSISTENCE=1 (omit --no-session-persistence, so the session and its subagent transcripts are written
 #        and telemetry v2 can read per-agent tokens, turns and models at SubagentStop; unset or any other value keeps it),
+#      CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (Claude Code's own: how long claude -p waits for background agents after its
+#        last turn; this script sets 3600000 when it is unset, see below),
 #      ORCH_DRY_RUN=1 (print the claude arguments, one per line, and exit).
 # Every run is told it is unattended (one sentence through --append-system-prompt: nobody can answer a question), so
 # the orchestrator plans a new skill without proposing it first. Skill slices: unless ORCH_SKILL_CREATE=off, each
@@ -206,6 +208,12 @@ fi
 export CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1
 # Fork subagents (on by default since v2.1.302) inherit the whole conversation and every tool; Agent(fork) is denied too.
 export CLAUDE_CODE_FORK_SUBAGENT=0
+# claude -p stops the background agents still running this many ms after its last turn ("Background tasks still running
+# ... stopping them"; default 600000). Since Claude Code 2.1.328, with CLAUDE_CODE_FORK_SUBAGENT=0, a background subagent
+# and the agents it waits for count against that one wait. The orchestrator ends its turn to wait for an implementer,
+# whose work and test gate (up to 870 s) can pass ten minutes with no turn in between, so a headless run waits up to an
+# hour. A value already in the environment wins; 0 waits with no limit. scripts/claude-update.mjs checks the name (bgwait).
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-3600000}"
 
 # The task is claude's positional prompt. A task that starts with a dash would be read as an option after -p, so it goes
 # after `--` at the very end instead (see the end of this list; probed on Claude Code 2.1.325:

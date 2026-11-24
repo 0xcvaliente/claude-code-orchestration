@@ -545,7 +545,7 @@ export function escalationMode(env = {}) {
  *   focus: string | null, workflow: boolean, model: string | null, isPlanReview: boolean, replan: number | null,
  *   plan?: { constraints: Record<string, string>, slices: PlannedSlice[] },
  *   sources?: string[], read?: 'lookup' | 'extract' | 'judge' | null, kind?: string | null, validate?: boolean, urls?: string[],
- *   skills?: string[], skill?: string, target?: 'private' | 'public', update?: true, drafts?: string[]
+ *   skills?: string[], skill?: string, target?: 'private' | 'public', update?: true, drafts?: string[], reviews_needed?: 1 | 2
  * }} LaunchRecord
  * journal-launches.jsonl, one per Agent launch of an implementer, reviewer, researcher or integrator (PostToolUse).
  * `slice` is sliceOfBrief: "plan" for a PLAN REVIEW brief. `urls` is the deduplicated hosts of briefUrls of the prompt
@@ -579,7 +579,7 @@ const bare = (t) => String(t ?? "").split(":").pop() ?? "";
 /**
  * The launch record for an Agent launch: the parsed brief, never its text.
  * @param {unknown} toolInput tool_input of the Agent call
- * @param {{ ts?: string, sessionId?: string, agentId?: string | null, projectDir?: string | null, pluginRoot?: string | null }} [ctx]
+ * @param {{ ts?: string, sessionId?: string, agentId?: string | null, projectDir?: string | null, pluginRoot?: string | null, env?: Record<string, string | undefined> }} [ctx]
  * @returns {LaunchRecord}
  */
 export function launchRecord(toolInput, ctx = {}) {
@@ -616,8 +616,18 @@ export function launchRecord(toolInput, ctx = {}) {
   if (h.target) rec.target = h.target;
   if (h.update) rec.update = true;
   if (h.drafts.length) rec.drafts = h.drafts;
+  // The second review rule (2.1.0, docs/limits.md J): a launch of this plugin's implementer records how many passing
+  // reviews its slice needs, 2 for a RISKY brief and 1 otherwise. ORCH_SECOND_REVIEW=off (ctx.env) leaves the field
+  // out, and so does every other role and a workflow brief: a record without it folds as before (1).
+  if (OWN_IMPLEMENTER.test(str(ti.subagent_type)) && !h.workflow && secondReviewOn(ctx.env)) rec.reviews_needed = h.risky ? 2 : 1;
   return rec;
 }
+
+/** This plugin's implementer, bare or namespaced. */
+const OWN_IMPLEMENTER = /^(?:orchestration:)?implementer$/;
+
+/** ORCH_SECOND_REVIEW: the second review rule is on unless the value is "off" (any case). @param {Record<string, string | undefined>} [env] */
+export const secondReviewOn = (env = {}) => String(env?.ORCH_SECOND_REVIEW ?? "").trim().toLowerCase() !== "off";
 
 /** The host (with port) of a URL, or null when it does not parse; records keep hosts, never paths or queries. @param {string} u @returns {string | null} */
 function hostOf(u) {
@@ -674,8 +684,13 @@ export function stopRecord(ctx) {
  * @typedef {{
  *   ts: number, status: 'pass' | 'fail' | null, answers: Record<string, Answer>, open: string[], model: string | null, checks: string[],
  *   counted: 'pass' | 'fail' | null, lowConfidence: boolean, superseded: boolean, validate: boolean, keys: string[],
- *   implAt: number | null, agent: string | null
+ *   implAt: number | null, agent: string | null, began?: number, early?: boolean
  * }} Review
+ * began: when the review began: the reviewer's latest SubagentStart (telemetry) at or before its stop, which is its resume
+ * when the coordinator resumed it, else its launch record's time (no later than its stop). early: it began at or before
+ * its attempt's boundary (the implementer's hand-back for that attempt when handbacks.jsonl holds one, else the
+ * latest implementer launch or stop), so it looked at an older state; a slice that needs two reviews counts it neither
+ * as a pass nor as a fail (countingReviews). A slice that needs one review never reads began or early.
  * agent: the reviewer's agent_id (null when the stop record has none). A stop record marked `continues` (journal.mjs: the
  * same turn going on after a stop hook, such as the stop after a forced hand-back) replaces the same agent's latest
  * review of the slice: one review. When an implementer launch or stop of the slice (or another review) came after that
@@ -694,8 +709,16 @@ export function stopRecord(ctx) {
  *   isolatedTestFailure: boolean, final: boolean, passed: boolean, gaveUp: boolean,
  *   attemptFrom: number, testGates: number[], reviewedSince: boolean,
  *   countedFails: number, stalled: boolean, stalledAt: number | null, stallKeys: string[], signals: string[],
- *   carriedFinal: boolean, testGaveUp: number[], testGateGaveUp: boolean, implementers: string[]
+ *   carriedFinal: boolean, testGaveUp: number[], testGateGaveUp: boolean, implementers: string[],
+ *   secondField: boolean, reviewsNeeded: 1 | 2, handbackAt: number | null, secondReview: 'pass' | 'fail' | 'one' | null
  * }} SliceState
+ * The second review rule (2.1.0; docs/limits.md, J). secondField: the slice's latest implementer launch record carries
+ * reviews_needed. reviewsNeeded: 2 when it does and the slice is RISKY (that brief, or s.risky), else 1; with 1 the
+ * slice folds exactly as before the rule. handbackAt: the time of the hand-back capture (handbacks.jsonl) of the
+ * implementer's latest stop, null without one (then the boundary is lastImplAt). secondReview, for a slice that needs
+ * 2, from countingReviews: 'fail' when any counts as a fail (in whatever order), 'pass' when none fails and two passes
+ * come from two different reviewer agents, 'one' with passes from one agent only, null with none; passed, gaveUp,
+ * final, the stall and the review gate all read it. null for a slice that needs 1.
  * implementers: agent ids of the slice's implementer launches and stops folded into this state, in order (a slice
  * carried whole into a new run keeps them; one that starts clean or is carried as final starts with none). The
  * plan check's reviewer hold reads it to look only at the implementers of the run a review lands in.
@@ -719,8 +742,11 @@ export function stopRecord(ctx) {
  * planReviewed: a reviewer of this run's PLAN REVIEW (or REPLAN) brief has stopped. running: agent ids that started
  * (SubagentStart) in this run and have not stopped yet. replans: times the reviewers of this run's REPLAN plan reviews
  * stopped (a REPLAN still running is not in it).
- * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[] }} Records
+ * @typedef {{ launches?: unknown[], stops?: unknown[], gates?: unknown[], starts?: unknown[], handbacks?: unknown[] | null }} Records
  * starts: telemetry.jsonl records; SubagentStart and SubagentStop entries (by agent_id) say which agents run.
+ * handbacks: handbacks.jsonl captures (handback-check.mjs); they set an implementer attempt's boundary for the second
+ * review rule. null: the log exists and could not be read, and then every slice needs one review (as before the rule),
+ * so an unreadable log never makes a gate ask for more.
  */
 
 // Test-gate records the fold reads (joined to a launch by agent_id): an isolated failure, and the test gate's give-ups
@@ -739,6 +765,7 @@ const newSlice = (slice, planned) => ({
   isolatedTestFailure: false, final: false, passed: false, gaveUp: false, attemptFrom: -Infinity, testGates: [], reviewedSince: false,
   countedFails: 0, stalled: false, stalledAt: null, stallKeys: [], signals: [], carriedFinal: false,
   testGaveUp: [], testGateGaveUp: false, implementers: [],
+  secondField: false, reviewsNeeded: 1, handbackAt: null, secondReview: null,
 });
 
 /** Reviews after the slice's latest implementer launch or stop. @param {SliceState} s */
@@ -746,6 +773,29 @@ export const currentReviews = (s) => s.reviews.filter((r) => s.lastImplAt === nu
 
 /** A review's counted status (its own status for a review object without `counted`). @param {Partial<Review>} r @returns {'pass' | 'fail' | null} */
 export const countedStatus = (r) => (r.counted === undefined ? (r.status ?? null) : r.counted);
+
+/**
+ * The reviews that count for a slice that needs two (the second review rule): reviews of its latest attempt
+ * (currentReviews) that are not superseded, have a counted status and began after the attempt's boundary (not early).
+ * @param {SliceState} s
+ */
+export const countingReviews = (s) => currentReviews(s).filter((r) => !r.superseded && countedStatus(r) !== null && r.early !== true);
+
+/**
+ * The verdict of a slice that needs two reviews: 'fail' when any counting review is a fail, whatever the order; 'pass'
+ * when none is and two passes come from two different reviewer agents (a resumed reviewer is one agent, a review with
+ * no agent id counts as one unknown agent); 'one' with passes from one agent only; null with no counting review.
+ * @param {SliceState} s @returns {'pass' | 'fail' | 'one' | null}
+ */
+export function secondReviewVerdict(s) {
+  const counting = countingReviews(s);
+  if (counting.some((r) => countedStatus(r) === "fail")) return "fail";
+  const agents = new Set(counting.filter((r) => countedStatus(r) === "pass").map((r) => r.agent ?? ""));
+  return agents.size >= 2 ? "pass" : agents.size === 1 ? "one" : null;
+}
+
+/** The reviews the opus rule and the doubt signals read: countingReviews for a slice that needs two, else currentReviews. @param {SliceState} s */
+const reviewsRead = (s) => (s.reviewsNeeded === 2 ? countingReviews(s) : currentReviews(s));
 
 /**
  * How a reviewer's stop counts (docs/brief-grammar.md, "Review counting"). A fail counts as a fail with a gap at or above
@@ -771,12 +821,18 @@ function countReview(status, gaps, answers, gapMin) {
  * counts as a fail after 1 + MAX_RETRIES attempts), or the latest review counts as a pass and the escalation rule is
  * met: no doubt signal (doubtSignals with the fold's env: none when ORCH_ESCALATION is off, "always" when it is always)
  * or a passing opus review after the latest implementer launch or stop. So a counted pass that still needs its opus
- * review keeps the slice, and its run, open. passed stays the latest counted status alone (the gates read it).
+ * review keeps the slice, and its run, open. passed stays the latest counted status alone (the gates read it), except
+ * for a slice that needs two reviews (the second review rule), where secondReviewVerdict stands in for it: a lone pass
+ * is no pass yet, and any counting fail is a fail.
  * @param {SliceState} s @param {Record<string, string | undefined>} env
  */
 function settle(s, env) {
+  // The second review rule: a RISKY slice whose latest implementer launch record carries reviews_needed needs two
+  // passing reviews of its latest attempt; its counted status is secondReviewVerdict's (a lone pass is no pass yet).
+  s.reviewsNeeded = s.secondField && s.risky ? 2 : 1;
+  s.secondReview = s.reviewsNeeded === 2 ? secondReviewVerdict(s) : null;
   const latest = currentReviews(s).at(-1);
-  const counted = latest ? countedStatus(latest) : null;
+  const counted = s.reviewsNeeded === 2 ? (s.secondReview === "pass" || s.secondReview === "fail" ? s.secondReview : null) : latest ? countedStatus(latest) : null;
   s.isolatedTestFailure = s.testGates.some((t) => t > s.attemptFrom);
   s.testGateGaveUp = s.testGaveUp.some((t) => t > s.attemptFrom);
   s.passed = s.carriedFinal || counted === "pass";
@@ -819,6 +875,33 @@ export function foldRuns(records, opts = {}) {
   const starts = arr(rec.starts).filter(
     (r) => mine(r) && typeof r.agent_id === "string" && r.agent_id && (r.hook_event_name === "SubagentStart" || r.hook_event_name === "SubagentStop"),
   );
+  // The second review rule's times: each agent's SubagentStart times (when a review began, a resume included) and each
+  // agent's hand-back captures (an implementer attempt's boundary). An unreadable handbacks.jsonl (null) turns the rule
+  // off for this fold: every slice then needs one review, as before.
+  const handbacksRead = rec.handbacks !== null;
+  /** @param {any[]} list @returns {Map<string, number[]>} */
+  const timesByAgent = (list) => {
+    /** @type {Map<string, number[]>} */
+    const m = new Map();
+    for (const r of list) {
+      if (typeof r.agent_id !== "string" || !r.agent_id) continue;
+      const t = time(r.ts);
+      if (!t) continue;
+      const l = m.get(r.agent_id) ?? [];
+      l.push(t);
+      m.set(r.agent_id, l);
+    }
+    return m;
+  };
+  const startTimes = timesByAgent(starts.filter((r) => r.hook_event_name === "SubagentStart"));
+  const handbackTimes = timesByAgent(handbacksRead ? arr(rec.handbacks).filter(mine) : []);
+  /** The latest time of `agent` in `m` at or before `at` and after `after`, or null. @param {Map<string, number[]>} m @param {unknown} agent @param {number} at @param {number} [after] */
+  const latestOf = (m, agent, at, after = -Infinity) => {
+    const l = typeof agent === "string" ? (m.get(agent) ?? []) : [];
+    let best = null;
+    for (const t of l) if (t <= at && t > after && (best === null || t > best)) best = t;
+    return best;
+  };
   const gates = arr(rec.gates).filter(
     (g) =>
       g.gate === "test" &&
@@ -924,7 +1007,8 @@ export function foldRuns(records, opts = {}) {
             settle(kept, env);
           } else if (old && !old.final && old.lastImplAt !== null) {
             const latest = currentReviews(old).at(-1);
-            if (!latest || countedStatus(latest) !== "fail") {
+            const failed = old.reviewsNeeded === 2 ? old.secondReview === "fail" : latest !== undefined && countedStatus(latest) === "fail";
+            if (!failed) {
               open.slices[p.slice] = old;
               delete closing?.slices[p.slice];
             }
@@ -946,6 +1030,8 @@ export function foldRuns(records, opts = {}) {
         s.carriedFinal = false;
         s.launches += 1;
         s.lastImplAt = ts;
+        s.handbackAt = null;
+        s.secondField = handbacksRead && (r.reviews_needed === 1 || r.reviews_needed === 2);
         if (typeof r.agent_id === "string" && r.agent_id && !s.implementers.includes(r.agent_id)) s.implementers.push(r.agent_id);
         s.risky = s.risky || r.risky === true;
         s.checks = [...new Set([...s.checks, ...strings(r.checks)])];
@@ -984,6 +1070,14 @@ export function foldRuns(records, opts = {}) {
         s.attemptFrom = s.reviews.at(-1)?.ts ?? -Infinity;
         s.reviewedSince = false;
       }
+      // The attempt's boundary for the second review rule: the hand-back this stop follows (the agent's latest capture
+      // at or before the stop's own time, after its latest start and after the slice's previous implementer event),
+      // since the report reaches the orchestrator at the hand-back, before this record is written.
+      const own = time(r.ts);
+      const started = latestOf(startTimes, r.agent_id, own) ?? -Infinity;
+      const prevImpl = s.lastImplAt ?? -Infinity;
+      const hb = latestOf(handbackTimes, r.agent_id, own, Math.max(prevImpl, started - 1));
+      s.handbackAt = hb;
       s.lastImplAt = Math.max(s.lastImplAt ?? ts, ts);
     } else if (role === "reviewer") {
       const status = r.status === "pass" || r.status === "fail" ? r.status : null;
@@ -1002,7 +1096,7 @@ export function foldRuns(records, opts = {}) {
       else if (same) {
         const counting = countReview(status, r.gaps, answers, gapMin);
         /** @type {Review} */
-        const kept = { ts: same.ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...counting, superseded: same.superseded, validate, implAt: same.implAt, agent };
+        const kept = { ts: same.ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...counting, superseded: same.superseded, validate, implAt: same.implAt, agent, began: same.began, early: same.early };
         if (kept.superseded) kept.counted = null;
         s.reviews[sameAt] = kept;
         if (validate && status !== null && !kept.superseded) {
@@ -1025,7 +1119,15 @@ export function foldRuns(records, opts = {}) {
           prev.counted = null;
         }
       }
-      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt, agent });
+      // When the review began (the second review rule): the reviewer's latest SubagentStart at or before its stop (its
+      // resume, when the coordinator resumed it), else its launch record's time, no later than the stop. Early: at or
+      // before the attempt's boundary (its hand-back, else the latest implementer launch or stop).
+      const own = time(r.ts);
+      const launchedAt = launch ? Math.min(time(launch.ts), own) : own;
+      const began = latestOf(startTimes, agent, own) ?? launchedAt;
+      const boundary = s.handbackAt ?? s.lastImplAt;
+      const early = boundary !== null && began <= boundary;
+      s.reviews.push({ ts, status, answers, open: Array.isArray(r.open) ? r.open : [], model, checks, ...countReview(status, r.gaps, answers, gapMin), superseded: false, validate, implAt: s.lastImplAt, agent, began, early });
       s.reviewedSince = true;
       // A counted failing review of a slice carried over as final ends its carried state, as implementer work does
       // (spec, "Carried slices"); a pass, a fail that counts as a pass and a reply with no STATUS leave it final.
@@ -1052,6 +1154,31 @@ function finish(run, s, env) {
   // A retry that failed on the same gap again. b: the latest counted review; a: the latest counted review of an
   // earlier implementer attempt. Both fail and every counted review between them fails (no pass between); two reviews
   // of one attempt (a second opinion) never stall on their own.
+  if (s.reviewsNeeded === 2) {
+    // The second review rule: an attempt failed when any of its counted reviews that began after its boundary fails, in
+    // whatever order. The latest attempt with such reviews and the one before it both failed and share a gap key (any
+    // of their failing reviews): stalled. Two reviews of one attempt still never stall on their own.
+    const late = counted.filter((r) => r.early !== true);
+    /** @type {Map<number | null, Review[]>} */
+    const byAttempt = new Map();
+    for (const r of late) byAttempt.set(r.implAt, [...(byAttempt.get(r.implAt) ?? []), r]);
+    const groups = [...byAttempt.values()];
+    const fails = (/** @type {Review[] | undefined} */ g) => (g ?? []).filter((r) => countedStatus(r) === "fail");
+    const fb = fails(groups.at(-1));
+    const fa = fails(groups.at(-2));
+    if (!s.final && fb.length && fa.length) {
+      const keysA = new Set(fa.flatMap((r) => r.keys));
+      const shared = [...new Set(fb.flatMap((r) => r.keys))].filter((k) => keysA.has(k));
+      const at = Math.max(...fb.map((r) => r.ts));
+      if (shared.length && !run.replans.some((t) => t > at)) {
+        s.stalled = true;
+        s.stalledAt = at;
+        s.stallKeys = shared;
+      }
+    }
+    s.signals = doubtSignals(s, env);
+    return;
+  }
   const b = counted.at(-1);
   const ai = b ? counted.findLastIndex((r) => r.implAt !== b.implAt) : -1;
   const a = ai >= 0 ? counted[ai] : undefined;
@@ -1082,15 +1209,20 @@ export function doubtSignals(s, env = {}) {
   const signals = [];
   if (s.risky) signals.push("risky");
   if (s.reviews.some((r) => countedStatus(r) === "fail")) signals.push("retry");
-  const current = currentReviews(s);
-  const pass = current.filter((r) => countedStatus(r) === "pass").at(-1);
-  if (pass && Object.values(pass.answers).some((a) => a?.mode === "read")) signals.push("read_answer");
-  if (pass && pass.open.length) signals.push("open_items");
+  // A slice that needs two reviews reads every pass that counts toward the two; any other its latest counted pass.
+  const current = reviewsRead(s);
+  const passes = current.filter((r) => countedStatus(r) === "pass");
+  const read = s.reviewsNeeded === 2 ? passes : passes.slice(-1);
+  if (read.some((p) => Object.values(p.answers).some((a) => a?.mode === "read"))) signals.push("read_answer");
+  if (read.some((p) => p.open.length)) signals.push("open_items");
   if (s.isolatedTestFailure) signals.push("tests_failed_isolated");
   if (s.testGateGaveUp) signals.push("test_gate_gave_up");
   if (current.some((r) => r.lowConfidence === true && countedStatus(r) === "pass")) signals.push("low_confidence_fail");
   return signals;
 }
 
-/** A review counted as a pass on an opus model after the slice's latest implementer. @param {SliceState} s */
-export const hasOpusPass = (s) => currentReviews(s).some((r) => countedStatus(r) === "pass" && isOpusModel(r.model));
+/**
+ * A review counted as a pass on an opus model after the slice's latest implementer (for a slice that needs two, among
+ * the reviews that count toward the two). @param {SliceState} s
+ */
+export const hasOpusPass = (s) => reviewsRead(s).some((r) => countedStatus(r) === "pass" && isOpusModel(r.model));

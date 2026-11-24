@@ -13,7 +13,8 @@
 // --save     write each violating sequence, one JSON per line, to FILE.
 // --hooks    the hooks folder to drive (default: this checkout's .claude/hooks); a copy of older hooks shows a finding
 //            against the unfixed code.
-// --plant    add a step that runs a hook which crashes (exit 1): a planted I5 violation, to test the report itself.
+// --plant    add a step that runs a hook which crashes (exit 1): a planted I5 violation, to test the report itself. It is
+//            the sequence's first step (2.1.0), so no time box cuts the sequence before it.
 //
 // One summary line at the end: seed, sequences run, hook calls, violations. Exit 0 with no violation, 1 with one, 2 on a
 // usage error. Every violation prints its invariant, seed, sequence and step, and a `REPLAY <json>` line. No model call,
@@ -30,11 +31,15 @@
 // a continued stop (which other workers' steps may come between); it may be woken after delivery (a late background
 // shell, a typed prompt) and resumed with SendMessage (a new hand-back, a STATUS line in its last message or only in its
 // transcript, or none). Implementer tests pass or fail through a flag file; a blocked stop is fixed and stopped again.
+// Some sequences launch all their implementers in one step (2.1.0: a wave sent in one message), their plan checks side
+// by side, under a wave cap of WAVE_CAP (ORCH_WAVE_MAX in every hook call).
 //
 // Invariants (each a named function below; a violation names it):
 //   I1 caps: no agent is denied or blocked more often than its gate's cap (hand-back check 1, quote check 1, test gate 2
 //      since the agent's latest start, plan check 2 per reason and slice, reviewer hold 2 per slice, agent and block,
-//      review gate 2 per reason since the last implementer stop, implementer_unfinished 2 per agent).
+//      review gate 2 per reason since the last implementer stop, implementer_unfinished 2 per agent); and the wave cap
+//      (2.1.0): the implementers of a wave that pass together, plus those running before it, stay within WAVE_CAP unless
+//      a record of the wave says it gave up, went unrecorded, judged without its lock or could not read its logs.
 //   I2 every sequence can end: once nothing runs, the orchestrator's Stop is let through within a bounded number of
 //      tries, and a Stop that lists a running subagent is never blocked.
 //   I3 one delivered review is counted once by foldRuns, with its delivered status and an attempt no later than itself,
@@ -60,6 +65,10 @@ const DEFAULT_TIMEOUT_S = 60;
 export const CPU_BOUND_MS = 5000;
 /** Tries of the orchestrator's Stop at the end of a sequence before I2 calls it stuck. */
 const STOP_TRIES = 16;
+/** The wave cap every hook call runs with (ORCH_WAVE_MAX): low, so a sequence's few implementers meet it. */
+export const WAVE_CAP = 2;
+/** The run-stale window the hooks use by default (ORCH_RUN_STALE_MIN unset), in ms: an older start does not count. */
+const STALE_MS = 30 * 60_000;
 
 // ---------------------------------------------------------------- arguments
 
@@ -177,8 +186,20 @@ export function generate(seed, k, opts = {}) {
     if (chance(0.05)) ops.push({ op: "fault", file: pick(LOGS), kind: pick(["full", "tail", "full+tail", "write", "dir"]) });
     if (chance(0.06)) ops.push({ op: "unfault" });
   }
-  if (opts.plant) ops.splice(Math.floor(r() * ops.length), 0, { op: "planted" });
+  // The planted step comes first (2.1.0): a sequence cut by its time box has always run it. The draw is kept, so the
+  // steps after it are the same as before.
+  if (opts.plant) {
+    r();
+    ops.unshift({ op: "planted" });
+  }
   if (chance(0.5)) ops.push({ op: "unfault" });
+  // A wave (2.1.0): the implementers of the sequence launched in one step, before any other step of theirs.
+  const impl = agents.filter((a) => a.role === "implementer").map((a) => a.i);
+  if (impl.length >= 2 && chance(0.5)) {
+    const rest = ops.filter((o) => !(o.op === "launch" && impl.includes(o.a)));
+    rest.splice(opts.plant ? 1 : 0, 0, { op: "wave", as: impl });
+    return { v: 1, seed, k, headless, agents, ops: rest };
+  }
   return { v: 1, seed, k, headless, agents, ops };
 }
 
@@ -241,7 +262,7 @@ function baseEnv() {
   /** @type {Record<string, string>} */
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^(ORCH_|CLAUDE_PLUGIN_|CLAUDE_ASYNC_AGENT_STALL|GIT_|NODE_OPTIONS$|NODE_TEST)/.test(k)) env[k] = v;
-  return { ...env, ORCH_SKILL_HINTS: "off", ORCH_HOOK_BUDGET_S: "40", ORCH_TEST_TIMEOUT_S: "10", CLAUDE_PLUGIN_ROOT: "" };
+  return { ...env, ORCH_SKILL_HINTS: "off", ORCH_HOOK_BUDGET_S: "40", ORCH_TEST_TIMEOUT_S: "10", ORCH_WAVE_MAX: String(WAVE_CAP), CLAUDE_PLUGIN_ROOT: "" };
 }
 const BASE_ENV = baseEnv();
 
@@ -475,6 +496,59 @@ export async function runSequence(seq, run) {
     a.refused = true;
     return false;
   };
+  /** The implementers running now, read as the plan check reads them (run.mjs implementerTestStates), fresh starts only. */
+  const runningImplementers = () => {
+    const now = Date.now();
+    const states = runMod.implementerTestStates(log(ctx, "telemetry.jsonl").filter((e) => e.session_id === ctx.sid), [], ctx.sid);
+    return [...states.values()].filter((/** @type {any} */ s) => s.start > s.stop && now - s.start <= STALE_MS).length;
+  };
+  /**
+   * A wave: the implementers' plan checks side by side, then each allowed one starts. I1: the plan check's caps per
+   * reason and slice, and the wave cap. @param {any[]} members @param {(a: any) => string} briefOf
+   */
+  const launchWave = async (members, briefOf) => {
+    const before = log(ctx, "plan-check.jsonl").length;
+    const runningBefore = runningImplementers();
+    const faulted = !!ctx.fault;
+    setTests("pass");
+    const inputs = members.map((a) => ({ subagent_type: a.type, description: `soak ${a.role}`, prompt: briefOf(a), run_in_background: true }));
+    const useIds = members.map(() => `toolu_L${++ctx.toolNo}`);
+    const res = await Promise.all(members.map((a, n) => hook(ctx, "plan-check.mjs", { ...common(), hook_event_name: "PreToolUse", tool_name: "Agent", tool_input: inputs[n], tool_use_id: useIds[n] })));
+    const recs = log(ctx, "plan-check.jsonl").slice(before).filter((e) => e.session_id === ctx.sid);
+    for (const [n, a] of members.entries()) {
+      const pc = res[n];
+      const input = inputs[n];
+      if (!pc || !input) continue;
+      if (pc.code === 2) {
+        taintIfFault(a);
+        const reason = /\bwave_full\b/.test(pc.stderr) ? "wave_full" : (recs.filter((e) => e.decision === "block" && e.slice === a.slice).at(-1)?.reason ?? "unlogged");
+        I1_caps(ctx, "plan check", `${reason}|${a.slice}`, 2);
+        a.refused = true;
+        continue;
+      }
+      a.launched = true;
+      a.running = true;
+      transcript(a, [{ type: "user", message: { role: "user", content: input.prompt } }]);
+      await hook(ctx, "telemetry.mjs", { ...common(), hook_event_name: "SubagentStart", ...ids(a) });
+      await hook(ctx, "journal.mjs", { ...common(), hook_event_name: "PostToolUse", tool_name: "Agent", tool_input: input, tool_response: { status: "async_launched", ...(a.id ? { agentId: a.id } : {}) }, tool_use_id: useIds[n] });
+      resetCaps(ctx, `test gate|${a.id}`);
+      taintIfFault(a);
+    }
+    // The wave cap: a wave never passes it together, unless a record of the wave excuses it.
+    const excused = recs.some(
+      (e) =>
+        e.reason === "wave_full_gave_up" ||
+        (Array.isArray(e.gave_up) && e.gave_up.includes("wave_full_gave_up")) ||
+        /_unrecorded$/.test(String(e.reason ?? "")) ||
+        e.wave?.lock === "not_taken" ||
+        e.wave?.skipped === "log_unreadable" ||
+        e.wave?.skipped === "wave_error",
+    );
+    const passed = res.filter((c) => c.code === 0).length;
+    if (!faulted && !ctx.fault && !excused && runningBefore + passed > WAVE_CAP) {
+      violate(ctx, "I1_caps", `wave: ${passed} of ${members.length} launched at once passed with ${runningBefore} running, over the cap of ${WAVE_CAP}`);
+    }
+  };
   /** A SubagentStart of a resumed or woken agent. @param {any} a */
   const start = async (a) => {
     a.running = true;
@@ -566,6 +640,8 @@ export async function runSequence(seq, run) {
   };
 
   // ---- ops
+  /** An implementer's brief. @param {any} a @param {string} slice */
+  const implementerBrief = (a, slice) => `SLICE: ${slice}\nFILES: ${slice}.txt\nDEPENDS: none\n${ctx.secret} brief ${a.i}`;
   /** @param {any} op */
   const apply = async (op) => {
     const a = op.a !== undefined ? st[op.a] : null;
@@ -574,9 +650,14 @@ export async function runSequence(seq, run) {
       case "launch": {
         const slice = a.badSlice ? "zz" : a.slice;
         const prompt =
-          a.role === "implementer" ? `SLICE: ${slice}\nFILES: ${slice}.txt\nDEPENDS: none\n${ctx.secret} brief ${a.i}` : a.role === "reviewer" ? `SLICE: ${a.slice}\n${a.checks ? "CHECKS: C1\nC1: the tests pass\n" : ""}Review the diff.\n${ctx.secret} brief ${a.i}` : `Look into the parser.\n${ctx.secret} brief ${a.i}`;
+          a.role === "implementer" ? implementerBrief(a, slice) : a.role === "reviewer" ? `SLICE: ${a.slice}\n${a.checks ? "CHECKS: C1\nC1: the tests pass\n" : ""}Review the diff.\n${ctx.secret} brief ${a.i}` : `Look into the parser.\n${ctx.secret} brief ${a.i}`;
         if (a.role === "implementer") setTests("pass");
         await launch(a, prompt);
+        return;
+      }
+      case "wave": {
+        const members = (Array.isArray(op.as) ? op.as : []).map((/** @type {number} */ i) => st[i]).filter((/** @type {any} */ m) => m && !m.launched && !m.refused);
+        if (members.length) await launchWave(members, (m) => implementerBrief(m, m.slice));
         return;
       }
       case "finish": {

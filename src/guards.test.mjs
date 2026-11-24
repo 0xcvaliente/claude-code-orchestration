@@ -870,8 +870,13 @@ test("researcher guard (w3 item 1): a FIFO operand, also behind a glob, is refus
   for (const c of ["ls -la pipe", "stat pipe", "find . -name pipe", "ls p*", "du -a ."]) assert.equal(researcherViolation(c, w3), null, c);
 });
 
+// A glob is judged on what it expands to on disk, and a path through a symlink on the folders it really passes, so
+// `/pro?` and `rootlink/../proc/...` reach /proc only where /proc exists (Linux). macOS has no /proc: there the shell
+// passes the glob unexpanded, `cat` finds no such file either way, and the guard rightly lets both be (2.1.0 probe).
+const hasProc = existsSync("/proc/self");
+
 test("researcher guard (w3 item 1): /proc and /sys are refused like /dev, in every spelling", () => {
-  for (const c of ["cat /proc/self/fd/0", "head /proc/kmsg", "cat /sys/kernel/notes", "cat /pro?/self/environ", "cat //proc/../proc/cpuinfo", "cat rootlink/../proc/self/fd/0", "grep x /proc", "wc -l /PROC/x"]) {
+  for (const c of ["cat /proc/self/fd/0", "head /proc/kmsg", "cat /sys/kernel/notes", ...(hasProc ? ["cat /pro?/self/environ"] : []), "cat //proc/../proc/cpuinfo", ...(hasProc ? ["cat rootlink/../proc/self/fd/0"] : []), "grep x /proc", "wc -l /PROC/x"]) {
     const v = researcherViolation(c, w3);
     assert.ok(v, `expected a denial for ${c}`);
     assert.match(v.reason, /device that may never end/, c);

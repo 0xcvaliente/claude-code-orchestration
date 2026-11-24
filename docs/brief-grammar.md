@@ -331,12 +331,15 @@ A slice is final in either of these cases:
 1. **Failed for good.** Its latest review (a reviewer stop after the slice's latest implementer launch or stop) failed after 3 implementer attempts in the run (`MAX_RETRIES` 2).
 2. **Passed, with the opus review rule met.** Its latest review passed. Either the slice has no [doubt signal](#doubt-signals) (none when `ORCH_ESCALATION=off`), or a review after its latest implementer launch or stop passed on opus (`hasOpusPass`).
 
+For a slice under the [second review rule](#second-review-counting) (2.1.0) "its latest review" in both cases reads as the verdict of the reviews that count: failed for good when any of them counts as a fail after 3 attempts; passed when two passes come from two different reviewer agents and none fails, with the opus rule read over those reviews.
+
 More rules:
 
 - Under `ORCH_ESCALATION=always` every slice carries the signal `always`, so it needs that opus pass.
 - A slice whose latest review passed but which still needs its opus pass is not final. It keeps `passed`, the latest review's counted status.
 - The fold computes the signals as each record arrives (`settle`, with the `env` passed to `foldRuns`), from the same inputs as `doubtSignals`.
 - A review with no STATUS is neither a pass nor a fail.
+- A slice under the second review rule with one pass, or passes from one agent only, is neither passed nor final, so its run stays open.
 
 ### Closed run
 
@@ -375,7 +378,7 @@ A review with STATUS fail counts as a fail when its stop record has any of:
 - an answer with verdict fail;
 - no gaps at all (an old-style reply, or a record from before gaps were logged, without `gaps`).
 
-Otherwise, a fail whose gaps are all below the cutoff counts as a pass and sets `lowConfidence`. It adds the doubt signal `low_confidence_fail`, so the opus review rule applies. An opus reviewer's low-confidence fail counts as an opus pass.
+Otherwise, a fail whose gaps are all below the cutoff counts as a pass and sets `lowConfidence`. It adds the doubt signal `low_confidence_fail`, so the opus review rule applies. An opus reviewer's low-confidence fail counts as an opus pass. Since 2.1.0 the gated workflow treats such a fail the same way in its own code: a slice that is not risky gets an opus review before it is accepted.
 
 `ORCH_GAP_MIN=0` makes every fail count. A pass stays a pass, and a reply without STATUS stays `null`, whatever its gaps.
 
@@ -385,6 +388,18 @@ Otherwise, a fail whose gaps are all below the cutoff counts as a pass and sets 
 - Those get `superseded: true` and `counted: null`. They count neither as a pass nor as a fail: no `retry` signal, no part of a stalled slice.
 - Reviews of an earlier attempt are not touched.
 - A validation reply with no STATUS supersedes nothing: it has no verdict to put in their place.
+
+<a id="second-review-counting"></a>
+
+**Second review counting (2.1.0).** A slice needs two reviews (`reviewsNeeded` 2) when its latest implementer launch record carries `reviews_needed` and the slice is RISKY (that brief, or its planned slice). The journal writes the field on this plugin's implementer launches only: 2 for a `RISKY: yes` brief, otherwise 1, and none with `ORCH_SECOND_REVIEW=off`. A slice without the field, or with an unreadable `handbacks.jsonl` (the `handbacks` input is `null`), needs one review and folds exactly as before.
+
+- **The boundary.** Each implementer stop sets the attempt's `handbackAt`: the time of the agent's latest capture in `handbacks.jsonl` at or before the stop, after its latest start and after the slice's previous implementer event. Without one the boundary is the stop itself (`lastImplAt`).
+- **When a review began** (`began`): the reviewer's latest SubagentStart at or before its stop (its resume, when it was resumed), else its launch record's time, no later than the stop. A review that began at or before the boundary is `early`: it counts neither as a pass nor as a fail.
+- **The reviews that count** (`countingReviews`): those of the latest attempt (`currentReviews`) that are not superseded, have a counted status and are not early.
+- **The verdict** (`secondReviewVerdict`, kept as `secondReview`): `fail` when any counting review counts as a fail, whatever the order; `pass` when none does and two passes come from two different reviewer agents (a resumed reviewer is one agent; a review with no agent id counts as one unknown agent); `one` with passes from one agent only; `null` with none. `passed`, `gaveUp`, `final`, the stall and the review gate read it.
+- **A validation.** A VALIDATE review's pass counts as one of the two. It also supersedes the earlier reviews of the attempt, an earlier pass included, so after a validation that confirms no gap one more reviewer is needed.
+- **Doubt signals and opus.** `doubtSignals` reads every counting pass (not only the latest) for `read_answer` and `open_items`, and `hasOpusPass` looks among the counting reviews. A RISKY slice carries `risky`, so one of the two passes must be on opus.
+- **Stall.** An attempt failed when any of its counting reviews failed; the latest attempt with such reviews and the one before it stall when their failing reviews share a key. Two failing reviews of one attempt still never stall on their own.
 
 **Keys.** A counted fail keeps `keys`: the [gap keys](glossary.md#g) of its gaps at or above the cutoff (null confidence included), deduplicated. Every other review has `keys: []`.
 
@@ -450,7 +465,7 @@ The run-model logs (`journal-launches.jsonl`, `journal.jsonl`, `journal-pending.
 
 ### Launch record
 
-Written to `journal-launches.jsonl` by `journal.mjs` at PostToolUse on `Agent|Task`, for every launch of an implementer, reviewer, researcher or integrator. Built by `launchRecord(tool_input, { ts, sessionId, agentId, projectDir, pluginRoot })`.
+Written to `journal-launches.jsonl` by `journal.mjs` at PostToolUse on `Agent|Task`, for every launch of an implementer, reviewer, researcher or integrator. Built by `launchRecord(tool_input, { ts, sessionId, agentId, projectDir, pluginRoot, env })`.
 
 | Field | Value |
 |---|---|
@@ -466,6 +481,7 @@ Written to `journal-launches.jsonl` by `journal.mjs` at PostToolUse on `Agent|Ta
 | `skills` | `parseHeader`'s `skills`: skill names only |
 | `skill`, `target`, `update`, `drafts` | `parseHeader`'s skill slice fields, each present only when set (a valid `SKILL`, a `TARGET`, `UPDATE: yes`, `DRAFTS` names) |
 | `sources` | `parseHeader`'s `sources`, with each `http://` or `https://` entry replaced by its host (`new URL(u).host`, port included; an entry that does not parse is dropped); paths stay as they are |
+| `reviews_needed` | 2.1.0, this plugin's implementer only (bare or `orchestration:`, not a workflow brief): 2 when the brief says `RISKY: yes`, else 1; left out when `ORCH_SECOND_REVIEW` (the `env` in `ctx`) is `off` ([Second review counting](#second-review-counting)) |
 | `urls` | the hosts of `briefUrls` of the prompt (`new URL(u).host`), deduplicated, in order of first appearance; invalid URLs skipped |
 
 The record keeps hosts only, never a URL's path, query or fragment, which can carry tokens. `parseHeader` and `briefUrls` still return the full text, for hooks that read the brief directly.
@@ -540,7 +556,7 @@ These reasons come from the run model:
 | `agents_running` | review gate | none: it is an allow, never counted as a block, so it never gives up |
 | `not_in_plan`, `builtin_agent_in_run` | plan check | `<reason>_gave_up` |
 | `replan_required` | both gates | `<reason>_gave_up` |
-| `constraints_unchecked`, `opus_review_required`, `implementer_unfinished` | review gate | `<reason>_gave_up` |
+| `constraints_unchecked`, `opus_review_required`, `implementer_unfinished`, `second_review_required` (2.1.0) | review gate | `<reason>_gave_up` |
 | `run_state_unreadable` | review gate | `max_blocks_reached`, like the review gate's older reasons |
 
 Each gives up (logs its give-up form and lets the launch or reply through) after 2 blocks: the [loop guard](glossary.md#l). `run_state_unreadable` blocks when the run state cannot be folded from the logs.
@@ -597,9 +613,10 @@ A test-gate block counts the same way. The test gate (`verify.sh`) runs beside t
 | `briefUrls(text)` | unique http(s) URLs of a text, in order, at most 50 |
 | `gapKey(text)` | the 8-hex-character key of a gap text (stop record `gaps`) |
 | `launchRecord(toolInput, ctx)`, `stopRecord(ctx)` | the log records above |
-| `foldRuns({ launches, stops, gates, starts }, { now, staleMin, sessionId, gapMin, env })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`, planned `files`, `countedFails`, `stalled`, `stalledAt`, `stallKeys`, `signals`; reviews carry their brief's `checks`, `counted`, `lowConfidence`, `superseded`, `validate` and `keys`), plus `planReviewed`, `running` and `replans` per run. `gapMin` defaults to `gapMinimum(env)`; `env` defaults to `{}` |
+| `foldRuns({ launches, stops, gates, starts, handbacks }, { now, staleMin, sessionId, gapMin, env })` | `{ runs, open }`: runs with slice states (`launches`, `attempts`, `reviews`, `final`, `passed`, `gaveUp`, `isolatedTestFailure`, planned `files`, `countedFails`, `stalled`, `stalledAt`, `stallKeys`, `signals`; since 2.1.0 `secondField`, `reviewsNeeded`, `handbackAt`, `secondReview`, and on reviews `agent`, `began`, `early`; reviews carry their brief's `checks`, `counted`, `lowConfidence`, `superseded`, `validate` and `keys`), plus `planReviewed`, `running` and `replans` per run. `gapMin` defaults to `gapMinimum(env)`; `env` defaults to `{}` |
 | `currentReviews(slice)`, `countedStatus(review)` | reviews after the slice's latest implementer launch or stop; a review's counted status |
 | `doubtSignals(slice, env)`, `hasOpusPass(slice)` | the opus review rule |
+| `countingReviews(slice)`, `secondReviewVerdict(slice)`, `secondReviewOn(env)` | the second review rule (2.1.0): the reviews that count, the verdict, whether the switch leaves the rule on |
 | `staleMinutes(env)`, `escalationMode(env)`, `gapMinimum(env)`, `stallGateOn(env)`, `MAX_RETRIES`, `RUN_STALE_MIN_DEFAULT`, `GAP_MIN_DEFAULT` | settings |
 
 **Parity.** `parseHeader` reads `SLICE`, `FILES` and `DEPENDS` as `plan-check.mjs` logs them, and `sliceOfBrief` keys a brief as `journal.mjs` does. `src/brief.test.mjs` runs both hooks to check. One difference: `journal.mjs` finds no slice in ``SLICE: `s1` `` (an id in backticks); `parseHeader` reads `s1`, as `plan-check.mjs` does.

@@ -1,7 +1,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -124,15 +124,17 @@ test("statusline: a git status that stalls is cut off after about a second, with
     gitIn(repo, "commit", "-q", "-m", "a");
     writeFileSync(join(repo, "a.txt"), "changed\n");
     const log = join(dir, "status-args");
-    // a git whose status records its arguments, then hangs for 5 seconds
-    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) printf '%s\\n' "$*" >> "${log}"; sleep 5; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
+    // a git whose status records its arguments, then hangs for 60 seconds: the script ending well before that shows the
+    // cut-off. (It hung 5 s and the bound was 3 s: on a loaded machine the 1 s watchdog itself started late and the
+    // status ran out its 5 s, 2.1.0 probe.)
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) printf '%s\\n' "$*" >> "${log}"; sleep 60; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
     chmodSync(join(bin, "git"), 0o755);
     const t0 = Date.now();
     const r = run(base, { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const ms = Date.now() - t0;
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, "");
-    assert.ok(ms < 3000, `took ${ms} ms`);
+    assert.ok(ms < 30000, `took ${ms} ms: cut off, not the 60 s status (about 1 s on an idle machine)`);
     const out = plain(r.stdout);
     assert.match(out, /🌿 main(?! \*)/);
     assert.match(out, /\[ctx\] .* 12%/);
@@ -165,9 +167,11 @@ test("statusline: a git status cut off at the limit is killed, with everything i
     const ms = Date.now() - t0;
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, "");
-    assert.ok(ms < 3000, `took ${ms} ms`);
+    // 20 s, not 3 s: far under the 30 s the stalled status runs, so the cut-off still shows on a loaded machine.
+    assert.ok(ms < 20000, `took ${ms} ms`);
     assert.match(plain(r.stdout), /🌿 main/);
-    spawnSync("sleep", ["0.3"]);
+    // polled for up to 10 s (was one look after 0.3 s): still well before the status's 30 s
+    for (const end = Date.now() + 10000; alive().length && Date.now() < end; ) spawnSync("sleep", ["0.2"]);
     assert.deepEqual(alive(), []);
   } finally {
     spawnSync("pkill", ["-f", marker]);
@@ -189,7 +193,15 @@ test("statusline: killed during a stalled git status, it leaves no process and n
     const tmp = join(dir, "tmp");
     spawnSync("mkdir", ["-p", bin, repo, tmp]);
     gitIn(repo, "init", "-q", "-b", "main");
-    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) sh -c 'sleep 30; : ${marker}'; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
+    // The stalled status itself sends the script its SIGTERM (its parent: the script starts git as a job), so the kill
+    // always lands while the status runs. Killed from the test after a fixed 500 ms, or after a ps poll, the kill could
+    // come after the script's own 1 s cut-off on a loaded machine (2.1.0 probe: 5 of 5 side-by-side runs failed). It
+    // waits until the script has started its watchdog (a second child; counted with ps, as macOS pgrep leaves out its
+    // own ancestors), so the script has stored git's job id: a kill
+    // right after the fork leaked the status's group (statusline.sh, reported to the owner; 2 of 8 runs).
+    const started = join(dir, "started");
+    const killParent = `n=0; while [ "$(ps -A -o ppid= | grep -c "^ *$PPID\$")" -lt 2 ] && [ $n -lt 250 ]; do sleep 0.02; n=$((n+1)); done; kill -TERM "$PPID"`;
+    writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) : > '${started}'; (${killParent}) & sh -c 'sleep 30; : ${marker}'; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
     chmodSync(join(bin, "git"), 0o755);
     const child = spawn("bash", [script], { cwd: repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: tmp } });
     let stderr = "";
@@ -197,12 +209,16 @@ test("statusline: killed during a stalled git status, it leaves no process and n
     child.stdout.resume();
     child.stdin.end(JSON.stringify(base));
     const exited = new Promise((res) => child.on("exit", res));
-    await new Promise((res) => setTimeout(res, 500));
-    assert.ok(alive().length > 0, "the fake git status should be running when the script is killed");
-    child.kill("SIGTERM");
-    await exited;
-    await new Promise((res) => setTimeout(res, 200));
-    assert.deepEqual(alive(), []);
+    // Polled, not one look after 200 ms: on a loaded machine the children take longer to go after the kill. The bound
+    // (10 s) stays far below the fake status's 30 s, so a child the script leaves behind is still caught.
+    const until = async (ok: () => boolean, ms: number) => {
+      for (const end = Date.now() + ms; !ok() && Date.now() < end; ) await new Promise((res) => setTimeout(res, 100));
+    };
+    const code = await exited;
+    assert.ok(existsSync(started), "the fake git status was running when the script was killed");
+    assert.equal(code, 143, "the script ended on its SIGTERM");
+    await until(() => alive().length === 0, 10000);
+    assert.deepEqual(alive(), [], `stderr: ${stderr}`);
     assert.deepEqual(readdirSync(tmp), []);
     assert.equal(stderr, "");
   } finally {
@@ -210,3 +226,51 @@ test("statusline: killed during a stalled git status, it leaves no process and n
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A SIGTERM that lands right after the script forks git (or the watchdog) and before it stores the job id: the EXIT
+// trap then ran with that id empty, so the job's process group kept running (2.1.0 probe: 2 of 8 side-by-side runs,
+// docs/limits.md, J). A DEBUG trap read from BASH_ENV sends the TERM exactly when the id assignment is next, so the
+// window is hit on every run, with no timing. A fake `sleep` (the watchdog's only command) hangs too, so a watchdog
+// left behind is seen as well.
+for (const at of ["STATUS_PID=$!", "WATCH_PID=$!"]) {
+  test(`statusline: a SIGTERM just before ${at} leaves no process and no temp file behind`, skipNoJq, async () => {
+    const marker = `slwin${process.pid}x${Date.now()}`;
+    const dir = mkdtempSync(join(tmpdir(), `${marker}-`));
+    const alive = () =>
+      spawnSync("ps", ["-A", "-o", "args="], { encoding: "utf8" })
+        .stdout.split("\n")
+        .filter((l) => l.includes(marker));
+    try {
+      const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      const realSleep = spawnSync("sh", ["-c", "command -v sleep"], { encoding: "utf8" }).stdout.trim();
+      const bin = join(dir, "bin");
+      const repo = join(dir, "repo");
+      const tmp = join(dir, "tmp");
+      spawnSync("mkdir", ["-p", bin, repo, tmp]);
+      gitIn(repo, "init", "-q", "-b", "main");
+      const started = join(dir, "started");
+      writeFileSync(join(bin, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in status) : > '${started}'; sh -c '${realSleep} 30; : ${marker}'; exit 0;; esac; done\nexec "${realGit}" "$@"\n`);
+      writeFileSync(join(bin, "sleep"), `#!/bin/sh\nexec sh -c '${realSleep} 30; : ${marker}'\n`);
+      chmodSync(join(bin, "git"), 0o755);
+      chmodSync(join(bin, "sleep"), 0o755);
+      const envFile = join(dir, "bash-env");
+      writeFileSync(envFile, `trap '[ "$BASH_COMMAND" = "$SL_KILL_AT" ] && kill -TERM $$' DEBUG\n`);
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: tmp, BASH_ENV: envFile, SL_KILL_AT: at };
+      const child = spawn("bash", [script], { cwd: repo, env });
+      let stderr = "";
+      child.stderr.on("data", (d) => (stderr += d));
+      child.stdout.resume();
+      child.stdin.end(JSON.stringify(base));
+      const code = await new Promise((res) => child.on("exit", res));
+      assert.equal(code, 143, `the script ended on its SIGTERM; stderr: ${stderr}`);
+      // Polled for up to 10 s, far below the fakes' 30 s, so a group the script leaves behind is still caught.
+      for (const end = Date.now() + 10000; alive().length && Date.now() < end; ) await new Promise((res) => setTimeout(res, 100));
+      assert.deepEqual(alive(), [], `stderr: ${stderr}`);
+      assert.deepEqual(readdirSync(tmp), []);
+      assert.equal(stderr, "");
+    } finally {
+      spawnSync("pkill", ["-f", marker]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

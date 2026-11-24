@@ -21,6 +21,9 @@ const lockFile = (/** @type {string} */ project) => join(project, ".claude", "st
 const QUIET = { ORCH_BASELINE: "off", ORCH_BUGFIX_CHECK: "off" };
 const nowS = () => Math.floor(Date.now() / 1000);
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+// The suite's start in epoch ms, as the test compares it with Date.now(). Not `date +%s%3N`: BSD date (macOS) has no
+// %3N and prints `<seconds>3N`, which reads as NaN.
+const NOW_MS = `node -e 'process.stdout.write(String(Date.now()))'`;
 /** @param {string} f */
 const num = (f) => Number(existsSync(f) ? readFileSync(f, "utf8").trim() : 0);
 /** @param {number} pid */
@@ -81,7 +84,9 @@ test("a gate killed with SIGKILL: its lock is not taken over while its suite sti
     assert.equal(r2.status, 0, r2.stderr);
     assert.equal(readFileSync(result, "utf8").trim(), "alone", "never two suites at once");
     assert.ok(r2.ms >= 2500, `it waited for the suite, ${r2.ms} ms`);
-    assert.ok(r2.ms < 20000, `and took the lock over at once after it, ${r2.ms} ms`);
+    // "At once" against the 900 s a stale lock otherwise stands (LOCK_STALE_S): 120 s, not 20 s, which a loaded machine
+    // passed (26 s, 2.1.0 probe), still tells the two apart.
+    assert.ok(r2.ms < 120000, `and took the lock over at once after it, ${r2.ms} ms`);
     assert.deepEqual([records(project).at(-1).reason, records(project).at(-1).lock_takeover], ["tests_passed", 1]);
     assert.equal(existsSync(lockFile(project)), false);
   } finally {
@@ -149,7 +154,7 @@ test("a fresh lock made between the stale check and the removal is never removed
       );
     }
     const started = join(box, "started");
-    const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `date +%s%3N > '${started}'` } });
+    const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `${NOW_MS} > '${started}'` } });
     const t = Date.now() + 20000;
     while (!existsSync(mark) && Date.now() < t) await sleep(50);
     assert.ok(existsSync(mark), "the fresh lock came in between");
@@ -190,7 +195,7 @@ test("a takeover that reads the lock while its name is free never moves the fres
   const started = join(box, "started");
   /** @type {import("node:child_process").ChildProcess | undefined} */
   let child;
-  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `date +%s%3N > '${started}'` }, onStart: (c) => (child = c) });
+  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `${NOW_MS} > '${started}'` }, onStart: (c) => (child = c) });
   try {
     const t = Date.now() + 20000;
     while (!existsSync(guardSeen) && Date.now() < t) await sleep(50);
@@ -244,7 +249,7 @@ test("a lock released and replaced by another gate's between a waiter's read and
   const started = join(box, "started");
   /** @type {import("node:child_process").ChildProcess | undefined} */
   let child;
-  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `date +%s%3N > '${started}'` }, onStart: (c) => (child = c) });
+  const run = gate(project, { env: { PATH: `${bin}:${process.env.PATH}`, ORCH_TEST_CMD: `${NOW_MS} > '${started}'` }, onStart: (c) => (child = c) });
   try {
     const t = Date.now() + 20000;
     while (!existsSync(swapped) && Date.now() < t) await sleep(50);
