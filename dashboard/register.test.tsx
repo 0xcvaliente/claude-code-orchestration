@@ -1907,6 +1907,7 @@ test('waiting: the main turn ended with agents still running reads waiting for N
 })
 
 test('marks: RISKY, the opus escalation and one constraint tick per check from the latest review', async ($, on) => {
+  mock.env(on, { ORCH_SECOND_REVIEW: 'off' }) // the marks as they were before the second review rule (the rule on: "second review" tests)
   await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
   const plan = ['PLAN REVIEW', 'CONSTRAINTS:', 'C1: parsing never throws', 'C2: no new dependencies', 'C3: old briefs still work',
     'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'RISKY: yes', 'CHECKS: C1, C2, C3', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none'].join('\n')
@@ -1984,6 +1985,55 @@ test('blocked launches: a gate denial of an Agent call is logged with its reason
   expect(t.some(x => /⊘ blocked tests_failed_after_report · s5 · reviewer$/.test(x))).toBe(true)
   expect(t.filter(x => /⊘ blocked/.test(x)).length).toBe(3) // a gave-up form and a person's denial are not gate blocks
 })
+
+test('blocked launches: wave_full, replan_required, worktree_base_not_head and implementer_unfinished are named like the other reasons', async ($, on) => {
+  on('tool.call', (_: unknown, e: any) => ({
+    deny: e.prompt?.includes('s4') ? 'Plan check: wave_full: 4 implementers are running or just launched in this session, and at most 4 may run at once. Wait for a running implementer\'s report, then launch slice s4 again.'
+      : e.prompt?.includes('s3') ? 'Plan check: slice s3 is stalled in run 2: its last two failed reviews report the same gap. Send the plan to the plan reviewer first.'
+      : e.prompt?.includes('s2') ? 'Plan check: slice s2 is launched with isolation "worktree", but worktree.baseRef is not "head" in the settings this session loaded, so the worktree would start from the remote default branch.'
+      : e.prompt?.includes('s1') ? 'Review gate: slice s1: its implementer (agent a1) started and never finished: it ran out of turns or was stopped (implementer_unfinished).'
+      : 'Plan check: wave_full_gave_up',
+  }))
+  await boot($, on)
+  const call = ($ as any).tool.call
+  for (const s of ['s4', 's3', 's2', 's1', 's0']) await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief(s), description: s })
+  const t = await texts($, 100, 200)
+  expect(t.some(x => /⊘ blocked wave_full · s4 · implementer$/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ blocked replan_required · s3 · implementer$/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ blocked worktree_base_not_head · s2 · implementer$/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ blocked implementer_unfinished · s1 · implementer$/.test(x))).toBe(true)
+  expect(t.some(x => /⊘ blocked wave_full · s0/.test(x))).toBe(false) // a gave-up form is not the reason
+})
+
+// The log shows the latest ten lines, so the phrases are checked six at a time.
+const PHRASED: [string, string, string][] = [
+  ['s1', 'Plan check: creating skills is turned off on this machine, so a KIND: skill slice cannot run.', 'skill_create_off'],
+  ['s2', 'Plan check: a KIND: skill brief needs a line SKILL: <name>, where the name is lower-case letters.', 'skill_name_invalid'],
+  ['s3', 'Plan check: the private skills repository is not set up on this machine (no path for it).', 'skill_repo_missing'],
+  ['s4', 'Plan check: a skill named release-notes already exists (in a skills repository or installed).', 'skill_exists'],
+  ['s5', 'Plan check: this run already creates the skill x, and a run creates at most one new skill.', 'skill_limit'],
+  ['s6', 'Review gate: slice s6: an implementer finished but no reviewer has run since. Send the result to a reviewer.', 'no_reviewer_after_last_implementer'],
+  ['s7', 'Review gate: slice s7: the last reviewer reported STATUS: fail. Retry the implementer with the gaps.', 'last_reviewer_failed'],
+  ['s8', 'Review gate: slice s8: the last reviewer returned no STATUS line. Rerun the review.', 'last_reviewer_no_status'],
+  ['s9', 'Review gate: the run state could not be folded from the logs, so the work cannot be shown reviewed.', 'run_state_unreadable'],
+  ['sa', 'Plan check: slice sa lists FILES outside its planned FILES: b.py (planned: a.py). Launch the slice as planned, or send the change to the plan reviewer first.', 'not_in_plan'],
+  ['sb', 'Plan check: run 1 is open, and subagent_type "Explore" is a Claude Code built-in or a fork, which the run\'s gates do not track.', 'builtin_agent_in_run'],
+  ['sc', 'Review gate: slice sc: the reviewer passed it without answering C2. Rerun the review with one line per CHECKS id.', 'constraints_unchecked'],
+  ['sd', 'Review gate: slice sd needs a passing review by an opus reviewer after its latest implementer attempt.', 'opus_review_required'],
+]
+for (let i = 0; i < PHRASED.length; i += 6) {
+  const msgs = PHRASED.slice(i, i + 6)
+  test(`blocked launches: a message without its reason code is named from its phrase (${msgs.map(m => m[2]).join(', ')})`, async ($, on) => {
+    on('tool.call', (_: unknown, e: any) => ({ deny: msgs.find(([s]) => e.prompt?.includes(`SLICE: ${s}\n`))?.[1] ?? 'Plan check: skill_limit_gave_up' }))
+    await boot($, on)
+    const call = ($ as any).tool.call
+    for (const [s] of msgs) await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief(s), description: s })
+    await call({ tool: 'Agent', subagent_type: 'orchestration:implementer', prompt: brief('s0'), description: 's0' })
+    const t = await texts($, 100, 200)
+    for (const [s, , reason] of msgs) expect(t.some(x => new RegExp(`⊘ blocked ${reason} · ${s} · implementer$`).test(x))).toBe(true)
+    expect(t.some(x => /⊘ blocked skill_limit · s0/.test(x))).toBe(false) // a gave-up form is not the reason
+  })
+}
 
 test('a reviewer reply with no STATUS line (it hit maxTurns) is not shown as done; an implementer reply with none still is', async ($, on) => {
   await boot($, on)
@@ -2399,7 +2449,7 @@ test('item 4: the gap cutoff from the environment decides doubt (a gap of 40 fai
 })
 
 test('item 4: escalation off in the environment: no opus mark and a risky slice is final on a sonnet pass', async ($, on) => {
-  mock.env(on, { ORCH_ESCALATION: 'off' })
+  mock.env(on, { ORCH_ESCALATION: 'off', ORCH_SECOND_REVIEW: 'off' }) // the second review rule off: escalation alone (the rule on: "second review" tests)
   await boot($, on)
   const s = $ as any
   await s.prompt.submit({ text: 'build it' })
@@ -2415,6 +2465,182 @@ test('item 4: escalation off in the environment: no opus mark and a risky slice 
   await s.prompt.submit({ text: 'the next job' }) // final: the run is closed and the prompt starts clean
   t = await texts($)
   expect(t.some(x => /s1/.test(x))).toBe(false)
+})
+
+// ---- The second review rule (brief.mjs settle, countingReviews, secondReviewVerdict; src/second-review.test.mjs). A RISKY slice whose latest
+// implementer launch carries reviews_needed needs two passing reviews of its latest attempt from two different reviewer agents.
+const SPIN_RE = '[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]'
+const RISKY_PLAN = ['PLAN REVIEW', 'SLICE: s1 - one', 'FILES: a.py', 'DEPENDS: none', 'RISKY: yes', 'SLICE: s2 - two', 'FILES: b.py', 'DEPENDS: none', 'RISKY: yes',
+  'SLICE: s3 - three', 'FILES: c.py', 'DEPENDS: none'].join('\n')
+const riskyBrief = (slice: string) => `${brief(slice)}\nRISKY: yes`
+const resume = ($: any, to: string) => $.tool.call({ tool: 'SendMessage', to, message: 'look again' })
+const handBack = ($: any, agentId: string) => $.tool.call({ tool: 'SubagentHandback', agentId, message: 'STATUS: pass' })
+
+test('second review: a risky slice with one passing review waits for its second; one reviewer twice is not two; a second reviewer passes it', async ($, on) => {
+  on('tool.call', () => ({ result: 'sent', text: 'ok' }))
+  mock.env(on, { ORCH_ESCALATION: 'off' }) // the rule alone, without the opus escalation
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', RISKY_PLAN, REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', brief('s1'), IMPL) // no RISKY line: the plan's RISKY is what the pane knows
+  await finish($, 'b1', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.includes('◌ s2 ⚑ · two')).toBe(true) // not launched yet: no implementer launch carries the rule, drawn as before
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s1 ⚑ review 1/2 · one$`).test(x))).toBe(true) // waiting for its second review, not passed
+  expect(t.some(x => /^✔ s1 /.test(x))).toBe(false)
+  // a slice that is not RISKY is judged as before: one pass, final
+  await spawnWith($, 'b3', brief('s3'), IMPL)
+  await finish($, 'b3', PASS)
+  await spawnWith($, 'r3', 'SLICE: s3', REVQ)
+  await finish($, 'r3', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s3 · three')).toBe(true)
+  // the same reviewer again (a resume) is one agent: still one review of two
+  await resume($, 'r1')
+  await finish($, 'r1', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s1 ⚑ review 1/2 · one$`).test(x))).toBe(true)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'and?' }) // s1 is not final: the run stays
+  expect((await texts($)).some(x => /^\S s1 /.test(x))).toBe(true)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ review 2/2 · one')).toBe(true) // two reviewer agents passed it
+})
+
+test('second review: a fail from either reviewer fails the slice, whichever came first; a VALIDATE pass is one of the two', async ($, on) => {
+  mock.env(on, { ORCH_ESCALATION: 'off' })
+  await boot($, on)
+  await spawnWith($, 'p1', RISKY_PLAN, REVQ)
+  await finish($, 'p1', PASS)
+  // s1: a pass, then a fail
+  await spawnWith($, 'b1', riskyBrief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', FAIL)
+  // s2: a fail, then a pass from another reviewer: still failed (one review would have passed it)
+  await spawnWith($, 'b2', riskyBrief('s2'), IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r3', 'SLICE: s2', REVQ)
+  await finish($, 'r3', 'STATUS: fail\nGAP: 90 missing null check in parse()')
+  await spawnWith($, 'r4', 'SLICE: s2', REVQ)
+  await finish($, 'r4', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.includes('✖ s1 ⚑ · one')).toBe(true)
+  expect(t.includes('✖ s2 ⚑ · two')).toBe(true)
+  // a gap validation of s2's attempt supersedes r3 and r4; its pass is one review of the two
+  await spawnWith($, 'v1', 'SLICE: s2\nVALIDATE: gaps', REVQ)
+  await finish($, 'v1', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s2 ⚑ review 1/2 · two$`).test(x))).toBe(true)
+  await spawnWith($, 'r5', 'SLICE: s2', REVQ)
+  await finish($, 'r5', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s2 ⚑ review 2/2 · two')).toBe(true)
+})
+
+test('second review: a review that began before the attempt\'s hand-back counts neither way; one that began after it counts', async ($, on) => {
+  on('tool.call', () => ({ result: 'delivered', text: 'ok' }))
+  mock.env(on, { ORCH_ESCALATION: 'off' })
+  await boot($, on)
+  await spawnWith($, 'p1', RISKY_PLAN, REVQ)
+  await finish($, 'p1', PASS)
+  // s1: r1 began while b1 still worked, before its hand-back; its fail does not count
+  await spawnWith($, 'b1', riskyBrief('s1'), IMPL)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await handBack($, 'b1')
+  await finish($, 'b1', PASS)
+  await finish($, 'r1', FAIL)
+  let t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s1 ⚑ review 0/2 · one$`).test(x))).toBe(true) // not failed: no review counts yet
+  expect(t.some(x => /^✖ s1 /.test(x))).toBe(false)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', PASS)
+  await spawnWith($, 'r3', 'SLICE: s1', REVQ)
+  await finish($, 'r3', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ review 2/2 · one')).toBe(true)
+  // s2: r4 began after b2's hand-back but before b2's stop, so it counts (with no hand-back seen it would not: s3 below)
+  await spawnWith($, 'b2', riskyBrief('s2'), IMPL)
+  await handBack($, 'b2')
+  await spawnWith($, 'r4', 'SLICE: s2', REVQ)
+  await finish($, 'b2', PASS)
+  await finish($, 'r4', PASS)
+  // s3 (RISKY in its brief only): the same order with no hand-back: the stop is the boundary, and r5 began before it
+  await spawnWith($, 'b3', riskyBrief('s3'), IMPL)
+  await spawnWith($, 'r5', 'SLICE: s3', REVQ)
+  await finish($, 'b3', PASS)
+  await finish($, 'r5', PASS)
+  t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s2 ⚑ review 1/2 · two$`).test(x))).toBe(true)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s3 ⚑ review 0/2 · three$`).test(x))).toBe(true)
+})
+
+test('second review: a new attempt resets the count; a stall, the opus escalation and final keep their meaning', async ($, on) => {
+  await boot($, on, { model: id => (id.startsWith('o') ? 'claude-opus-4' : 'sonnet') })
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', RISKY_PLAN, REVQ)
+  await finish($, 'p1', PASS)
+  // s1: a pass of the first attempt does not count for the second
+  await spawnWith($, 'b1', riskyBrief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  await spawnWith($, 'b2', riskyBrief('s1'), IMPL)
+  await finish($, 'b2', PASS)
+  await spawnWith($, 'r2', 'SLICE: s1', REVQ)
+  await finish($, 'r2', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.some(x => new RegExp(`^${SPIN_RE} s1 ⚑ review 1/2 ⇧opus\\? · one$`).test(x))).toBe(true)
+  // two sonnet passes: passed, but RISKY still asks for an opus review, so the slice is not final
+  await spawnWith($, 'r3', 'SLICE: s1', REVQ)
+  await finish($, 'r3', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ review 2/2 ⇧opus? · one')).toBe(true)
+  await spawnWith($, 'o1', 'SLICE: s1', REVQ)
+  await finish($, 'o1', PASS)
+  t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ review 2/2 ⇧opus✔ · one')).toBe(true)
+  // s2: the same gap failing in two attempts is a stall
+  for (const k of [1, 2]) {
+    await spawnWith($, `c${k}`, riskyBrief('s2'), IMPL)
+    await finish($, `c${k}`, PASS)
+    await spawnWith($, `f${k}`, 'SLICE: s2', REVQ)
+    await finish($, `f${k}`, `STATUS: fail\nGAP: 9${k} missing null check in parse()`)
+  }
+  t = await texts($, 100, 200)
+  expect(t.includes('✖ s2 ⚑ ↻replan ⇧opus? · two')).toBe(true)
+})
+
+test('second review: with the rule off in the environment a risky slice passes on one review, as before', async ($, on) => {
+  mock.env(on, { ORCH_ESCALATION: 'off', ORCH_SECOND_REVIEW: ' OFF ' })
+  await boot($, on)
+  const s = $ as any
+  await s.prompt.submit({ text: 'build it' })
+  await spawnWith($, 'p1', 'PLAN REVIEW\nSLICE: s1 - one\nRISKY: yes', REVQ)
+  await finish($, 'p1', PASS)
+  await spawnWith($, 'b1', riskyBrief('s1'), IMPL)
+  await finish($, 'b1', PASS)
+  await spawnWith($, 'r1', 'SLICE: s1', REVQ)
+  await finish($, 'r1', PASS)
+  let t = await texts($, 100, 200)
+  expect(t.includes('✔ s1 ⚑ · one')).toBe(true)
+  await s.turn.complete(mainDone('answer'))
+  await s.prompt.submit({ text: 'the next job' }) // final: the run is closed
+  t = await texts($)
+  expect(t.some(x => /s1/.test(x))).toBe(false)
+  expect((mod as any).settingsOf({ second: 'off' }).secondReview).toBe(false)
+  expect((mod as any).settingsOf({}).secondReview).toBe(true)
+  expect((mod as any).settingsOf({ second: '' }).secondReview).toBe(true)
 })
 
 test("items 4 and 7: the test gate's records in gates.jsonl show both reasons, ask for an opus review and keep the run open", async ($, on) => {

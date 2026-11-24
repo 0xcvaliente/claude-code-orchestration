@@ -4,7 +4,8 @@
 //   PostToolUse on Agent|Task -> journal-launches.jsonl: a launch record (brief.mjs launchRecord) for every launch of an
 //     implementer, reviewer, researcher or integrator: agent_id (from the tool response, else null), bare agent_type,
 //     slice (a brief starting with PLAN REVIEW is slice "plan"), the parsed header, the reviewer model, isPlanReview,
-//     replan and, for PLAN REVIEW briefs, the parsed plan.
+//     replan and, for PLAN REVIEW briefs, the parsed plan; for this plugin's implementer also reviews_needed (2 for a
+//     RISKY brief, else 1; left out with the maintainer switch ORCH_SECOND_REVIEW=off, read from this hook's environment).
 //   SubagentStop of an implementer or reviewer -> journal.jsonl: a stop record (brief.mjs stopRecord): slice, status
 //     (parseStatus: any STATUS: fail line fails, else the first STATUS line decides, blockquotes ignored), answers,
 //     open and run (the run foldRuns gives the slice at write time), and draft ({ name, branch } of a skill slice's
@@ -86,7 +87,7 @@ if (p.hook_event_name === "PostToolUse") {
   const role = bare(p.tool_input?.subagent_type);
   if (!LAUNCH_ROLES.includes(role)) process.exit(0);
   const agentId = agentIdOf(p.tool_response);
-  const rec = launchRecord(p.tool_input, { sessionId, agentId, projectDir: process.env.CLAUDE_PROJECT_DIR || p.cwd || null, pluginRoot: process.env.CLAUDE_PLUGIN_ROOT || null });
+  const rec = launchRecord(p.tool_input, { sessionId, agentId, projectDir: process.env.CLAUDE_PROJECT_DIR || p.cwd || null, pluginRoot: process.env.CLAUDE_PLUGIN_ROOT || null, env: process.env });
   append("journal-launches.jsonl", rec);
   if (agentId && rec.slice && STOP_ROLES.includes(role)) {
     const waiting = readJsonl(stateDir, "journal-pending.jsonl").filter((e) => e.agent_id === agentId).pop();

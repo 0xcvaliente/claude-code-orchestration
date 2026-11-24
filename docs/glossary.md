@@ -18,6 +18,8 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **baseRef.** The Claude Code setting `worktree.baseRef`. Set to `"head"`, worktrees start from your local HEAD; otherwise they start from the remote default branch and miss local commits. [docs/native-mode.md "Parallel slices"]
 
+**Block reason.** The code a gate gives when it blocks, such as `wave_full` or `second_review_required`. Every block reason of the plan check and the review gate is listed in `.claude/hooks/reasons.mjs` (2.1.0; the hooks keep their own literals and do not import it), in the orchestrator's "Block reasons" section and in the pane's `GATE_REASONS`; tests keep the four in step. [docs/development.md "A new block reason"]
+
 **Brief.** The text the orchestrator sends a worker when it launches it. It starts with header lines (`SLICE:`, `FILES:`, `DEPENDS:` for an implementer) that the hooks read. [docs/brief-grammar.md]
 
 **Bugfix check.** The test gate's check for a `KIND: bugfix` slice: after its tests pass, a changed or added test file must fail on the base. [`.claude/hooks/bugfix-check.mjs`]
@@ -148,7 +150,7 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 ## O
 
-**Opus review.** A review on opus (or a model whose name contains `opus`, `fable` or `mythos`) that a slice needs when a doubt signal fired, or always for a RISKY slice. The review gate blocks with `opus_review_required` until one passes. Also called: escalation rule (in the spec), opus escalation. Not the same as escalation. [docs/brief-grammar.md "Reviewer model", "Doubt signals"]
+**Opus review.** A review on opus (or a model whose name contains `opus`, `fable` or `mythos`) that a slice needs when a doubt signal fired, or always for a RISKY slice (there, since 2.1.0, one of its two passing reviews). The review gate blocks with `opus_review_required` until one passes. Also called: escalation rule (in the spec), opus escalation. Not the same as escalation. [docs/brief-grammar.md "Reviewer model", "Doubt signals"]
 
 **Orchestrate route.** The route that plans the task, builds independent slices with a reviewer each, behind the gates. Also called: the pipeline. [README.md "The three routes"]
 
@@ -188,13 +190,13 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Researcher guard.** The guard that holds a researcher's Bash to its read-only list: no redirection except `2>/dev/null` and `2>&1`, no substitution, no reads of devices, FIFOs, `/proc` or `/sys` (globs judged on what they may expand to). [`.claude/hooks/researcher-guard.mjs`]
 
-**Review gate.** The Stop gate. It gates every slice of the latest run that an implementer worked on, plus the slice of the session's last implementer. It blocks the final reply until each of them has a passing review after its latest attempt (or failed for good), with its checked ids answered and any needed opus review and replan done. [`.claude/hooks/review-gate.mjs`; docs/gates.md "Review gate"]
+**Review gate.** The Stop gate. It gates every slice of the latest run that an implementer worked on, plus the slice of the session's last implementer. It blocks the final reply until each of them has a passing review after its latest attempt (two for a RISKY slice under the second review rule; or failed for good), with its checked ids answered and any needed opus review and replan done. [`.claude/hooks/review-gate.mjs`; docs/gates.md "Review gate"]
 
 **Reviewed route.** One session does the task, then one fresh reviewer checks it. [README.md "The three routes"]
 
 **Reviewer.** The worker that checks one slice, or a plan, with a fresh context. Sonnet, medium effort, at most 40 turns; it never edits files. [`.claude/agents/reviewer.md`]
 
-**Risky.** A task or slice where a wrong result is costly: security, authentication, payments, data migrations or deletion, public API changes, production operations, content published outside the team. A RISKY slice gets an opus review from the start. [README.md "Choosing a route (triage)"]
+**Risky.** A task or slice where a wrong result is costly: security, authentication, payments, data migrations or deletion, public API changes, production operations, content published outside the team. A RISKY slice gets an opus review from the start; in a native run since 2.1.0 it gets two reviewers at once, one on opus, and needs both to pass (the second review rule). [README.md "Choosing a route (triage)"]
 
 **Route.** One of three ways to run a task: plain, reviewed or orchestrate. Triage picks one. [README.md "The three routes"]
 
@@ -205,6 +207,8 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 **SDK pipeline.** The TypeScript orchestrator in `src/` on the Claude Agent SDK (`npm run sdk`). Code in a git repository only. Frozen: maintenance only. Its roles are planner, explorer, writer, verifier, triager and solo. Also called: the pipeline. [docs/sdk-pipeline.md; CLAUDE.md]
 
 **SDK worker.** One agent the SDK pipeline starts for a role: planner, explorer, writer, verifier, triager or solo. The ones with Bash (solo, writer, verifier) run the Bash judge. [docs/sdk-pipeline.md "What it is"; `rolesFor` in `src/config.ts`]
+
+**Second review rule.** Since 2.1.0, in a native run: a RISKY slice needs two passing reviews of its latest attempt from two different reviewer agents, both begun after the implementer handed back; any counted fail fails it, and one pass alone blocks the reply with `second_review_required`. A launch record without `reviews_needed` (an older log, or the rule switched off) gives the one-review rule. [docs/gates.md "Second review rule"; docs/brief-grammar.md "Review counting"]
 
 **Seal.** `provenance.json` in a draft skill's folder: a hash of every file. Any change after sealing breaks it. [docs/skills.md "The seal"]
 
@@ -234,6 +238,8 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 **Suite lock.** `test-gate.lock` in the state dir. The test gate holds it while it runs a suite, so one suite runs at a time per project, worktrees included. [docs/gates.md "Time budget and suite lock"]
 
+**`suite_s`.** The whole seconds a test gate's suite run took, without the wait for the suite lock. Since 2.1.0 every test-gate record written after a suite run carries it, and the wave cap reads the latest one. [docs/gates.md "Time budget and suite lock"]
+
 **Switch.** An environment variable named `ORCH_*` that turns a gate or feature on or off or sets a value. Named only in maintainer text. [docs/settings.md; `.claude/rules/agents.md`]
 
 ## T
@@ -260,7 +266,9 @@ Gate reason codes (`not_in_plan`, `opus_review_required`, ...) are not listed he
 
 ## W
 
-**Wave.** Slices launched together in one message to run in parallel. [`.claude/agents/orchestrator.md` step 3]
+**Wave.** Slices launched together in one message to run in parallel. Since 2.1.0 at most 4 implementers run at a time: with more ready slices the orchestrator launches 4 and starts the next ready slice when one reports. [`.claude/agents/orchestrator.md` step 3]
+
+**Wave cap.** How many of this plugin's implementers may run at once in a session: 4 by default (`.claude/hooks/limits.mjs`), fewer for slices in worktrees when the test suite is slow. The plan check blocks a launch over it with `wave_full`. The gated workflow has its own bound, `waveMax`. [docs/gates.md "Wave cap"]
 
 **Worker.** One of this repo's four launched roles: researcher, implementer, reviewer, integrator. Also called: subagent, agent. [CLAUDE.md]
 

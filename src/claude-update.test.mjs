@@ -96,7 +96,7 @@ test("check: a healthy machine passes, writes its record and never runs a model"
   try {
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, JSON.stringify(r.checks));
-    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["payload", "warn"], ["memory", "warn"], ["sdk", "ok"], ["plugin", "ok"], ["workflow", "warn"], ["sandbox", "ok"], ["dist", "ok"]]);
+    assert.deepEqual(r.checks.map((c) => [c.id, c.status]), [["cli", "ok"], ["builtins", "ok"], ["headless", "ok"], ["flags", "ok"], ["payload", "warn"], ["memory", "warn"], ["bgwait", "warn"], ["sdk", "ok"], ["plugin", "ok"], ["workflow", "warn"], ["sandbox", "ok"], ["dist", "ok"]]);
     assert.equal(r.claude_code_version, CC);
     assert.equal(r.orchestration_version, VERSION);
     assert.equal(JSON.parse(readFileSync(join(m.home, "orchestration", "claude-update.json"), "utf8")).claude_code_version, CC);
@@ -308,7 +308,7 @@ test("check sandbox: off, missing file or a covering entry is ok; on without the
     }
     const r = check({ env: m.env, run: m.run, root });
     assert.equal(r.ok, true, "a note, not a failure");
-    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "payload", "memory", "sdk", "plugin", "workflow", "sandbox", "dist"], "placed after plugin");
+    assert.deepEqual(r.checks.map((c) => c.id), ["cli", "builtins", "headless", "flags", "payload", "memory", "bgwait", "sdk", "plugin", "workflow", "sandbox", "dist"], "placed after plugin");
   } finally {
     m.done();
   }
@@ -397,7 +397,7 @@ test("items 4 and 5: payload and memory are looked up in the program file; a fil
     assert.equal(noField.memory.status, "ok");
     assert.equal(programChecks(prog("nomem", [...HOOK_FIELDS])).memory.status, "fail");
     for (const unknown of [programChecks(prog("wrapper", ["exec node cli.js"])), programChecks(null), programChecks(join(dir, "absent"))]) {
-      assert.deepEqual([unknown.payload.status, unknown.memory.status], ["warn", "warn"]);
+      assert.deepEqual([unknown.payload.status, unknown.memory.status, unknown.bgwait.status], ["warn", "warn", "warn"]);
     }
     // Through check(): ORCH_CLAUDE_BIN names the program; a name not on PATH is a note.
     const m = machine();
@@ -407,6 +407,33 @@ test("items 4 and 5: payload and memory are looked up in the program file; a fil
       assert.equal(of(r, "memory")?.status, "ok");
       const n = check({ env: m.env, run: m.run, root });
       assert.equal(of(n, "payload")?.status, "warn");
+    } finally {
+      m.done();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 2.1.0 (Claude Code 2.1.328): scripts/orchestrate.sh sets the wait of claude -p for background agents, so the check
+// looks for that setting's name in the program file like the memory switch, and fails when it is gone.
+test("2.1.0: bgwait looks for the wait setting orchestrate.sh exports; gone is a failure", async () => {
+  const { programChecks, HOOK_FIELDS, MEMORY_SWITCH, WAIT_SWITCH } = await import("../scripts/claude-update.mjs");
+  assert.equal(WAIT_SWITCH, "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS");
+  assert.match(readFileSync(join(root, "scripts", "orchestrate.sh"), "utf8"), new RegExp(`^export ${WAIT_SWITCH}=`, "m"));
+  const dir = mkdtempSync(join(tmpdir(), "claude-update-wait-"));
+  try {
+    const prog = (/** @type {string} */ name, /** @type {string[]} */ words) => { const f = join(dir, name); writeFileSync(f, `\x7fELF ${words.join(" x ")} end`); return f; };
+    const all = programChecks(prog("all", [...HOOK_FIELDS, MEMORY_SWITCH, WAIT_SWITCH]));
+    assert.deepEqual([all.payload.status, all.memory.status, all.bgwait.status], ["ok", "ok", "ok"]);
+    const gone = programChecks(prog("gone", [...HOOK_FIELDS, MEMORY_SWITCH]));
+    assert.deepEqual([gone.payload.status, gone.memory.status, gone.bgwait.status], ["ok", "ok", "fail"]);
+    assert.match(gone.bgwait.text, /CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS/);
+    const m = machine();
+    try {
+      const r = check({ env: { ...m.env, ORCH_CLAUDE_BIN: join(dir, "gone") }, run: m.run, root });
+      assert.deepEqual([r.ok, of(r, "bgwait")?.status], [false, "fail"]);
+      assert.equal(of(check({ env: { ...m.env, ORCH_CLAUDE_BIN: join(dir, "all") }, run: m.run, root }), "bgwait")?.status, "ok");
     } finally {
       m.done();
     }

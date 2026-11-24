@@ -75,6 +75,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
    - The bar is 40 cells, or the pane width less 2 (at least 10). The slices share it evenly in plan order: done green, running amber (pulsing), failed red, still to do grey. It is drawn in `━`, so it is never taken for flow-line art.
    - Up to 8 slice lines (`<glyph> <id> <marks> · <goal>`, cut to the width), then `+N more`. Marks follow the id only when they apply, so an old-style plan and reply show none (`marksOf`):
      - `⚑`: the slice is [risky](glossary.md#r) (its planned slice or an implementer brief says `RISKY: yes`).
+     - `review N/2` (2.1.0): a RISKY slice under the [second review rule](glossary.md#s), with N the reviewer agents whose passes count for its latest attempt (0, 1 or 2). With fewer than two the slice stays running (amber); with two it is passed; a counted fail from either reviewer shows the slice as failed and drops the mark. The pane mirrors the fold (`needsTwo`, `secondStateOf` in `dashboard/register.tsx`): it decides from the slice's RISKY lines and `ORCH_SECOND_REVIEW` in its own environment, and marks an implementer launch as under the rule as the journal writes `reviews_needed`. The boundary a review must begin after is the implementer's `SubagentHandback` call as the pane sees it; when it missed that call it takes the implementer's stop, which is stricter, never laxer.
      - `↻replan`: a [stalled slice](glossary.md#s). It needs a `PLAN REVIEW` with `REPLAN:` before another attempt. The pane mirrors the gates' stalled-slice rule in `sliceRunOf` ([brief-grammar.md, Stall](brief-grammar.md#stall)). The plan check and the Stop gate block such a slice with `replan_required`.
      - `doubt`: a review of the latest attempt said `STATUS: fail` but counts as a pass, because every one of its `GAP:` lines is below the gates' cutoff (`ORCH_GAP_MIN`, default 80) and no checked id failed (`countedOf`). A `GAP:` line with no number counts as 100. Such a review shows as passed on its card and in the tasks table.
      - `⚠isolated`: the test gate logged an isolated test failure (`tests_failed_isolated`) for an implementer of the slice since the review before its latest attempt. `⚠gate gave up`: it logged a test gate that gave up (`max_blocks_reached`, `bugfix_unverified_gave_up`). Both come from `gates.jsonl` ("Where the data comes from").
@@ -86,7 +87,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
    progress · 1/3 slices · 33% · 1 running · 1 failed · ↻ replan 1
    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    ✔ s1 C1✔ C2✓ · shared types
-   ⠋ s2 ⚑ ⇧opus? · the handler
+   ⠋ s2 ⚑ review 1/2 ⇧opus? · the handler
    ✖ s3 C2✖ · docs
    ```
 
@@ -186,7 +187,7 @@ What starts a new run (`newRun`). The old agents, log, verdict, input, plan and 
     - Triage verdicts are logged too.
     - A started agent that opens a retry attempt is logged as `retry k of X · <label> started …`. A plan review that starts after a failed one ended is logged as `re-plan · …`.
     - A `SendMessage` resume logs its start entry at once (`resumed · <label> started …`, or the retry note when it opens a retry attempt). A resumed run the pane sees by neither a spawn nor a `SendMessage` logs a start entry, when its turn completes, only when it opens a retry attempt (the retry note) or is a plan review after a failed one (`re-plan`; `startNote`); otherwise it logs only its end entry.
-    - An `Agent` launch a gate denied is logged as `⊘ blocked <reason>`, then ` · <slice>` and ` · <role>` when known. The plan check blocks before the agent exists, so no spawn follows. The reason is the gate's code when its message names one (`not_in_plan`, `builtin_agent_in_run`, `missing_lines`, `no_plan_review`, `light_path_multi`, `file_overlap`, `dependency_cycle` and the rest), else the code the plan check's message stands for.
+    - An `Agent` launch a gate denied is logged as `⊘ blocked <reason>`, then ` · <slice>` and ` · <role>` when known. The plan check blocks before the agent exists, so no spawn follows. The reason is the gate's code when its message names one (`not_in_plan`, `builtin_agent_in_run`, `missing_lines`, `no_plan_review`, `light_path_multi`, `file_overlap`, `dependency_cycle` and the rest; since 2.1.0 also `wave_full`, `replan_required`, `worktree_base_not_head` and `implementer_unfinished`), else the code the plan check's message stands for (`GATE_REASONS` and `GATE_PHRASES` in `dashboard/register.tsx`, a list of its own: the pane cannot import the hooks).
     - A `<reason>_gave_up` launch went through and is not logged as blocked.
 12. **Used in this session.** What the whole session used, like the Claude desktop app's list. One row per kind, with as many names as fit, then `+N`. It is kept across runs (a new run does not reset it) and drawn once anything was used, also before any agent.
     - `skills`: skills expanded for the model (`skill.prompt`: a `/name` command, the Skill tool, or a worker's preloaded skill), in first-use order.
@@ -237,6 +238,7 @@ Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, tr
 | `↻` | a retry connector, a retry card's connector, a loop-back label | amber running, green passed, red failed |
 | `✚ new` | a slice added by a replan (on the card's attempt line) | dim |
 | `⚑` | a RISKY slice (progress line) | as the line |
+| `review N/2` | a RISKY slice under the second review rule, N of its two passing reviews in (progress line) | as the line |
 | `⇧opus?`, `⇧opus✔` | an opus review is needed and none passed yet, or one passed (progress line) | as the line |
 | `C1✔`, `C1✓`, `C1✖`, `C1·` | a checked constraint passed by a command, passed by reading, failed, not answered (progress line) | as the line |
 | `↻ replan N` | the plan was extended by a `PLAN REVIEW` with `REPLAN: N` (progress heading) | bold |
@@ -259,7 +261,7 @@ Arrows join the boxes in turn: input to orchestrator, orchestrator to triage, tr
 - **Agent events.** The `Agent` spawn event gives the role, model and start time. The turn-complete event gives the reply, the token usage and the end time.
 - **Reply status** follows the one [STATUS rule](glossary.md#s); a reply with no STATUS line counts as done, except a reviewer's, which gave no verdict and is drawn as failed. A reviewer's status is its [counted status](glossary.md#c). The reply's constraint answers, OPEN items and `GAP:` lines feed the marks.
 - **Test-gate records.** At each agent start and end and at each prompt the pane reads the last MiB of each `gates.jsonl` the hooks may write (the project's `.claude/state/`, and the per-user and plugin state dirs for this project), read only. It keeps the records of the implementers it knows whose reason is `tests_failed_isolated`, `max_blocks_reached` or `bugfix_unverified_gave_up`, for the `⚠` marks and the doubt signals. When a file is longer than that, it skips the first, possibly cut, line and shows `⚠ older test-gate records not read (gates.jsonl over 1 MiB)` under the slices.
-- **The gates' settings.** At each session start the pane reads `ORCH_RUN_STALE_MIN`, `ORCH_GAP_MIN` and `ORCH_ESCALATION` as the hooks read them: the environment variable when it is set (even empty), else the plugin setting when it is not empty, else the default (30 minutes, 80, the escalation rule). The standalone `dist/dashboard` declares no plugin settings, so there only the environment and the defaults apply.
+- **The gates' settings.** At each session start the pane reads `ORCH_RUN_STALE_MIN`, `ORCH_GAP_MIN` and `ORCH_ESCALATION` as the hooks read them: the environment variable when it is set (even empty), else the plugin setting when it is not empty, else the default (30 minutes, 80, the escalation rule). Since 2.1.0 it also reads `ORCH_SECOND_REVIEW` from the environment only (there is no plugin setting): `off`, in any case, turns the second review rule off. The standalone `dist/dashboard` declares no plugin settings, so there only the environment and the defaults apply.
 - **Tool calls** give a running agent's latest tool. A denied `Agent` call gives a blocked log entry. A main-session `SendMessage` to an agent that has ended opens its resumed record ("Attempts").
 - **The route verdict** comes from the `route` tool, or from the result of a main-session `npm run route` call.
 - **The plan** comes from the `SLICE:` and `GOAL:` lines of the latest `PLAN REVIEW` brief that names a slice ("Progress" above).
@@ -319,6 +321,7 @@ implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
 - The changed-file count runs `git status` for tracked files only, with no index lock, for at most about a second. Past that the line shows no count.
 - Folder and model names print as they are: a backslash in a name shows as a backslash.
 - `src/statusline.test.ts` covers it (skipped without `jq`).
+- Since 2.1.0 a TERM, INT or HUP that arrives while git starts no longer leaves git running. The script records the signal from before git starts until both job ids are stored, then acts on it, and its EXIT cleanup also ends the process group of every job still listed. Two tests ("a SIGTERM just before STATUS_PID=$!", "a SIGTERM just before WATCH_PID=$!") send the signal at those two points from a DEBUG trap read through `BASH_ENV`. They ran on macOS bash 3.2; Linux bash was not run on the release machine. A copy installed earlier is not updated: run `npm run install-statusline -- --force` again to get the fix.
 
 A plugin cannot set `statusLine`, so turning it on takes two steps:
 
@@ -357,4 +360,5 @@ curl -fsSL https://raw.githubusercontent.com/0xcvaliente/claude-code-orchestrati
 - The mod does not route [workflow agents](glossary.md#w): its `agent.spawn` handler only records the spawn, so workflow researchers are still not routed. A probe showed that routing them there is feasible; it is not built ([native-mode.md, Checked live](native-mode.md#checked-live), Check G; [live checks: workflow agents](data/live-checks-workflow.md#answers)).
 - "Used in this session" keeps the last 300 skills, connectors and files of each list, and shows file base names, so two files with the same name show twice.
 - The stacked bar is at most 40 cells wide and at least 10, and each model with tokens needs one cell. It would overflow only with more such models than cells, which in practice means a very large number of distinct models.
+- The second review rule (2.1.0) on the pane. A slice that becomes RISKY only through a replan after its implementer was launched uses the two-review rule on its slice line, but its diagram card keeps the one-review rule. The pane's hand-back time is the moment it sees the `SubagentHandback` tool call, which can differ slightly from the time of the hook's record in `handbacks.jsonl`. The pane does not read `handbacks.jsonl`, so it cannot tell when the hooks could not read it and fell back to one review.
 - Status line widths follow Unicode's East_Asian_Width and emoji properties. A terminal that draws ambiguous-width characters as two columns shows those rows wider than counted.

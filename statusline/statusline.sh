@@ -54,23 +54,33 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   # each run in a process group of their own (set -m); the script waits for git itself, and the watchdog kills
   # git's group (git and everything it started) at the limit, in which case the line shows no dirty count. The
   # EXIT trap kills both groups and removes the temp file, also when the script itself is killed.
-  DIRTY=""; STATUS_PID=""; WATCH_PID=""
+  # From the temp file to the storing of both job ids, TERM, INT and HUP are only recorded (a signal between a fork
+  # and its `$!` assignment had run the EXIT trap with the id still empty, leaving that group running) and acted on
+  # once both ids are set. Recorded, never ignored: an ignored signal is inherited by git, which the watchdog ends with TERM.
+  DIRTY=""; STATUS_PID=""; WATCH_PID=""; STATUS_OUT=""; GOT_SIG=""
+  git_cleanup() {
+    local p
+    [ -n "$WATCH_PID" ] && kill -TERM -- "-$WATCH_PID" 2>/dev/null
+    [ -n "$STATUS_PID" ] && kill -TERM -- "-$STATUS_PID" 2>/dev/null
+    # second line of defence: the group of any job still listed
+    for p in $(jobs -p 2>/dev/null); do kill -TERM -- "-$p" 2>/dev/null; done
+    [ -n "$STATUS_OUT" ] && rm -f "$STATUS_OUT"
+    WATCH_PID=""; STATUS_PID=""; STATUS_OUT=""
+  }
+  trap git_cleanup EXIT
+  trap 'GOT_SIG=143' TERM; trap 'GOT_SIG=130' INT; trap 'GOT_SIG=129' HUP
   STATUS_OUT=$(mktemp "${TMPDIR:-/tmp}/statusline.XXXXXX" 2>/dev/null)
-  if [ -n "$STATUS_OUT" ]; then
-    git_cleanup() {
-      [ -n "$WATCH_PID" ] && kill -TERM -- "-$WATCH_PID" 2>/dev/null
-      [ -n "$STATUS_PID" ] && kill -TERM -- "-$STATUS_PID" 2>/dev/null
-      [ -n "$STATUS_OUT" ] && rm -f "$STATUS_OUT"
-      WATCH_PID=""; STATUS_PID=""; STATUS_OUT=""
-    }
-    trap git_cleanup EXIT
-    trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+  if [ -n "$STATUS_OUT" ] && [ -z "$GOT_SIG" ]; then
     set -m
     git --no-optional-locks status --porcelain --untracked-files=no > "$STATUS_OUT" 2>/dev/null < /dev/null &
     STATUS_PID=$!
     (sleep 1; kill -TERM -- "-$STATUS_PID" || kill -TERM "$STATUS_PID") > /dev/null 2>&1 < /dev/null &
     WATCH_PID=$!
     set +m
+  fi
+  trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+  [ -n "$GOT_SIG" ] && exit "$GOT_SIG"
+  if [ -n "$STATUS_PID" ]; then
     wait "$STATUS_PID" 2>/dev/null
     rc=$?
     STATUS_PID=""

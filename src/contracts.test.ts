@@ -9,6 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TRIAGE } from "./config.js";
+import { GAP_MIN_DEFAULT } from "../.claude/hooks/brief.mjs";
+import { PLAN_SLICE_CAP, RESEARCH_QUESTION_CAP, WAVE_CAP_DEFAULT } from "../.claude/hooks/limits.mjs";
+import { PLAN_CHECK_BLOCK_REASONS, REVIEW_GATE_BLOCK_REASONS } from "../.claude/hooks/reasons.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -217,7 +220,7 @@ test("worker agents and the conventions skill describe their 0.4.0 lines", () =>
 });
 
 test("model-facing text names gate reasons but no environment switch", () => {
-  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE|ALLOW_HAIKU|SKILL_CREATE|SKILLS_REPO_PRIVATE|SKILLS_REPO_PUBLIC|WORKFLOW_GUARD)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b|\ballow_haiku\b|\bskill_create\b|\bskills_repo_(private|public)\b|\bworkflow_guard\b/;
+  const switches = /ORCH_(ESCALATION|ALLOW_BUILTINS|RUN_STALE_MIN|GAP_MIN|STALL_GATE|GUARDS|READ_ROUTER|QUOTE_CHECK|BASELINE|BUGFIX_CHECK|SKILL_HINTS|TEST_CMD|JUDGE|ALLOW_HAIKU|SKILL_CREATE|SKILLS_REPO_PRIVATE|SKILLS_REPO_PUBLIC|WORKFLOW_GUARD|WAVE_MAX)\b|CLAUDE_PLUGIN_OPTION_|\bskill_hints\b|\ballow_haiku\b|\bskill_create\b|\bskills_repo_(private|public)\b|\bworkflow_guard\b/;
   const authoring = [".claude/skills/skill-authoring/SKILL.md", ...["skill-shape", "evaluation", "compliance"].map((f) => `.claude/skills/skill-authoring/references/${f}.md`)];
   const files = [ORCH, REVIEWER, IMPLEMENTER, RESEARCHER, ".claude/agents/integrator.md", SKILL, CONVENTIONS, ...authoring];
   for (const file of files) assert.doesNotMatch(read(file).replace(/^---\n[\s\S]*?\n---\n/, ""), switches, `${file} names a switch`);
@@ -280,6 +283,30 @@ test("the orchestrator, the route skill and the nudge cap plan-shaping skills at
     assert.match(text, /PLAN REVIEW/, `${file} puts the decision in the PLAN REVIEW brief`);
   }
   assert.match(read(ORCH), /stays in your context/, `${ORCH} says why it loads few skills itself`);
+});
+
+// --- Two reviewers for a RISKY slice (2.1.0): the rule the review gate's `second_review_required` enforces. ---
+test("the orchestrator, the route skill and the nudge state the two-reviewer rule for RISKY slices the same way", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.doesNotMatch(text, /RISKY slice with [^.]*opus"? from the start/, `${file} no longer reviews a RISKY slice with one opus reviewer`);
+    assert.match(text, /RISKY slice gets two [^.;]*in one message with the same brief, one with `?model:? "?opus"?`? and one on the default model/, `${file} launches two reviewers at once`);
+    assert.match(text, /passes only when both pass/, `${file} needs both passes`);
+    assert.match(text, /second_review_required/, `${file} names the gate's reason`);
+    assert.match(text, /wait for both reports before you validate gaps or retry/i, `${file} waits for both reports`);
+    assert.match(text, /new attempt is reviewed by two fresh reviewers, never a resumed one/, `${file} reviews a new attempt with fresh reviewers`);
+    assert.match(text, /gap validation confirms no gap, its pass counts as one of the two/, `${file} counts a validation's pass as one of the two`);
+    assert.match(text, /one more fresh reviewer, with `?model:? "?opus"?`? when no pass of the attempt ran on opus/, `${file} sends one more fresh reviewer after a validation`);
+    assert.match(text, /refused with `?tests_failed_after_report`?, resume the implementer first and launch the two reviewers only after it has reported again/, `${file} resumes the implementer before the two reviewers`);
+  }
+  const stop = read(ORCH).split("\n").find((l) => l.startsWith("A Stop hook blocks your final reply while"));
+  assert.ok(stop, `${ORCH} lists what the Stop hook blocks on`);
+  assert.match(stop, /RISKY slice[^.]*`second_review_required`/, `${ORCH} names second_review_required where it lists what the Stop hook blocks on`);
+});
+
+test("the reviewer reviews on its own when another reviewer reviews the same slice", () => {
+  const body = read(REVIEWER).replace(/^---\n[\s\S]*?\n---\n/, "");
+  assert.match(body, /Another reviewer may review the same slice at the same time\. Your verdict rests on your own checks alone: do not look for that reviewer's report and do not rely on it\./);
 });
 
 test("the plan reviewer checks each slice's skill choice", () => {
@@ -388,4 +415,105 @@ test("the integrator checks that no merge is left in progress after an abort and
   assert.match(conflict, /Never start a merge while one is in progress/, "never continues while a merge is in progress");
   assert.doesNotMatch(conflict, /\$\?|\$\{|PIPESTATUS/, "the check needs no exit-code variable");
   assert.match(body, /^OPEN: /m, "the reply format has an OPEN line for the tree state");
+});
+
+// --- 2.1.0 caps (one home: .claude/hooks/limits.mjs) and the block reasons the orchestrator must know. ---
+test("the orchestrator, the route skill and the nudge state the caps of limits.mjs", () => {
+  const orch = read(ORCH);
+  const step1 = orch.split("\n").find((l) => l.startsWith("1. Explore"))!;
+  const step2 = orch.split("\n").find((l) => l.startsWith("2. Plan"))!;
+  assert.match(step1, new RegExp(`ask at most ${RESEARCH_QUESTION_CAP} narrow questions`), `${ORCH} step 1 caps researcher questions`);
+  assert.match(step2, new RegExp(`\\(at most ${PLAN_SLICE_CAP} slices\\)`), `${ORCH} step 2 caps slices`);
+  assert.match(orch, new RegExp(`Wave: at most ${WAVE_CAP_DEFAULT} implementers run at a time`), `${ORCH} step 3 states the wave cap`);
+  assert.match(orch, new RegExp(`launch ${WAVE_CAP_DEFAULT} and start the next ready slice`), `${ORCH} launches a full wave, then the next ready slice`);
+  const texts: [string, string][] = [[ORCH, orch], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    // Every cap a text states matches limits.mjs; no other number stands where a cap does.
+    for (const m of text.matchAll(/at most (\d+) (?:narrow |researcher )?questions/g)) assert.equal(Number(m[1]), RESEARCH_QUESTION_CAP, `${file} states ${m[0]}`);
+    for (const m of text.matchAll(/at most (\d+) slices/g)) assert.equal(Number(m[1]), PLAN_SLICE_CAP, `${file} states ${m[0]}`);
+    for (const m of text.matchAll(/at most (\d+) implementers run at a time/g)) assert.equal(Number(m[1]), WAVE_CAP_DEFAULT, `${file} states ${m[0]}`);
+    assert.match(text, new RegExp(`at most ${RESEARCH_QUESTION_CAP} (?:narrow |researcher )?questions`, "i"), `${file} caps researcher questions`);
+    assert.match(text, new RegExp(`at most ${PLAN_SLICE_CAP} slices`), `${file} caps slices`);
+    assert.match(text, new RegExp(`at most ${WAVE_CAP_DEFAULT} implementers run at a time`), `${file} caps implementers at once`);
+    assert.match(text, /`?wave_full`? means wait for a running implementer's report, then launch it again|`wave_full` is not a plan problem: wait for a running implementer's report, then launch the slice again/, `${file} says what to do on wave_full`);
+    assert.match(text, /in worktrees the plan check may allow fewer|for slices in worktrees the plan check may allow fewer/, `${file} says worktree waves may be smaller`);
+  }
+});
+
+test("the plan reviewer checks the slice cap of limits.mjs", () => {
+  const body = read(REVIEWER).replace(/^---\n[\s\S]*?\n---\n/, "");
+  const plan = body.split("\n").find((l) => l.startsWith("- Plan review"));
+  assert.ok(plan, `${REVIEWER} has its plan-review rule`);
+  assert.match(plan, new RegExp(`there are at most ${PLAN_SLICE_CAP} slices`), `${REVIEWER} checks the slice cap`);
+  for (const m of body.matchAll(/at most (\d+) slices/g)) assert.equal(Number(m[1]), PLAN_SLICE_CAP, `${REVIEWER} states ${m[0]}`);
+});
+
+test("the gap cutoff the three texts state equals the code's default", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    const stated = [...text.matchAll(/gap (?:with|of) confidence (\d+) or more/g)].map((m) => Number(m[1]));
+    assert.ok(stated.length > 0, `${file} states the gap cutoff`);
+    for (const n of stated) assert.equal(n, GAP_MIN_DEFAULT, `${file} states a cutoff of ${n}`);
+  }
+});
+
+/** The block reasons plan-check.mjs can give, read from its code; fails when a block path it cannot read appears. */
+function planCheckBlockReasons(): string[] {
+  const src = read(".claude/hooks/plan-check.mjs");
+  const reasons = new Set<string>();
+  const args = [...src.matchAll(/\bdecide\(\s*"block",\s*([^,]+),/g)].map((m) => m[1]!.trim());
+  for (const a of args) {
+    const lit = a.match(/^"([a-z_]+)"$/);
+    if (lit) reasons.add(lit[1]!);
+    else assert.equal(a, "reason", `plan-check.mjs blocks with a reason the test cannot read: ${a}`);
+  }
+  // The one non-literal block is the skill-slice helper `gate(reason, message)`.
+  assert.equal(args.filter((a) => a === "reason").length, 1, "plan-check.mjs has one block through the skill-slice helper");
+  for (const m of src.matchAll(/\bgate\(\s*"([a-z_]+)"/g)) reasons.add(m[1]!);
+  // The reviewer hold exits 2 itself with HOLD_REASON; decide() is the only other exit 2.
+  const hold = src.match(/const HOLD_REASON = "([a-z_]+)"/)?.[1];
+  assert.ok(hold, "plan-check.mjs names HOLD_REASON");
+  reasons.add(hold);
+  assert.equal(src.match(/process\.exit\(2\)/g)?.length, 2, "plan-check.mjs exits 2 only in decide() and the reviewer hold");
+  for (const known of ["not_in_plan", "wave_full", "skill_limit", "tests_failed_after_report"]) assert.ok(reasons.has(known), `the reading of plan-check.mjs finds ${known}`);
+  return [...reasons];
+}
+
+/** The block reasons review-gate.mjs can give: every problem's reason literal (block() takes only live.reason). */
+function reviewGateBlockReasons(): string[] {
+  const src = read(".claude/hooks/review-gate.mjs");
+  const calls = [...src.matchAll(/(?<!function )\bblock\(([^,()\n]+),/g)].map((m) => m[1]!.trim());
+  assert.deepEqual(calls, ["live.reason"], "review-gate.mjs blocks only with the reason of a listed problem");
+  assert.doesNotMatch(src, /decide\(\s*"block"/, "review-gate.mjs blocks only through block()");
+  assert.equal(src.match(/process\.exit\(2\)/g)?.length, 1, "review-gate.mjs exits 2 only in block()");
+  const reasons = new Set([...src.matchAll(/\breason: "([a-z_]+)"/g)].map((m) => m[1]!));
+  for (const known of ["opus_review_required", "implementer_unfinished", "last_reviewer_failed"]) assert.ok(reasons.has(known), `the reading of review-gate.mjs finds ${known}`);
+  return [...reasons];
+}
+
+test("reasons.mjs lists exactly the block reasons the hooks' code gives, both ways", () => {
+  const sorted = (xs: readonly string[]) => [...new Set(xs)].sort();
+  assert.ok(Object.isFrozen(PLAN_CHECK_BLOCK_REASONS) && Object.isFrozen(REVIEW_GATE_BLOCK_REASONS), "reasons.mjs exports frozen arrays");
+  assert.equal(new Set(PLAN_CHECK_BLOCK_REASONS).size, PLAN_CHECK_BLOCK_REASONS.length, "reasons.mjs: no duplicate plan-check reason");
+  assert.equal(new Set(REVIEW_GATE_BLOCK_REASONS).size, REVIEW_GATE_BLOCK_REASONS.length, "reasons.mjs: no duplicate review-gate reason");
+  assert.deepEqual(sorted(PLAN_CHECK_BLOCK_REASONS), sorted(planCheckBlockReasons()), "PLAN_CHECK_BLOCK_REASONS equals the reasons plan-check.mjs blocks with");
+  assert.deepEqual(sorted(REVIEW_GATE_BLOCK_REASONS), sorted(reviewGateBlockReasons()), "REVIEW_GATE_BLOCK_REASONS equals the reasons review-gate.mjs blocks with");
+  // A list, not a run-time dependency: it imports nothing, and no hook imports it.
+  assert.doesNotMatch(read(".claude/hooks/reasons.mjs"), /^\s*import\b|\bimport\(|\brequire\(/m, "reasons.mjs imports nothing");
+  for (const hook of ["plan-check.mjs", "review-gate.mjs"]) assert.doesNotMatch(read(`.claude/hooks/${hook}`), /reasons\.mjs/, `${hook} does not import reasons.mjs`);
+});
+
+test("the orchestrator's Block reasons section names every block reason of the plan check and the review gate", () => {
+  const list = section(read(ORCH), /^## Block reasons/);
+  const plan = list.slice(list.indexOf("- Plan check"), list.indexOf("- Review gate"));
+  const review = list.slice(list.indexOf("- Review gate"));
+  for (const r of planCheckBlockReasons()) assert.ok(plan.includes(`\`${r}\``), `${ORCH} Block reasons, plan check: names ${r}`);
+  for (const r of reviewGateBlockReasons()) assert.ok(review.includes(`\`${r}\``), `${ORCH} Block reasons, review gate: names ${r}`);
+  // The section against the module, each part against its own list, both ways.
+  const named = (text: string) => [...new Set([...text.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)].map((m) => m[1]!))].sort();
+  assert.deepEqual(named(plan), [...PLAN_CHECK_BLOCK_REASONS].sort(), `${ORCH} Block reasons, plan check: names exactly PLAN_CHECK_BLOCK_REASONS`);
+  assert.deepEqual(named(review), [...REVIEW_GATE_BLOCK_REASONS].sort(), `${ORCH} Block reasons, review gate: names exactly REVIEW_GATE_BLOCK_REASONS`);
+  // Every reason the section names is one the hooks can give (no stale entries).
+  const known = new Set([...planCheckBlockReasons(), ...reviewGateBlockReasons()]);
+  for (const m of list.matchAll(/`([a-z]+(?:_[a-z]+)+)`/g)) assert.ok(known.has(m[1]!), `${ORCH} Block reasons names ${m[1]}, which no hook gives`);
 });

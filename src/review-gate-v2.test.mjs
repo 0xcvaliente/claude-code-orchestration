@@ -28,11 +28,13 @@ const R = (...items) => ({ launches: items.flatMap((i) => (i.launch ? [i.launch]
 const planLaunch = (min, prompt = PLAN) => ({ launch: launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { ts: at(min), sessionId: "s1", agentId: `plan${min}` }) });
 /** The plan reviewer `agentId` (plan<launch min>) stops at `min`. @param {number} min @param {string} agentId @returns {Item} */
 const planStop = (min, agentId) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "reviewer", slice: "plan", reply: "STATUS: pass" }) });
+// These fold tests pin the one-review rule; the second review rule (a RISKY slice needs two passes) is off here and
+// covered by src/second-review.test.mjs.
 /** @param {number} min @param {string} slice @returns {Item[]} */
 const implAttempt = (min, slice) => {
   const agentId = `impl-${slice}-${min}`;
   return [
-    { launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none` }, { ts: at(min), sessionId: "s1", agentId }) },
+    { launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none` }, { ts: at(min), sessionId: "s1", agentId, env: { ORCH_SECOND_REVIEW: "off" } }) },
     { stop: stopRecord({ ts: at(min + 0.5), sessionId: "s1", agentId, role: "implementer", reply: "STATUS: pass" }) },
   ];
 };
@@ -445,7 +447,8 @@ test("Stop gate: the light path's only implementer, unfinished, is no longer no_
 });
 
 test("Stop gate: a fresh implementer that finishes the slice takes an unfinished one over; another slice's stop does not", () => {
-  const s = session({ ORCH_ESCALATION: "off" });
+  // Slice b is RISKY in the plan; this test is about the unfinished implementer, not the second review rule.
+  const s = session({ ORCH_ESCALATION: "off", ORCH_SECOND_REVIEW: "off" });
   s.plan();
   s.launch(IMPL, implBrief("a"));
   s.impl("b"); // a sibling slice finishing later does not cover slice a
@@ -473,7 +476,8 @@ test("Stop gate: an implementer start with no launch record (a workflow agent) i
 });
 
 test("Stop gate: an unfinished implementer is gated once for the session: two blocks, one give-up, then left alone", () => {
-  const s = session({ ORCH_ESCALATION: "off" });
+  // Slice b is RISKY in the plan; this test is about the unfinished implementer, not the second review rule.
+  const s = session({ ORCH_ESCALATION: "off", ORCH_SECOND_REVIEW: "off" });
   s.plan();
   const orphan = s.launch(IMPL, implBrief("a"));
   const stop = () => s.run("review-gate.mjs", { background_tasks: [] });

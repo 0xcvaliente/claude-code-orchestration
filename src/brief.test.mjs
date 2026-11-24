@@ -333,9 +333,11 @@ const R = (...items) => ({
 });
 /** @param {number} min @param {string} [prompt] @returns {Item} */
 const planLaunch = (min, prompt = PLAN) => ({ launch: launchRecord({ subagent_type: "orchestration:reviewer", prompt }, { ts: at(min), sessionId: "s1", agentId: `plan${min}` }) });
+// These fold tests pin the one-review rule; the second review rule (a RISKY slice needs two passes) is off here and
+// covered by src/second-review.test.mjs.
 /** @param {number} min @param {string} slice @param {string} [extra] @param {string} [agentId] @returns {Item} */
 const impl = (min, slice, extra = "", agentId = `impl-${slice}-${min}`) => ({
-  launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none\n${extra}` }, { ts: at(min), sessionId: "s1", agentId }),
+  launch: launchRecord({ subagent_type: "implementer", prompt: `SLICE: ${slice}\nFILES: ${slice}.py\nDEPENDS: none\n${extra}` }, { ts: at(min), sessionId: "s1", agentId, env: { ORCH_SECOND_REVIEW: "off" } }),
 });
 /** An implementer stop; the slice is joined from the launch by agent id (a SendMessage resume has no new launch). @param {number} min @param {string} agentId @returns {Item} */
 const implStop = (min, agentId) => ({ stop: stopRecord({ ts: at(min), sessionId: "s1", agentId, role: "implementer", reply: "STATUS: pass" }) });
@@ -353,7 +355,7 @@ const attempt = (min, slice, verdict, extra = "") => [impl(min, slice, extra), i
 
 test("launch and stop records carry parsed fields, never the brief or reply text", () => {
   const l = launchRecord({ subagent_type: "orchestration:implementer", prompt: "SLICE: a\nFILES: a.py\nDEPENDS: none\nRISKY: yes\nCHECKS: C2\nsecret body text" }, { ts: "t", sessionId: "s", agentId: "x1" });
-  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null, sources: [], read: null, kind: null, validate: false, urls: [], skills: [] });
+  assert.deepEqual(l, { ts: "t", session_id: "s", agent_id: "x1", agent_type: "implementer", slice: "a", files: ["a.py"], depends: [], path: null, risky: true, checks: ["C2"], focus: null, workflow: false, model: null, isPlanReview: false, replan: null, sources: [], read: null, kind: null, validate: false, urls: [], skills: [], reviews_needed: 2 });
   assert.doesNotMatch(JSON.stringify(l), /secret body text/);
   const p = launchRecord({ subagent_type: "reviewer", model: "opus", prompt: PLAN }, { ts: "t" });
   assert.equal(p.slice, "plan");
