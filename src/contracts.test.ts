@@ -374,7 +374,14 @@ test("the three texts launch a non-RISKY slice's one review on opus directly whe
 test("the three texts start a slice with no checked constraints on the default model", () => {
   const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
   for (const [file, text] of texts) {
-    assert.match(text, /A slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model\./, `${file} starts a slice with no checked constraints on the default model`);
+    assert.match(text, /On its first review, a slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model;/, `${file} starts a slice with no checked constraints on the default model`);
+  }
+});
+
+test("the three texts send a retry after a failed review to opus directly whether or not the slice has checked constraints", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /a slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model; a retry after a failed review still goes to opus directly\./, `${file} exempts a retry from the no-checked-constraints sentence`);
   }
 });
 
