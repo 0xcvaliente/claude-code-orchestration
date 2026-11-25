@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Removed
+
+- **The main status line** (`statusline/statusline.sh`, its test `src/statusline.test.ts`, `scripts/install-statusline.sh` and `npm run install-statusline`). It was a personal script, not part of the plugin, and the repo no longer ships one. A copy already installed in your Claude Code config folder keeps working until you remove it and its `statusLine` setting. The worker rows under the prompt (the mod's `AgentRow` hook) and `.claude/hooks/subagent-statusline.mjs` are unchanged. [docs/dashboard.md](docs/dashboard.md), "Status lines", [docs/development.md](docs/development.md) and `CLAUDE.md` no longer describe it; [docs/limits.md](docs/limits.md), J, keeps its 2.1.0 item and notes the removal.
+
 ## [2.1.2] - 2026-11-25
 
 2.1.2 ends a run of code in a git repository with a hand-off: the integrator commits the passed slices on a new branch, ready for the person's `/ship`, and publishing is `/ship`'s by default. It also silences the shell's stderr for the status line's final cleanup, aimed at a stray line seen in CI and not yet shown gone, and fixes the count of unlabelled reviews in `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`; a status line installed earlier needs `npm run install-statusline -- --force`. After a run of code in git, type `/ship` to push the hand-off branch and open its pull request.

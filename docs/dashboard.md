@@ -1,6 +1,6 @@
 # The pane and status lines
 
-The [pane](glossary.md#p) is a live view of a run, drawn beside the chat while the run happens. This page says how to open it, what each part shows and where its data comes from. It also covers the two status lines: the row under the prompt for each [worker](glossary.md#w), and `statusline/statusline.sh`.
+The [pane](glossary.md#p) is a live view of a run, drawn beside the chat while the run happens. This page says how to open it, what each part shows and where its data comes from. It also covers the status line row under the prompt for each [worker](glossary.md#w).
 
 The pane is a Claude Code function-hooks [mod](glossary.md#m). Its source is `dashboard/register.tsx`, and this page states what that code does. Users need "Opening it" and "Status lines"; the rest is for maintainers.
 
@@ -291,7 +291,7 @@ npm run build-plugin      # rebuild dist/plugin and dist/dashboard from dashboar
 
 ## Status lines
 
-Two status lines go with this repo. The first ships with the mod; the second you install yourself.
+The mod draws the row of each worker under the prompt. The repo no longer ships a main status line: the script that used to be here was a personal one and was removed after 2.1.2 ([CHANGELOG.md](../CHANGELOG.md), Unreleased).
 
 ### The row of each worker
 
@@ -310,37 +310,6 @@ implementer s2 #2 risky · opus · 41.2k (21%) · Running the tests
 - **Other agents** (built-ins, other plugins) keep the rows Claude Code draws.
 - **Your own setting wins.** A `subagentStatusLine` in your own or the project's settings draws the row first, and the mod leaves a row that arrives already drawn. `.claude/hooks/subagent-statusline.mjs` is kept for that use: name it in your own `subagentStatusLine` to get the same rows from the launch records (`journal-launches.jsonl`).
 - **Checked** on the mod's test host (`npm run test-dashboard`, which CI runs since 2.0.0). Rows in this format were captured once in a live interactive session ([probes b2](data/probes-2.0.0-b2.md), Probe 1), but which component drew them there was not established ([Limits](limits.md), A, K2).
-
-### statusline.sh
-
-`statusline/statusline.sh` is the status line used with this repo. It needs `jq`; without it, it prints one line saying so. It prints two lines:
-
-1. The model in brackets, the folder's name, and in a git repository the branch with `*N` changed tracked files. It adds `+A -R`, the lines added and removed in the session.
-2. The 5-hour and 7-day rate-limit windows with the time left and a dot bar, when Claude Code sends them (Claude.ai subscribers, after the first response). Then the context fill as a dot bar: green, yellow from 70%, red from 90%.
-
-- The changed-file count runs `git status` for tracked files only, with no index lock, for at most about a second. Past that the line shows no count.
-- Folder and model names print as they are: a backslash in a name shows as a backslash.
-- `src/statusline.test.ts` covers it (skipped without `jq`).
-- Since 2.1.0 a TERM, INT or HUP that arrives while git starts no longer leaves git running. The script records the signal from before git starts until both job ids are stored, then acts on it, and its EXIT cleanup also ends the process group of every job still listed. Two tests ("a SIGTERM just before STATUS_PID=$!", "a SIGTERM just before WATCH_PID=$!") send the signal at those two points from a DEBUG trap read through `BASH_ENV`. They ran on macOS bash 3.2; Linux bash was not run on the release machine. A copy installed earlier is not updated: run `npm run install-statusline -- --force` again to get the fix.
-
-A plugin cannot set `statusLine`, so turning it on takes two steps:
-
-```bash
-npm run install-statusline              # copy it to ~/.claude/statusline.sh (or $CLAUDE_CONFIG_DIR/statusline.sh) and print the setting
-npm run install-statusline -- --force   # replace a different file already there (without --force it refuses)
-```
-
-Then add the setting it prints to `~/.claude/settings.json`:
-
-```json
-{ "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" } }
-```
-
-Without a checkout, download it and add the same setting:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/0xcvaliente/claude-code-orchestration/main/statusline/statusline.sh -o ~/.claude/statusline.sh
-```
 
 ## Limits
 
