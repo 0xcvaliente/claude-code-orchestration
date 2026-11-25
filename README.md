@@ -131,11 +131,11 @@ Every gate, its reason codes and its limits: [Gates and guards](docs/gates.md). 
 **What it adds to Claude Code.** Claude Code already runs subagents in the background, scripts workflows, forks helpers, reviews diffs with `/code-review` and weighs intent in auto mode. This plugin adds:
 
 - **Verification**: a review gate per slice, a [constraints ledger](docs/glossary.md#c) (the task's hard rules, each checked by id), an opus review when in doubt, checked retries (a fresh reviewer confirms the gaps before a retry), and a test gate that compares failures with the base.
-- **Routing cost**: a plain session when a task does not split. On small and medium coding tasks, the orchestrate route cost 1.2x to 2.1x the tokens of a plain session for the same 100% score ([results](bench/RESULTS.md#results-why-a-router)).
+- **Routing cost**: a plain session when a task does not split. On small and medium coding tasks, the orchestrate route cost 1.2x to 2.1x the tokens of a plain session for the same 100% score (measured on 0.1.5, 2026-10-15; [results](bench/RESULTS.md#results-why-a-router)).
 - **Safety**: role limits, guards, and denies for fork and built-in subagents.
 - **Resumability**: a run journal that outlives the session.
 
-It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7% on the k2 task by delegating to them itself ([results](bench/RESULTS.md#results-built-in-subagents-blocked)). Area by area: [What Claude Code ships vs what this plugin adds](docs/native-vs-plugin.md).
+It does not win on raw score: with the built-ins allowed, plain Opus scored 99.7% on the k2 task by delegating to them itself (measured on 0.1.5, 2026-10-15; [results](bench/RESULTS.md#results-built-in-subagents-blocked)). Area by area: [What Claude Code ships vs what this plugin adds](docs/native-vs-plugin.md).
 
 ## Limits and safety
 
