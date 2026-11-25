@@ -200,6 +200,14 @@ const PENDING_NOTE =
 // record is paired with it, or its record says the gate ended without deciding (run.mjs NO_RESULT_REASONS).
 const NO_RESULT_NOTE =
   "\n\nTest gate (added by the plan check): the test gate left no result that can be tied to this slice's latest implementer stop, and it is no longer running, so no test-gate run backs the worker's report. Do not rest a pass on the tests having passed; say in your report that the test gate left no result.";
+// The test gate's reasons (verify.sh log_gate) for "the whole suite ran at the stop and passed": tests_passed (its own
+// run) and tests_passed_cached (the stop reused its hand-back gate's passing run of the same tree). No other reason, and
+// no record without a suite_s (verify.sh 2.1.0: the seconds the suite ran; none when no suite ran), ever adds the note.
+const PASSED_REASONS = new Set(["tests_passed", "tests_passed_cached"]);
+// Appended to our reviewer's brief when the test-gate record paired with the slice's latest implementer stop is one of
+// PASSED_REASONS: the reviewer runs the slice's acceptance check, not the whole suite a second time.
+const PASSED_NOTE =
+  "\n\nTest gate (added by the plan check): the test gate ran the project's whole test suite at this slice's latest implementer stop, and it passed. Run the slice's own acceptance check from your brief, and do not run the whole suite again.";
 const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
 // The authoring skill a skill slice loads: the plugin's namespaced copy for the plugin's hook, else the project's.
 const AUTHORING = process.argv.includes("--plugin") ? "orchestration:skill-authoring" : "skill-authoring";
@@ -254,7 +262,7 @@ if (role === "implementer") {
       routed = null; // an unexpected error leaves the launch as it was
     }
   }
-  // Review hold: our reviewer of a slice (not a PLAN REVIEW) may be refused (exit 2 inside) or get the pending note.
+  // Review hold: our reviewer of a slice (not a PLAN REVIEW) may be refused (exit 2 inside) or get one of the test-gate notes (pending, no result, passed).
   const pending = !builtin && REVIEWER_TYPES.has(type) && holdOn(process.env) && typeof tool.prompt === "string" && h.slice && !isPlanReview(prompt) ? reviewHold(h.slice) : "";
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
   const drafts = !builtin && HINTED_TYPES.has(type) ? draftsText(null) : "";
@@ -294,7 +302,10 @@ function holdLog(rec) {
  *     while the gate may still be running (the stop is younger than run.mjs stopGateWindowMs: the gate's budget plus its
  *     overrun); past that window, or when the stop's record says the gate ended without deciding (NO_RESULT_REASONS), the
  *     no-result note (test_gate_no_result) is appended instead (2.0.1);
- *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an
+ *   - the stop's record says the whole suite ran and passed (suitePassed: allow with tests_passed or
+ *     tests_passed_cached, and a suite_s): the gate-passed note (test_gate_passed) is appended, so the reviewer runs the
+ *     slice's acceptance check and not the whole suite again;
+ *   - anything else (another allow, a warn, an environment or other bugfix_ block, still running, no implementer, an
  *     unreadable log): "" and no record.
  * @param {string} slice @returns {string}
  */
@@ -346,7 +357,23 @@ function reviewHold(slice) {
     holdLog({ decision: "note", reason: "test_gate_no_result", slice, agent_id: a.id });
     return NO_RESULT_NOTE;
   }
+  if (suitePassed(g)) {
+    holdLog({ decision: "note", reason: "test_gate_passed", slice, agent_id: a.id });
+    return PASSED_NOTE;
+  }
   return "";
+}
+
+/**
+ * True only for a SubagentStop test-gate record that says the whole suite ran and passed: decision allow, a reason in
+ * PASSED_REASONS, a suite_s of whole seconds (the suite ran; verify.sh writes none when it did not), and no mark of the
+ * hand-back gate (stopGateOf never pairs one; checked again here). Anything else, a warn included: false.
+ * @param {any} g @returns {boolean}
+ */
+function suitePassed(g) {
+  if (!g || typeof g !== "object" || g.decision !== "allow" || typeof g.reason !== "string" || !PASSED_REASONS.has(g.reason)) return false;
+  if (g.at === "handback" || (typeof g.handback_id === "string" && g.handback_id !== "")) return false;
+  return Number.isInteger(g.suite_s) && g.suite_s >= 0;
 }
 
 /**

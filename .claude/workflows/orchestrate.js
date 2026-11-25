@@ -1,7 +1,8 @@
 // Verification status.
 // TESTED with a stubbed runtime (src/workflow.test.mjs: fake agent(), parallel(), pipeline(), phase(), log()): the meta
 //   block is a pure literal whose phases match the phase() titles; the stage order (plan, explore, build, review, then
-//   integrate for isolated waves); the slice cap; retries with reviewer gaps and the failed result, in the shared tree
+//   integrate for isolated waves); the slice and question caps and the wave bound, pinned to .claude/hooks/limits.mjs;
+//   the opus review after a failing review whose gaps are all below the cutoff or all refuted; retries with reviewer gaps and the failed result, in the shared tree
 //   and after a failed merged review of an isolated slice; the short plan log line and the result's plan and summary; and that every
 //   implementer brief starts with `ORCHESTRATION: workflow`, which plan-check.mjs skips (run against the real hook).
 // VERIFIED live on Claude Code 2.1.314 (docs/data/live-checks-2026-10-31.md): SubagentStart and SubagentStop fire for
@@ -22,7 +23,13 @@ export const meta = {
 
 
 // args: { task: string, maxSlices?: number, maxRetries?: number, baseRefHead?: boolean, code?: boolean, plan?: object, skip?: string[],
-//         gapMin?: number, planCheck?: boolean, planReview?: boolean, refute?: boolean, escalateLast?: boolean }
+//         gapMin?: number, planCheck?: boolean, planReview?: boolean, refute?: boolean, escalateLast?: boolean, waveMax?: number }
+//   maxSlices (default 12): the most slices one plan may hold. The planner asks at most 6 research questions.
+//   waveMax (default 4): the most slices of one dependency wave that build at the same time, a whole number from 1 to 8
+//     (anything else counts as unset). The agents of this script never reach the plan check, so the script bounds itself:
+//     a pool starts the next ready slice as soon as one ends. Code in the shared tree still builds one slice at a time.
+//   The numbers 12, 6, 4 and 8 are the caps in .claude/hooks/limits.mjs (the script cannot import it at run time);
+//   src/workflow.test.mjs pins each copy to it.
 //   code: true (the default) = the task changes code: a parallel wave runs in worktrees, after a checkpoint commit and
 //     merged by the integrator, only when baseRefHead is true; otherwise its slices run one at a time in the shared
 //     folder, because each implementer's test gate runs the whole suite and parallel siblings would fail each other's.
@@ -40,7 +47,11 @@ export const meta = {
 //     more, then what is still wrong is fixed in code and each fix is logged. A plan given in args.plan is fixed in code.
 //   planReview (default true): a reviewer checks the plan; a gap at or above gapMin sends it back to the planner once.
 //   refute (default true): before a retry a reviewer tries to refute the gaps against the changes; only standing gaps go
-//     to the implementer, and a slice whose gaps are all refuted passes.
+//     to the implementer. When every gap is refuted the earlier failure is a doubt signal: a slice that is not risky gets
+//     an opus review and passes only if it passes (its gaps get an opus refute pass); a risky slice, whose reviews and
+//     refute pass already ran on opus, passes.
+//   A failing review whose gaps are all below gapMin counts as a pass with a doubt signal, so the slice gets the opus
+//   review before it is accepted.
 //   escalateLast (default true): the last implementer attempt (attempt maxRetries+1) runs on opus.
 //   maxRetries, refute and escalateLast hold for every slice. An isolated slice whose merged review fails gets the refute
 //   pass, then, while attempts remain, is rebuilt with the standing gaps in a new worktree from the current HEAD (which
@@ -50,7 +61,14 @@ export const meta = {
 // line per slice; a new session resumes with args.plan (that plan) and args.skip (the ids that passed).
 const task = (args && args.task) || ''
 if (!task) throw new Error('pass args.task')
-const MAX_SLICES = args && typeof args.maxSlices === 'number' && args.maxSlices > 0 ? args.maxSlices : 6
+// Caps: copies of PLAN_SLICE_CAP, RESEARCH_QUESTION_CAP, WAVE_CAP_DEFAULT and WAVE_CAP_CEILING in .claude/hooks/limits.mjs.
+const PLAN_SLICE_CAP = 12
+const RESEARCH_QUESTION_CAP = 6
+const WAVE_CAP_DEFAULT = 4
+const WAVE_CAP_CEILING = 8
+const MAX_SLICES = args && typeof args.maxSlices === 'number' && args.maxSlices > 0 ? args.maxSlices : PLAN_SLICE_CAP
+const WAVE_MAX =
+  args && Number.isInteger(args.waveMax) && args.waveMax >= 1 && args.waveMax <= WAVE_CAP_CEILING ? args.waveMax : WAVE_CAP_DEFAULT
 const MAX_RETRIES = args && typeof args.maxRetries === 'number' && args.maxRetries >= 0 ? args.maxRetries : 2
 // true only for a git repository whose settings set worktree.baseRef to "head": isolated worktrees then start from the local HEAD
 const BASE_REF_HEAD = !!(args && args.baseRefHead === true)
@@ -66,7 +84,7 @@ const KINDS = ['feature', 'bugfix', 'refactor', 'docs', 'other']
 
 const QUESTIONS = {
   type: 'object',
-  properties: { questions: { type: 'array', items: { type: 'string' }, maxItems: 4 } },
+  properties: { questions: { type: 'array', items: { type: 'string' }, maxItems: RESEARCH_QUESTION_CAP } },
   required: ['questions'],
 }
 // A slice's optional skills: names of installed skills its implementer and reviewers load, passed through as written.
@@ -326,18 +344,21 @@ if (!plan) {
   phase('Plan')
   const q = await agent(
     CODE
-      ? `Task:\n${task}\n\nSkim the repository and list up to 4 specific questions a read-only explorer should answer before the work is split up. Return an empty list if you need none.`
-      : `Task:\n${task}\n\nSkim the folder and list up to 4 specific questions a read-only researcher (local files and the web) should answer before the work is split up. Return an empty list if you need none.`,
+      ? `Task:\n${task}\n\nSkim the repository and list up to ${RESEARCH_QUESTION_CAP} specific questions a read-only explorer should answer before the work is split up. Return an empty list if you need none.`
+      : `Task:\n${task}\n\nSkim the folder and list up to ${RESEARCH_QUESTION_CAP} specific questions a read-only researcher (local files and the web) should answer before the work is split up. Return an empty list if you need none.`,
     { label: 'plan:questions', effort: 'high', schema: QUESTIONS },
   )
+  const asked = ((q && q.questions) || []).filter((x) => typeof x === 'string')
+  const questions = asked.slice(0, RESEARCH_QUESTION_CAP)
+  if (asked.length > questions.length) log(`explore: dropped ${asked.length - questions.length} question(s) over the cap of ${RESEARCH_QUESTION_CAP}: ${asked.slice(RESEARCH_QUESTION_CAP).join('; ')}`)
 
   phase('Explore')
   const answers = await parallel(
-    ((q && q.questions) || []).map((question) => () =>
+    questions.map((question) => () =>
       agent(question, { label: `explore:${question.slice(0, 30)}`, phase: 'Explore', agentType: 'researcher' }),
     ),
   )
-  findings = ((q && q.questions) || [])
+  findings = questions
     .map((question, i) => `Q${i + 1}: ${question}\nA${i + 1}: ${answers[i] || '(failed)'}`)
     .join('\n\n')
 
@@ -439,15 +460,18 @@ const judge = (r, ids) => {
     if (!a) gaps.push({ text: `${id}: not answered`, confidence: 100, hard: true })
     else if (a.verdict !== 'pass') gaps.push({ text: `${id}: ${a.detail || 'failed'}`, confidence: 100, hard: true })
   }
-  const doubt = [...byId.values()].some((a) => a.mode === 'read') || isOpen(r.open)
-  return { gaps, low, doubt }
+  // A failing verdict whose gaps are all below the cutoff (and no failed checked id) counts as a pass with a doubt signal.
+  const belowCutoff = !r.pass && gaps.length === 0
+  const doubt = [...byId.values()].some((a) => a.mode === 'read') || isOpen(r.open) || belowCutoff
+  return { gaps, low, doubt, belowCutoff }
 }
 const texts = (gaps) => gaps.map((g) => g.text)
 
 // Reviews a slice and returns its gaps (none = passed). A risky slice gets a default and an opus reviewer at once;
 // otherwise a passing review is escalated to one opus reviewer, whose verdict decides, when it shows a doubt signal
-// (a read-mode answer or a non-empty open) or the slice already failed a review.
-async function review(s, body, label, phaseName, retry) {
+// (a read-mode answer, a non-empty open, or a failing verdict whose gaps are all below the cutoff) or the slice already
+// failed a review. `opusOnly`: one opus reviewer alone, whose verdict decides (the review after a refuted failure).
+async function review(s, body, label, phaseName, retry, opusOnly = false) {
   const ids = checksOf(s)
   const bugfix =
     s.kind === 'bugfix'
@@ -459,11 +483,17 @@ async function review(s, body, label, phaseName, retry) {
   const logLow = (low) => {
     if (low.length) log(`${s.id}: ignoring ${low.length} reviewer gap(s) below confidence ${GAP_MIN}: ${low.map((g) => `${g.text} (${g.confidence})`).join('; ')}`)
   }
+  if (opusOnly) {
+    const v = judge(await ask('opus'), ids)
+    logLow(v.low)
+    return v.gaps
+  }
   const verdicts = (await parallel((s.risky ? [undefined, 'opus'] : [undefined]).map((model) => () => ask(model)))).map((r) => judge(r, ids))
   logLow(verdicts.flatMap((v) => v.low))
   const gaps = verdicts.flatMap((v) => v.gaps)
   if (gaps.length || s.risky || !(retry || verdicts.some((v) => v.doubt))) return gaps
-  log(`${s.id}: escalating to an opus review (${retry ? 'retry' : 'doubt signal'})`)
+  const why = retry ? 'retry' : verdicts.some((v) => v.belowCutoff) ? `doubt signal: a failing review with every gap below confidence ${GAP_MIN}` : 'doubt signal'
+  log(`${s.id}: escalating to an opus review (${why})`)
   const v = judge(await ask('opus'), ids)
   logLow(v.low)
   return v.gaps
@@ -472,7 +502,8 @@ async function review(s, body, label, phaseName, retry) {
 // Refute pass (args.refute): a reviewer tries to disprove each refutable gap against the slice's changes and returns the
 // gaps that still stand. Hard gaps (failed constraint answers, a reviewer that returned nothing) always stand.
 // `merged`: the slice's work is merged into the current branch (an isolated slice), so it is not in git diff HEAD.
-async function refute(s, gaps, label, merged = false) {
+// `opus`: an opus verdict refutes (the gaps of the opus review that follows a refuted failure).
+async function refute(s, gaps, label, merged = false, opus = false) {
   const soft = gaps.filter((g) => !g.hard)
   if (!REFUTE || !soft.length) return gaps
   const r = await agent(
@@ -484,7 +515,7 @@ async function refute(s, gaps, label, merged = false) {
           : "Read the slice's files") +
       ' and try to refute each gap: a gap stands only when the changes really show the problem. Return one entry per gap: n (its number), stands, and the reason.\n',
     // A risky slice's gaps include the opus reviewer's, so only an opus verdict may refute them.
-    { label, phase: 'Build', agentType: 'reviewer', model: s.risky ? 'opus' : undefined, schema: REFUTED },
+    { label, phase: 'Build', agentType: 'reviewer', model: s.risky || opus ? 'opus' : undefined, schema: REFUTED },
   )
   if (!r) {
     log(`${s.id}: the refute pass returned nothing; every gap stands`)
@@ -495,6 +526,26 @@ async function refute(s, gaps, label, merged = false) {
   const dropped = soft.filter((_g, i) => refuted.has(i + 1))
   if (dropped.length) log(`${s.id}: refute pass dropped ${dropped.length} gap(s): ${texts(dropped).join('; ')}`)
   return [...gaps.filter((g) => g.hard), ...standing]
+}
+
+// After a refute pass left no gap of a failing review standing: the earlier failure is a doubt signal, so a slice that is
+// not risky gets one opus review (`opusReview` runs it) and passes only if that review passes; that review's gaps get an
+// opus refute pass, and a pass there is the passing opus verdict. A risky slice was reviewed and refuted on opus
+// already, so it passes as before. Returns the gaps that stand (none = passed).
+async function afterRefuted(s, opusReview, label, merged = false) {
+  if (s.risky) {
+    log(`${s.id}: no reviewer gap stands after the refute pass; passing`)
+    return []
+  }
+  log(`${s.id}: no reviewer gap stands after the refute pass; the earlier failure is a doubt signal, escalating to an opus review`)
+  const gaps = await opusReview()
+  if (!gaps.length) {
+    log(`${s.id}: the opus review passed; passing`)
+    return []
+  }
+  const standing = await refute(s, gaps, `${label}:opus`, merged, true)
+  if (!standing.length) log(`${s.id}: no gap of the opus review stands after an opus refute pass; passing`)
+  return standing
 }
 
 const results = []
@@ -553,6 +604,26 @@ async function runSlices(list, done) {
   }
 }
 
+// A bounded pool: runs fn over items with at most `size` running at once, starting the next item as soon as one ends.
+// The results keep the items' order; an item whose fn throws becomes null, as a pipeline() stage that throws does.
+async function pool(items, fn, size) {
+  const out = new Array(items.length).fill(null)
+  let next = 0
+  const lane = async () => {
+    while (next < items.length) {
+      const i = next++
+      try {
+        out[i] = await fn(items[i], i)
+      } catch (e) {
+        log(`${(items[i] && items[i].id) || `item ${i + 1}`}: stopped with an error: ${(e && e.message) || e}`)
+        out[i] = null
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(size, items.length)) }, () => lane()))
+  return out
+}
+
 // Runs one wave and returns its results (also pushed to results).
 async function runWave(wave) {
   // Isolate only parallel slices of code, and only with baseRefHead (callers pass it for a git repository whose
@@ -609,20 +680,15 @@ async function runWave(wave) {
       }
       // Isolated work is reviewed after integration, so review here only when it is in the shared tree.
       if (isolated) return { slice: s, status: 'built', attempts: attempt, branch: work.branch, gaps: [] }
-      const gaps = await review(
-        s,
-        CODE
-          ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped. Return a verdict.\n`
-          : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.\n`,
-        `review:${s.id}#${attempt}`,
-        'Build',
-        failedReview,
-      )
+      const reviewBody = CODE
+        ? `Goal: ${s.goal}\nAcceptance: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nIf this folder is a git work tree, review the working-tree changes (git diff HEAD and git status); otherwise read these files. Then run the acceptance check, not the project's whole suite: the test gate already ran it when the implementer stopped. Return a verdict.\n`
+        : `Goal: ${s.goal}\nAcceptance checklist: ${s.acceptance}\nFiles: ${s.files.join(', ') || 'unspecified'}\nReview the slice's files against the goal and the checklist (not git diff): read the output, check every item and the sources it cites, and return a verdict.\n`
+      const gaps = await review(s, reviewBody, `review:${s.id}#${attempt}`, 'Build', failedReview)
       if (gaps.length === 0) return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
-      const standing = await refute(s, gaps, `refute:${s.id}#${attempt}`)
+      let standing = await refute(s, gaps, `refute:${s.id}#${attempt}`)
       if (standing.length === 0) {
-        log(`${s.id}: no reviewer gap stands after the refute pass; passing`)
-        return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
+        standing = await afterRefuted(s, () => review(s, reviewBody, `review:${s.id}#${attempt}:refuted`, 'Build', true, true), `refute:${s.id}#${attempt}`)
+        if (standing.length === 0) return { slice: s, status: 'passed', attempts: attempt, branch: '', gaps: [] }
       }
       failedReview = true
       feedback = texts(standing).join('\n')
@@ -632,9 +698,11 @@ async function runWave(wave) {
   // Isolated slices run at the same time in their own worktrees. Without code the output files of a wave are disjoint
   // and none is code, so its slices share the folder and also run at the same time. Code in the shared tree goes one
   // at a time: each implementer's test gate runs the whole suite, which another slice's half-written files would fail.
+  // At most WAVE_MAX slices build at the same time (the plan check's wave cap does not see this script's agents).
   let out
   if (isolated || wave.length === 1 || !CODE) {
-    out = await pipeline(wave, (s) => runSlice(s))
+    if (wave.length > WAVE_MAX) log(`wave ${wave.map((s) => s.id).join(', ')}: ${wave.length} slices, at most ${WAVE_MAX} building at a time`)
+    out = await pool(wave, (s) => runSlice(s), WAVE_MAX)
   } else {
     out = []
     for (const s of wave) out.push(await runSlice(s))
@@ -670,13 +738,14 @@ async function runWave(wave) {
         log(`${b.slice.id}: ${b.gaps[0]}; not reviewed`)
       }
     }
-    const reviewMerged = (b, label, retry) =>
+    const reviewMerged = (b, label, retry, opusOnly = false) =>
       review(
         b.slice,
         `Goal: ${b.slice.goal}\nAcceptance: ${b.slice.acceptance}\nThe work is merged into the current branch. Review it, run the check, and return a verdict.\n`,
         label,
         'Integrate',
         retry,
+        opusOnly,
       )
     await integrate(built, 'integrate')
     // Review the merged result once per slice, in the shared tree.
@@ -695,9 +764,11 @@ async function runWave(wave) {
     for (const [b, first] of firstGaps) {
       let gaps = first
       for (;;) {
-        const standing = await refute(b.slice, gaps, `refute:${b.slice.id}#${b.attempts}`, true)
+        let standing = await refute(b.slice, gaps, `refute:${b.slice.id}#${b.attempts}`, true)
         if (standing.length === 0) {
-          log(`${b.slice.id}: no reviewer gap stands after the refute pass; passing`)
+          standing = await afterRefuted(b.slice, () => reviewMerged(b, `review:${b.slice.id}#${b.attempts}:refuted`, true, true), `refute:${b.slice.id}#${b.attempts}`, true)
+        }
+        if (standing.length === 0) {
           b.status = 'passed'
           b.gaps = []
           break

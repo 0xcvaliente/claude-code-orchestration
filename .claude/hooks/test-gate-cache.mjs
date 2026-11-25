@@ -297,9 +297,20 @@ export function storeVerdict(l0, l1, recentMs) {
 
 /**
  * by: the tool_use_id of the hand-back whose gate wrote it; tree: the hash of its L0; clock0: the clock read for L0;
- * used: true once a stop has taken it.
- * @typedef {{ key: string, result: string, ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string, fail?: string, tree?: string, clock0?: number, used?: boolean }} CacheEntry
+ * used: true once a stop has taken it; suite_s (2.1.0): the whole seconds the hand-back's suite ran, absent for a
+ * lock-wait give-up (no run) and for entries stored before 2.1.0.
+ * @typedef {{ key: string, result: string, ts: string, session_id?: string, agent_id?: string, by?: string, extra?: string, message?: string, fail?: string, tree?: string, clock0?: number, used?: boolean, suite_s?: number }} CacheEntry
  */
+
+/**
+ * A suite run time in whole seconds (verify.sh's suite_s), or null for anything else: a string of 1 to 9 digits or a
+ * whole number from 0 to 999999999, so the value written into a record is always a plain JSON number.
+ * @param {unknown} v @returns {number | null}
+ */
+export function suiteSeconds(v) {
+  if (typeof v === "number") return Number.isInteger(v) && v >= 0 && v <= 999999999 ? v : null;
+  return typeof v === "string" && /^[0-9]{1,9}$/.test(v) ? Number(v) : null;
+}
 
 /** @param {string} state @returns {CacheEntry[]} */
 export function readCache(state) {
@@ -421,14 +432,18 @@ export function refusedHandbacks(state, sessionId, agentId, exclude = "") {
 // the time the command may take (its listing stops there; verify.sh also limits the process).
 //   key <cwd> <cmd> <isolated>                   prints the tree key, or nothing
 //   list <state> <cwd> <secs>                    prints a listing of the trees (one JSON line; hash null if incomplete)
-//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <l0-file> <l1-file> [<recent-ms> [<fail>]]
+//   put <state> <key> <result> <handback-id> <extra> <session> <agent> <l0-file> <l1-file> [<recent-ms> [<fail> [<suite-s>]]]
 //                                                message on stdin; prints "stored" or the reason code why nothing was
 //                                                stored; <recent-ms> (tests only; empty: RECENT_MS) is the recent-change
 //                                                guard; <fail> the failed run's record fields (bugfix-check.mjs
 //                                                failureExtra), kept with the entry as `fail`
+//                                                [<suite-s>] (2.1.0) the seconds the hand-back's suite ran, kept with
+//                                                the entry as `suite_s` (suiteSeconds; empty or invalid: none)
 //   take <state> <key> <session> <agent> <handback-id> <cwd> <secs>   prints result, by, extra, the failed run's record
-//                                                fields (cleanFailureExtra; an empty line for none), then the message; or
-//                                                "none" and the reason code when no outcome may be taken (cacheTakeWhy)
+//                                                fields (cleanFailureExtra; an empty line for none), the run's suite_s
+//                                                (2.1.0; an empty line for none, as for an entry stored before), then the
+//                                                message; or "none" and the reason code when no outcome may be taken
+//                                                (cacheTakeWhy)
 //   link <state> <session> <agent>               prints the hand-back the agent's stop follows, or nothing
 //   refused <state> <session> <agent> <exclude-id>   prints a count
 const isMain = (() => {
@@ -463,13 +478,14 @@ if (isMain) {
       const state = a[0] ?? "";
       const r = cacheTakeWhy(state, { key: a[1] ?? "", session: a[2] ?? "", agent: a[3] ?? "", handback: a[4] ?? "", roots: scanRoots(a[5] ?? "."), exclude: [state], deadline: deadlineOf(a[6]) });
       const e = r.entry;
-      if (e) process.stdout.write(`${e.result}\n${String(e.by ?? "").replace(/[^A-Za-z0-9_.:-]/g, "")}\n${String(e.extra ?? "").replace(/\n/g, "")}\n${cleanFailureExtra(e.fail)}\n${e.message ?? ""}`);
+      if (e) process.stdout.write(`${e.result}\n${String(e.by ?? "").replace(/[^A-Za-z0-9_.:-]/g, "")}\n${String(e.extra ?? "").replace(/\n/g, "")}\n${cleanFailureExtra(e.fail)}\n${suiteSeconds(e.suite_s) ?? ""}\n${e.message ?? ""}`);
       else process.stdout.write(`none\n${r.reason}\n`);
     } else if (cmd === "put") {
       const state = a[0] ?? "";
       const message = readFileSync(0, "utf8");
       const fail = cleanFailureExtra(a[10] ?? "");
-      const entry = { key: a[1] ?? "", result: a[2] ?? "", ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", message, ...(fail ? { fail } : {}) };
+      const suite = suiteSeconds(a[11]);
+      const entry = { key: a[1] ?? "", result: a[2] ?? "", ts: new Date().toISOString(), by: a[3] ?? "", extra: a[4] ?? "", session_id: a[5] ?? "", agent_id: a[6] ?? "", message, ...(fail ? { fail } : {}), ...(suite === null ? {} : { suite_s: suite }) };
       const recent = /^[0-9]{1,6}$/.test(a[9] ?? "") ? Number(a[9]) : undefined;
       process.stdout.write(`${cachePut(state, entry, readListing(a[7] ?? ""), readListing(a[8] ?? ""), recent)}\n`);
     } else if (cmd === "link") process.stdout.write(latestHandbackId(a[1] ?? "", a[2] ?? "", a[0] ?? "") ?? "");

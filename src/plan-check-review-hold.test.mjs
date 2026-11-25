@@ -3,6 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -422,6 +423,228 @@ test("when the hold's record cannot be written, the launch is let through rather
     gate(dir, 4, "block", "tests_failed");
     mkdirSync(join(dir, ".claude", "state", "review-hold.jsonl")); // appending to it fails
     for (let i = 0; i < 3; i += 1) assert.equal(launch(dir, REVIEW).status, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 2.1.0: the gate-passed note. When the test-gate record paired with the slice's latest implementer stop says the whole
+// suite ran and passed (allow, tests_passed or tests_passed_cached, with suite_s), the reviewer's brief gets one line
+// telling it to run the slice's acceptance check and not the whole suite again. Anything else: no such line.
+const PASSED = /the test gate ran the project's whole test suite at this slice's latest implementer stop, and it passed/;
+const PENDING = /the test gate has not reported yet on this slice's latest implementer stop/;
+/** The note the launch appended to REVIEW ("" when the launch printed nothing). @param {{ stdout: string }} r */
+const added = (r) => {
+  if (!r.stdout) return "";
+  const prompt = String(JSON.parse(r.stdout).hookSpecificOutput.updatedInput.prompt);
+  assert.ok(prompt.startsWith(REVIEW), "the brief is kept");
+  return prompt.slice(REVIEW.length);
+};
+/** Asserts that a launch got no gate-passed note and no test_gate_passed record. @param {string} dir @param {any} r @param {string} what */
+function noPassedNote(dir, r, what) {
+  assert.equal(r.status, 0, `${what}: never refused`);
+  assert.doesNotMatch(r.stdout, PASSED, `${what}: no gate-passed note`);
+  assert.ok(!holds(dir).some((e) => e.reason === "test_gate_passed"), `${what}: no test_gate_passed record`);
+}
+
+test("2.1.0: a paired tests_passed record with suite_s adds the gate-passed note and records test_gate_passed", () => {
+  const dir = project();
+  try {
+    implementer(dir);
+    gate(dir, 4, "allow", "tests_passed", { suite_s: 231 });
+    const r = launch(dir, REVIEW);
+    assert.equal(r.status, 0);
+    const out = JSON.parse(r.stdout).hookSpecificOutput;
+    assert.equal(out.permissionDecision, "allow");
+    const note = added(r);
+    assert.match(note, /^\n\nTest gate \(added by the plan check\): /, "the other notes' lead");
+    assert.match(note, PASSED);
+    assert.match(note, /Run the slice's own acceptance check from your brief, and do not run the whole suite again\.$/);
+    assert.doesNotMatch(note, /skip|do not run the acceptance|pass the slice|mark .* pass/i, "never says to skip the check or to pass");
+    assert.doesNotMatch(note, SWITCH, "the note names no switch");
+    const hd = parseHeader(note);
+    const rp = parseReply(note);
+    assert.ok(!hd.slice && !hd.files.length && !hd.checks.length && rp.status === null && !rp.open.length, "the note parses as no brief or reply line");
+    assert.deepEqual(holds(dir).map((e) => [e.decision, e.reason, e.slice, e.agent_id, e.agent_type, e.session_id]), [["note", "test_gate_passed", "a", "impl1", "reviewer", "s1"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: a paired tests_passed_cached record (the stop reused its hand-back's passing run) adds the gate-passed note", () => {
+  const dir = project();
+  try {
+    startOnly(dir);
+    gate(dir, 0.5, "allow", "tests_passed", { at: "handback", handback_id: "toolu_h1", suite_s: 300 });
+    keyedStop(dir, 1, "toolu_h1");
+    gate(dir, 1.5, "allow", "tests_passed_cached", { after_handback: "toolu_h1", suite_s: 300 });
+    const r = launch(dir, REVIEW, "orchestration:reviewer");
+    assert.equal(r.status, 0);
+    assert.match(added(r), PASSED);
+    assert.deepEqual(holds(dir).map((e) => [e.decision, e.reason, e.slice, e.agent_id]), [["note", "test_gate_passed", "a", "impl1"]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Every other paired record: no gate-passed note. Each carries a suite_s, so only its decision or reason keeps the note out.
+for (const [decision, reason, note] of /** @type {[string, string, RegExp | null][]} */ ([
+  ["allow", "max_blocks_reached", null],
+  ["allow", "no_tests_collected", null],
+  ["allow", "bugfix_unverified_gave_up", null],
+  ["allow", "bugfix_verified", null],
+  ["allow", "test_gate_error", NO_RECORD], // NO_RESULT_REASONS: the no-result note instead
+  ["warn", "tests_failed_isolated", null],
+  ["warn", "tests_failed_baseline", null],
+  ["warn", "tests_passed", null], // a warn is never a pass
+  ["allow", "no_test_command", null],
+  ["allow", "no_code_changes", null],
+  ["allow", "isolated_skipped", null],
+  ["allow", "TESTS_PASSED", null],
+  ["allow", "tests_passed ", null],
+])) {
+  test(`2.1.0: a paired ${decision} ${JSON.stringify(reason)} record adds no gate-passed note`, () => {
+    const dir = project();
+    try {
+      implementer(dir);
+      gate(dir, 4, decision, reason, { suite_s: 120 });
+      const r = launch(dir, REVIEW);
+      noPassedNote(dir, r, reason);
+      if (note) assert.match(added(r), note);
+      else assert.equal(r.stdout, "", "the brief is unchanged");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("2.1.0: a tests_passed record without suite_s (no proof the suite ran, an older gate) adds no gate-passed note", () => {
+  const dir = project();
+  try {
+    implementer(dir);
+    gate(dir, 4, "allow", "tests_passed");
+    const r = launch(dir, REVIEW);
+    noPassedNote(dir, r, "no suite_s");
+    assert.equal(r.stdout, "");
+    gate(dir, 5, "allow", "tests_passed_cached", { suite_s: "231" }); // not a number: two records now, pending anyway
+    noPassedNote(dir, launch(dir, REVIEW), "suite_s as text");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: hand-back gate records only (a hand-back tests_passed included) add no gate-passed note", () => {
+  const dir = project();
+  try {
+    startOnly(dir);
+    gate(dir, 0.3, "allow", "handback_lock_wait", { at: "handback", handback_id: "toolu_1", not_run: 1 });
+    gate(dir, 0.5, "allow", "tests_passed", { at: "handback", handback_id: "toolu_2", suite_s: 200 });
+    gate(dir, 0.6, "allow", "tests_passed", { handback_id: "toolu_3", suite_s: 200 }); // a hand-back id alone marks it too
+    append(dir, "telemetry.jsonl", { ts: at(1), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
+    const r = launch(dir, REVIEW);
+    noPassedNote(dir, r, "hand-back records");
+    assert.match(added(r), NO_RECORD, "the stop has no record of its own: the no-result note, as before");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: a stop the gate has not reported on keeps the pending note inside the window and the no-result note after it", () => {
+  const dir = project();
+  try {
+    // A stop seconds ago, with no record yet: the pending note.
+    const now = Date.now();
+    append(dir, "journal-launches.jsonl", { ts: new Date(now - 30000).toISOString(), session_id: "s1", agent_id: "impl1", agent_type: "implementer", slice: "a" });
+    append(dir, "telemetry.jsonl", { ts: new Date(now - 30000).toISOString(), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStart" });
+    append(dir, "telemetry.jsonl", { ts: new Date(now - 5000).toISOString(), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
+    const pending = launch(dir, REVIEW);
+    noPassedNote(dir, pending, "pending");
+    assert.match(added(pending), PENDING);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const old = project();
+  try {
+    implementer(old); // stopped long ago, no record: past the window
+    const missing = launch(old, REVIEW);
+    noPassedNote(old, missing, "missing");
+    assert.match(added(missing), NO_RECORD);
+    // Two candidate records and no hand-back id: the pass cannot be tied to the stop (pending), so no gate-passed note.
+    gate(old, 3, "allow", "no_code_changes");
+    gate(old, 4, "allow", "tests_passed", { suite_s: 99 });
+    const twice = launch(old, REVIEW);
+    noPassedNote(old, twice, "unpaired pass");
+    assert.match(added(twice), NO_RECORD);
+  } finally {
+    rmSync(old, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: an unreadable gates log adds no gate-passed note", () => {
+  const dir = project();
+  const gates = join(dir, ".claude", "state", "gates.jsonl");
+  try {
+    implementer(dir);
+    gate(dir, 4, "allow", "tests_passed", { suite_s: 231 });
+    chmodSync(gates, 0o000);
+    const r = launch(dir, REVIEW);
+    noPassedNote(dir, r, "unreadable gates.jsonl");
+    assert.doesNotMatch(r.stdout, PASSED);
+  } finally {
+    try {
+      chmodSync(gates, 0o600);
+    } catch {
+      // already gone
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: with the hold off (environment or plugin option) a passed gate adds nothing and records nothing", () => {
+  const dir = project();
+  try {
+    implementer(dir);
+    gate(dir, 4, "allow", "tests_passed", { suite_s: 231 });
+    for (const env of /** @type {Record<string, string>[]} */ ([{ ORCH_REVIEW_HOLD: "off" }, { CLAUDE_PLUGIN_OPTION_REVIEW_HOLD: "off" }])) {
+      const r = launch(dir, REVIEW, "reviewer", env);
+      assert.deepEqual([r.status, r.stdout], [0, ""], JSON.stringify(env));
+    }
+    assert.equal(holds(dir).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: a slice with no implementer in the run, a PLAN REVIEW and other agents get no gate-passed note", () => {
+  const dir = project();
+  try {
+    implementer(dir); // slice a only
+    gate(dir, 4, "allow", "tests_passed", { suite_s: 231 });
+    const other = launch(dir, "SLICE: b\nReview it.");
+    assert.deepEqual([other.status, other.stdout], [0, ""], "slice b has no implementer");
+    const plan = launch(dir, "PLAN REVIEW\nCONSTRAINTS:\nC1: x\nSLICE: a\nFILES: x.py\nDEPENDS: none\nGOAL: y");
+    assert.deepEqual([plan.status, plan.stdout], [0, ""], "a PLAN REVIEW");
+    for (const t of ["researcher", "integrator", "otherplugin:reviewer", BUILTIN]) assert.equal(launch(dir, REVIEW, t).stdout, "", t);
+    assert.equal(holds(dir).length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("2.1.0: an implementer started again after its passing stop gets no gate-passed note until its new stop passes", () => {
+  const dir = project();
+  try {
+    implementer(dir);
+    gate(dir, 4, "allow", "tests_passed", { suite_s: 231 });
+    assert.match(added(launch(dir, REVIEW)), PASSED, "the passing stop");
+    append(dir, "telemetry.jsonl", { ts: at(5), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStart" });
+    const running = launch(dir, REVIEW);
+    assert.deepEqual([running.status, running.stdout], [0, ""], "resumed and running: nothing added");
+    append(dir, "telemetry.jsonl", { ts: at(6), session_id: "s1", agent_type: "implementer", agent_id: "impl1", hook_event_name: "SubagentStop" });
+    const stopped = launch(dir, REVIEW);
+    assert.doesNotMatch(stopped.stdout, PASSED, "the earlier pass is from before the latest start");
+    assert.match(added(stopped), NO_RECORD);
+    assert.deepEqual(holds(dir).map((e) => e.reason), ["test_gate_passed", "test_gate_no_result"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

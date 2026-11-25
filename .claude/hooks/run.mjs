@@ -4,6 +4,8 @@
 //   journal.jsonl           stop records (journal.mjs, SubagentStop)
 //   gates.jsonl             test-gate records (verify.sh); joined to a launch by agent_id inside foldRuns
 //   telemetry.jsonl         SubagentStart / SubagentStop (telemetry.mjs): which agents are still running
+//   handbacks.jsonl         hand-back captures (handback-check.mjs): an implementer attempt's boundary for the
+//                           second review rule (null when unreadable: the rule then stays off for the fold)
 // No side effects at import beyond state.mjs reading settings; the functions only read files, and an unreadable or
 // missing log reads as empty. Node built-ins only. The logs gather every session of a project, so a caller that wants
 // one session's records passes its id and lines of other sessions are skipped before JSON.parse. A hook reads each log
@@ -83,19 +85,24 @@ export function appendJsonl(dir, name, record) {
  * The session's records for foldRuns. Test-gate records without a session_id (older verify.sh) are kept: foldRuns
  * joins them to a launch of this session by agent_id. `raw` holds logs the caller already read with
  * readJsonl(dir, name, sessionId), keyed by file name, so they are not read twice.
+ * handbacks: the hand-back captures of handbacks.jsonl (state.mjs HANDBACK_LOG, written by handback-check.mjs), which
+ * set an implementer attempt's boundary for the second review rule; null when that log exists and cannot be read, and
+ * the fold then applies the one-review rule to every slice, so an unreadable log never makes a gate ask for more.
  * @param {string} sessionId @param {string} [dir] @param {Record<string, any[]>} [raw]
- * @returns {{ launches: any[], stops: any[], gates: any[], starts: any[] }}
+ * @returns {{ launches: any[], stops: any[], gates: any[], starts: any[], handbacks: any[] | null }}
  */
 export function loadRecords(sessionId, dir = stateDir, raw = {}) {
   /** @param {any} r */
   const mine = (r) => r.session_id === sessionId;
   /** @param {string} name @returns {any[]} */
   const read = (name) => (Array.isArray(raw[name]) ? /** @type {any[]} */ (raw[name]) : readJsonl(dir, name, sessionId));
+  const handbacks = Array.isArray(raw["handbacks.jsonl"]) ? raw["handbacks.jsonl"] : readJsonlOrNull(dir, "handbacks.jsonl", sessionId);
   return {
     launches: read("journal-launches.jsonl").filter(mine),
     stops: read("journal.jsonl").filter(mine),
     gates: read("gates.jsonl").filter((g) => g.gate === "test" && (g.session_id === undefined || g.session_id === sessionId)),
     starts: read("telemetry.jsonl").filter((e) => mine(e) && (e.hook_event_name === "SubagentStart" || e.hook_event_name === "SubagentStop")),
+    handbacks: handbacks === null ? null : handbacks.filter(mine),
   };
 }
 
@@ -240,16 +247,105 @@ export function stopGateOf(stops, gates, start, allStops = stops) {
  * @param {Record<string, string | undefined>} [env] @returns {number}
  */
 export function stopGateWindowMs(env = process.env) {
-  const posInt = (/** @type {unknown} */ v) => (typeof v === "string" && /^\d+$/.test(v) && Number(v) > 0 ? Number(v) : null);
+  return (gateBudgetS(env) + GATE_OVERRUN_S) * 1000;
+}
+/** Seconds a stop gate may run past its budget (verify.sh: at most B + 20 s), with room for its record's write. */
+export const GATE_OVERRUN_S = 60;
+
+/** A whole number above 0 written as digits, else null (verify.sh pos_int). @param {unknown} v @returns {number | null} */
+const posInt = (v) => (typeof v === "string" && /^\d+$/.test(v) && Number(v) > 0 ? Number(v) : null);
+
+/**
+ * The test gate's time budget in seconds, as verify.sh computes it (its `budget`): ORCH_HOOK_BUDGET_S when smaller, else
+ * min(870, stall limit in seconds - 60), at least 1; the stall limit CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS, 600 s when
+ * unset or not a positive whole number. The one derivation here: stopGateWindowMs and waveCap both read it. verify.sh
+ * mirrors the rule in bash: change both together.
+ * @param {Record<string, string | undefined>} [env] @returns {number}
+ */
+export function gateBudgetS(env = process.env) {
   const raw = env.CLAUDE_ASYNC_AGENT_STALL_TIMEOUT_MS;
   let stallS = 600;
   if (typeof raw === "string" && /^\d+$/.test(raw)) stallS = raw.length > 15 ? 1_000_000 : Number(raw) < 1 ? 600 : Math.floor(Number(raw) / 1000);
   const max = Math.max(1, Math.min(870, stallS - 60));
-  const budget = Math.min(posInt(env.ORCH_HOOK_BUDGET_S) ?? max, max);
-  return (budget + GATE_OVERRUN_S) * 1000;
+  return Math.min(posInt(env.ORCH_HOOK_BUDGET_S) ?? max, max);
 }
-/** Seconds a stop gate may run past its budget (verify.sh: at most B + 20 s), with room for its record's write. */
-export const GATE_OVERRUN_S = 60;
+
+/**
+ * The test gate's floor in seconds, as verify.sh computes it (its `floor`): the time it keeps for the suite when it waits
+ * for another gate's suite lock, min(120, budget / 4 rounded down, the test run's own limit ORCH_TEST_TIMEOUT_S, default
+ * 600), at least 1. verify.sh mirrors the rule in bash: change both together.
+ * @param {Record<string, string | undefined>} [env] @returns {number}
+ */
+export function gateFloorS(env = process.env) {
+  const testLimit = posInt(env.ORCH_TEST_TIMEOUT_S) ?? 600;
+  return Math.max(1, Math.min(120, Math.floor(gateBudgetS(env) / 4), testLimit));
+}
+
+/**
+ * The wave cap of one implementer launch (the plan check's wave_full, 2.1.0): `base` (limits.mjs waveMax), and for a
+ * launch with isolation "worktree" 1 + floor((budget - floor) / suiteS), never below 1 and never above `base`. Isolated
+ * slices run their test gates side by side and one suite runs at a time per project, so the last of n stops waits for
+ * n - 1 suites: past the floor it no longer gets the lock and its tests do not run (tests_failed_isolated, not_run).
+ * suiteS is the latest suite_s on record for the project (latestSuiteS); none, or 0, means no narrowing.
+ * @param {number} base @param {{ isolated: boolean, suiteS: number | null, env?: Record<string, string | undefined> }} o
+ * @returns {number}
+ */
+export function waveCap(base, { isolated, suiteS, env = process.env }) {
+  if (!isolated || typeof suiteS !== "number" || !(suiteS > 0)) return base;
+  const fits = 1 + Math.floor((gateBudgetS(env) - gateFloorS(env)) / suiteS);
+  return Math.max(1, Math.min(base, fits));
+}
+
+/**
+ * The latest suite_s (whole seconds the test command ran, verify.sh 2.1.0) among test-gate records, in log order; null
+ * when none carries one. @param {any[]} gates @returns {number | null}
+ */
+export function latestSuiteS(gates) {
+  for (let i = gates.length - 1; i >= 0; i--) {
+    const g = gates[i];
+    if (g && g.gate === "test" && Number.isInteger(g.suite_s) && g.suite_s >= 0) return g.suite_s;
+  }
+  return null;
+}
+
+/**
+ * The implementers of a session that count against the wave cap (2.1.0), from the gates' own reading of the logs:
+ *   running  implementer agents whose latest SubagentStart has no later SubagentStop (implementerTestStates, the reading
+ *            the review gate's implementer_unfinished and the reviewer hold use), not counting a start older than
+ *            `staleMs` (the run-stale window);
+ *   pending  implementer launches the plan check allowed (`allows`, plan-check.jsonl records) in the last `pendingMs` that
+ *            no SubagentStart has followed yet: each allow, oldest first, takes the first agent's first start after it
+ *            that no earlier allow took (a later start of the same agent is a resume, not a launch).
+ * `telemetry`: the session's SubagentStart and SubagentStop records (loadRecords' `starts`). Pure.
+ * @param {{ telemetry: any[], allows: any[], sessionId: string, now: number, staleMs: number, pendingMs: number }} o
+ * @returns {{ running: number, pending: number }}
+ */
+export function waveLoad({ telemetry, allows, sessionId, now, staleMs, pendingMs }) {
+  const agents = implementerTestStates(telemetry, [], sessionId);
+  const running = [...agents.values()].filter((a) => a.start > a.stop && now - a.start <= staleMs).length;
+  /** @type {Map<string, number>} */
+  const first = new Map();
+  for (const e of telemetry) {
+    if (e.hook_event_name !== "SubagentStart" || !isImplementerType(e.agent_type ?? e.role) || typeof e.agent_id !== "string" || !e.agent_id) continue;
+    first.set(e.agent_id, Math.min(first.get(e.agent_id) ?? Infinity, timeOf(e.ts)));
+  }
+  const starts = [...first.values()].sort((x, y) => x - y);
+  const recent = allows
+    .filter((e) => e && e.decision === "allow" && e.session_id === sessionId && isImplementerType(e.agent_type) && now - timeOf(e.ts) <= pendingMs)
+    .map((e) => timeOf(e.ts))
+    .sort((x, y) => x - y);
+  let pending = 0;
+  let j = 0;
+  for (const t of recent) {
+    while (j < starts.length && (starts[j] ?? 0) < t) j++;
+    if (j < starts.length) j++;
+    else pending++;
+  }
+  return { running, pending };
+}
+
+/** A bare or namespaced implementer agent type. @param {unknown} t */
+const isImplementerType = (t) => String(String(t ?? "").split(":").pop()) === "implementer";
 
 /**
  * Stop-gate reasons that say the gate ended without deciding (verify.sh on_exit, 2.0.1): an allow, not a result. The

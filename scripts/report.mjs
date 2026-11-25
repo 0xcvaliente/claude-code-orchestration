@@ -289,6 +289,101 @@ const skillsSection = (() => {
   return `\n<h2>Skills</h2>${countTable}${draftTable}${reviseList}`;
 })();
 
+// Review time (2.1.x): how long agents run, and how many reviews each slice took. Wall time is an agent's last
+// SubagentStop `ts` minus its first SubagentStart `ts` (an agent stops several times: test-gate send-backs, resumes),
+// joined per session and agent id like the stop records above; an agent with no start, no stop or no readable time is
+// left out of the times and counted in a note. Reviews per slice come from the journal's reviewer stop records (a stop
+// with `continues: true` replaces the earlier record of that reply, a resume counts again), each reviewer's model
+// from its last telemetry stop (`models`). It reads no log the page did not already read.
+/** @param {number[]} xs sorted ascending, not empty */
+const median = (xs) => {
+  const mid = Math.floor(xs.length / 2);
+  return xs.length % 2 ? /** @type {number} */ (xs[mid]) : (/** @type {number} */ (xs[mid - 1]) + /** @type {number} */ (xs[mid])) / 2;
+};
+/** @param {number} ms */
+const formatDuration = (ms) => {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
+  return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
+};
+/** @type {Map<string, { role: string, start: number | null, stop: number | null, bad: boolean }>} */
+const spans = new Map();
+for (const e of events) {
+  if (typeof e.agent_id !== "string" || !e.agent_id || (e.hook_event_name !== "SubagentStart" && e.hook_event_name !== "SubagentStop")) continue;
+  const key = `${e.session_id ?? ""}\n${e.agent_id}`;
+  const a = spans.get(key) ?? { role: bareType(e.agent_type), start: null, stop: null, bad: false };
+  const t = typeof e.ts === "string" ? Date.parse(e.ts) : NaN;
+  if (Number.isNaN(t)) a.bad = true;
+  else if (e.hook_event_name === "SubagentStart") a.start = a.start === null ? t : Math.min(a.start, t);
+  else a.stop = a.stop === null ? t : Math.max(a.stop, t);
+  spans.set(key, a);
+}
+/** @type {Map<string, { role: string, model: string, times: number[] }>} */
+const wall = new Map();
+let untimed = 0;
+for (const [key, a] of spans) {
+  if (a.start === null || a.stop === null || a.stop < a.start) {
+    untimed++;
+    continue;
+  }
+  const last = lastStops.get(key);
+  const model = Array.isArray(last?.models) && last.models.length ? last.models.filter((/** @type {unknown} */ m) => typeof m === "string").join(", ") || "n/a" : "n/a";
+  const k = `${a.role}\n${model}`;
+  let w = wall.get(k);
+  if (!w) wall.set(k, (w = { role: a.role, model, times: /** @type {number[]} */ ([]) }));
+  w.times.push(a.stop - a.start);
+}
+const wallRows = [...wall.values()]
+  .sort((a, b) => a.role.localeCompare(b.role) || a.model.localeCompare(b.model))
+  .map((w) => {
+    const times = [...w.times].sort((a, b) => a - b);
+    return [w.role, w.model, times.length, formatDuration(median(times)), formatDuration(/** @type {number} */ (times[times.length - 1])), formatDuration(times.reduce((x, y) => x + y, 0))];
+  });
+const untimedNote = untimed ? `<p>${untimed} agent${untimed === 1 ? "" : "s"} without a start or stop record (or with no readable time), left out of the times.</p>` : "";
+const wallTable = wallRows.length ? table(["Role", "Model", "Agents", "Median", "Longest", "Total"], wallRows) : "<p>No agent with both a start and a stop record yet.</p>";
+/** @param {unknown} m */
+const isOpus = (m) => typeof m === "string" && /opus/i.test(m);
+const reviewSlices = (() => {
+  const journal = skillLogs.journal.rows;
+  if (!journal.length) return "<p>No journal yet (<code>journal.jsonl</code>), so reviews per slice cannot be counted.</p>";
+  /** @type {Map<string, any[]>} slice key -> its reviewer stop records, a continued record replacing the one it continues */
+  const perSlice = new Map();
+  /** @type {Map<string, any>} */
+  const lastReviewOf = new Map();
+  for (const r of journal) {
+    if (!r || typeof r !== "object" || !r.slice || String(r.role ?? r.agent_type ?? "").split(":").pop() !== "reviewer") continue;
+    const agentKey = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
+    const list = perSlice.get(sliceKey(r)) ?? perSlice.set(sliceKey(r), []).get(sliceKey(r)) ?? [];
+    const earlier = r.continues === true && agentKey ? lastReviewOf.get(agentKey) : undefined;
+    const at = earlier ? list.indexOf(earlier) : -1;
+    if (at >= 0) list[at] = r;
+    else list.push(r);
+    if (agentKey) lastReviewOf.set(agentKey, r);
+  }
+  if (!perSlice.size) return "<p>No reviews in the journal yet.</p>";
+  let reviews = 0;
+  let opus = 0;
+  let unknown = 0;
+  const rows = [...perSlice.values()].map((list) => {
+    const first = list[0];
+    let onOpus = 0;
+    for (const r of list) {
+      const stop = typeof r.agent_id === "string" && r.agent_id ? lastStops.get(`${r.session_id ?? ""}\n${r.agent_id}`) : undefined;
+      const models = Array.isArray(stop?.models) && stop.models.length ? stop.models : typeof r.model === "string" ? [r.model] : [];
+      if (!models.length) unknown++;
+      else if (models.some(isOpus)) onOpus++;
+    }
+    reviews += list.length;
+    opus += onOpus;
+    return [String(first.session_id ?? "").slice(0, 8), first.run ?? "", first.slice, list.length, onOpus];
+  });
+  const share = reviews ? Math.round((opus / reviews) * 100) : 0;
+  const unknownNote = unknown ? ` ${unknown} review${unknown === 1 ? " has" : "s have"} no model on record and count${unknown === 1 ? "s" : ""} as not on opus.` : "";
+  return `${table(["Session", "Run", "Slice", "Reviews", "On opus"], rows)}<p>${perSlice.size} slice${perSlice.size === 1 ? "" : "s"}, ${reviews} review${reviews === 1 ? "" : "s"}, ${(reviews / perSlice.size).toFixed(1)} per slice, ${opus} of ${reviews} on opus (${share}%).${unknownNote}</p>`;
+})();
+const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}`;
+
 // Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".
 const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</code> (${names.join(", ")})`).join("; ") : `<code>${esc(dir)}</code>`;
 
@@ -297,7 +392,7 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agents by role</h2>${roleTable}${noStopLine}
-<h2>Estimated cost by role and model</h2>${costTable}
+<h2>Estimated cost by role and model</h2>${costTable}${reviewTimeSection}
 <h2>Reads by kind and role</h2>${readTable}${skillsSection}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}

@@ -14,8 +14,8 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } fr
 /** Larger files are not this workflow (it is about 50 KB). */
 const MAX_BYTES = 4 * 1024 * 1024;
 
-export const PROJECT_WORKFLOW_SHA256 = "8fb66f7fd871d3ed879b3eb1c83e7af6f02afdd0b51a345b39e6c4fa7dbc2c8a";
-export const PLUGIN_WORKFLOW_SHA256 = "83b30561f8ded3eb721b17aa8643aca892e63a272fdc9f72a02a477ee4ecbe34";
+export const PROJECT_WORKFLOW_SHA256 = "c699126ea25043aa638e0ca9b2a9748b77e5f8aa3836945f9de4aeba8e10a7bc";
+export const PLUGIN_WORKFLOW_SHA256 = "ec2b7ba8f0f5adde521693c3ac522aed1da44cfa3ed899030e80e5703aa31fcf";
 
 /** SHA-256 (hex) of a workflow file's bytes, CRLF read as LF. @param {Buffer} bytes */
 export function workflowSha256(bytes) {
