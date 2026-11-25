@@ -294,6 +294,69 @@ test("report review time: reviews per slice lists only slices with an implemente
   }
 });
 
+test("report review time: a review with no slice label is counted in the not-of-a-slice line, so the table and the line add up to every review", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-unlabelled-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    /** @param {string} id @param {string | null | undefined} slice @param {object} [rest] */
+    const review = (id, slice, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "reviewer", slice, run: 1, status: "pass", answers: {}, open: [], ...rest });
+    /** @param {string} id @param {string} slice @param {object} [rest] */
+    const impl = (id, slice, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "orchestration:implementer", slice, run: 1, status: "pass", ...rest });
+    const unlabelled = [
+      review("u1", null), // a brief with no SLICE line
+      review("u2", ""),
+      review("u3", undefined), // no slice field at all once serialised
+    ];
+    const journal = [
+      ...unlabelled,
+      impl("i1", "a"),
+      review("r1", "a"),
+      review("r2", "a"),
+      impl("i2", "b"),
+      review("r3", "b"),
+      review("p1", "plan"), // a label with no implementer
+      "not an object",
+      { ts: "t", session_id: "s1", agent_id: "x1", role: "researcher", status: "pass" }, // not a reviewer: skipped as before
+    ];
+    writeFileSync(join(state, "journal.jsonl"), journal.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const opus = { models: ["claude-opus-5-5"] };
+    const tel = ["u1", "u2", "u3", "r1", "p1"].flatMap((id) => [tStart(id, "reviewer", at(0)), tStop(id, "reviewer", at(60), opus)]).concat(
+      ["r2", "r3"].flatMap((id) => [tStart(id, "reviewer", at(0)), tStop(id, "reviewer", at(60), { models: ["claude-sonnet-5-5"] })]),
+    );
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const perSlice = (/** @type {string} */ sec) => sec.slice(sec.indexOf("<h3>Reviews per slice</h3>"));
+    const mixed = perSlice(reviewTime(renderReport(dir)));
+    // The table holds the two real slices only, and the summary counts their reviews alone.
+    assert.equal((mixed.match(/<tr><td>s1<\/td>/g) ?? []).length, 2, "exactly the two real slices");
+    assert.match(mixed, /<td>s1<\/td><td>1<\/td><td>a<\/td><td>2<\/td><td>1<\/td>/);
+    assert.match(mixed, /<td>s1<\/td><td>1<\/td><td>b<\/td><td>1<\/td><td>0<\/td>/);
+    assert.match(mixed, /2 slices, 3 reviews, 1\.5 per slice, 1 of 3 on opus \(33%\)\./);
+    // The line counts the three unlabelled reviews and the plan review.
+    assert.match(mixed, /4 reviews were not of a slice \(plan reviews and other checks\)\./);
+
+    // Table reviews plus the line equal the reviewer rows read.
+    const reviewerRows = journal.filter((r) => typeof r === "object" && r !== null && r.role === "reviewer").length;
+    const tableReviews = [...mixed.matchAll(/<tr><td>s1<\/td><td>1<\/td><td>[^<]*<\/td><td>(\d+)<\/td>/g)].reduce((n, m) => n + Number(m[1]), 0);
+    const line = Number(/(\d+) reviews? (?:was|were) not of a slice/.exec(mixed)?.[1] ?? 0);
+    assert.equal(tableReviews + line, reviewerRows, `${tableReviews} + ${line} = ${reviewerRows}`);
+
+    // Only unlabelled reviews: the slice wording with the line, never "No reviews in the journal yet.".
+    writeFileSync(join(state, "journal.jsonl"), unlabelled.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const only = perSlice(reviewTime(renderReport(dir)));
+    assert.match(only, /No reviews of a slice in the journal yet\./);
+    assert.match(only, /3 reviews were not of a slice \(plan reviews and other checks\)\./);
+    assert.doesNotMatch(only, /No reviews in the journal yet\./);
+    assert.doesNotMatch(only, /<th>Slice<\/th>/);
+
+    // One unlabelled review: the singular line.
+    writeFileSync(join(state, "journal.jsonl"), `${JSON.stringify(unlabelled[0])}\n`);
+    assert.match(perSlice(reviewTime(renderReport(dir))), /1 review was not of a slice/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("report: an agent that stops several times is counted once, with its last record (each record is a running total)", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-report-once-"));
   try {

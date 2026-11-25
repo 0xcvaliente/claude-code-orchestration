@@ -295,7 +295,7 @@ const skillsSection = (() => {
 // left out of the times and counted in a note. Reviews per slice come from the journal's reviewer stop records (a stop
 // with `continues: true` replaces the earlier record of that reply, a resume counts again), each reviewer's model
 // from its last telemetry stop (`models`). Only slices with an implementer record in the same run (session, run and
-// slice) are listed; other reviews are counted in one line. It reads no log the page did not already read.
+// slice) are listed; other reviews, those with no slice label among them, are counted in one line. It reads no log the page did not already read.
 /** @param {number[]} xs sorted ascending, not empty */
 const median = (xs) => {
   const mid = Math.floor(xs.length / 2);
@@ -352,10 +352,14 @@ const reviewSlices = (() => {
   const perSlice = new Map();
   /** @type {Map<string, any>} */
   const lastReviewOf = new Map();
+  // A review with no SLICE label goes under one key no implementer record can have (a slice key holds two newlines),
+  // so it is counted in the "not of a slice" line below like a label with no implementer behind it.
+  const unlabelled = "unlabelled";
   for (const r of journal) {
-    if (!r || typeof r !== "object" || !r.slice || String(r.role ?? r.agent_type ?? "").split(":").pop() !== "reviewer") continue;
+    if (!r || typeof r !== "object" || String(r.role ?? r.agent_type ?? "").split(":").pop() !== "reviewer") continue;
     const agentKey = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
-    const list = perSlice.get(sliceKey(r)) ?? perSlice.set(sliceKey(r), []).get(sliceKey(r)) ?? [];
+    const key = r.slice ? sliceKey(r) : unlabelled;
+    const list = perSlice.get(key) ?? perSlice.set(key, []).get(key) ?? [];
     const earlier = r.continues === true && agentKey ? lastReviewOf.get(agentKey) : undefined;
     const at = earlier ? list.indexOf(earlier) : -1;
     if (at >= 0) list[at] = r;

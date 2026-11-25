@@ -64,7 +64,10 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
     [ -n "$STATUS_PID" ] && kill -TERM -- "-$STATUS_PID" 2>/dev/null
     # second line of defence: the group of any job still listed
     for p in $(jobs -p 2>/dev/null); do kill -TERM -- "-$p" 2>/dev/null; done
-    [ -n "$STATUS_OUT" ] && rm -f "$STATUS_OUT"
+    # rm is this function's only forked simple command; bash waits for it with LINENO at the function's line (61), and
+    # while the killed jobs are reaped that wait once printed "line 61: wait_for: No record of process N" (CI). Its own
+    # 2>/dev/null would apply in the child only: the group's redirection also covers the shell's wait.
+    [ -n "$STATUS_OUT" ] && { rm -f "$STATUS_OUT"; } 2>/dev/null
     WATCH_PID=""; STATUS_PID=""; STATUS_OUT=""
   }
   trap git_cleanup EXIT
