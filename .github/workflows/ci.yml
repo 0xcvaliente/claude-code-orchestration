@@ -32,5 +32,5 @@ jobs:
       # The dashboard (mod) test runs `claude plugin validate` and `claude plugin test`; neither needs a login (probed on
       # 2.1.326 with an empty HOME: docs/data/probes-2.0.0-w4.md). Pinned to the Claude Code the Agent SDK carries.
       - name: Install the Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.326
+        run: npm install -g @anthropic-ai/claude-code@2.1.331
       - run: npm run test-dashboard
