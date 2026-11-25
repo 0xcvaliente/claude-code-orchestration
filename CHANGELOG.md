@@ -4,7 +4,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [2.1.2] - 2026-11-25
 
-2.1.2 ends a run of code in a git repository with a hand-off: the integrator commits the passed slices on a new branch, ready for the person's `/ship`, and publishing is `/ship`'s by default. It also fixes a stray stderr line of the status line and the count of unlabelled reviews in `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`; a status line installed earlier needs `npm run install-statusline -- --force`. After a run of code in git, type `/ship` to push the hand-off branch and open its pull request.
+2.1.2 ends a run of code in a git repository with a hand-off: the integrator commits the passed slices on a new branch, ready for the person's `/ship`, and publishing is `/ship`'s by default. It also silences the shell's stderr for the status line's final cleanup, aimed at a stray line seen in CI and not yet shown gone, and fixes the count of unlabelled reviews in `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`; a status line installed earlier needs `npm run install-statusline -- --force`. After a run of code in git, type `/ship` to push the hand-off branch and open its pull request.
 
 ### Added
 
@@ -21,7 +21,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Fixed
 
-- **The status line prints nothing on stderr from its cleanup** (`statusline/statusline.sh`). The cleanup's `rm` of its temp file now runs in a group whose `2>/dev/null` also covers bash's own wait, which once printed `wait_for: No record of process N` in CI on Linux. The message was not reproduced on the release machine, so the fix rests on the likely cause and its effect on the CI machine is not proven; a test in `src/statusline.test.ts` runs both SIGTERM cases 50 times each and requires empty stderr. A copy installed earlier needs `npm run install-statusline -- --force`.
+- **The status line's final cleanup runs with the shell's stderr silenced** (`statusline/statusline.sh`). Its EXIT trap is now `exec 2>/dev/null; git_cleanup`, aimed at a stray `wait_for: No record of process N` line bash printed during that cleanup in CI on Linux; a first form of the change, which silenced only the cleanup's `rm`, did not stop it. The kills, the temp-file removal and the exit statuses are unchanged; the message was never reproduced locally, so the change is not proven until the repeated-run test in `src/statusline.test.ts` (200 rounds at `STATUS_PID=$!` and 50 at `WATCH_PID=$!`, each checking exit status 143 and an empty stderr) passes on the CI runner. A copy installed earlier needs `npm run install-statusline -- --force`.
 - **"Reviews per slice" counts every review** (`scripts/report.mjs`). A review with no slice label (a brief without a SLICE line) is now counted in the "not of a slice" line, so the table and that line add up to every reviewer stop record. Tests: `src/report-cost.test.mjs`; `docs/logs.md` describes it and the limit that remains.
 
 ### Limits
