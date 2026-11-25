@@ -366,8 +366,15 @@ test("the three texts name a test gate that gave up as a doubt signal where they
 test("the three texts launch a non-RISKY slice's one review on opus directly when the opus review is certain", () => {
   const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
   for (const [file, text] of texts) {
-    assert.match(text, /For a slice that is not RISKY, when the opus review is certain before the review starts \((the slice is )?a retry after a failed review, or no command can prove any of its checked constraints, so every answer will be `?\(read\)`?\), launch its one review on opus directly[^.;]*instead of a default-model review followed by an opus one; that review is the slice's review\./, `${file} launches a certain opus review directly`);
+    assert.match(text, /For a slice that is not RISKY, when the opus review is certain before the review starts \((the slice is )?a retry after a failed review, or the slice has checked constraints \(a `?CHECKS:`? line\) and no command can prove any of them, so every answer will be `?\(read\)`?\), launch its one review on opus directly[^.;]*instead of a default-model review followed by an opus one; that review is the slice's review\./, `${file} launches a certain opus review directly`);
     assert.match(text, /When in doubt whether a command can prove a constraint, start on the default model\./, `${file} starts on the default model when in doubt`);
+  }
+});
+
+test("the three texts start a slice with no checked constraints on the default model", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /A slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model\./, `${file} starts a slice with no checked constraints on the default model`);
   }
 });
 
