@@ -498,7 +498,8 @@ Written to `journal.jsonl` at SubagentStop by `stopRecord({ ts, sessionId, agent
 | `status` | `parseStatus` of the final reply, or the status of the hand-back capture `journal.mjs` takes; `null` for a refused last hand-back (below) |
 | `answers`, `open` | `parseReply` |
 | `run` | the id `foldRuns` gives the run at write time; runs are numbered 1, 2, ... in session order |
-| `model` | a reviewer stop may carry it; otherwise the model comes from its launch record |
+| `kind` | reviewer stops only (2.1.x; `reviewFields`): `plan` for a PLAN REVIEW (launch `isPlanReview` or slice `plan`), `validate` for a brief with `VALIDATE: gaps`, otherwise `review`; taken from the reviewer's launch record in the same session, or from the brief in the transcript when there is no launch record; left out when unknown. An implementer's record has none, and no gate reads it |
+| `model` | reviewer stops only (2.1.x; `reviewFields`): the model the reviewer's launch record names, as the launch gave it (an alias such as `opus`); left out when unknown, including when there is no launch record. The fold takes a review's model from this field, else from the launch record: the same value |
 | `continues` | `true`, only when set ([below](#continued-stops)) |
 | `after_handback` | added by `journal.mjs`: the `tool_use_id` of the hand-back the stop follows, when there is one since the agent's latest start |
 | `report`, `refused_by` | added by `journal.mjs` (2.0.0) only when the agent's latest hand-back since its previous stop record was refused and the stop's last message has no STATUS line: `report: "handback_refused"`, `refused_by` the refusing check (`handback`, `quote` or `test`), with `status` null ([logs.md, Hand-back capture](logs.md#hand-back-capture)) |

@@ -341,6 +341,15 @@ test("the orchestrator answers a small read-only question itself, with no resear
   assert.match(read(ORCH), /A small question of step 0 goes to a `reviewer` only when a wrong answer is costly\./, `${ORCH} step 5 points back to step 0`);
 });
 
+test("the route skill, the nudge and the maintainer rules carry the same small-question exception", () => {
+  const texts: [string, string][] = [[SKILL, read(SKILL)], [NUDGE, nudgeContext()], [".claude/rules/agents.md", read(".claude/rules/agents.md")]];
+  for (const [name, text] of texts) {
+    assert.match(text, /a question about the project that changes nothing and that at most 5 of (your|the session's) own Read, Grep or Glob calls can settle is answered directly/, `${name} bounds the small question at 5 own reads`);
+    assert.match(text, /answered directly, with (a file and line reference for each fact and )?no researcher/, `${name} launches no researcher for a small question`);
+    assert.match(text, /goes to (a )?`?(orchestration:)?reviewer`? only when a wrong answer is costly/, `${name} reviews a small question only when a wrong answer is costly`);
+  }
+});
+
 // --- Output to the person: keywords, not prose (the three-places rule). ---
 test("the orchestrator, the route skill and the nudge state the same terse output rule", () => {
   const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];

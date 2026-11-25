@@ -411,6 +411,11 @@ const reviewSlices = (() => {
 // pass, fail and total. A stop record with `continues: true` replaces the record it continues, as in "Reviews per
 // slice", so one reply counts once; a resume counts again. Records without a kind (written before the field) are
 // counted in one line under the table. Only top-level fields of each parsed line are read.
+// The launch records (journal-launches.jsonl), read here because a reviewer with no model on its stop record takes its
+// launch record's; the cost by phase below places agents by them.
+const launchLog = readQuiet("journal-launches.jsonl");
+/** @type {any[]} */
+const launches = launchLog.rows.filter((l) => l && typeof l === "object" && typeof l.agent_id === "string" && l.agent_id);
 const REVIEW_KINDS = ["plan", "validate", "review"];
 const reviewKinds = (() => {
   /** @type {any[]} the reviewer stop records, a continued record replacing the one it continues */
@@ -427,6 +432,18 @@ const reviewKinds = (() => {
     if (agentKey) lastOf.set(agentKey, r);
   }
   if (!list.length) return "<p>No reviewer stop records in the journal yet.</p>";
+  /** @type {Map<string, any>} session + agent id -> its latest launch record */
+  const launchByAgent = new Map();
+  for (const l of launches) launchByAgent.set(`${l.session_id ?? ""}\n${l.agent_id}`, l);
+  /** @param {unknown} m */
+  const named = (m) => (typeof m === "string" && m ? m : null);
+  // The stop record's model, else its launch record's, else the one model of its last telemetry stop.
+  /** @param {any} r @returns {string} */
+  const reviewerModel = (r) => {
+    const key = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
+    const models = key ? lastStops.get(key)?.models : undefined;
+    return named(r.model) ?? (key ? named(launchByAgent.get(key)?.model) : null) ?? (Array.isArray(models) && models.length === 1 ? named(models[0]) : null) ?? "unknown";
+  };
   /** @type {Map<string, { kind: string, model: string, pass: number, fail: number, total: number }>} */
   const counts = new Map();
   let noKind = 0;
@@ -435,7 +452,7 @@ const reviewKinds = (() => {
       noKind++;
       continue;
     }
-    const model = typeof r.model === "string" && r.model ? r.model : "unknown";
+    const model = reviewerModel(r);
     const key = `${r.kind}\n${model}`;
     let c = counts.get(key);
     if (!c) counts.set(key, (c = { kind: r.kind, model, pass: 0, fail: 0, total: 0 }));
@@ -448,7 +465,7 @@ const reviewKinds = (() => {
   const rows = [...counts.values()]
     .sort((a, b) => REVIEW_KINDS.indexOf(a.kind) - REVIEW_KINDS.indexOf(b.kind) || a.model.localeCompare(b.model))
     .map((c) => [c.kind, c.model, c.pass, c.fail, c.total]);
-  return `${table(["Kind", "Model", "Pass", "Fail", "Total"], rows)}<p>Kind: plan (a plan review), validate (a gap validation), review (any other review). Model: the model the reviewer's launch named, "unknown" when none is on record. Total includes replies with no STATUS line.</p>${noKindNote}`;
+  return `${table(["Kind", "Model", "Pass", "Fail", "Total"], rows)}<p>Kind: plan (a plan review), validate (a gap validation), review (any other review). Model: the model on the reviewer's stop record (its launch's), else on its launch record, else the one model of its last telemetry stop; "unknown" when none is on record. A launch names a model as given (a launch alias such as opus or sonnet), telemetry as a full model id: the report has no mapping between the two, so one model can show under both forms. Total includes replies with no STATUS line.</p>${noKindNote}`;
 })();
 const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}<h3>Review outcomes by kind and model</h3>${reviewKinds}`;
 
@@ -467,9 +484,6 @@ const TOKEN_KINDS = /** @type {const} */ (["input", "output", "cache_read", "cac
 const num = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
 /** @param {any} t */
 const sumTokens = (t) => TOKEN_KINDS.reduce((a, k) => a + num(t?.[k]), 0);
-const launchLog = readQuiet("journal-launches.jsonl");
-/** @type {any[]} */
-const launches = launchLog.rows.filter((l) => l && typeof l === "object" && typeof l.agent_id === "string" && l.agent_id);
 /** @param {any} l */
 const isPlanLaunch = (l) => l.slice === "plan" || l.isPlanReview === true;
 /** @type {Map<string, any>} session + agent id -> its latest launch record */
@@ -485,17 +499,22 @@ for (const r of skillLogs.journal.rows) {
 const builtSlices = new Set();
 /** @type {Set<string>} session + run + slice with an implementer launch seen */
 const builtRunSlices = new Set();
+/** @type {Set<string>} session + slice with an implementer launch of no known run seen */
+const unknownRunSlices = new Set();
 for (const l of launches) {
   const key = `${l.session_id ?? ""}\n${l.agent_id}`;
   launchOf.set(key, l);
   if (bareType(l.agent_type) !== "implementer" || implPhase.has(key)) continue;
   // Build versus retries is decided per session, run and slice, so a later run that reuses a slice id starts with a
-  // build; an implementer with no known run (no journal record with one) is decided per session and slice.
+  // build; an implementer with no known run (no journal record with one) is decided per session and slice. A
+  // known-run launch after a no-known-run launch of the same session and slice (one that stopped at its turn limit
+  // has no journal record) is a retry too.
   const sk = `${l.session_id ?? ""}\n${l.slice ?? ""}`;
   const rk = runOfAgent.has(key) ? sliceKey({ session_id: l.session_id, run: runOfAgent.get(key), slice: l.slice }) : null;
-  implPhase.set(key, (rk ? builtRunSlices.has(rk) : builtSlices.has(sk)) ? "retries" : "build");
+  implPhase.set(key, (rk ? builtRunSlices.has(rk) || unknownRunSlices.has(sk) : builtSlices.has(sk)) ? "retries" : "build");
   builtSlices.add(sk);
   if (rk) builtRunSlices.add(rk);
+  else unknownRunSlices.add(sk);
 }
 const PHASES = ["plan review", "explore", "build", "retries", "review", "integrate", "unassigned"];
 /** @param {string} key session + agent id @returns {string} */
@@ -613,50 +632,97 @@ const phaseSection = (() => {
   const mains = orchestrator.agents;
   const noLaunches = launches.length ? "" : "<p>No launch records (<code>journal-launches.jsonl</code>), so every subagent is unassigned.</p>";
   const noTokensNote = noTokens ? `<p>${noTokens} agent${noTokens === 1 ? "" : "s"} with no token data on the last stop record left out.</p>` : "";
-  return `${head}${table(["Phase", "Agents", "Input", "Output", "Cache read", "Cache write", "Total tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>${subagents} subagent${subagents === 1 ? "" : "s"} at ${esc(formatUsd(subCost))} and ${mains} main-session transcript${mains === 1 ? "" : "s"}: ${esc(formatTokens(sumTokens(all)))} tokens and ${esc(formatUsd(all.cost))} in all, at list prices as of ${PRICES_AS_OF}: an estimate for comparing phases, not a bill (a subscription is not billed per token). "Not priced" counts agents (for the orchestrator, models in a transcript) with several models or no listed price: their tokens count, their cost does not.</p>${noLaunches}${noTokensNote}${skippedNote}${unreadableNote}`;
+  return `${head}${table(["Phase", "Agents", "Input", "Output", "Cache read", "Cache write", "Total tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>${subagents} subagent${subagents === 1 ? "" : "s"} at ${esc(formatUsd(subCost))} and ${mains} main-session transcript${mains === 1 ? "" : "s"}: ${esc(formatTokens(sumTokens(all)))} tokens and ${esc(formatUsd(all.cost))} in all, at list prices as of ${PRICES_AS_OF}: an estimate for comparing phases, not a bill (a subscription is not billed per token). "Not priced" counts agents (for the orchestrator, models in a transcript) with several models or no listed price: their tokens count, their cost does not. Build and retries count implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record, so its tokens count with that agent's first launch, under build when that was the first.</p>${noLaunches}${noTokensNote}${skippedNote}${unreadableNote}`;
 })();
 
-// Tokens and estimated cost per passed slice: a slice (session, run, slice) whose latest reviewer stop record in
-// journal.jsonl is pass and which has an implementer launch. An agent's run is the run of its own journal record; an
-// agent with none goes to the latest passed run of its session and slice. Plan reviews are not a slice's reviews.
+// Tokens and estimated cost per slice whose latest review passed: a slice (session, run, slice) whose latest reviewer
+// stop record in journal.jsonl is pass and which has an implementer launch. This is not the gates' verdict (a risky
+// slice fails on any counted fail of the attempt, a superseded review counts as nothing, a fail with every gap below the
+// cutoff can count as a pass), and the report does not repeat the gates' fold: a row marks a failing review recorded
+// after the slice's latest implementer launch, so a disagreement shows. An agent's run is the run of its own journal
+// record; an agent with none, or whose own run is not among these slices (a slice carried into a later run is reviewed
+// under the new run id while its implementers keep the old one), goes to the latest such run of its session and slice;
+// an agent whose own run is known goes there only when that run has no implementer launch of its own for the slice
+// (the slice was carried), so an earlier failed or unrelated run that reused the slice id adds nothing. Plan reviews are not a slice's reviews.
 const passedSection = (() => {
-  const head = "<h3>Tokens and estimated cost per passed slice</h3>";
+  const head = "<h3>Tokens and estimated cost per slice whose latest review passed</h3>";
   if (unreadable.has("journal.jsonl")) return `${head}<p><code>journal.jsonl</code> could not be read, so no slice can be counted.</p>`;
   const journal = skillLogs.journal.rows.filter((r) => r && typeof r === "object");
   if (!journal.length) return `${head}<p>No journal yet (<code>journal.jsonl</code>), so passed slices cannot be counted.</p>`;
   if (!launches.length) return `${head}<p>No launch records (<code>journal-launches.jsonl</code>), so no slice has an implementer launch to count.</p>`;
+  /** @type {any[]} the slices' reviewer stop records, a continued record replacing the one it continues */
+  const reviews = [];
+  /** @type {Map<string, any>} */
+  const lastOf = new Map();
+  for (const r of journal) {
+    if (bareType(r.role ?? r.agent_type) !== "reviewer" || !r.slice || r.slice === "plan") continue;
+    const agentKey = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
+    const earlier = r.continues === true && agentKey ? lastOf.get(agentKey) : undefined;
+    const at = earlier ? reviews.indexOf(earlier) : -1;
+    if (at >= 0) reviews[at] = r;
+    else reviews.push(r);
+    if (agentKey) lastOf.set(agentKey, r);
+  }
   /** @type {Map<string, unknown>} slice key -> latest reviewer status */
   const latest = new Map();
-  for (const r of journal) {
-    if (bareType(r.role ?? r.agent_type) === "reviewer" && r.slice && r.slice !== "plan") latest.set(sliceKey(r), r.status);
-  }
-  /** @type {Map<string, { session: string, run: string, slice: string, impl: Set<string>, rev: Set<string>, attempts: number }>} */
+  for (const r of reviews) latest.set(sliceKey(r), r.status);
+  /** @type {Map<string, { session: string, run: string, slice: string, impl: Set<string>, rev: Set<string>, attempts: number, lastLaunch: number }>} */
   const passed = new Map();
   for (const [key, status] of latest) {
     if (status !== "pass") continue;
     const [session = "", run = "", slice = ""] = key.split("\n");
-    passed.set(key, { session, run, slice, impl: new Set(), rev: new Set(), attempts: 0 });
+    passed.set(key, { session, run, slice, impl: new Set(), rev: new Set(), attempts: 0, lastLaunch: -Infinity });
   }
-  /** @param {any} l @returns {string | undefined} the passed slice key a launch belongs to */
-  const passedKeyOf = (l) => {
-    const agentKey = `${l.session_id ?? ""}\n${l.agent_id}`;
-    if (runOfAgent.has(agentKey)) return sliceKey({ session_id: l.session_id, run: runOfAgent.get(agentKey), slice: l.slice });
-    const prefix = `${l.session_id ?? ""}\n`;
-    return [...passed.keys()].filter((k) => k.startsWith(prefix) && k.endsWith(`\n${l.slice}`)).pop();
+  // Passed slices with an implementer launch of their own run: such a slice was not carried, so an agent of another
+  // known run (an earlier failed or unrelated run that reused the slice id) is not attached to it.
+  /** @type {Set<string>} */
+  const ownImpl = new Set();
+  for (const l of launches) {
+    if (!l.slice || isPlanLaunch(l) || bareType(l.agent_type) !== "implementer") continue;
+    const run = runOfAgent.get(`${l.session_id ?? ""}\n${l.agent_id}`);
+    if (run === undefined || run === null) continue;
+    const own = sliceKey({ session_id: l.session_id, run, slice: l.slice });
+    if (passed.has(own)) ownImpl.add(own);
+  }
+  /** @param {unknown} session @param {unknown} slice @param {unknown} run @returns {string | undefined} the passed slice key */
+  const passedKey = (session, slice, run) => {
+    const known = run !== undefined && run !== null;
+    if (known) {
+      const own = sliceKey({ session_id: session, run, slice });
+      if (passed.has(own)) return own;
+    }
+    const prefix = `${session ?? ""}\n`;
+    return [...passed.keys()].filter((k) => k.startsWith(prefix) && k.endsWith(`\n${slice}`) && !(known && ownImpl.has(k))).pop();
   };
   for (const l of launches) {
     if (!l.slice || isPlanLaunch(l)) continue;
     const role = bareType(l.agent_type);
     if (role !== "implementer" && role !== "reviewer") continue;
-    const k = passedKeyOf(l);
+    const k = passedKey(l.session_id, l.slice, runOfAgent.get(`${l.session_id ?? ""}\n${l.agent_id}`));
     const p = k ? passed.get(k) : undefined;
     if (!p) continue;
-    if (role === "implementer") p.attempts++;
+    if (role === "implementer") {
+      p.attempts++;
+      const t = typeof l.ts === "string" ? Date.parse(l.ts) : NaN;
+      p.lastLaunch = Number.isNaN(t) || Number.isNaN(p.lastLaunch) ? NaN : Math.max(p.lastLaunch, t);
+    }
     (role === "implementer" ? p.impl : p.rev).add(`${l.session_id ?? ""}\n${l.agent_id}`);
   }
-  const rows = [...passed.values()]
-    .filter((p) => p.impl.size)
-    .map((p) => {
+  // A failing review after the latest implementer launch: by time; with no readable launch or review time, any
+  // failing review of the slice counts.
+  /** @type {Set<string>} */
+  const failedAfter = new Set();
+  for (const r of reviews) {
+    if (r.status !== "fail") continue;
+    const k = passedKey(r.session_id, r.slice, r.run);
+    const p = k ? passed.get(k) : undefined;
+    if (!k || !p) continue;
+    const t = typeof r.ts === "string" ? Date.parse(r.ts) : NaN;
+    if (Number.isNaN(t) || Number.isNaN(p.lastLaunch) || !(t < p.lastLaunch)) failedAfter.add(k);
+  }
+  const rows = [...passed]
+    .filter(([, p]) => p.impl.size)
+    .map(([k, p]) => {
       const b = emptyBucket();
       for (const a of [...p.impl, ...p.rev]) {
         const u = agentUsage.get(a);
@@ -664,18 +730,21 @@ const passedSection = (() => {
         b.agents++;
         addTo(b, u.tokens, u.model);
       }
-      return [p.session.slice(0, 8), p.run, p.slice, p.attempts, p.impl.size, p.rev.size, formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced];
+      return [p.session.slice(0, 8), p.run, p.slice, p.attempts, p.impl.size, p.rev.size, formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced, failedAfter.has(k) ? "yes" : "no"];
     });
-  if (!rows.length) return `${head}<p>No passed slice with an implementer launch yet.</p>`;
-  return `${head}${table(["Session", "Run", "Slice", "Attempts", "Implementers", "Reviewers", "Tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>Tokens and cost of each slice's implementers and reviewers, from their last stop records with tokens, at list prices as of ${PRICES_AS_OF}: an estimate, not a bill. Attempts counts implementer launches. Slices whose latest review did not pass, and slices with no implementer launch, are left out.</p>`;
+  if (!rows.length) return `${head}<p>No slice whose latest review passed and with an implementer launch yet.</p>`;
+  return `${head}${table(["Session", "Run", "Slice", "Attempts", "Implementers", "Reviewers", "Tokens", "Est. cost (list prices)", "Not priced", "Failing review after latest launch"], rows)}<p>Slices whose latest reviewer stop record in the journal is pass. This can differ from the gates' verdict for a slice with several reviews of one attempt (a risky slice fails on any counted fail, a superseded review counts as nothing, a fail whose gaps are all below the cutoff can count as a pass): "Failing review after latest launch" is yes when a failing review was recorded after the slice's latest implementer launch record. Tokens and cost of each slice's implementers and reviewers, from their last stop records with tokens, at list prices as of ${PRICES_AS_OF}: an estimate, not a bill. Attempts counts implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record and is not counted. Slices whose latest review did not pass, and slices with no implementer launch, are left out.</p>`;
 })();
 
 // Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".
 const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</code> (${names.join(", ")})`).join("; ") : `<code>${esc(dir)}</code>`;
+// Logs that exist but could not be read (a folder, no permission) count as empty in every section, so a section may
+// say "no ... yet": one note at the top names them all.
+const unreadableTop = unreadable.size ? `<p><strong>Note:</strong> these logs exist but could not be read, so every section counts them as empty: ${[...unreadable].map((n) => `<code>${esc(n)}</code>`).join(", ")}.</p>` : "";
 
 const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Orchestration report</title>
 <style>:root{color-scheme:light dark}body{font:15px/1.5 system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}table{border-collapse:collapse;width:100%;margin:.5rem 0 1.5rem}th,td{border-bottom:1px solid #8884;padding:.4rem .6rem;text-align:left;font-size:13px}th{font-weight:600}</style></head>
-<body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
+<body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>${unreadableTop}
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agents by role</h2>${roleTable}${noStopLine}
 <h2>Estimated cost by role and model</h2>${costTable}

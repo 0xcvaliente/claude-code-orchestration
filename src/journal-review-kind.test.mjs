@@ -259,7 +259,9 @@ test("report phase: the first implementer of a later run that reuses a slice id 
     // record, so no known run: decided per session and slice as before (retries).
     writeJsonl(join(state, "journal.jsonl"), [jr("i1", 1), jr("i2", 2), jr("i3", 2)]);
     const html = renderReport(dir);
-    const sec = html.slice(html.indexOf("<h2>Tokens and estimated cost by phase</h2>"), html.indexOf("<h3>Tokens and estimated cost per passed slice</h3>"));
+    const end = html.indexOf("<h3>Tokens and estimated cost per slice whose latest review passed</h3>");
+    assert.notEqual(end, -1, "the passed-slice heading ends the phase table");
+    const sec = html.slice(html.indexOf("<h2>Tokens and estimated cost by phase</h2>"), end);
     assert.match(sec, /<td>build<\/td><td>2<\/td>/);
     assert.match(sec, /<td>retries<\/td><td>2<\/td>/);
   } finally {
