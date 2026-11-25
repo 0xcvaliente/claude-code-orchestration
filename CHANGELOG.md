@@ -2,6 +2,32 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.2] - 2026-11-25
+
+2.1.2 ends a run of code in a git repository with a hand-off: the integrator commits the passed slices on a new branch, ready for the person's `/ship`, and publishing is `/ship`'s by default. It also silences the shell's stderr for the status line's final cleanup, aimed at a stray line seen in CI and not yet shown gone, and fixes the count of unlabelled reviews in `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`; a status line installed earlier needs `npm run install-statusline -- --force`. After a run of code in git, type `/ship` to push the hand-off branch and open its pull request.
+
+### Added
+
+- **The hand-off** (`orchestrator.md` step 7, `integrator.md`, the `route` skill, `nudge.mjs`). Once every slice of a run of code in a git repository is final, the orchestrator sends the integrator a brief that starts with HANDOFF; the integrator creates the named new branch, commits the passed slices' files on it by name, never pushes in a hand-off and never commits on the default branch, and reports `BRANCH:` and `CHECKPOINT:`. It is skipped when the task says not to commit or no slice passed; a headless run denies creating the branch, so nothing is committed and the final report says the reviewed files are uncommitted.
+- **Two lines in the final report** (the same four files). `handoff: <branch> at <commit>` (or `handoff: none - <why>`) and, last before `Open:`, `Next: type /ship` (`Next: type /steward` when a pull request for the branch exists). Only the person starts `/ship`; the orchestrator never invokes it. Pinned in `src/contracts.test.ts`.
+- **The hand-off in the docs.** `docs/native-mode.md` has a section "How a run ends" and its integrator row names the hand-off; the routes table in `README.md` says where an orchestrated run of code in git leaves its work.
+
+### Changed
+
+- **Publishing is `/ship`'s by default** (`orchestrator.md`, `integrator.md`, the `route` skill, `nudge.mjs`). Pushing, pull requests and CI watching belong to the person's `/ship`; the integrator pushes, opens a pull request, merges, tags or creates a release only when its brief quotes the person's own words asking for exactly that, within the limits its file states (a pull request merged only when at least one CI check exists and every check passed, no `--admin`, no force-push, no push to the default branch).
+- **A new branch off the default branch** (`orchestrator.md` steps 3 and 4, `integrator.md`). A brief that makes the integrator commit or merge while the run's branch is the default branch names a new branch, which the integrator creates first and which is the run's branch from then on; on the default branch the checkpoint before a parallel wave is always sent, and when it fails the wave runs one slice at a time. `integrator.md` itself now tells the integrator to confirm a branch and head its brief names, in every mode, and to stop when a named new branch already exists.
+- **The integrator** (`integrator.md`): `maxTurns` 40 (was 20), a description that covers checkpoint, merge and hand-off, and `BRANCH:` and `PUBLISHED:` fields in its reply.
+- Version 2.1.2 in `package.json`, `package-lock.json` and both plugin manifests.
+
+### Fixed
+
+- **The status line's final cleanup runs with the shell's stderr silenced** (`statusline/statusline.sh`). Its EXIT trap is now `exec 2>/dev/null; git_cleanup`, aimed at a stray `wait_for: No record of process N` line bash printed during that cleanup in CI on Linux; a first form of the change, which silenced only the cleanup's `rm`, did not stop it. The kills, the temp-file removal and the exit statuses are unchanged; the message was never reproduced locally, so the change is not proven until the repeated-run test in `src/statusline.test.ts` (200 rounds at `STATUS_PID=$!` and 50 at `WATCH_PID=$!`, each checking exit status 143 and an empty stderr) passes on the CI runner. A copy installed earlier needs `npm run install-statusline -- --force`.
+- **"Reviews per slice" counts every review** (`scripts/report.mjs`). A review with no slice label (a brief without a SLICE line) is now counted in the "not of a slice" line, so the table and that line add up to every reviewer stop record. Tests: `src/report-cost.test.mjs`; `docs/logs.md` describes it and the limit that remains.
+
+### Limits
+
+[docs/limits.md](docs/limits.md) gains section K, "The hand-off to /ship": among others, a headless run gets no hand-off branch and no `/ship`, the gated workflow ends without a hand-off, and the hand-off's rules are prompt rules no hook enforces. Its section J's status line item now records the CI message and that the fix's effect there is not proven; what 2.1.0 does not do, in section J, holds for 2.1.2.
+
 ## [2.1.1] - 2026-11-25
 
 2.1.1 narrows the rule that sends a slice's one review to opus directly, so a slice with no checked constraints starts on the default model again, and fixes the "Reviews per slice" table of `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person.
@@ -701,6 +727,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.1.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.2
 [2.1.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.1
 [2.1.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.0
 [2.0.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.3

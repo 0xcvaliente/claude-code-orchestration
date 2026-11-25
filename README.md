@@ -71,7 +71,7 @@ npm run route -- --repo /path/to/folder --task "..."   # triage only; prints the
 |---|---|---|---|
 | Plain | One session in your folder (`solo` in the SDK pipeline) | Your folder; uncommitted in git | Code: your tests. Other work: the session checks its work against the request |
 | Reviewed | The same, then one fresh reviewer | Your folder; uncommitted in git | Code: the tests and the reviewer. Other work: the reviewer checks each requirement and each cited source |
-| Orchestrate | The orchestrator, researchers, implementers and a reviewer per slice; for code in git also worktrees and the integrator | Code in git: branches merged into your current branch (SDK pipeline: `orch/<id>/result`). Other work: your folder, nothing committed | Tests for code, a reviewer per slice, the review gate, a merge check for isolated code slices |
+| Orchestrate | The orchestrator, researchers, implementers and a reviewer per slice; for code in git also worktrees and the integrator | Code in git: the passed slices committed on a new hand-off branch, ready for your `/ship` (worktree branches are merged first into the run's branch, a new branch when you were on the default branch; a headless run cannot create that branch and reports the files it left uncommitted). SDK pipeline: `orch/<id>/result`. Other work: your folder, nothing committed | Tests for code, a reviewer per slice, the review gate, a merge check for isolated code slices |
 
 Each route in detail: [How the native orchestrator works](docs/native-mode.md).
 

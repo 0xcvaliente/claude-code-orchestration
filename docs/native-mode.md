@@ -18,7 +18,7 @@ Each role is an agent with a fixed model, effort, [turn limit](glossary.md#t) an
 | Researcher | Sonnet, low, 15 turns (the read router may raise the model) | Read, Grep, Glob, a read-only Bash list (below), `WebSearch`, `WebFetch`, `Skill` | Answers one narrow question with evidence: file paths, or URLs for web sources |
 | Implementer | Opus, medium, 80 turns | Every tool except `Agent` (`disallowedTools: Agent`) | Builds one slice: code, a document, an analysis or an operation |
 | Reviewer | Sonnet, medium, 40 turns | Read, Grep, Glob, Bash, `WebSearch`, `WebFetch`, `Skill`; it never edits | Checks one slice, or a plan, with a fresh context |
-| Integrator | Sonnet, low, 20 turns | Read, Grep, Glob, Bash | Code in git only: writes checkpoint commits, merges passing branches, runs the slices' acceptance checks and then the whole suite once. It never resolves a conflict |
+| Integrator | Sonnet, low, 40 turns | Read, Grep, Glob, Bash | Code in git only: writes checkpoint commits, merges passing branches, runs the slices' acceptance checks and then the whole suite once, and at the end commits the passed slices on a new hand-off branch for your `/ship` ([How a run ends](#how-a-run-ends)). It never resolves a conflict, and it pushes only when its brief quotes your own words asking for it |
 | Triager | Sonnet, low | Read-only | Sizes a task for the router ([triage](../README.md#choosing-a-route-triage)) |
 | Plain session (`npm run auto`) | Opus, medium | What the session allows | Does a small task alone, with no workers |
 
@@ -53,7 +53,7 @@ The orchestrate route plans the task, builds slices with an implementer each, an
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/pipeline-dark.svg">
-  <img alt="The orchestrate route for code in git: Fable plans, Sonnet explores, a reviewer checks the plan; Opus writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and a slice that fails twice on the same gap is stalled until one replan; the integrator merges passing branches into your current branch and runs the whole suite once (SDK pipeline: orch/&lt;id&gt;/result)." src="diagrams/pipeline-light.svg">
+  <img alt="The orchestrate route for code in git: Fable plans, Sonnet explores, a reviewer checks the plan; Opus writes each slice behind a test gate and a fresh reviewer; gaps are validated before a retry (2nd resumes the writer, 3rd is fresh on Opus), and a slice that fails twice on the same gap is stalled until one replan; the integrator merges passing branches into the run's branch and runs the whole suite once, then commits the passed slices on a new hand-off branch (SDK pipeline: orch/&lt;id&gt;/result)." src="diagrams/pipeline-light.svg">
 </picture>
 
 Why each step has this shape:
@@ -81,7 +81,7 @@ The orchestrator writes to you in short bullets or `key: value` lines, never par
 - **First line**: the path, `Path: light|full - <reason, a few words>`.
 - **The plan, once**: one line per slice, `<id>: <goal, a few words>`, plus `RISKY` when it is; then `Constraints: C1-C<n>` (ids only). The full plan with the constraint texts goes only into the PLAN REVIEW brief.
 - **Progress**: one short line, only when something changed or when it waits for workers (`waiting: s1 review, s3 build`).
-- **Final report** of at most 15 lines: `Result: <n> passed, <n> failed`, then one `<id>: pass|fail - <evidence pointer>` line per slice, then only the lines that apply (replaced, reused, a skill draft, sequential slices, unverified slices), and last `Open: <items>` or `Open: none`.
+- **Final report** of at most 15 lines: `Result: <n> passed, <n> failed`, then one `<id>: pass|fail - <evidence pointer>` line per slice, then only the lines that apply (replaced, reused, a skill draft, sequential slices, unverified slices, and for code in git `handoff: <branch> at <commit>` or `handoff: none - <why>`), then `Next: type /ship` when the hand-off made a branch (`Next: type /steward` when a pull request for it exists), and last `Open: <items>` or `Open: none`.
 - **More detail** (the full plan, gaps, logs, reasoning) only when you ask.
 
 The `/route` skill and the nudge carry the same rule; `/route` starts with `Route: <mode> - <reason>`.
@@ -90,12 +90,12 @@ The `/route` skill and the nudge carry the same rule; `/route` starts with `Rout
 
 The orchestrator sizes the task first. It decides whether the task changes code (source, tests, or build or CI configuration) and, if so, whether that code is in a git repository.
 
-- **Light path**: a small task with one slice and nothing risky. One implementer works in the shared folder, then one reviewer checks it. No exploration, plan review, worktrees or integrator. The brief carries `PATH: light`.
+- **Light path**: a small task with one slice and nothing risky. One implementer works in the shared folder, then one reviewer checks it. No exploration, plan review, worktrees or merges; for code in git the integrator then makes the hand-off commit ([How a run ends](#how-a-run-ends)). The brief carries `PATH: light`.
 - **Full path**: every other task. Exploration, a plan review, slices with a reviewer each, and for code in git, worktrees and the integrator.
 
 *Risky* means a wrong result is costly: security, authentication, payments, data migrations or deletion, public API changes, production operations, or content sent or published outside the team. The size limits mirror `TRIAGE` in `src/config.ts` and are stated once, in the README's [Choosing a route (triage)](../README.md#choosing-a-route-triage). For work that small, a plain session is cheaper still. `npm run auto` and the `/route` skill decide that before the orchestrator starts.
 
-**Git machinery** (worktrees, the integrator, checkpoint commits, branch reports, commit-range reviews of merged code) is for code in a git repository only. Work that changes no code runs in the shared folder, and nobody commits. The reviewer of `npm run auto`'s reviewed route is not part of this: it reads `git diff HEAD` for any task in a git work tree.
+**Git machinery** (worktrees, the integrator, checkpoint commits, the hand-off, branch reports, commit-range reviews of merged code) is for code in a git repository only. Work that changes no code runs in the shared folder, and nobody commits. The reviewer of `npm run auto`'s reviewed route is not part of this: it reads `git diff HEAD` for any task in a git work tree.
 
 **Interface first.** For large work with separable parts, slice 1 writes the shared interfaces, types and stubs (for documents, the outline and shared definitions) in the shared folder. For code in git a checkpoint commit follows. The other slices then run against it:
 - in parallel in worktrees, for code in a git repository;
@@ -141,17 +141,33 @@ Worktrees, checkpoint commits, `BRANCH:` reports and the integrator are for code
 
 **Check `worktree.baseRef` first.** Claude Code starts a worktree from the remote default branch unless `worktree.baseRef` is `"head"`. This repo sets it in `.claude/settings.json`; plugin users must set it in their own settings. Worktrees also see only committed work.
 1. Before a parallel wave, the orchestrator reads `.claude/settings.json`, `.claude/settings.local.json` and `~/.claude/settings.json`. If `baseRef` is not `"head"`, it runs the slices one after another in the shared folder and says so.
-2. If earlier slices left uncommitted work, it sends the integrator a CHECKPOINT brief naming the files those slices own. The integrator stages and commits only those paths and reports the hash in a `CHECKPOINT:` field.
+2. If earlier slices left uncommitted work, it sends the integrator a CHECKPOINT brief naming the files those slices own. The integrator stages and commits only those paths and reports the hash in a `CHECKPOINT:` field. When the run's branch is the repository's default branch, the brief also names a new branch, which the integrator creates first; that branch is the run's branch from then on (the same holds for a merge brief). On the default branch the orchestrator sends this brief before every parallel wave, even with nothing to commit, so the branch exists before the merge; when it cannot be created (a headless run), the wave runs one slice at a time.
 3. The orchestrator checks that field before it launches the wave. If the commit failed, or the field is `none` while those slices left changes, it runs the wave one slice at a time in the shared folder instead. The gated workflow does the same and logs why.
 
 A session that acts as orchestrator itself gets the same `baseRef` and CHECKPOINT rule from the `/route` skill. The nudge carries only the `baseRef` rule.
 
 **A wave in worktrees.** For independent code slices in a git repository, the orchestrator launches implementers with `isolation: "worktree"`. Each commits on its own branch. Since 2.0.0 each brief names its base commit, and the worker stops and reports when its worktree does not contain it.
-- The integrator's brief names the branch and head commit the run is built on, and the integrator stops on a mismatch (also for a CHECKPOINT). It merges the branches (`git merge --no-ff`, aborting on a conflict), runs the slices' acceptance checks, then the project's whole suite once. If an abort fails, it runs `git status`, aborts again, then `git reset --merge`, and stops if a merge is still in progress.
+- The integrator's brief names the branch and head commit the run is built on, and the integrator stops on a mismatch (also for a CHECKPOINT and the hand-off). On the default branch the brief names a new branch to merge into, as for a CHECKPOINT. It merges the branches (`git merge --no-ff`, aborting on a conflict), runs the slices' acceptance checks, then the project's whole suite once. If an abort fails, it runs `git status`, aborts again, then `git reset --merge`, and stops if a merge is still in progress.
 - Conflicted slices are retried one at a time in the shared folder. Dependent slices run one after another in the shared folder.
 - A rejected slice is retried by resuming the same implementer with `SendMessage`. Checked: a resumed isolated implementer kept its worktree and committed on its branch. A slice in the shared folder has no branch: if `SendMessage` fails, the orchestrator starts a fresh implementer with the same files and the gaps. Since 2.0.0, for an isolated slice whose resume fails or reports another branch, and for its third attempt, the orchestrator starts a fresh isolated implementer whose first command merges the slice's branch; it never starts a worker that is not isolated on another worktree's folder. These are rules in the orchestrator's prompt.
 - The test gate in a worktree runs the tests and only warns by default (`tests_failed_isolated`, a doubt signal), because sibling slices may not be merged yet. The integrator's whole-suite run on the merged result is the real gate.
 - The test gates of one project run one suite at a time. An isolated slice whose gate could not get its turn in time logs `tests_failed_isolated` with `not_run`, so it also needs an opus review ([Test gate in worktrees](gates.md#test-gate-in-worktrees)).
+
+## How a run ends
+
+A run of code in a git repository ends on a branch of its own, ready for Claude Code's `/ship`. Other work ends with its files in your folder, nothing committed.
+
+**The hand-off.** Once every slice is final, the orchestrator sends the integrator a brief that starts with HANDOFF. It names the run's branch and head commit, a new branch (such as `orch/<short task words>`), the files of every slice that passed, and a commit subject.
+- The integrator confirms the branch and head and stops on a mismatch. It stops too when the new branch already exists.
+- It creates the branch from the run's head, so the uncommitted reviewed files come with it. It stages those files by name (never `git add -A`) and commits. Work that a merge already committed is on the new branch as it is.
+- It never pushes in a hand-off and never commits on the default branch. Its reply names the branch (`BRANCH: <branch> at <hash>`) and the commit (`CHECKPOINT:`).
+- The orchestrator skips the hand-off when the task says not to commit, or when no slice passed. A skill draft is never part of it: it stays on its own branch in the skills repository.
+
+**The final report** gains two lines: `handoff: <branch> at <commit>` (or `handoff: none - <why>`) and, last before `Open:`, `Next: type /ship`, or `Next: type /steward` when a pull request for the branch exists.
+
+**Publishing is yours.** Only you start `/ship`: it pushes the branch, opens the pull request, reviews it and watches CI, conflicts and review comments, and it does not merge. `/steward` watches a pull request that already exists. The orchestrator never invokes either. The integrator pushes, opens a pull request, merges, tags or creates a release only when its brief quotes your own words from the session asking for exactly that. Then it does nothing beyond those words, merges only when at least one CI check exists and all passed, never uses `--admin`, never force-pushes or pushes to the default branch, runs every command in the foreground, and stops at a step boundary when its turns run low. For that work its turn limit is 40, up from 20: waiting for CI used up 20 turns twice.
+
+**Headless runs.** `npm run native` and `npm run auto` deny creating a branch by default (`git switch` is not on their allowlist) and cannot run `/ship`. The integrator then reports that it could not create the branch, nothing is committed, and the final report says the reviewed files are uncommitted and why. The gated workflow ends without a hand-off ([Limits, K](limits.md#k-the-hand-off-to-ship)).
 
 ## The reviewed route
 
