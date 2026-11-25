@@ -106,6 +106,130 @@ test("report: a continued stop record (G-8, one review recorded twice) counts it
   }
 });
 
+/** @param {string} dir @returns {string} the report's HTML */
+const renderReport = (dir) => {
+  const r = spawnSync("node", [join(root, "scripts", "report.mjs"), dir], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  return readFileSync(join(dir, ".claude", "state", "report.html"), "utf8");
+};
+/** @param {string} id @param {string} type @param {string} ts @param {object} [rest] */
+const tStart = (id, type, ts, rest = {}) => ({ ts, session_id: "s1", hook_event_name: "SubagentStart", agent_id: id, agent_type: type, ...rest });
+/** @param {string} id @param {string} type @param {string} ts @param {object} [rest] */
+const tStop = (id, type, ts, rest = {}) => ({ ts, session_id: "s1", hook_event_name: "SubagentStop", agent_id: id, agent_type: type, ...rest });
+const at = (/** @type {number} */ s) => new Date(Date.UTC(2026, 10, 20, 10, 0, 0) + s * 1000).toISOString();
+/** @param {string} html */
+const reviewTime = (html) => html.slice(html.indexOf("<h2>Review time</h2>"), html.indexOf("<h2>Reads by kind and role</h2>"));
+
+test("report review time: wall time per agent from its first start to its last stop, median, longest and total per role and model", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-wall-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    const opus = { models: ["claude-opus-5-5"] };
+    const tel = [
+      // One reviewer, one start and one stop: 4 min 12 s.
+      tStart("r1", "orchestration:reviewer", at(0)),
+      tStop("r1", "orchestration:reviewer", at(252), opus),
+      // Two more opus reviewers: 60 s and 600 s, so the median of three is 4 min 12 s and the longest 10 min 0 s.
+      tStart("r2", "reviewer", at(0)),
+      tStop("r2", "reviewer", at(60), opus),
+      tStart("r3", "reviewer", at(10)),
+      tStop("r3", "reviewer", at(610), opus),
+      // An implementer that stops three times: first start to last stop, 30 min 5 s.
+      tStart("i1", "implementer", at(0)),
+      tStop("i1", "implementer", at(300), { models: ["claude-opus-5-5"] }),
+      tStop("i1", "implementer", at(900), { models: ["claude-opus-5-5"] }),
+      tStop("i1", "implementer", at(1805), { models: ["claude-opus-5-5"] }),
+      // A sonnet reviewer: its own row.
+      tStart("r4", "reviewer", at(0)),
+      tStop("r4", "reviewer", at(42), { models: ["claude-sonnet-5-5"] }),
+      // A stop with no start and a start with no stop: left out and noted.
+      tStop("x1", "reviewer", at(50), opus),
+      tStart("x2", "researcher", at(50)),
+    ];
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const html = renderReport(dir);
+    const sec = reviewTime(html);
+    assert.ok(html.indexOf("<h2>Estimated cost by role and model</h2>") < html.indexOf("<h2>Review time</h2>"), "after the cost section");
+    assert.match(sec, /<th>Role<\/th><th>Model<\/th><th>Agents<\/th><th>Median<\/th><th>Longest<\/th><th>Total<\/th>/);
+    assert.match(sec, /<td>implementer<\/td><td>claude-opus-5-5<\/td><td>1<\/td><td>30 min 5 s<\/td><td>30 min 5 s<\/td><td>30 min 5 s<\/td>/);
+    // 252 + 60 + 600 = 912 s total.
+    assert.match(sec, /<td>reviewer<\/td><td>claude-opus-5-5<\/td><td>3<\/td><td>4 min 12 s<\/td><td>10 min 0 s<\/td><td>15 min 12 s<\/td>/);
+    assert.match(sec, /<td>reviewer<\/td><td>claude-sonnet-5-5<\/td><td>1<\/td><td>42 s<\/td><td>42 s<\/td><td>42 s<\/td>/);
+    assert.match(sec, /2 agents without a start or stop record/);
+    // No journal: one line, and the page still renders.
+    assert.match(sec, /No journal yet \(<code>journal\.jsonl<\/code>\), so reviews per slice cannot be counted\./);
+    assert.match(html, /<h2>Gate decisions<\/h2>/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report review time: an even count takes the mean of the middle two; nothing timed says so; long runs show hours", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-wall2-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    const m = { models: ["claude-sonnet-5-5"] };
+    const tel = [
+      tStart("a", "reviewer", at(0)), tStop("a", "reviewer", at(10), m),
+      tStart("b", "reviewer", at(0)), tStop("b", "reviewer", at(20), m),
+      tStart("c", "reviewer", at(0)), tStop("c", "reviewer", at(40), m),
+      tStart("d", "reviewer", at(0)), tStop("d", "reviewer", at(3900), m),
+    ];
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const sec = reviewTime(renderReport(dir));
+    assert.match(sec, /<td>reviewer<\/td><td>claude-sonnet-5-5<\/td><td>4<\/td><td>30 s<\/td><td>1 h 5 min<\/td><td>1 h 6 min<\/td>/);
+    assert.doesNotMatch(sec, /without a start or stop record/);
+
+    // Only a stop: nothing timed, the note, exit 0.
+    writeFileSync(join(state, "telemetry.jsonl"), `${JSON.stringify(tStop("z", "reviewer", at(5)))}\n`);
+    const bare = reviewTime(renderReport(dir));
+    assert.match(bare, /No agent with both a start and a stop record yet\./);
+    assert.match(bare, /1 agent without a start or stop record/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report review time: reviews per slice from the journal, opus counted from the reviewer's telemetry models", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-reviews-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    /** @param {string} id @param {string} slice @param {object} [rest] */
+    const review = (id, slice, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "reviewer", slice, run: 1, status: "pass", answers: {}, open: [], ...rest });
+    const journal = [
+      { ts: "t", session_id: "s1", agent_id: "i1", role: "implementer", slice: "a", run: 1, status: "pass" }, // not a review
+      review("r1", "a", { status: "fail" }),
+      review("r2", "a"),
+      review("r2", "a", { continues: true }), // the same reply recorded twice: one review
+      review("r3", "a"),
+      review("r4", "b"),
+      review("r5", "b"), // no telemetry: model unknown, not on opus
+    ];
+    writeFileSync(join(state, "journal.jsonl"), journal.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const tel = [
+      tStart("r1", "reviewer", at(0)), tStop("r1", "reviewer", at(60), { models: ["claude-sonnet-5-5"] }),
+      tStart("r2", "reviewer", at(0)), tStop("r2", "reviewer", at(60), { models: ["claude-opus-5-5"] }),
+      tStart("r3", "orchestration:reviewer", at(0)), tStop("r3", "orchestration:reviewer", at(60), { models: ["claude-fable-5-2"] }),
+      tStart("r4", "reviewer", at(0)), tStop("r4", "reviewer", at(60), { models: ["us.anthropic.claude-opus-5-5"] }),
+    ];
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const sec = reviewTime(renderReport(dir));
+    assert.match(sec, /<th>Session<\/th><th>Run<\/th><th>Slice<\/th><th>Reviews<\/th><th>On opus<\/th>/);
+    assert.match(sec, /<td>s1<\/td><td>1<\/td><td>a<\/td><td>3<\/td><td>1<\/td>/);
+    assert.match(sec, /<td>s1<\/td><td>1<\/td><td>b<\/td><td>2<\/td><td>1<\/td>/);
+    assert.match(sec, /2 slices, 5 reviews, 2\.5 per slice, 2 of 5 on opus \(40%\)\. 1 review has no model on record and counts as not on opus\./);
+
+    // A journal with no reviewer record.
+    writeFileSync(join(state, "journal.jsonl"), `${JSON.stringify(journal[0])}\n`);
+    assert.match(reviewTime(renderReport(dir)), /No reviews in the journal yet\./);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("report: an agent that stops several times is counted once, with its last record (each record is a running total)", () => {
   const dir = mkdtempSync(join(tmpdir(), "orch-report-once-"));
   try {

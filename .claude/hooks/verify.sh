@@ -166,13 +166,17 @@ now_iso() {
 }
 
 # Every record also carries link_extra (the hand-back or stop it belongs to: handback_id and at, or after_handback) and
-# tree_extra (the cache key's first 16 hex digits, and the record it reused), and after a failed test run fail_extra
+# tree_extra (the cache key's first 16 hex digits, and the record it reused), once the suite has run suite_extra
+# (2.1.0: suite_s, the whole seconds the test command ran by bash's SECONDS, so within a second; the lock wait, the
+# listings and the base run are not in it; a stop that reuses its hand-back's outcome carries that run's suite_s; no
+# field when no suite ran: a lock-wait give-up, a skip, a stop with no test command), and after a failed test run fail_extra
 # (what failed: failed_count, failed_tests, failed_crash and output, the file in the state folder that keeps the tail of
 # the run's output; bugfix-check.mjs failureExtra). Returns 1 when the line was not written.
 log_gate() { # decision reason [extra JSON fields: counts only]
   local extra="${link_extra:-}"
   decided=1
   [ -z "${tree_extra:-}" ] || extra="${extra:+$extra,}$tree_extra"
+  [ -z "${suite_extra:-}" ] || extra="${extra:+$extra,}$suite_extra"
   [ -z "${3:-}" ] || extra="${extra:+$extra,}$3"
   [ -z "${fail_extra:-}" ] || extra="${extra:+$extra,}$fail_extra"
   [ "${took_over:-0}" = 0 ] || extra="${extra:+$extra,}\"lock_takeover\":1" # this gate replaced a stale suite lock
@@ -182,7 +186,7 @@ log_gate() { # decision reason [extra JSON fields: counts only]
     "$(now_iso)" "$1" "$2" "${agent_type:-}" "${agent_id:-}" "${session_id:-}" "${extra:+,$extra}" >> "$state/gates.jsonl" 2>/dev/null || return 1
   return 0
 }
-decided=0 link_extra="" tree_extra="" fail_extra=""
+decided=0 link_extra="" tree_extra="" fail_extra="" suite_extra=""
 
 # Run a command in its own process group, stdin from $2 and stdout to $3 (stderr to $4), for at most $1 seconds; then
 # the whole group is killed. Sets lim_rc and lim_timed_out. Portable: job control (set -m) gives the background job its
@@ -807,13 +811,13 @@ cache_put() { # result extra message: the hand-back gate only; the helper compar
   [ "$in_project" = 0 ] || [ -f "$state/.gitignore" ] || printf '*\n' 2>/dev/null >"$state/.gitignore"
   { ensure_work && printf '%s' "$3" >"$work/put.in"; } 2>/dev/null || { store_note no_work; return 0; }
   run_limited "$lim" "$work/put.in" "$work/put.out" /dev/null node "$hooks_dir/test-gate-cache.mjs" put "$state" "$cache_key" "$1" "$handback_id" "$2" \
-    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json" "$recent_ms" "$fail_extra"
+    "${session_id:-}" "${agent_id:-}" "$work/l0.json" "$work/l1.json" "$recent_ms" "$fail_extra" "$suite_s"
   code="$(sed -n 1p "$work/put.out" 2>/dev/null | LC_ALL=C tr -cd 'a-z0-9_')"
   [ "$lim_timed_out" = 0 ] && [ -n "$code" ] || code=put_failed
   store_note "$code"
   return 0
 }
-cached="" cached_by="" cached_extra="" cached_fail="" cached_msg="" key_stable=0 cache_key="" take_reason=""
+cached="" cached_by="" cached_extra="" cached_fail="" cached_msg="" key_stable=0 cache_key="" take_reason="" suite_s=""
 if [ "$handback" = 1 ] || [ -n "${after_handback:-}" ]; then
   compute_key
   cache_key="$key_out"
@@ -845,7 +849,10 @@ if [ -n "$cache_key" ]; then
     cached_extra="$(sed -n 3p "$work/cache.out" | LC_ALL=C tr -cd 'a-z_0-9,:"')"
     cached_fail="$(sed -n 4p "$work/cache.out")" # cleaned by the helper (cleanFailureExtra); checked again below
     case "$cached_fail" in '"failed_count":'*) ;; *) cached_fail="" ;; esac
-    cached_msg="$(sed -n '5,$p' "$work/cache.out")"
+    # The hand-back run's suite_s (empty for an entry stored before 2.1.0, or a lock-wait give-up: no run).
+    suite_s="$(sed -n 5p "$work/cache.out" | LC_ALL=C tr -cd '0-9')"
+    case "$suite_s" in ??????????*) suite_s="" ;; esac
+    cached_msg="$(sed -n '6,$p' "$work/cache.out")"
     tree_extra="$tree_extra,\"reused\":\"$cached\",\"reused_from\":\"$cached_by\""
   fi
 fi
@@ -861,6 +868,7 @@ if [ "$cached" = pass ] || [ "$cached" = fail ] || [ "$cached" = timeout ]; then
   [ "$cached" = pass ] || rc=1
   if [ "$cached" = timeout ]; then rc=137 timed_out=1; fi
   [ "$cached" = pass ] || fail_extra="$cached_fail" # what failed, as the hand-back's run recorded it
+  [ -z "$suite_s" ] || suite_extra="\"suite_s\":$suite_s" # how long that run took
   out=""
 else
   if [ "$cached" = lock_wait ]; then
@@ -909,6 +917,9 @@ else
   run_s="$SECONDS"
   run_limited "$limit" /dev/null "$work/test.out" "$work/test.out" bash -c "$cmd"
   run_s=$((SECONDS - run_s))
+  # From here every record of this gate carries the run's time (log_gate), and the hand-back's store keeps it for its stop.
+  suite_s="$run_s"
+  suite_extra="\"suite_s\":$suite_s"
   rc="$lim_rc"
   timed_out="$lim_timed_out"
   # At a hand-back: L1 at once, then the key again, so that an outcome is stored only for the trees the run began with.

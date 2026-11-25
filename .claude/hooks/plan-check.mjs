@@ -37,6 +37,19 @@
 //                         <project>/.claude/settings.json, <CLAUDE_CONFIG_DIR or ~/.claude>/settings.json that sets it)
 //                         is not "head", and HEAD in input.cwd differs from refs/remotes/origin/HEAD: the worktree would
 //                         start from the remote default branch. Anything it cannot establish lets the launch through.
+//   wave_full             (2.1.0; last of all, so a launch refused for another reason takes no slot; this plugin's
+//                         implementer only, bare or orchestration:; the usual two-block guard per slice, then
+//                         wave_full_gave_up) the session's implementers running (run.mjs waveLoad: a SubagentStart with
+//                         no later SubagentStop, read as the review gate reads them, a start older than the run-stale
+//                         window not counted) plus the implementer launches this hook allowed in the last
+//                         WAVE_PENDING_MS (limits.mjs, 120 s) that no first start has followed yet, reach the cap:
+//                         limits.mjs waveMax (4, or ORCH_WAVE_MAX from 1 to 8), for a launch with isolation "worktree"
+//                         narrowed to 1 + floor((gate budget - floor) / suite_s) by run.mjs waveCap from the project's
+//                         latest suite_s in gates.jsonl (none: no narrowing). The count and this launch's record run
+//                         under plan-check-wave.lock (WAVE_LOCK_WAIT_MS, then judged without it, `lock: "not_taken"`).
+//                         Never blocks when limits.mjs cannot be loaded (then the record has no `wave`, as before) or
+//                         telemetry.jsonl or plan-check.jsonl cannot be read. The record carries `wave` (running,
+//                         pending, cap, base, suite_s when narrowing read one, lock, full, narrowed; or skipped).
 // Coverage note: a launch of our researcher whose SOURCES name two or more local regular files gets a coverage note
 // appended through the allow with updatedInput below (ORCH_SOURCES_NOTE=off turns it off).
 // Reviewer hold (1.6.1). On unless ORCH_REVIEW_HOLD=off (or the plugin option REVIEW_HOLD=off). The test gate runs at an
@@ -61,6 +74,9 @@
 // the latest run's opening (in every scope when the session has no runs).
 // A wave's launches arrive at the same time, so read-decide-append runs under a lock (an exclusive mkdir); a lock
 // older than STALE_MS is taken over, and after WAIT_MS without it the hook decides unlocked rather than stall.
+// Skills repository (2.1.0): a git call that runs out of time (gitRun: GIT_CALL_MS per call, GIT_BUDGET_MS for all) is
+// not a missing repository: skill_repo_missing needs git to answer, and a timeout lets the slice through with
+// repo_check "git_timeout" in skill-create.jsonl.
 // A brief with an ORCHESTRATION: workflow line (the scripted workflow) is not checked. Exits 0 on malformed input.
 //
 // Read router (0.4.0; design: docs/research-2026-10-31.md section 2). Off unless ORCH_READ_ROUTER=on. It acts only on
@@ -123,20 +139,30 @@
 // (its SKILL.md path); an unknown name is dropped. Every decision on a skill slice and every DRAFTS lookup goes to
 // skill-create.jsonl in the state dir (decision, reason, skill name, target, paths, slice, run, session; never brief
 // text). A brief without KIND: skill and DRAFTS: is decided exactly as before.
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { agentModel, isPlanReview, isSkillName, normalizeFiles, parseHeader, parseReply, stallGateOn } from "./brief.mjs";
+import { agentModel, isPlanReview, isSkillName, normalizeFiles, parseHeader, parseReply, stallGateOn, staleMinutes } from "./brief.mjs";
 import { builtinAgents, OWN_AGENTS } from "./builtin-agents.mjs";
-import { NO_RESULT_REASONS, appendJsonl, implementerTestStates, implementersOfRun, latestImplementerOf, notTestFailure, readJsonl, readJsonlOrNull, sessionRuns, stopGateWindowMs } from "./run.mjs";
+import { NO_RESULT_REASONS, appendJsonl, implementerTestStates, implementersOfRun, latestImplementerOf, latestSuiteS, notTestFailure, readJsonl, readJsonlOrNull, sessionRuns, stopGateWindowMs, waveCap, waveLoad } from "./run.mjs";
 import { duplicate, ensureStateDir, stateDir } from "./state.mjs";
 
 const MAX_BLOCKS = 2; // loop guard: two blocks per reason and scope, then the launch goes through as <reason>_gave_up
 const LOG = "plan-check.jsonl";
 const WAIT_MS = 5000;
 const STALE_MS = 10000;
+// The wave cap's lock (2.1.0) covers only its count and this launch's record: a few milliseconds of reading and one
+// append. Not taken within WAVE_LOCK_WAIT_MS, the launch is judged without it; one older than WAVE_LOCK_STALE_MS is taken over.
+const WAVE_LOCK_WAIT_MS = 3000;
+const WAVE_LOCK_STALE_MS = 10000;
+// git (gitRun): one call at most GIT_CALL_MS, all of a launch's calls together at most GIT_BUDGET_MS. The implementer
+// path's fixed waits then stay well under the 60 s hook timeout: lock 5 s + wave lock 3 s + git 25 s leaves 27 s for
+// its scans and node's start.
+const GIT_CALL_MS = 10_000;
+const GIT_BUDGET_MS = 25_000;
+let gitSpent = 0;
 // Claude Code's built-in agent types and fork, which no gate here tracks: the list in builtin-agents.mjs plus the names
 // scripts/claude-update.mjs learned from the Claude Code installed on this machine.
 const BUILTINS = builtinAgents();
@@ -147,7 +173,7 @@ const ROUTER_BUDGET_MS = 15_000; // under the hook timeout the wiring slice sets
 // The most ORCH_READ_ROUTER_BUDGET_MS may give the profiler. A researcher launch takes no lock and runs no git, so its
 // worst case is this child plus node startup, the skill catalog scan of the hints and the log reads: 40 s leaves 20 s
 // of the 60 s hook timeout for those (file-system work with no timeout of its own), as the implementer path's fixed
-// waits (lock 5 s, at most seven 5 s git calls) leave 20 s for its scans.
+// waits (lock 5 s, wave lock 3 s, git 25 s in all) leave 27 s for its scans.
 const ROUTER_BUDGET_MAX_MS = 40_000;
 /** @type {Record<string, number>} */
 const TIER_RANK = { haiku: 0, sonnet: 1, opus: 2 };
@@ -174,6 +200,14 @@ const PENDING_NOTE =
 // record is paired with it, or its record says the gate ended without deciding (run.mjs NO_RESULT_REASONS).
 const NO_RESULT_NOTE =
   "\n\nTest gate (added by the plan check): the test gate left no result that can be tied to this slice's latest implementer stop, and it is no longer running, so no test-gate run backs the worker's report. Do not rest a pass on the tests having passed; say in your report that the test gate left no result.";
+// The test gate's reasons (verify.sh log_gate) for "the whole suite ran at the stop and passed": tests_passed (its own
+// run) and tests_passed_cached (the stop reused its hand-back gate's passing run of the same tree). No other reason, and
+// no record without a suite_s (verify.sh 2.1.0: the seconds the suite ran; none when no suite ran), ever adds the note.
+const PASSED_REASONS = new Set(["tests_passed", "tests_passed_cached"]);
+// Appended to our reviewer's brief when the test-gate record paired with the slice's latest implementer stop is one of
+// PASSED_REASONS: the reviewer runs the slice's acceptance check, not the whole suite a second time.
+const PASSED_NOTE =
+  "\n\nTest gate (added by the plan check): the test gate ran the project's whole test suite at this slice's latest implementer stop, and it passed. Run the slice's own acceptance check from your brief, and do not run the whole suite again.";
 const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
 // The authoring skill a skill slice loads: the plugin's namespaced copy for the plugin's hook, else the project's.
 const AUTHORING = process.argv.includes("--plugin") ? "orchestration:skill-authoring" : "skill-authoring";
@@ -228,7 +262,7 @@ if (role === "implementer") {
       routed = null; // an unexpected error leaves the launch as it was
     }
   }
-  // Review hold: our reviewer of a slice (not a PLAN REVIEW) may be refused (exit 2 inside) or get the pending note.
+  // Review hold: our reviewer of a slice (not a PLAN REVIEW) may be refused (exit 2 inside) or get one of the test-gate notes (pending, no result, passed).
   const pending = !builtin && REVIEWER_TYPES.has(type) && holdOn(process.env) && typeof tool.prompt === "string" && h.slice && !isPlanReview(prompt) ? reviewHold(h.slice) : "";
   const block = !builtin && HINTED_TYPES.has(type) ? skillHintText() : "";
   const drafts = !builtin && HINTED_TYPES.has(type) ? draftsText(null) : "";
@@ -268,7 +302,10 @@ function holdLog(rec) {
  *     while the gate may still be running (the stop is younger than run.mjs stopGateWindowMs: the gate's budget plus its
  *     overrun); past that window, or when the stop's record says the gate ended without deciding (NO_RESULT_REASONS), the
  *     no-result note (test_gate_no_result) is appended instead (2.0.1);
- *   - anything else (gate passed or warned, an environment or other bugfix_ block, still running, no implementer, an
+ *   - the stop's record says the whole suite ran and passed (suitePassed: allow with tests_passed or
+ *     tests_passed_cached, and a suite_s): the gate-passed note (test_gate_passed) is appended, so the reviewer runs the
+ *     slice's acceptance check and not the whole suite again;
+ *   - anything else (another allow, a warn, an environment or other bugfix_ block, still running, no implementer, an
  *     unreadable log): "" and no record.
  * @param {string} slice @returns {string}
  */
@@ -320,7 +357,23 @@ function reviewHold(slice) {
     holdLog({ decision: "note", reason: "test_gate_no_result", slice, agent_id: a.id });
     return NO_RESULT_NOTE;
   }
+  if (suitePassed(g)) {
+    holdLog({ decision: "note", reason: "test_gate_passed", slice, agent_id: a.id });
+    return PASSED_NOTE;
+  }
   return "";
+}
+
+/**
+ * True only for a SubagentStop test-gate record that says the whole suite ran and passed: decision allow, a reason in
+ * PASSED_REASONS, a suite_s of whole seconds (the suite ran; verify.sh writes none when it did not), and no mark of the
+ * hand-back gate (stopGateOf never pairs one; checked again here). Anything else, a warn included: false.
+ * @param {any} g @returns {boolean}
+ */
+function suitePassed(g) {
+  if (!g || typeof g !== "object" || g.decision !== "allow" || typeof g.reason !== "string" || !PASSED_REASONS.has(g.reason)) return false;
+  if (g.at === "handback" || (typeof g.handback_id === "string" && g.handback_id !== "")) return false;
+  return Number.isInteger(g.suite_s) && g.suite_s >= 0;
 }
 
 /**
@@ -483,19 +536,44 @@ function repoPath(target) {
   return v && isAbsolute(v) ? resolve(v) : null;
 }
 
-/** git -C dir args: trimmed stdout, or null on any failure. @param {string} dir @param {string[]} args @returns {string | null} */
-function git(dir, args) {
+/**
+ * git -C dir args: its trimmed stdout (null when it failed) and whether it ran out of time. One call gets at most
+ * GIT_CALL_MS, and all of this hook's git calls together GIT_BUDGET_MS (none starts once it is spent: timed out), so the
+ * hook decides well inside its 60 s timeout on a loaded machine (2.1.0: a 5 s limit read a slow git as a missing
+ * skills repository). @param {string} dir @param {string[]} args @returns {{ out: string | null, timedOut: boolean }}
+ */
+function gitRun(dir, args) {
+  const left = GIT_BUDGET_MS - gitSpent;
+  if (left <= 0) return { out: null, timedOut: true };
+  const t0 = Date.now();
   try {
-    return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const r = spawnSync("git", ["-C", dir, ...args], { encoding: "utf8", timeout: Math.min(GIT_CALL_MS, left), killSignal: "SIGKILL", stdio: ["ignore", "pipe", "ignore"] });
+    const code = /** @type {NodeJS.ErrnoException | undefined} */ (r.error)?.code;
+    if (code === "ETIMEDOUT") return { out: null, timedOut: true };
+    return { out: !r.error && r.status === 0 ? String(r.stdout ?? "").trim() : null, timedOut: false };
   } catch {
-    return null;
+    return { out: null, timedOut: false };
+  } finally {
+    gitSpent += Date.now() - t0;
   }
 }
+/** git -C dir args: trimmed stdout, or null on any failure or timeout. @param {string} dir @param {string[]} args @returns {string | null} */
+function git(dir, args) {
+  return gitRun(dir, args).out;
+}
 
-/** The repo is usable for drafts: a git work tree with scripts/validate.py. @param {string | null} repo */
+/**
+ * The repo is usable for drafts: a git work tree with scripts/validate.py. "unknown" when git ran out of time on the
+ * work-tree question: a slow git is not a missing repository, so the caller lets the slice through and logs it. An unset
+ * path, no scripts/validate.py, or a git that answers anything but "true" is false, as before.
+ * @param {string | null} repo @returns {boolean | "unknown"}
+ */
 function usableRepo(repo) {
   try {
-    return !!repo && git(repo, ["rev-parse", "--is-inside-work-tree"]) === "true" && existsSync(join(repo, "scripts", "validate.py"));
+    if (!repo || !existsSync(join(repo, "scripts", "validate.py"))) return false;
+    const r = gitRun(repo, ["rev-parse", "--is-inside-work-tree"]);
+    if (r.timedOut) return "unknown";
+    return r.out === "true";
   } catch {
     return false;
   }
@@ -872,45 +950,71 @@ let files = h.files;
 // Only this plugin's or project's own implementer (bare or orchestration:) is a skill slice; built-ins, fork and other
 // plugins' agents get nothing from the skill feature.
 const skillSlice = OWN_IMPLEMENTER.has(type) && h.kind === "skill";
-/** @type {{ name: string | null, target: 'private' | 'public', update: boolean, repo?: string, draft?: string, branch?: string, base?: string, worktree?: string, facts?: string } | null} */
+/** @type {{ name: string | null, target: 'private' | 'public', update: boolean, repo?: string, draft?: string, branch?: string, base?: string, worktree?: string, facts?: string, repo_check?: string } | null} */
 let skillInfo = skillSlice ? { name: h.skill, target: h.target ?? "private", update: h.update } : null;
 /** True once create, name and repo checks passed (given up or not): only then are there facts to append. */
 let skillReady = false;
 
-const lock = join(stateDir, "plan-check.lock");
-// The owner token written into the lock at creation. The lock is removed only while it still holds this token: a lock
-// older than STALE_MS may have been taken over by another launch, whose lock is not ours to remove.
-const lockOwner = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-let locked = false;
-try {
-  ensureStateDir();
-  const sleep = new Int32Array(new SharedArrayBuffer(4));
-  for (const start = Date.now(); !locked && Date.now() - start < WAIT_MS; ) {
-    try {
-      mkdirSync(lock);
-      locked = true;
+/**
+ * Take a lock folder: an exclusive mkdir, retried every 25 ms for at most `waitMs`; a lock older than `staleMs` is taken
+ * over. Returns whether it is held. The owner token written into it at creation is what releaseLock checks: a lock
+ * older than `staleMs` may have been taken over by another launch, whose lock is not ours to remove. Never throws.
+ * @param {string} path @param {string} owner @param {number} waitMs @param {number} staleMs @returns {boolean}
+ */
+function takeLock(path, owner, waitMs, staleMs) {
+  try {
+    ensureStateDir();
+    const sleep = new Int32Array(new SharedArrayBuffer(4));
+    for (const start = Date.now(); Date.now() - start < waitMs; ) {
       try {
-        writeFileSync(join(lock, "owner"), lockOwner);
+        mkdirSync(path);
+        try {
+          writeFileSync(join(path, "owner"), owner);
+        } catch {
+          // no token: the lock is left to go stale rather than removed unchecked
+        }
+        return true;
       } catch {
-        // no token: the lock is left to go stale rather than removed unchecked
+        try {
+          if (Date.now() - statSync(path).mtimeMs > staleMs) rmSync(path, { recursive: true, force: true });
+        } catch {
+          // the holder just released it
+        }
+        Atomics.wait(sleep, 0, 0, 25);
       }
-    } catch {
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > STALE_MS) rmSync(lock, { recursive: true, force: true });
-      } catch {
-        // the holder just released it
-      }
-      Atomics.wait(sleep, 0, 0, 25);
     }
+  } catch {
+    // no state dir: decide unlocked
   }
-} catch {
-  // no state dir: decide unlocked
+  return false;
+}
+/** Remove a lock folder while it still holds `owner`. Never throws. @param {string} path @param {string} owner */
+function releaseLock(path, owner) {
+  try {
+    if (readFileSync(join(path, "owner"), "utf8") === owner) rmSync(path, { recursive: true, force: true });
+  } catch {
+    // taken over, already gone or not removable: the decision stands
+  }
 }
 
-/** @type {{ runs: import("./brief.mjs").Run[], open: import("./brief.mjs").Run | null, records: { stops: any[], launches?: any[] } }} */
-let state = { runs: [], open: null, records: { stops: [], launches: [] } };
+const lock = join(stateDir, "plan-check.lock");
+const lockOwner = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const locked = takeLock(lock, lockOwner, WAIT_MS, STALE_MS);
+// The wave cap's own lock (judgeWave), held from its count to this launch's record; and what it found, for the record.
+const waveLockPath = join(stateDir, "plan-check-wave.lock");
+let waveLocked = false;
+/** @type {Record<string, unknown> | null} */
+let wave = null;
+
+// Read once and shared: telemetry (the session's starts and stops) and every test-gate record of the project (the wave
+// cap's suite_s is the project's latest, whatever session wrote it). readJsonlOrNull: the wave cap never blocks on a
+// log it cannot read; the fold reads an unreadable log as empty, as before.
+const teleRaw = readJsonlOrNull(stateDir, "telemetry.jsonl", sessionId);
+const gatesRaw = readJsonlOrNull(stateDir, "gates.jsonl");
+/** @type {{ runs: import("./brief.mjs").Run[], open: import("./brief.mjs").Run | null, records: { stops: any[], launches?: any[], starts?: any[] } }} */
+let state = { runs: [], open: null, records: { stops: [], launches: [], starts: [] } };
 try {
-  state = sessionRuns(sessionId, { env: process.env });
+  state = sessionRuns(sessionId, { env: process.env, raw: { "telemetry.jsonl": teleRaw ?? [], "gates.jsonl": gatesRaw ?? [] } });
 } catch {
   // unreadable logs: decide as if nothing ran
 }
@@ -940,7 +1044,7 @@ const skips = [];
 
 /** @param {string} decision @param {string} reason @param {string} [message] @returns {never} */
 function decide(decision, reason, message) {
-  const record = () => ({ ts: new Date().toISOString(), session_id: sessionId, decision, reason, slice, files, depends, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}), ...(skips.length ? { skips } : {}) });
+  const record = () => ({ ts: new Date().toISOString(), session_id: sessionId, decision, reason, slice, files, depends, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}), ...(skips.length ? { skips } : {}), ...(wave ? { wave } : {}) });
   // A block is made only when the earlier records could be read and its own record reads back (2.0.1, soak): the loop
   // guard counts blocks from this log, so a block it cannot count would be made at every try. Such a launch goes
   // through as <reason>_unrecorded. Logging never changes any other decision.
@@ -965,6 +1069,8 @@ function decide(decision, reason, message) {
       // logging must never change the decision
     }
   }
+  // The wave count and this launch's record are written: the next launch's count sees it.
+  if (waveLocked) releaseLock(waveLockPath, lockOwner);
   // Skill hints: only this plugin's own implementer, and only on a plain allow (ok or light_path), never a give-up.
   // A ready skill slice gets its facts on every allow; DRAFTS lines go to every allow. The haiku rule's raised model
   // goes out on every allow.
@@ -986,13 +1092,7 @@ function decide(decision, reason, message) {
     const { name, ...rest } = skillInfo;
     createLog({ decision, reason, skill: name, ...rest, slice, files, agent_type: type, run: runKey, ...(gaveUp.length ? { gave_up: gaveUp } : {}) });
   }
-  if (locked) {
-    try {
-      if (readFileSync(join(lock, "owner"), "utf8") === lockOwner) rmSync(lock, { recursive: true, force: true });
-    } catch {
-      // taken over, already gone or not removable: the decision stands
-    }
-  }
+  if (locked) releaseLock(lock, lockOwner);
   if (decision === "block") {
     try {
       writeSync(2, `${message}\n`);
@@ -1035,15 +1135,17 @@ if (skillInfo) {
   };
   const { name, target } = skillInfo;
   const repo = repoPath(target);
+  /** @type {boolean | "unknown"} */
+  let usable = false;
   if (!createOn(process.env)) {
     gate("skill_create_off", "Plan check: creating skills is turned off on this machine, so a KIND: skill slice cannot run. Drop the skill slice and do the task without it, and say in the final report that the skill was not created.");
   } else if (!name) {
     gate("skill_name_invalid", "Plan check: a KIND: skill brief needs a line SKILL: <name>, where the name is lower-case letters and digits in words joined by single hyphens, at most 64 characters (for example release-notes). Add or fix the line and launch again.");
-  } else if (!usableRepo(repo)) {
+  } else if (!(usable = usableRepo(repo))) {
     gate("skill_repo_missing", `Plan check: the ${target} skills repository is not set up on this machine (no path for it, not a git work tree, or no scripts/validate.py), so the skill cannot be drafted there. Do the task without the skill and say so in the final report, or ask the person to set up the ${target} skills repository.`);
   } else if (repo) {
     const draft = draftOf(target, name);
-    skillInfo = { ...skillInfo, repo, draft, branch: `skill/${name}` };
+    skillInfo = { ...skillInfo, repo, draft, branch: `skill/${name}`, ...(usable === "unknown" ? { repo_check: "git_timeout" } : {}) };
     skillReady = true;
     files = normalizeFiles(h.files, draft);
     if (!skillInfo.update) {
@@ -1595,4 +1697,58 @@ if (tool.isolation === "worktree" && typeof input.cwd === "string" && input.cwd)
     }
   }
 }
+
+// Wave cap (2.1.0): judged last, so a launch refused for another reason takes no slot. Only this plugin's implementer.
+if (OWN_IMPLEMENTER.has(type)) {
+  const judged = await judgeWave();
+  // A copy of the hooks without limits.mjs judges no wave, and its record stays as it was before the wave cap.
+  wave = judged.skipped === "limits_missing" ? null : judged;
+  if (judged.full) {
+    if (blocks("wave_full", (e) => e.slice === slice) < MAX_BLOCKS) {
+      const n = Number(judged.running) + Number(judged.pending);
+      const why = judged.narrowed ? ` (fewer than usual for slices in isolated worktrees: the test suite took ${judged.suite_s} s, and the test gates of more parallel stops would not all get their turn at the suite within their time budget)` : "";
+      decide(
+        "block",
+        "wave_full",
+        `Plan check: wave_full: ${n} implementer${n === 1 ? " is" : "s are"} running or just launched in this session, and at most ${judged.cap} may run at once${why}. Wait for a running implementer's report, then launch slice ${slice} again.`,
+      );
+    }
+    gaveUp.push("wave_full_gave_up");
+  }
+}
 decide("allow", gaveUp[0] ?? (light && !reviewed ? "light_path" : "ok"));
+
+/**
+ * The wave cap of this launch: how many implementers of the session run or are on their way (run.mjs waveLoad, over the
+ * telemetry read once above and plan-check.jsonl read again under the wave lock), against the cap (limits.mjs waveMax,
+ * narrowed for an isolated launch by run.mjs waveCap from the project's latest suite_s). The wave lock is taken for at
+ * most WAVE_LOCK_WAIT_MS and held until decide() has written this launch's record, so launches judged at the same moment
+ * count each other; a lock not taken in time is judged without it (`lock: "not_taken"`). Skipped, never full, when
+ * limits.mjs cannot be loaded (`limits_missing`) or a log it counts from cannot be read (`log_unreadable`). Never throws.
+ * @returns {Promise<Record<string, unknown> & { full?: boolean, narrowed?: boolean }>}
+ */
+async function judgeWave() {
+  /** @type {any} */
+  let lim;
+  try {
+    lim = await import("./limits.mjs");
+    if (typeof lim.waveMax !== "function") throw new Error("no waveMax");
+  } catch {
+    return { skipped: "limits_missing" };
+  }
+  try {
+    waveLocked = takeLock(waveLockPath, lockOwner, WAVE_LOCK_WAIT_MS, WAVE_LOCK_STALE_MS);
+    const lockState = waveLocked ? "taken" : "not_taken";
+    const allows = readJsonlOrNull(stateDir, LOG, sessionId);
+    if (allows === null || teleRaw === null) return { skipped: "log_unreadable", lock: lockState };
+    const base = lim.waveMax(process.env);
+    const isolated = tool.isolation === "worktree";
+    const suiteS = isolated && gatesRaw !== null ? latestSuiteS(gatesRaw) : null;
+    const cap = waveCap(base, { isolated, suiteS, env: process.env });
+    const pendingMs = typeof lim.WAVE_PENDING_MS === "number" ? lim.WAVE_PENDING_MS : 0;
+    const { running, pending } = waveLoad({ telemetry: state.records.starts ?? [], allows, sessionId, now: Date.now(), staleMs: staleMinutes(process.env) * 60_000, pendingMs });
+    return { running, pending, cap, base, ...(suiteS !== null ? { suite_s: suiteS } : {}), lock: lockState, full: running + pending >= cap, narrowed: cap < base };
+  } catch {
+    return { skipped: "wave_error" };
+  }
+}
