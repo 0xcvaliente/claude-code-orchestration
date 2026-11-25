@@ -294,7 +294,8 @@ const skillsSection = (() => {
 // joined per session and agent id like the stop records above; an agent with no start, no stop or no readable time is
 // left out of the times and counted in a note. Reviews per slice come from the journal's reviewer stop records (a stop
 // with `continues: true` replaces the earlier record of that reply, a resume counts again), each reviewer's model
-// from its last telemetry stop (`models`). It reads no log the page did not already read.
+// from its last telemetry stop (`models`). Only slices with an implementer record in the same run (session, run and
+// slice) are listed; other reviews are counted in one line. It reads no log the page did not already read.
 /** @param {number[]} xs sorted ascending, not empty */
 const median = (xs) => {
   const mid = Math.floor(xs.length / 2);
@@ -362,6 +363,21 @@ const reviewSlices = (() => {
     if (agentKey) lastReviewOf.set(agentKey, r);
   }
   if (!perSlice.size) return "<p>No reviews in the journal yet.</p>";
+  // Only a slice that some implementer worked on in the same run is a slice: a reviewer launch whose brief carries a
+  // SLICE label with no implementer behind it (a plan review, a one-off check) is counted in one line instead.
+  /** @type {Set<string>} */
+  const implemented = new Set();
+  for (const r of journal) {
+    if (r && typeof r === "object" && r.slice && String(r.role ?? r.agent_type ?? "").split(":").pop() === "implementer") implemented.add(sliceKey(r));
+  }
+  let notOfSlice = 0;
+  for (const [key, list] of [...perSlice]) {
+    if (implemented.has(key)) continue;
+    notOfSlice += list.length;
+    perSlice.delete(key);
+  }
+  const otherNote = notOfSlice ? `<p>${notOfSlice} review${notOfSlice === 1 ? " was" : "s were"} not of a slice (plan reviews and other checks).</p>` : "";
+  if (!perSlice.size) return `<p>No reviews of a slice in the journal yet.</p>${otherNote}`;
   let reviews = 0;
   let opus = 0;
   let unknown = 0;
@@ -380,7 +396,7 @@ const reviewSlices = (() => {
   });
   const share = reviews ? Math.round((opus / reviews) * 100) : 0;
   const unknownNote = unknown ? ` ${unknown} review${unknown === 1 ? " has" : "s have"} no model on record and count${unknown === 1 ? "s" : ""} as not on opus.` : "";
-  return `${table(["Session", "Run", "Slice", "Reviews", "On opus"], rows)}<p>${perSlice.size} slice${perSlice.size === 1 ? "" : "s"}, ${reviews} review${reviews === 1 ? "" : "s"}, ${(reviews / perSlice.size).toFixed(1)} per slice, ${opus} of ${reviews} on opus (${share}%).${unknownNote}</p>`;
+  return `${table(["Session", "Run", "Slice", "Reviews", "On opus"], rows)}<p>${perSlice.size} slice${perSlice.size === 1 ? "" : "s"}, ${reviews} review${reviews === 1 ? "" : "s"}, ${(reviews / perSlice.size).toFixed(1)} per slice, ${opus} of ${reviews} on opus (${share}%).${unknownNote}</p>${otherNote}`;
 })();
 const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}`;
 

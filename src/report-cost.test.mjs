@@ -205,6 +205,7 @@ test("report review time: reviews per slice from the journal, opus counted from 
       review("r2", "a"),
       review("r2", "a", { continues: true }), // the same reply recorded twice: one review
       review("r3", "a"),
+      { ts: "t", session_id: "s1", agent_id: "i2", role: "implementer", slice: "b", run: 1, status: "pass" }, // b is a slice too
       review("r4", "b"),
       review("r5", "b"), // no telemetry: model unknown, not on opus
     ];
@@ -225,6 +226,69 @@ test("report review time: reviews per slice from the journal, opus counted from 
     // A journal with no reviewer record.
     writeFileSync(join(state, "journal.jsonl"), `${JSON.stringify(journal[0])}\n`);
     assert.match(reviewTime(renderReport(dir)), /No reviews in the journal yet\./);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report review time: reviews per slice lists only slices with an implementer in the same run; the rest are counted in one line", () => {
+  const dir = mkdtempSync(join(tmpdir(), "orch-report-realslices-"));
+  try {
+    const state = join(dir, ".claude", "state");
+    mkdirSync(state, { recursive: true });
+    /** @param {string} id @param {string} slice @param {object} [rest] */
+    const review = (id, slice, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "reviewer", slice, run: 1, status: "pass", answers: {}, open: [], ...rest });
+    /** @param {string} id @param {string} slice @param {object} [rest] */
+    const impl = (id, slice, rest = {}) => ({ ts: "t", session_id: "s1", agent_id: id, role: "orchestration:implementer", slice, run: 1, status: "pass", ...rest });
+    const journal = [
+      review("p1", "plan"), // a plan review: no implementer
+      review("p2", "plan"),
+      review("q1", "answer"), // a one-off check
+      impl("i1", "a"),
+      review("r1", "a"),
+      review("r2", "a"),
+      impl("i2", "b"),
+      review("r3", "b"),
+      impl("i3", "c", { run: 2 }), // an implementer of c in another run does not make run 1's c a slice
+      review("q2", "c"),
+    ];
+    writeFileSync(join(state, "journal.jsonl"), journal.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const opus = { models: ["claude-opus-5-5"] };
+    const tel = ["p1", "p2", "q1", "q2", "r1"].flatMap((id) => [tStart(id, "reviewer", at(0)), tStop(id, "reviewer", at(60), opus)]).concat(
+      ["r2", "r3"].flatMap((id) => [tStart(id, "reviewer", at(0)), tStop(id, "reviewer", at(60), { models: ["claude-sonnet-5-5"] })]),
+    );
+    writeFileSync(join(state, "telemetry.jsonl"), tel.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const sec = reviewTime(renderReport(dir));
+    const perSlice = sec.slice(sec.indexOf("<h3>Reviews per slice</h3>"));
+    assert.equal((perSlice.match(/<tr><td>s1<\/td>/g) ?? []).length, 2, "exactly the two real slices");
+    assert.match(perSlice, /<td>s1<\/td><td>1<\/td><td>a<\/td><td>2<\/td><td>1<\/td>/);
+    assert.match(perSlice, /<td>s1<\/td><td>1<\/td><td>b<\/td><td>1<\/td><td>0<\/td>/);
+    assert.doesNotMatch(perSlice, /<td>(plan|answer|c)<\/td>/);
+    assert.match(perSlice, /2 slices, 3 reviews, 1\.5 per slice, 1 of 3 on opus \(33%\)\./);
+    assert.match(perSlice, /4 reviews were not of a slice \(plan reviews and other checks\)\./);
+    // The wall-time table still counts every reviewer: 5 on opus, 2 on sonnet.
+    assert.match(sec, /<td>reviewer<\/td><td>claude-opus-5-5<\/td><td>5<\/td>/);
+    assert.match(sec, /<td>reviewer<\/td><td>claude-sonnet-5-5<\/td><td>2<\/td>/);
+
+    // Every review belongs to a real slice: no such line.
+    writeFileSync(join(state, "journal.jsonl"), journal.slice(3, 8).map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const all = reviewTime(renderReport(dir));
+    assert.match(all, /2 slices, 3 reviews, 1\.5 per slice/);
+    assert.doesNotMatch(all, /not of a slice/);
+
+    // Only reviews with no implementer: no table, the line, exit 0.
+    writeFileSync(join(state, "journal.jsonl"), journal.slice(0, 3).map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const none = reviewTime(renderReport(dir));
+    assert.match(none, /No reviews of a slice in the journal yet\./);
+    assert.match(none, /3 reviews were not of a slice/);
+    assert.doesNotMatch(none, /<th>Slice<\/th>/);
+
+    // No journal and no start records: the existing line, exit 0.
+    rmSync(join(state, "journal.jsonl"));
+    writeFileSync(join(state, "telemetry.jsonl"), `${JSON.stringify(tStop("r1", "reviewer", at(5), opus))}\n`);
+    const bare = reviewTime(renderReport(dir));
+    assert.match(bare, /No journal yet \(<code>journal\.jsonl<\/code>\), so reviews per slice cannot be counted\./);
+    assert.doesNotMatch(bare, /not of a slice/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

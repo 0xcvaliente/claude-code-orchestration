@@ -2,6 +2,24 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.1] - 2026-11-25
+
+2.1.1 narrows the rule that sends a slice's one review to opus directly, so a slice with no checked constraints starts on the default model again, and fixes the "Reviews per slice" table of `npm run report`. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person.
+
+### Changed
+
+- **The direct opus review needs checked constraints** (`orchestrator.md`, the `route` skill, `nudge.mjs`). In 2.1.0 its `(read)` case, "no command can prove any of its checked constraints", was also true of a slice with no `CHECKS:` line, which could send such a slice's first review straight to opus. The case now requires that the slice has checked constraints, none of which a command can prove; on its first review a slice with no checked constraints starts on the default model, and a retry after a failed review still goes to opus directly. No gate changes; pinned in `src/contracts.test.ts`.
+- **The README dates its two benchmark statements.** The routing-cost statement and the k2 statement now name the plugin version and date of the campaign each was measured on.
+- Version 2.1.1 in `package.json`, `package-lock.json` and both plugin manifests.
+
+### Fixed
+
+- **"Reviews per slice" lists only slices** (`scripts/report.mjs`). The table and its summary line list and count only slices with an implementer record in the same session and run; reviews that are not of a slice (plan reviews and other checks) are counted in one line under it. Tests: `src/report-cost.test.mjs`; described in `docs/logs.md`.
+
+### Limits
+
+2.1.1 adds no open item, so [docs/limits.md](docs/limits.md) is unchanged: what 2.1.0 does not do, in its section J, holds for 2.1.1.
+
 ## [2.1.0] - 2026-11-24
 
 2.1.0 raises the plan's caps and puts them in one module, adds a brake on how many implementers run at once, makes the test suite pass on macOS and records how long each gate's suite ran, gives the gated workflow the same caps and a bounded wave, and is checked against Claude Code 2.1.331 and Agent SDK 0.3.331. The probes are in [probes-2.1.0-suite.md](docs/data/probes-2.1.0-suite.md) and [probes-2.1.0-claude-code.md](docs/data/probes-2.1.0-claude-code.md). Upgrading: pull, `npm install` (the Agent SDK moved to 0.3.331), `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update`. Nothing asks anything new of a person; what the release does not do is on [docs/limits.md](docs/limits.md), J.
@@ -683,6 +701,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.1.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.1
 [2.1.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.0
 [2.0.3]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.3
 [2.0.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.0.2
