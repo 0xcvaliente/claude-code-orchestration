@@ -67,7 +67,11 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
     [ -n "$STATUS_OUT" ] && rm -f "$STATUS_OUT"
     WATCH_PID=""; STATUS_PID=""; STATUS_OUT=""
   }
-  trap git_cleanup EXIT
+  # The script is ending, so the EXIT trap first sends the shell's own stderr to /dev/null: in CI, bash itself
+  # sometimes printed "line 61: wait_for: No record of process N" during this cleanup after a TERM, from a wait it makes
+  # at the function's level while the killed jobs are reaped (which statement was not found; a redirection on `rm`
+  # alone did not stop it). The kills, the removal and the exit status are unchanged.
+  trap 'exec 2>/dev/null; git_cleanup' EXIT
   trap 'GOT_SIG=143' TERM; trap 'GOT_SIG=130' INT; trap 'GOT_SIG=129' HUP
   STATUS_OUT=$(mktemp "${TMPDIR:-/tmp}/statusline.XXXXXX" 2>/dev/null)
   if [ -n "$STATUS_OUT" ] && [ -z "$GOT_SIG" ]; then

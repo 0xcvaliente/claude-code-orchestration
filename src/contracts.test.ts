@@ -346,6 +346,34 @@ test("the orchestrator, the route skill and the nudge state the same terse outpu
   }
 });
 
+// --- The hand-off to /ship: the run ends on a new branch, and only the person starts /ship. ---
+test("the orchestrator, the route skill and the nudge end the final report with the /ship line and leave /ship to the person", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  for (const [file, text] of texts) {
+    assert.match(text, /`?Next: type \/ship`?/, `${file} gives the final report's /ship line`);
+    assert.match(text, /`?Next: type \/steward`? when a pull request/, `${file} gives the /steward variant`);
+    assert.match(text, /`?handoff: <branch> at <commit>`? or `?handoff: none - <why>`?/, `${file} gives the hand-off line`);
+    assert.match(text, /only the person starts `?\/ship`?/i, `${file} says only the person starts /ship`);
+    assert.match(text, /never invoke `?\/ship`? or `?\/steward`?, or the `?ship`?, `?ship-local`? or `?steward`? skills/i, `${file} never invokes /ship, /steward or their skills`);
+    assert.match(text, /HANDOFF/, `${file} names the HANDOFF brief`);
+    assert.match(text, /a headless run denies it\), nothing (is|was) committed/, `${file} covers the headless hand-off`);
+    assert.match(text, /only when the person asked for exactly that in their own words in this session/, `${file} leaves publishing to the person's own words`);
+  }
+});
+
+test("the integrator holds the HANDOFF mode, a BRANCH field and never pushes in a hand-off", () => {
+  const body = read(".claude/agents/integrator.md").replace(/^---\n[\s\S]*?\n---\n/, "");
+  assert.match(body, /starts with HANDOFF is in hand-off mode/, "the HANDOFF mode");
+  assert.match(body, /^Hand-off mode: when the brief says HANDOFF/m, "the HANDOFF mode's steps");
+  assert.match(body, /^BRANCH: /m, "the reply format has a BRANCH field");
+  assert.match(body, /Never push in a hand-off/, "never push in a hand-off");
+  assert.match(body, /Never run `git add -A`/, "never git add -A");
+  assert.match(body, /never on the default branch/, "the hand-off never commits on the default branch");
+  assert.match(body, /`git rev-parse -q --verify refs\/heads\/<new branch>`[^.]*\. If it exists, stop/, "stops when the new branch exists");
+  assert.match(body, /quotes the person's own words from this session/, "publishing only on the person's quoted words");
+  assert.match(read(".claude/agents/integrator.md"), /^maxTurns: 40$/m, "the integrator has 40 turns");
+});
+
 test("the orchestrator shows the plan once as summary lines and puts the full plan only into the PLAN REVIEW brief", () => {
   const orch = read(ORCH);
   assert.match(orch, /full plan[^.]*goes? only into the PLAN REVIEW brief/, `${ORCH} keeps the full plan out of the visible reply`);
