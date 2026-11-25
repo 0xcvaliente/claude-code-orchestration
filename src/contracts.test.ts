@@ -231,7 +231,7 @@ test("model-facing text names gate reasons but no environment switch", () => {
   assert.equal(refusal.decision, "block");
   assert.doesNotMatch(refusal.reason, switches, "the nudge's refusal names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
-  const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
+  const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md") + read("docs/maintainer-notes.md");
   for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "ORCH_WORKFLOW_GUARD", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
   assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
 });
@@ -318,7 +318,7 @@ test("the plan reviewer checks each slice's skill choice", () => {
 });
 
 test("maintainer text describes the skill suggestions and the widened allow", () => {
-  for (const file of [".claude/rules/agents.md", "CLAUDE.md"]) {
+  for (const file of [".claude/rules/agents.md", "docs/maintainer-notes.md"]) {
     const text = read(file);
     for (const t of ["SKILLS:", "ORCH_SKILL_HINTS=off", "skill_hints", "at most 3", "anthropic-skills:<name>", "synced/<uuid>/<name>", ".claude/skills", "Workflow agents get no hints", "light_path", "never for built-ins or fork"]) {
       assert.ok(text.includes(t), `${file} must mention ${t}`);
@@ -332,6 +332,13 @@ test("maintainer text describes the skill suggestions and the widened allow", ()
 
 test("the orchestrator says once that an answer it writes itself is reviewed", () => {
   assert.equal(read(ORCH).match(/answer you write yourself/g)?.length, 1);
+});
+
+test("the orchestrator answers a small read-only question itself, with no researcher, and reviews it only when risky", () => {
+  const step = read(ORCH).split("\n").find((l) => l.startsWith("0. Size the task first"))!;
+  assert.match(step, /Small question: when the task is a question about the project or its files that changes nothing and that at most 5 of your own Read, Grep or Glob calls can settle, answer it yourself with a file and line reference for each fact and launch no researcher; send the answer to a `reviewer` only when a wrong answer is costly \(the risky list below\)\. It is not a run and needs no path line; when the reads show it needs more than that, continue with the paths below\./, `${ORCH} step 0 states the small-question rule`);
+  assert.match(read(ORCH), /^1\. Explore \(a small question of step 0 skips this step\):/m, `${ORCH} step 1 points back to step 0`);
+  assert.match(read(ORCH), /A small question of step 0 goes to a `reviewer` only when a wrong answer is costly\./, `${ORCH} step 5 points back to step 0`);
 });
 
 // --- Output to the person: keywords, not prose (the three-places rule). ---

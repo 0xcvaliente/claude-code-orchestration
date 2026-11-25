@@ -37,9 +37,9 @@ const C = WAVE_CAP_CEILING;
  * @type {{ file: string, re: RegExp, want: number[] }[]}
  */
 const COPIES = [
-  { file: "CLAUDE.md", re: /`PLAN_SLICE_CAP` (\d+), `RESEARCH_QUESTION_CAP` (\d+), `WAVE_CAP_DEFAULT` (\d+), `WAVE_CAP_CEILING` (\d+)/g, want: [S, Q, W, C] },
-  { file: "CLAUDE.md", re: /`ORCH_WAVE_MAX` \(1 to (\d+)/g, want: [C] },
-  { file: "CLAUDE.md", re: /`maxSlices` (\d+), `waveMax` \(default (\d+), 1 to (\d+)\)[^,]*, at most (\d+) questions/g, want: [S, W, C, Q] },
+  { file: "docs/maintainer-notes.md", re: /`PLAN_SLICE_CAP` (\d+), `RESEARCH_QUESTION_CAP` (\d+), `WAVE_CAP_DEFAULT` (\d+), `WAVE_CAP_CEILING` (\d+)/g, want: [S, Q, W, C] },
+  { file: "docs/maintainer-notes.md", re: /`ORCH_WAVE_MAX` \(1 to (\d+)/g, want: [C] },
+  { file: "docs/maintainer-notes.md", re: /`maxSlices` (\d+), `waveMax` \(default (\d+), 1 to (\d+)\)[^,]*, at most (\d+) questions/g, want: [S, W, C, Q] },
   { file: ".claude/rules/agents.md", re: /`PLAN_SLICE_CAP` \((\d+)\), `RESEARCH_QUESTION_CAP` \((\d+)\), `WAVE_CAP_DEFAULT` \((\d+)\), `WAVE_CAP_CEILING` \((\d+)\)/g, want: [S, Q, W, C] },
   { file: ".claude/rules/agents.md", re: /`args\.waveMax` \(1 to (\d+), else (\d+)\)/g, want: [C, W] },
   { file: "docs/gates.md", re: /\((\d+) slices per plan, (\d+) researcher questions per run, (\d+) implementers at once\)/g, want: [S, Q, W] },
@@ -69,7 +69,7 @@ test("every copy of the caps in the 2.1.0 docs equals limits.mjs", () => {
 });
 
 test("the maintainer notes name the wave switch", () => {
-  for (const file of ["CLAUDE.md", ".claude/rules/agents.md"]) assert.match(read(file), /`ORCH_WAVE_MAX`/, `${file} names ORCH_WAVE_MAX`);
+  for (const file of ["docs/maintainer-notes.md", ".claude/rules/agents.md"]) assert.match(read(file), /`ORCH_WAVE_MAX`/, `${file} names ORCH_WAVE_MAX`);
 });
 
 test("the changelog's newest entry is package.json's version and holds no Known and not fixed list", () => {
@@ -141,13 +141,13 @@ test("docs/limits.md, J: the items this run closed have left, each pointing to i
 
 test("the second review rule: its reason, field and switch are in the docs, the switch environment only with 22 settings", () => {
   assert.ok(REVIEW_GATE_BLOCK_REASONS.includes("second_review_required"), "reasons.mjs lists second_review_required");
-  for (const file of ["docs/gates.md", "docs/logs.md", "docs/brief-grammar.md", "docs/glossary.md", "CHANGELOG.md", "CLAUDE.md", ".claude/rules/agents.md"]) {
+  for (const file of ["docs/gates.md", "docs/logs.md", "docs/brief-grammar.md", "docs/glossary.md", "CHANGELOG.md", "docs/maintainer-notes.md", ".claude/rules/agents.md"]) {
     assert.match(read(file), /`second_review_required`/, `${file} names second_review_required`);
   }
-  for (const file of ["docs/logs.md", "docs/brief-grammar.md", "docs/gates.md", "CLAUDE.md", ".claude/rules/agents.md"]) {
+  for (const file of ["docs/logs.md", "docs/brief-grammar.md", "docs/gates.md", "docs/maintainer-notes.md", ".claude/rules/agents.md"]) {
     assert.match(read(file), /`reviews_needed`/, `${file} names the field reviews_needed`);
   }
-  for (const file of ["CLAUDE.md", ".claude/rules/agents.md", "docs/settings.md", "docs/gates.md"]) {
+  for (const file of ["docs/maintainer-notes.md", ".claude/rules/agents.md", "docs/settings.md", "docs/gates.md"]) {
     assert.match(read(file), /`ORCH_SECOND_REVIEW/, `${file} names ORCH_SECOND_REVIEW`);
   }
   const row = read("docs/settings.md").split("\n").find((l) => l.startsWith("| `ORCH_SECOND_REVIEW` |"));

@@ -11,7 +11,8 @@
 //     open and run (the run foldRuns gives the slice at write time), and draft ({ name, branch } of a skill slice's
 //     DRAFT: <name> <branch> line; left out when the reply has none), skills_used and skills_skipped (the skill names
 //     of the SKILLS-USED and SKILLS-SKIPPED lines, at most 8 each; each left out when empty, so a reply without them
-//     gives the record it gave before); for implementers also files_touched and
+//     gives the record it gave before); for reviewers also kind ("plan", "validate" or "review") and model (brief.mjs
+//     reviewFields, from the launch record; each left out when unknown); for implementers also files_touched and
 //     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree, "git" there
 //     without a transcript), left out when unknown or on
 //     any error.
@@ -30,7 +31,7 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
+import { launchRecord, parseStatus, reviewFields, sliceOfBrief, stopRecord } from "./brief.mjs";
 import { readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, HANDBACK_LOG, HANDBACK_REFUSALS, latestHandbackId, stateDir } from "./state.mjs";
 
@@ -91,7 +92,7 @@ if (p.hook_event_name === "PostToolUse") {
   append("journal-launches.jsonl", rec);
   if (agentId && rec.slice && STOP_ROLES.includes(role)) {
     const waiting = readJsonl(stateDir, "journal-pending.jsonl").filter((e) => e.agent_id === agentId).pop();
-    if (waiting) append("journal.jsonl", { ...waiting, session_id: sessionId, role, slice: rec.slice, run: runOf(rec.slice) });
+    if (waiting) append("journal.jsonl", { ...waiting, session_id: sessionId, role, slice: rec.slice, run: runOf(rec.slice), ...(role === "reviewer" ? reviewFields(rec) : {}) });
   }
   process.exit(0);
 }
@@ -311,6 +312,17 @@ if (handback) {
   const fields = { status: handback.status === "pass" || handback.status === "fail" ? handback.status : null };
   for (const k of ["answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"]) if (k in handback) fields[k] = handback[k];
   rec = /** @type {typeof rec} */ ({ ...rec, ...fields });
+}
+// A reviewer's kind (plan, validate or review) and model (2.1.x, added fields; no gate reads them): from its launch
+// record in this session (the one the fold reads, so the fold's model is the same), else kind from the brief in the
+// transcript; each left out when unknown.
+if (role === "reviewer") {
+  try {
+    const own = launch && (launch.session_id ?? "") === sessionId ? launch : undefined;
+    rec = /** @type {typeof rec} */ ({ ...rec, ...reviewFields(own, own ? undefined : textOf(entries.find((e) => e.type === "user")?.message?.content)) });
+  } catch {
+    // fields left out
+  }
 }
 // The same turn going on after a stop hook (stop_hook_active true: the stop after a forced hand-back, or after a test-gate
 // block) with an earlier stop record of this agent: `continues: true` (G-8, audit 2026-11-16). The fold lets a reviewer's

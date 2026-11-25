@@ -8,8 +8,8 @@
 // page holds no hook payloads. With no logs anywhere it writes an empty report where this repo's writers would log.
 // The Skills section (skills.jsonl, journal.jsonl, skill-create.jsonl, skill-gate.jsonl) appears only when those logs
 // name a skill, so the report of a run without skills is the one it was before.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { stateDirFor, userStateDirs } from "../.claude/hooks/state.mjs";
 import { PRICES_AS_OF, costOf, formatUsd } from "./prices.mjs";
 import { TOKENS_PER_USD, formatTokens } from "./tokens.mjs";
@@ -24,12 +24,18 @@ const dir =
   stateDirFor(repo).dir;
 
 const sources = new Map(); // dir -> the logs read from it
-/** @param {string} name @returns {any[]} */
-const read = (name) => {
-  const from = candidates.find(has([name]));
-  if (!from) return [];
-  (sources.get(from) ?? sources.set(from, []).get(from)).push(name);
-  return readFileSync(join(from, name), "utf8")
+/** @type {Set<string>} logs that exist but could not be read (a folder, no permission): read as empty */
+const unreadable = new Set();
+/** @param {string} from @param {string} name @returns {any[]} */
+const parseLog = (from, name) => {
+  let text;
+  try {
+    text = readFileSync(join(from, name), "utf8");
+  } catch {
+    unreadable.add(name);
+    return [];
+  }
+  return text
     .split("\n")
     .filter(Boolean)
     .flatMap((l) => {
@@ -39,6 +45,13 @@ const read = (name) => {
         return [];
       }
     });
+};
+/** @param {string} name @returns {any[]} */
+const read = (name) => {
+  const from = candidates.find(has([name]));
+  if (!from) return [];
+  (sources.get(from) ?? sources.set(from, []).get(from)).push(name);
+  return parseLog(from, name);
 };
 
 /** @param {unknown} v */
@@ -56,16 +69,7 @@ const reads = read("reads.jsonl");
 const readQuiet = (name) => {
   const from = candidates.find(has([name]));
   if (!from) return { rows: [], note: () => {} };
-  const rows = readFileSync(join(from, name), "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .flatMap((l) => {
-      try {
-        return [JSON.parse(l)];
-      } catch {
-        return [];
-      }
-    });
+  const rows = parseLog(from, name);
   return { rows, note: () => void (sources.get(from) ?? sources.set(from, []).get(from)).push(name) };
 };
 /** @param {string[]} heads @param {unknown[][]} rows */
@@ -402,7 +406,269 @@ const reviewSlices = (() => {
   const unknownNote = unknown ? ` ${unknown} review${unknown === 1 ? " has" : "s have"} no model on record and count${unknown === 1 ? "s" : ""} as not on opus.` : "";
   return `${table(["Session", "Run", "Slice", "Reviews", "On opus"], rows)}<p>${perSlice.size} slice${perSlice.size === 1 ? "" : "s"}, ${reviews} review${reviews === 1 ? "" : "s"}, ${(reviews / perSlice.size).toFixed(1)} per slice, ${opus} of ${reviews} on opus (${share}%).${unknownNote}</p>${otherNote}`;
 })();
-const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}`;
+// Review outcomes by kind and model (2.1.x): the reviewer stop records in journal.jsonl that carry `kind` (plan,
+// validate or review) and `model` (journal.mjs, from the reviewer's launch record), counted per kind and model with
+// pass, fail and total. A stop record with `continues: true` replaces the record it continues, as in "Reviews per
+// slice", so one reply counts once; a resume counts again. Records without a kind (written before the field) are
+// counted in one line under the table. Only top-level fields of each parsed line are read.
+const REVIEW_KINDS = ["plan", "validate", "review"];
+const reviewKinds = (() => {
+  /** @type {any[]} the reviewer stop records, a continued record replacing the one it continues */
+  const list = [];
+  /** @type {Map<string, any>} */
+  const lastOf = new Map();
+  for (const r of skillLogs.journal.rows) {
+    if (!r || typeof r !== "object" || String(r.role ?? r.agent_type ?? "").split(":").pop() !== "reviewer") continue;
+    const agentKey = typeof r.agent_id === "string" && r.agent_id ? `${r.session_id ?? ""}\n${r.agent_id}` : null;
+    const earlier = r.continues === true && agentKey ? lastOf.get(agentKey) : undefined;
+    const at = earlier ? list.indexOf(earlier) : -1;
+    if (at >= 0) list[at] = r;
+    else list.push(r);
+    if (agentKey) lastOf.set(agentKey, r);
+  }
+  if (!list.length) return "<p>No reviewer stop records in the journal yet.</p>";
+  /** @type {Map<string, { kind: string, model: string, pass: number, fail: number, total: number }>} */
+  const counts = new Map();
+  let noKind = 0;
+  for (const r of list) {
+    if (typeof r.kind !== "string" || !REVIEW_KINDS.includes(r.kind)) {
+      noKind++;
+      continue;
+    }
+    const model = typeof r.model === "string" && r.model ? r.model : "unknown";
+    const key = `${r.kind}\n${model}`;
+    let c = counts.get(key);
+    if (!c) counts.set(key, (c = { kind: r.kind, model, pass: 0, fail: 0, total: 0 }));
+    c.total++;
+    if (r.status === "pass") c.pass++;
+    else if (r.status === "fail") c.fail++;
+  }
+  const noKindNote = noKind ? `<p>${noKind} earlier review${noKind === 1 ? " carries" : "s carry"} no kind (stop records written before the field), not counted above.</p>` : "";
+  if (!counts.size) return `<p>No review with a kind on record yet.</p>${noKindNote}`;
+  const rows = [...counts.values()]
+    .sort((a, b) => REVIEW_KINDS.indexOf(a.kind) - REVIEW_KINDS.indexOf(b.kind) || a.model.localeCompare(b.model))
+    .map((c) => [c.kind, c.model, c.pass, c.fail, c.total]);
+  return `${table(["Kind", "Model", "Pass", "Fail", "Total"], rows)}<p>Kind: plan (a plan review), validate (a gap validation), review (any other review). Model: the model the reviewer's launch named, "unknown" when none is on record. Total includes replies with no STATUS line.</p>${noKindNote}`;
+})();
+const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}<h3>Review outcomes by kind and model</h3>${reviewKinds}`;
+
+// Tokens and estimated cost by phase (2.1.x). The subagents are each agent's last stop record with tokens, the same
+// selection and pricing (costOf, one model) as the cost table above, so the subagent phases plus "unassigned" cover
+// the same agents and tokens. Each is placed by its latest launch record in journal-launches.jsonl (same session and
+// agent id): plan review (slice `plan` or isPlanReview), explore (researcher), build (an implementer's first launch for
+// a slice in a run of a session, the run from the agent's journal stop records; with no run known, in the session),
+// retries (its later launches), review (other reviewers), integrate (integrator); an agent with
+// no launch record is unassigned. The orchestrator is the main session: each distinct `transcript_path` the telemetry
+// records name is read once, its assistant messages summed like telemetry.mjs sums a subagent's (per message id the
+// largest value of each field, synthetic messages skipped) and priced per model. Only top-level fields count: a stop
+// record's `background_tasks` holds other agents' data.
+const TOKEN_KINDS = /** @type {const} */ (["input", "output", "cache_read", "cache_write"]);
+/** @param {unknown} v */
+const num = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+/** @param {any} t */
+const sumTokens = (t) => TOKEN_KINDS.reduce((a, k) => a + num(t?.[k]), 0);
+const launchLog = readQuiet("journal-launches.jsonl");
+/** @type {any[]} */
+const launches = launchLog.rows.filter((l) => l && typeof l === "object" && typeof l.agent_id === "string" && l.agent_id);
+/** @param {any} l */
+const isPlanLaunch = (l) => l.slice === "plan" || l.isPlanReview === true;
+/** @type {Map<string, any>} session + agent id -> its latest launch record */
+const launchOf = new Map();
+/** @type {Map<string, string>} session + agent id -> phase, for implementers by launch order */
+const implPhase = new Map();
+/** @type {Map<string, unknown>} session + agent id -> the run of its journal stop records (launch records carry none) */
+const runOfAgent = new Map();
+for (const r of skillLogs.journal.rows) {
+  if (r && typeof r === "object" && typeof r.agent_id === "string" && r.agent_id && r.run !== undefined && r.run !== null) runOfAgent.set(`${r.session_id ?? ""}\n${r.agent_id}`, r.run);
+}
+/** @type {Set<string>} session + slice with an implementer launch seen */
+const builtSlices = new Set();
+/** @type {Set<string>} session + run + slice with an implementer launch seen */
+const builtRunSlices = new Set();
+for (const l of launches) {
+  const key = `${l.session_id ?? ""}\n${l.agent_id}`;
+  launchOf.set(key, l);
+  if (bareType(l.agent_type) !== "implementer" || implPhase.has(key)) continue;
+  // Build versus retries is decided per session, run and slice, so a later run that reuses a slice id starts with a
+  // build; an implementer with no known run (no journal record with one) is decided per session and slice.
+  const sk = `${l.session_id ?? ""}\n${l.slice ?? ""}`;
+  const rk = runOfAgent.has(key) ? sliceKey({ session_id: l.session_id, run: runOfAgent.get(key), slice: l.slice }) : null;
+  implPhase.set(key, (rk ? builtRunSlices.has(rk) : builtSlices.has(sk)) ? "retries" : "build");
+  builtSlices.add(sk);
+  if (rk) builtRunSlices.add(rk);
+}
+const PHASES = ["plan review", "explore", "build", "retries", "review", "integrate", "unassigned"];
+/** @param {string} key session + agent id @returns {string} */
+const phaseOf = (key) => {
+  const l = launchOf.get(key);
+  if (!l) return "unassigned";
+  const role = bareType(l.agent_type);
+  if (isPlanLaunch(l)) return "plan review";
+  if (role === "researcher") return "explore";
+  if (role === "implementer") return implPhase.get(key) ?? "build";
+  if (role === "reviewer") return "review";
+  if (role === "integrator") return "integrate";
+  return "unassigned";
+};
+/** @returns {{ agents: number, input: number, output: number, cache_read: number, cache_write: number, cost: number, unpriced: number }} */
+const emptyBucket = () => ({ agents: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, cost: 0, unpriced: 0 });
+/** @typedef {ReturnType<typeof emptyBucket>} Bucket */
+/** @param {Bucket} b @param {any} tokens @param {string | null} model */
+const addTo = (b, tokens, model) => {
+  for (const k of TOKEN_KINDS) b[k] += num(tokens?.[k]);
+  const cost = costOf(tokens, model);
+  if (cost === null) b.unpriced++;
+  else b.cost += cost;
+};
+/** @type {Map<string, Bucket>} */
+const phases = new Map(PHASES.map((p) => [p, emptyBucket()]));
+let noTokens = 0;
+/** @type {Map<string, { tokens: any, model: string | null }>} session + agent id -> what it counts for */
+const agentUsage = new Map();
+for (const [key, e] of lastStops) {
+  if (!e.tokens || typeof e.tokens !== "object") {
+    noTokens++;
+    continue;
+  }
+  const model = Array.isArray(e.models) && e.models.length === 1 ? e.models[0] : null;
+  const b = /** @type {Bucket} */ (phases.get(key.startsWith("\n#") ? "unassigned" : phaseOf(key)));
+  b.agents++;
+  addTo(b, e.tokens, model);
+  agentUsage.set(key, { tokens: e.tokens, model });
+}
+// The main session's transcripts: only the exact paths the records name, each once; a path that is not an absolute
+// .jsonl file, is missing or cannot be read is skipped and counted.
+/** @type {Set<string>} */
+const transcriptPaths = new Set();
+for (const e of events) if (typeof e.transcript_path === "string" && e.transcript_path) transcriptPaths.add(e.transcript_path);
+const orchestrator = emptyBucket();
+let transcriptsSkipped = 0;
+for (const path of transcriptPaths) {
+  let text;
+  try {
+    if (!isAbsolute(path) || !path.endsWith(".jsonl") || !statSync(path).isFile()) throw new Error("not a transcript");
+    text = readFileSync(path, "utf8");
+  } catch {
+    transcriptsSkipped++;
+    continue;
+  }
+  /** @type {Map<string, { model: string | null, input: number, output: number, cache_read: number, cache_write: number, cache_write_1h: number }>} */
+  const perMessage = new Map();
+  let n = 0;
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e?.type !== "assistant" || e.isSidechain === true) continue;
+    const m = e.message;
+    if (!m || typeof m !== "object" || m.model === "<synthetic>") continue;
+    const id = typeof m.id === "string" && m.id ? m.id : `#${n++}`;
+    const u = m.usage && typeof m.usage === "object" ? m.usage : {};
+    const prev = perMessage.get(id) ?? { model: null, input: 0, output: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 };
+    perMessage.set(id, {
+      model: typeof m.model === "string" && m.model ? m.model : prev.model,
+      input: Math.max(prev.input, num(u.input_tokens)),
+      output: Math.max(prev.output, num(u.output_tokens)),
+      cache_read: Math.max(prev.cache_read, num(u.cache_read_input_tokens)),
+      cache_write: Math.max(prev.cache_write, num(u.cache_creation_input_tokens)),
+      cache_write_1h: Math.max(prev.cache_write_1h, num(u.cache_creation?.ephemeral_1h_input_tokens)),
+    });
+  }
+  orchestrator.agents++;
+  /** @type {Map<string, { input: number, output: number, cache_read: number, cache_write: number, cache_write_1h: number }>} model -> summed tokens */
+  const perModel = new Map();
+  for (const t of perMessage.values()) {
+    const k = t.model ?? "";
+    const s = perModel.get(k) ?? { input: 0, output: 0, cache_read: 0, cache_write: 0, cache_write_1h: 0 };
+    for (const f of /** @type {const} */ (["input", "output", "cache_read", "cache_write", "cache_write_1h"])) s[f] += t[f];
+    perModel.set(k, s);
+  }
+  // Messages of a model with no listed price, or with no model, count as tokens and as one unpriced part.
+  for (const [model, t] of perModel) {
+    for (const k of TOKEN_KINDS) orchestrator[k] += t[k];
+    const cost = costOf(t, model || null);
+    if (cost === null) orchestrator.unpriced++;
+    else orchestrator.cost += cost;
+  }
+}
+const phaseSection = (() => {
+  const head = "<h2>Tokens and estimated cost by phase</h2>";
+  const unreadableNote = [...unreadable].filter((n) => n === "telemetry.jsonl" || n === "journal-launches.jsonl").map((n) => `<p><code>${esc(n)}</code> could not be read and counts as empty.</p>`).join("");
+  const skippedNote = transcriptsSkipped ? `<p>${transcriptsSkipped} main-session transcript${transcriptsSkipped === 1 ? " was" : "s were"} missing or unreadable and skipped: the orchestrator row leaves ${transcriptsSkipped === 1 ? "it" : "them"} out.</p>` : "";
+  const subagents = PHASES.reduce((a, p) => a + /** @type {Bucket} */ (phases.get(p)).agents, 0);
+  if (!subagents && !orchestrator.agents) return `${head}<p>No token data yet: no stop record with tokens in <code>telemetry.jsonl</code> and no readable main-session transcript.</p>${skippedNote}${unreadableNote}`;
+  if (launches.length) launchLog.note();
+  /** @param {string} name @param {Bucket} b */
+  const row = (name, b) => [name, b.agents, formatTokens(b.input), formatTokens(b.output), formatTokens(b.cache_read), formatTokens(b.cache_write), formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced];
+  /** @type {[string, Bucket][]} */
+  const named = [...PHASES.map((p) => /** @type {[string, Bucket]} */ ([p, phases.get(p)])), ["orchestrator", orchestrator]];
+  const rows = named.filter(([, b]) => b.agents).map(([p, b]) => row(p, b));
+  const all = emptyBucket();
+  for (const [, b] of named) for (const k of /** @type {const} */ (["agents", "input", "output", "cache_read", "cache_write", "cost", "unpriced"])) all[k] += b[k];
+  const subCost = [...phases.values()].reduce((a, b) => a + b.cost, 0);
+  const mains = orchestrator.agents;
+  const noLaunches = launches.length ? "" : "<p>No launch records (<code>journal-launches.jsonl</code>), so every subagent is unassigned.</p>";
+  const noTokensNote = noTokens ? `<p>${noTokens} agent${noTokens === 1 ? "" : "s"} with no token data on the last stop record left out.</p>` : "";
+  return `${head}${table(["Phase", "Agents", "Input", "Output", "Cache read", "Cache write", "Total tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>${subagents} subagent${subagents === 1 ? "" : "s"} at ${esc(formatUsd(subCost))} and ${mains} main-session transcript${mains === 1 ? "" : "s"}: ${esc(formatTokens(sumTokens(all)))} tokens and ${esc(formatUsd(all.cost))} in all, at list prices as of ${PRICES_AS_OF}: an estimate for comparing phases, not a bill (a subscription is not billed per token). "Not priced" counts agents (for the orchestrator, models in a transcript) with several models or no listed price: their tokens count, their cost does not.</p>${noLaunches}${noTokensNote}${skippedNote}${unreadableNote}`;
+})();
+
+// Tokens and estimated cost per passed slice: a slice (session, run, slice) whose latest reviewer stop record in
+// journal.jsonl is pass and which has an implementer launch. An agent's run is the run of its own journal record; an
+// agent with none goes to the latest passed run of its session and slice. Plan reviews are not a slice's reviews.
+const passedSection = (() => {
+  const head = "<h3>Tokens and estimated cost per passed slice</h3>";
+  if (unreadable.has("journal.jsonl")) return `${head}<p><code>journal.jsonl</code> could not be read, so no slice can be counted.</p>`;
+  const journal = skillLogs.journal.rows.filter((r) => r && typeof r === "object");
+  if (!journal.length) return `${head}<p>No journal yet (<code>journal.jsonl</code>), so passed slices cannot be counted.</p>`;
+  if (!launches.length) return `${head}<p>No launch records (<code>journal-launches.jsonl</code>), so no slice has an implementer launch to count.</p>`;
+  /** @type {Map<string, unknown>} slice key -> latest reviewer status */
+  const latest = new Map();
+  for (const r of journal) {
+    if (bareType(r.role ?? r.agent_type) === "reviewer" && r.slice && r.slice !== "plan") latest.set(sliceKey(r), r.status);
+  }
+  /** @type {Map<string, { session: string, run: string, slice: string, impl: Set<string>, rev: Set<string>, attempts: number }>} */
+  const passed = new Map();
+  for (const [key, status] of latest) {
+    if (status !== "pass") continue;
+    const [session = "", run = "", slice = ""] = key.split("\n");
+    passed.set(key, { session, run, slice, impl: new Set(), rev: new Set(), attempts: 0 });
+  }
+  /** @param {any} l @returns {string | undefined} the passed slice key a launch belongs to */
+  const passedKeyOf = (l) => {
+    const agentKey = `${l.session_id ?? ""}\n${l.agent_id}`;
+    if (runOfAgent.has(agentKey)) return sliceKey({ session_id: l.session_id, run: runOfAgent.get(agentKey), slice: l.slice });
+    const prefix = `${l.session_id ?? ""}\n`;
+    return [...passed.keys()].filter((k) => k.startsWith(prefix) && k.endsWith(`\n${l.slice}`)).pop();
+  };
+  for (const l of launches) {
+    if (!l.slice || isPlanLaunch(l)) continue;
+    const role = bareType(l.agent_type);
+    if (role !== "implementer" && role !== "reviewer") continue;
+    const k = passedKeyOf(l);
+    const p = k ? passed.get(k) : undefined;
+    if (!p) continue;
+    if (role === "implementer") p.attempts++;
+    (role === "implementer" ? p.impl : p.rev).add(`${l.session_id ?? ""}\n${l.agent_id}`);
+  }
+  const rows = [...passed.values()]
+    .filter((p) => p.impl.size)
+    .map((p) => {
+      const b = emptyBucket();
+      for (const a of [...p.impl, ...p.rev]) {
+        const u = agentUsage.get(a);
+        if (!u) continue;
+        b.agents++;
+        addTo(b, u.tokens, u.model);
+      }
+      return [p.session.slice(0, 8), p.run, p.slice, p.attempts, p.impl.size, p.rev.size, formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced];
+    });
+  if (!rows.length) return `${head}<p>No passed slice with an implementer launch yet.</p>`;
+  return `${head}${table(["Session", "Run", "Slice", "Attempts", "Implementers", "Reviewers", "Tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>Tokens and cost of each slice's implementers and reviewers, from their last stop records with tokens, at list prices as of ${PRICES_AS_OF}: an estimate, not a bill. Attempts counts implementer launches. Slices whose latest review did not pass, and slices with no implementer launch, are left out.</p>`;
+})();
 
 // Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".
 const state = sources.size ? [...sources].map(([d, names]) => `<code>${esc(d)}</code> (${names.join(", ")})`).join("; ") : `<code>${esc(dir)}</code>`;
@@ -412,7 +678,8 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <body><h1>Orchestration report</h1><p>${esc(repo)}</p><p>State: ${state}</p>
 <h2>Headless runs</h2>${runs.length ? `<table><thead><tr><th>Time</th><th>Task</th><th>Result</th><th>Tokens</th><th>Turns</th><th>Subagents</th></tr></thead><tbody>${runRows}</tbody></table>${estimated ? "<p>≈ marks runs logged before token tracking, estimated from their list-price cost at about 1M tokens per dollar.</p>" : ""}` : "<p>No runs logged yet. Use <code>npm run native</code>.</p>"}
 <h2>Agents by role</h2>${roleTable}${noStopLine}
-<h2>Estimated cost by role and model</h2>${costTable}${reviewTimeSection}
+<h2>Estimated cost by role and model</h2>${costTable}
+${phaseSection}${passedSection}${reviewTimeSection}
 <h2>Reads by kind and role</h2>${readTable}${skillsSection}
 <h2>Agent events</h2>${sessions || "<p>No agent events yet. Run the orchestrator once.</p>"}
 <h2>Triage decisions</h2>${routes.length ? table(["Time", "Task", "Mode", "Source", "Reason"], routes.map((r) => [r.ts, r.task, r.mode, r.source, r.reason])) : "<p>No triage decisions yet. Use <code>/route</code> or <code>npm run auto</code>.</p>"}
