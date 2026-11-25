@@ -22,7 +22,6 @@
     "build-plugin": "node scripts/build-plugin.mjs",
     "check-plugin": "node scripts/build-plugin.mjs --check",
     "test-dashboard": "node scripts/test-dashboard.mjs",
-    "install-statusline": "bash scripts/install-statusline.sh",
     "claude-update": "node scripts/claude-update.mjs",
     "skill-publish": "node scripts/skill-publish.mjs",
     "soak": "node scripts/soak-gates.mjs",
