@@ -2,7 +2,7 @@
 
 This page lists every plugin setting and environment variable the native orchestrator reads, with its default and its effect. It is for maintainers. What each gate does is in [gates.md](gates.md); the SDK pipeline's own variables are in [sdk-pipeline.md, Environment](sdk-pipeline.md#environment).
 
-A [switch](glossary.md#s) is an environment variable named `ORCH_*`. Switches are named only in maintainer text: these docs, CLAUDE.md, `.claude/rules/agents.md` and hook comments. Never in agent bodies, skills or the nudge's context; `src/contracts.test.ts` checks this.
+A [switch](glossary.md#s) is an environment variable named `ORCH_*`. Switches are named only in maintainer text: these docs, CLAUDE.md, [maintainer-notes.md](maintainer-notes.md) (the release-by-release rules, which name most switches), `.claude/rules/agents.md` and hook comments. Never in agent bodies, skills or the nudge's context; `src/contracts.test.ts` checks this.
 
 ## How a setting reaches the hooks
 

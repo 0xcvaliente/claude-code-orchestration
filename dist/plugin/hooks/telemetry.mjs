@@ -205,7 +205,15 @@ if (process.argv[1]?.endsWith("telemetry.mjs")) {
   // Report text never goes in the log (2.0.1, D6): last_assistant_message is the worker's report, and `status` above is
   // all any reader takes from it. Older records that still carry it are read as before (no reader uses the field).
   const TEXT_FIELDS = new Set(["last_assistant_message"]);
-  const slim = Object.fromEntries(Object.entries(payload).filter(([k]) => !TEXT_FIELDS.has(k)).map(([k, v]) => [k, typeof v === "object" ? v : clip(v)]));
+  // Transcript paths are kept whole, never cut (a cut path no longer ends in .jsonl and the report counts it missing);
+  // one that is not a string or is longer than 4,096 characters is left out.
+  const PATH_FIELDS = new Set(["transcript_path", "agent_transcript_path"]);
+  const pathOk = (/** @type {unknown} */ v) => typeof v === "string" && v.length <= 4096;
+  const slim = Object.fromEntries(
+    Object.entries(payload)
+      .filter(([k, v]) => !TEXT_FIELDS.has(k) && (!PATH_FIELDS.has(k) || pathOk(v)))
+      .map(([k, v]) => [k, PATH_FIELDS.has(k) || typeof v === "object" ? v : clip(v)]),
+  );
 
   const usage = payload.hook_event_name === "SubagentStop" && typeof payload.agent_transcript_path === "string" ? usageFromTranscript(payload.agent_transcript_path, String(payload.agent_type ?? "").split(":").pop() ?? "") : undefined;
 
