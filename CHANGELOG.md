@@ -4,7 +4,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ## [2.2.0] - 2026-11-26
 
-2.2.0 shows where a run's tokens go and trims what every session loads. `npm run report` gains a cost table by phase (with the main sessions' own tokens), a table per slice whose latest review passed and a table of review outcomes by kind and model, fed by fields the journal now writes: `kind` and `model` on reviewer stop records and `run` on implementer and reviewer launch records. The orchestrator answers a small read-only question itself. The nudge's session-start text is cut to a third, which fixes a text that, since 2.1.2, was over Claude Code's cap on hook context, and `CLAUDE.md` is cut to about a third, its release history moved to `docs/maintainer-notes.md`. No gate decision, setting or workflow changes: the hooks only add fields to their records, and records written before 2.2.0 fold as before. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update` (`-- --fix` updates an installed copy whose version differs), and start a new session or run `/reload-plugins` so the shorter nudge loads. Nothing else asks anything new of a person.
+2.2.0 shows where a run's tokens go and trims what every session loads. `npm run report` gains a cost table by phase (with the main sessions' own tokens), a table per slice whose latest review passed and a table of review outcomes by kind and model, fed by fields the journal now writes: `kind` and `model` on reviewer stop records and `run` on implementer and reviewer launch records. The orchestrator answers a small read-only question itself. The nudge's session-start text is cut to a third, which fixes a text that, since 2.1.2, was over Claude Code's cap on hook context, and `CLAUDE.md` is cut to about a third, its release history moved to `docs/maintainer-notes.md`. It also removes the main status line, a personal script the plugin never shipped. No gate decision, setting or workflow changes: journal records gain fields, telemetry keeps two path fields whole instead of cutting them, and the nudge's text is shorter; records written before 2.2.0 fold as before. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update` (`-- --fix` updates an installed copy whose version differs), and start a new session or run `/reload-plugins` so the shorter nudge loads. Nothing else asks anything new of a person.
 
 ### Added
 
@@ -24,6 +24,10 @@ All notable changes to this project are listed here. The format follows [Keep a 
 - **The report's "State:" line** names `journal.jsonl` and `journal-launches.jsonl` whenever a section used their rows (`scripts/report.mjs`).
 - Version 2.2.0 in `package.json`, `package-lock.json` and both plugin manifests.
 
+### Removed
+
+- **The main status line** (`statusline/statusline.sh`, its test `src/statusline.test.ts`, `scripts/install-statusline.sh` and `npm run install-statusline`). It was a personal script, not part of the plugin, and the repo no longer ships one. A copy already installed in your Claude Code config folder keeps working until you remove it and its `statusLine` setting. The worker rows under the prompt (the mod's `AgentRow` hook) and `.claude/hooks/subagent-statusline.mjs` are unchanged. [docs/dashboard.md](docs/dashboard.md), "Status lines", [docs/development.md](docs/development.md), `CLAUDE.md` and `docs/maintainer-notes.md` no longer describe it; [docs/limits.md](docs/limits.md), J, keeps its 2.1.0 item and notes the removal (pull request #39).
+
 ### Fixed
 
 - **The nudge fits Claude Code's cap on hook context** (`nudge.mjs`). Claude Code keeps at most 10,000 characters of a hook's context and replaces longer output with a file path and a 2,000-character preview. 2.1.2's session-start text was 11,209 characters (11,460 with the agent-teams warning line), so a plain session with the 2.1.2 plugin most likely received only its start; 2.1.1's was 9,655. The text is now 3,568 characters (3,819 with the warning), and `src/nudge-length.test.mjs` runs the hook and holds its output at 9,000 or less, warning line included.
@@ -31,7 +35,7 @@ All notable changes to this project are listed here. The format follows [Keep a 
 
 ### Limits
 
-[docs/limits.md](docs/limits.md) gains section L, "Found in 2.2.0 and not fixed": among others, a resumed attempt writes no launch record and so counts under build and not under retries or Attempts, the report has no mapping from launch aliases to full model ids, the "Failing review after latest attempt" marker can say no when an implementer is woken between two reviews of one attempt, records from before 2.2.0 are placed by the older rules, the new tables are estimates at list prices, and the status line fix of 2.1.2 stays unproven in CI while the CI workflow is disabled. What earlier releases do not do, in sections A to K, holds for 2.2.0.
+[docs/limits.md](docs/limits.md) gains section L, "Found in 2.2.0 and not fixed": among others, a resumed attempt writes no launch record and so counts under build and not under retries or Attempts, the report has no mapping from launch aliases to full model ids, the "Failing review after latest attempt" marker can say no when an implementer is woken between two reviews of one attempt, records from before 2.2.0 are placed by the older rules, and the new tables are estimates at list prices. What earlier releases do not do, in sections A to K, holds for 2.2.0.
 
 ## [2.1.2] - 2026-11-25
 

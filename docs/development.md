@@ -30,7 +30,6 @@ npm run typecheck    # the type check only
 | `npm run test-dashboard` | The pane's own test (needs the `claude` CLI) |
 | `npm run plain` | A plain interactive session in this repo: `claude --settings '{"agent":"","outputStyle":"Concise"}'`. A session opened here otherwise starts as the orchestrator |
 | `npm run report` | An HTML timeline and per-role tables from the state dir, with an estimated cost at list prices ([Run report](logs.md#run-report)) |
-| `npm run install-statusline` | Copy the status line script and print the setting ([Status lines](dashboard.md#status-lines)) |
 | `npm run claude-update` | Check this repo against the installed Claude Code after an update; `-- --fix` repairs the machine, `-- --enable` turns the plugin on, `-- --write-source` updates the block list in the repo ([docs/claude-code-updates.md](claude-code-updates.md)) |
 | `npm run soak` | The gate soak (2.0.1): a seeded, model-free run of random worker life cycles through the real hooks in `.claude/hooks`, checking nine invariants after every step. `-- --minutes N` (default 10, at most 60: a larger or unreadable value exits 2 and runs nothing), `--seed S`, `--sequences K`, `--concurrency C`, `--replay FILE`, `--save FILE`, `--hooks DIR`, `--plant`. Exit 0 clean, 1 with a violation (each with a `REPLAY` line), 2 on a usage error. Each sequence runs in its own temp project; the project's `.claude/state` is never touched ([probes soak](data/probes-2.0.1-soak.md)) |
 | `npm run skill-publish` | List draft skills; `-- <name>` pushes a draft and opens its pull request, `--merge` merges, installs and removes the draft, `--dry-run` prints the steps ([Publishing](skills.md#publishing)) |
@@ -60,11 +59,10 @@ npm run typecheck    # the type check only
 .claude-plugin/      marketplace.json (written by npm run build-plugin; docs/marketplace.md)
 dist/plugin/, dist/dashboard/   the built plugin, and the pane's mod alone (both committed)
 dashboard/           the pane (source for both builds)
-statusline/          statusline.sh
 src/                 the SDK pipeline (config.ts is the source of truth for roles and thresholds) and the tests
 scripts/             check.mjs (npm run check), run-tests.mjs (npm test), auto.sh, orchestrate.sh, build-plugin.mjs,
                      report.mjs and prices.mjs (npm run report), tokens.mjs, test-dashboard.mjs, sandbox-smoke.mjs,
-                     install-statusline.sh, claude-update.mjs (the check after a Claude Code update),
+                     claude-update.mjs (the check after a Claude Code update),
                      skill-publish.mjs (a person publishes a draft skill),
                      run-result.mjs and log-run.mjs (a headless run's result document and its row in runs.jsonl)
 evals/               the plugin eval suite
@@ -96,7 +94,7 @@ The full rules are in `CLAUDE.md`, `docs/maintainer-notes.md` and `.claude/rules
 - The suite's wall time depends on the machine's load: a test that waits for a hook uses a marker or a poll, never a fixed sleep or a tight wall-clock window ([Limits](limits.md), J).
 - Every test file imports `./test-tmp.mjs` (from `bench/`: `../src/test-tmp.mjs`) as its first import, so a file run on its own makes and removes its own `orch-test-*` root. `src/test-tmp.test.mjs` fails when one does not.
 - The test gate's hardening tests are split in three files: `src/gate-hardening-time.test.mjs` (time limit and hook budget), `src/gate-hardening-trap.test.mjs` (temp folder, `run_limited`) and `src/gate-hardening-logs.test.mjs` (the rest).
-- To hit a race in a shell script at an exact line, set a DEBUG trap in a file named by `BASH_ENV`: bash runs the trap before each command, and the trap can send the signal when `$BASH_COMMAND` is the command under test. `src/statusline.test.ts` sends a TERM just before `STATUS_PID=$!` and `WATCH_PID=$!` this way (2.1.0), with no timing window.
+- To hit a race in a shell script at an exact line, set a DEBUG trap in a file named by `BASH_ENV`: bash runs the trap before each command, and the trap can send the signal when `$BASH_COMMAND` is the command under test. The status line test of 2.1.0 to 2.1.2 sent a TERM just before two `$!` assignments this way, with no timing window; that script and its test have since been removed.
 - To test a hook script by hand in zsh, pass the JSON with `printf '%s'`, not `echo`: zsh expands `\n`.
 
 **After a change under `.claude/` or `dashboard/`,** rebuild the plugin (next section) and bump `version` in `package.json`, so installed copies pick up the change.
