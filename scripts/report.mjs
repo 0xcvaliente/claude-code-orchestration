@@ -414,7 +414,7 @@ const reviewSlices = (() => {
   const unknownNote = unknown ? ` ${unknown} review${unknown === 1 ? " has" : "s have"} no model on record and count${unknown === 1 ? "s" : ""} as not on opus.` : "";
   return `${table(["Session", "Run", "Slice", "Reviews", "On opus"], rows)}<p>${perSlice.size} slice${perSlice.size === 1 ? "" : "s"}, ${reviews} review${reviews === 1 ? "" : "s"}, ${(reviews / perSlice.size).toFixed(1)} per slice, ${opus} of ${reviews} on opus (${share}%).${unknownNote}</p>${otherNote}`;
 })();
-// Review outcomes by kind and model (2.1.x): the reviewer stop records in journal.jsonl that carry `kind` (plan,
+// Review outcomes by kind and model (2.2.0): the reviewer stop records in journal.jsonl that carry `kind` (plan,
 // validate or review) and `model` (journal.mjs, from the reviewer's launch record), counted per kind and model with
 // pass, fail and total. A stop record with `continues: true` replaces the record it continues, as in "Reviews per
 // slice", so one reply counts once; a resume counts again. Records without a kind (written before the field) are
@@ -479,7 +479,7 @@ const reviewKinds = (() => {
 })();
 const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model</h3>${wallTable}${untimedNote}<h3>Reviews per slice</h3>${reviewSlices}<h3>Review outcomes by kind and model</h3>${reviewKinds}`;
 
-// Tokens and estimated cost by phase (2.1.x). The subagents are each agent's last stop record with tokens, the same
+// Tokens and estimated cost by phase (2.2.0). The subagents are each agent's last stop record with tokens, the same
 // selection and pricing (costOf, one model) as the cost table above, so the subagent phases plus "unassigned" cover
 // the same agents and tokens. Each is placed by its latest launch record in journal-launches.jsonl (same session and
 // agent id): plan review (slice `plan` or isPlanReview), explore (researcher), build (an implementer's first launch for

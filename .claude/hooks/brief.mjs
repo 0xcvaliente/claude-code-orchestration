@@ -569,7 +569,7 @@ export function escalationMode(env = {}) {
  * a DRAFT line) is there only when the reply has a valid one, so a reply without it gives the record it gave before.
  * `skills_used` and `skills_skipped` (the skill names of the SKILLS-USED and SKILLS-SKIPPED lines, at most 8 each) are
  * there only when non-empty, for the same reason. A reviewer's record also carries `kind` ("plan", "validate" or
- * "review") and `model` (its launch record's model) from reviewFields, each left out when unknown; records before 2.1.x
+ * "review") and `model` (its launch record's model) from reviewFields, each left out when unknown; records before 2.2.0
  * lack both, and no gate reads them (the fold takes a review's model from `model`, else the launch record: the same value).
  *
  * @typedef {{ ts: string, gate: string, decision: string, reason: string, agent_type?: string, agent_id?: string, session_id?: string }} GateRecord
@@ -684,7 +684,7 @@ export function stopRecord(ctx) {
 }
 
 /**
- * The review fields of a reviewer's stop record (2.1.x, added fields only; no gate reads them): `kind` is "plan" for a
+ * The review fields of a reviewer's stop record (2.2.0, added fields only; no gate reads them): `kind` is "plan" for a
  * PLAN REVIEW (launch slice "plan" or isPlanReview), "validate" for a VALIDATE: gaps brief, else "review"; `model` is
  * the model its launch record names. They come from the launch record, else (kind only) from the brief text parsed by
  * isPlanReview and parseHeader. Each field is left out when unknown (no launch record and no brief, a launch record
