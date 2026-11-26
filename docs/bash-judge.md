@@ -254,7 +254,7 @@ When that prefix starts with an exec-env name followed by `=` or the append form
 
 A quoted exec-env word in command position (`"PATH=/x" su`) is not an assignment to any shell; it is outside the rule's property.
 
-**Tested.** `src/judge-differential.test.mjs` runs the vendored 1.4.0 judge (`src/fixtures/judge-core-1.4.0.mjs`, byte for byte `git show 1874522:.claude/hooks/judge-core.mjs`; never edit it) against the current one, over every string in the judge tests, the corpus and generated forms. It checks:
+**Tested.** `src/judge-differential.test.mjs` runs the vendored 1.4.0 judge (`src/fixtures/judge-core-1.4.0.mjs`, byte for byte `git show 8c55586:.claude/hooks/judge-core.mjs`; never edit it) against the current one, over every string in the judge tests, the corpus and generated forms. It checks:
 
 - nothing 1.4.0 denies passes or is judged, except the eight J-15 rows of [section 2.1, "Relaxed"](#relaxed) and their wrapped forms, named one by one in `RELAXED`;
 - nothing 1.4.0 judges passes;

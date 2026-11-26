@@ -104,7 +104,7 @@ test("eval graders: results-nonempty and results-pass match node:test summaries,
   for (const [name, out] of outputs) {
     for (const g of graders) assert.match(String(out), g.re, `${g.file} on ${name}`);
   }
-  // The patterns of the 2026-11-10 smoke run (before commit 8a1aa75) had no escape prefix: colour alone fails them, plain
+  // The patterns of the 2026-11-10 smoke run (before commit 020ab68) had no escape prefix: colour alone fails them, plain
   // output passes them. Whether that run's file was coloured is not known (its files were removed).
   for (const old of [/^(?:#|ℹ) pass [1-9]/m, /^(?:#|ℹ) fail 0\b/m]) {
     assert.doesNotMatch(String(outputs[0]?.[1]), old);

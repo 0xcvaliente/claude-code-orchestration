@@ -24,7 +24,7 @@ Charts and the full report: [benchmark-builtins-blocked-report.html](benchmark-b
 
 | Campaign | Matrix | Git SHA | Claude Code | Plugin | Runtimes | Started | Runs |
 |---|---|---|---|---|---|---|---|
-| k2-cap10-nobuiltins | k2-cap10: 1 tasks × 4 arms × cap10 × 2 reps | 6f5bbcc | 2.1.299 (Claude Code) | 0.1.6 | node v24.21.0 | 2026-10-15T20:42:18.052Z | 8 |
+| k2-cap10-nobuiltins | k2-cap10: 1 tasks × 4 arms × cap10 × 2 reps | 6b2428a | 2.1.299 (Claude Code) | 0.1.6 | node v24.21.0 | 2026-10-15T20:42:18.052Z | 8 |
 
 ### Setups
 

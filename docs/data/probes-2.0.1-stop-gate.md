@@ -1,6 +1,6 @@
 # Probes 2.0.1: implementer stops with no test-gate record (D5)
 
-Date: 2026-11-18. Claude Code 2.1.326 (the recorded session) and 2.1.327 (installed), repo at `8cb5b1e` (2.0.0) plus
+Date: 2026-11-18. Claude Code 2.1.326 (the recorded session) and 2.1.327 (installed), repo at `fa4ddb9` (2.0.0) plus
 the uncommitted slices s1 and s2. Follows item D5 of `docs/data/probes-2.0.1-reviewer-loop.md`.
 
 Sources read (counts, times and field names only; no report or brief text is copied here):
@@ -70,7 +70,7 @@ Test commands: pass `true`, fail `echo 'not ok 1 - boom'; exit 1`, slow `sleep 2
 
 ## Root cause and fix, per path
 
-Line numbers are those of `verify.sh` at `8cb5b1e`, before the fix.
+Line numbers are those of `verify.sh` at `fa4ddb9`, before the fix.
 
 1. **Field read** (all five kinds). Root cause: `json_str` at `.claude/hooks/verify.sh:562-564` (before the fix), called
    at `:565-569`, read the last `"agent_type"` in the event. The exit at `:611-613` (`agent_type != implementer`,

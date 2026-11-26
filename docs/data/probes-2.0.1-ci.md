@@ -1,6 +1,6 @@
 # Probes 2.0.1: the CI failure of `src/test-gate-records.test.mjs` (pull request #31)
 
-Date: 2026-11-18. Repo at `bc04989` (2.0.1, branch `fix/reviewer-loop-2.0.1`), compared with `8cb5b1e` (2.0.0, `main`).
+Date: 2026-11-18. Repo at `bc04989` (2.0.1, branch `fix/reviewer-loop-2.0.1`), compared with `fa4ddb9` (2.0.0, `main`).
 Local machine: Linux, 8 CPUs. Scripts and copies live in the session's scratchpad (`s7/`), never in `.claude/state/`.
 
 ## The failure
@@ -16,9 +16,9 @@ and failed the test step on one test:
 gh run view 44322958852 --log-failed | grep -E "✖|recent_change|check failed"
 ```
 
-## Main at 8cb5b1e fails the same way
+## Main at fa4ddb9 fails the same way
 
-`gh run list --branch main --limit 10`: the `ci` workflow's run at `8cb5b1e` is 44270898410, **failure**; the
+`gh run list --branch main --limit 10`: the `ci` workflow's run at `fa4ddb9` is 44270898410, **failure**; the
 successful run at that commit is the other workflow ("Update Mac copy", 44270898591), not `ci`. Its job log
 (`gh run view 44270898410 --log-failed` printed nothing; read with
 `gh api repos/<owner>/<repo>/actions/jobs/134686943910/logs`) shows the same test, the same assertion, the same actual
@@ -63,10 +63,10 @@ time of the test's `mkdirSync`. The margin over the guard is only the hook's sta
 | hooks | time from spawn to L0 (20 runs, ms) | store |
 |---|---|---|
 | `bc04989` (2.0.1) | min 419, median 517, max 1467 | stored 20 of 20 |
-| `8cb5b1e` (2.0.0, `git archive 8cb5b1e .claude/hooks`) | min 343, median 423, max 636 | stored 20 of 20 |
+| `fa4ddb9` (2.0.0, `git archive fa4ddb9 .claude/hooks`) | min 343, median 423, max 636 | stored 20 of 20 |
 
-Locally the margin never fell under 300 ms, so the test passed: 10 of 10 alone at `bc04989`, and the `8cb5b1e` test
-file run against the `8cb5b1e` hooks 20 of 20 (`s7/old/old-hooks.test.mjs`). The CI runner reaches L0 sooner.
+Locally the margin never fell under 300 ms, so the test passed: 10 of 10 alone at `bc04989`, and the `fa4ddb9` test
+file run against the `fa4ddb9` hooks 20 of 20 (`s7/old/old-hooks.test.mjs`). The CI runner reaches L0 sooner.
 
 **Does the 2.0.1 `verify.sh` change cause it?** No. It makes it slightly *less* likely: 2.0.1's gate parses the event
 with node before anything else, which adds about 90 ms (median 517 against 423) before L0, and so widens the margin. The

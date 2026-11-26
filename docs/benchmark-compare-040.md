@@ -7,10 +7,10 @@ One k2 run per arm and two d2-docs runs per arm. This run shows direction only a
 - Matrix `bench/matrix/compare-040.json`, seed 40, `parallel_blocks: 2` (at most 5 sessions live). Two groups:
   - `k2-stdlib-toolkit-xl` (twelve Python standard-library modules, 1,762 hidden tests) at a 10-minute cap (cell `cap10`), arms `O-mix-plugin` and `O-mix-030`, 1 rep each.
   - `d2-docs` (seven questions over a .txt, a text PDF, a PDF table, an image-only scanned PDF, an xlsx with uncached formulas, a bar chart and a 60-page PDF) at a 6-minute cap (cell `cap6`, overriding the task's 8), arms `all-haiku`, `all-sonnet` and `routed`, 2 reps each.
-- Versions: Claude Code 2.1.316, plugin 0.4.0, repo at 053044f. Started 2026-10-31 16:22:40 UTC.
+- Versions: Claude Code 2.1.316, plugin 0.4.0, repo at 8b2bc0d. Started 2026-10-31 16:22:40 UTC.
 - Arms (`bench/arms.mjs`):
   - `O-mix-plugin`: the orchestrator from this checkout's plugin build (0.4.0), loaded with `--plugin-dir`, shipped models (opus orchestrator, sonnet workers).
-  - `O-mix-030`: the same from the 0.3.0 plugin (`dist/plugin` at 4b5c780).
+  - `O-mix-030`: the same from the 0.3.0 plugin (`dist/plugin` at d207cb8).
   - `all-haiku`: the orchestrator as shipped (researcher on haiku).
   - `all-sonnet`: the orchestrator with every subagent forced to sonnet (`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`), not the researcher alone.
   - `routed`: the orchestrator with the read router on (`ORCH_READ_ROUTER=on`).
@@ -77,7 +77,7 @@ Three further points:
 
 ## Live router check
 
-The router was checked separately, by hand, on 2026-10-31 (recorded in [data/live-checks-2026-10-31.md](data/live-checks-2026-10-31.md), Check H). In a scratch git repo with the main checkout's `.claude/` copied in (at 053044f) and `src/fixtures/files/scanned.pdf`, `ORCH_READ_ROUTER=on claude -p ... --model sonnet --allowedTools=Agent` had the main session launch the project researcher with the brief `SLICE: r1 / SOURCES: scanned.pdf / READ: extract / Question: what text is shown on the first page...`.
+The router was checked separately, by hand, on 2026-10-31 (recorded in [data/live-checks-2026-10-31.md](data/live-checks-2026-10-31.md), Check H). In a scratch git repo with the main checkout's `.claude/` copied in (at 8b2bc0d) and `src/fixtures/files/scanned.pdf`, `ORCH_READ_ROUTER=on claude -p ... --model sonnet --allowedTools=Agent` had the main session launch the project researcher with the brief `SLICE: r1 / SOURCES: scanned.pdf / READ: extract / Question: what text is shown on the first page...`.
 
 - `reads-route.jsonl` recorded `decision: route`, `model: haiku` from the agent file, `raised: true`, `to: sonnet`, reasons `read_extract`, `pdf_sonnet`, `pdf_scanned`, `pdf_hard_pages`, 1 file, 0 conversions, `hard_pages: 0`.
 - Telemetry's SubagentStop for the researcher recorded models `["claude-sonnet-5-5"]`, 2 turns, tokens input 4, output 305, cache read 6,288, cache write 9,658.

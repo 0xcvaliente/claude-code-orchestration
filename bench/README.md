@@ -36,7 +36,7 @@ Defined in `ARMS` in `bench/arms.mjs`. Every arm except `SDK` goes through the p
 | `N-UC` | Native ultracode: Claude Code as shipped, model Opus, no `.claude/` copied. Built-in and fork subagents allowed, `Workflow` allowed |
 | `W-mix` | The shipped [gated workflow](../docs/glossary.md#g): `.claude/` copied in, `scripts/orchestrate.sh` with `ORCH_AGENT=none` and the prompt `/orchestrate {"task":<task prompt>,"code":true,"baseRefHead":true}`. `Workflow` allowed |
 | `O-mix-plugin` | Orchestrator from this checkout's plugin build `dist/plugin`, loaded with `--plugin-dir` by `bench/lib/plugin-launch.sh`. `ORCH_AGENT_PREFIX=orchestration:`, no `.claude/` copied, shipped models |
-| `O-mix-030` | The same with an older plugin build: `dist/plugin` at commit `4b5c780` (`BASELINE_030_REF`), extracted once with `git archive` into `<tmpdir>/orch-bench-plugin/4b5c780/` |
+| `O-mix-030` | The same with an older plugin build: `dist/plugin` at commit `d207cb8` (`BASELINE_030_REF`), extracted once with `git archive` into `<tmpdir>/orch-bench-plugin/d207cb8/` |
 | `all-haiku` | `O-mix` with the researcher's `model:` line rewritten to haiku and `ORCH_ALLOW_HAIKU=1`; the other agents keep their shipped models. For the `d2-docs` reading comparison (H14) |
 | `all-sonnet` | `O-mix` with `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` and `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`: every [worker](../docs/glossary.md#w) runs on sonnet, not the researcher alone |
 | `routed` | `O-mix` with `ORCH_READ_ROUTER=on` and shipped models, so the researcher runs on sonnet |

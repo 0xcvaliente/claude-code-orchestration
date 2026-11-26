@@ -1,7 +1,7 @@
 # Probes 2.1.0: Claude Code 2.1.327 to 2.1.331
 
 Date: 2026-11-24. Claude Code 2.1.331 installed (2.1.328 to 2.1.331 in `~/.local/share/claude/versions/`), repo at
-`7b213e7` (2.0.3) plus the uncommitted slice s0. Release 2.1.0 is checked against Claude Code 2.1.331 and Agent SDK
+`13ab1e7` (2.0.3) plus the uncommitted slice s0. Release 2.1.0 is checked against Claude Code 2.1.331 and Agent SDK
 0.3.331. No model was called: no `claude -p` with a prompt, no headless run, no eval or bench.
 
 ## Sources

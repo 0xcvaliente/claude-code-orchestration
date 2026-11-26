@@ -340,7 +340,7 @@ const CORPUS_SUBJECTS = [
   "Merge branch 'worktree-agent-a27b49c6a0f81aee0' into release-2.0.0",
   "Merge branch 'worktree-agent-a73f2c5234998ca87' into release-2.0.0",
   "Merge branch 'worktree-agent-a9a22a7d620865da7' into release-2.0.0",
-  "Join the release-1.6.1 branch history: its tree equals the published 1.6.1 (f6b1229)",
+  "Join the release-1.6.1 branch history: its tree equals the published 1.6.1 (d42545b)",
   "w6 retry 2: follow every tag chain (at most 16 tag objects) and scan each tag object; blob and tree targets the push carries count",
   "w6 retry: scan every byte of each raw commit and tag object but its fixed-form id lines",
   "w4: claude-update checks payload fields, the memory switch and the loaded plugin's workflow (items 4, 5)",

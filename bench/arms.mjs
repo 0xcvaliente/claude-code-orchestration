@@ -12,7 +12,7 @@
 //   SDK    the SDK pipeline (npx tsx src/cli.ts --mode orchestrate), no .claude/ copied, no mid-run snapshots (launcher "sdk", bench/lib/sdk.mjs)
 //   O-mix-plugin  orchestrator from this checkout's plugin build dist/plugin, loaded with --plugin-dir (launcher "plugin",
 //          bench/lib/plugin-launch.sh), ORCH_AGENT_PREFIX=orchestration:, no .claude/ copied, shipped models
-//   O-mix-030     the same from the 0.3.0 plugin: dist/plugin at ref BASELINE_030_REF (4b5c780), extracted with git archive
+//   O-mix-030     the same from the 0.3.0 plugin: dist/plugin at ref BASELINE_030_REF (d207cb8), extracted with git archive
 //   all-haiku     O-mix with the researcher's model: line rewritten to haiku and ORCH_ALLOW_HAIKU=1 (without it the plan check
 //          raises a haiku launch to sonnet); the d2-docs researcher comparison (H14). Haiku was the shipped researcher model in
 //          0.4.0, when the published runs were made; the researcher ships on sonnet since 1.3.0.
@@ -43,7 +43,7 @@ import { sdkCommand } from "./lib/sdk.mjs";
 export const NUC_PREFIX = "ultracode Use a workflow (the Workflow tool) to orchestrate this task.\n\n";
 
 // The 0.3.0 release commit: its committed dist/plugin is the O-mix-030 baseline.
-export const BASELINE_030_REF = "4b5c780";
+export const BASELINE_030_REF = "d207cb8";
 const PLUGIN_ENV = { ORCH_AGENT: "orchestrator", ORCH_AGENT_PREFIX: "orchestration:" };
 // d3-reader arms: a plain sonnet main session (no orchestrator) that keeps subagent transcripts (per-agent telemetry tokens).
 export const READER_ENV = Object.freeze({ ORCH_AGENT: "none", ORCH_MODEL: "sonnet", ORCH_SESSION_PERSISTENCE: "1", ORCH_OUTPUT_STYLE: "default" });
@@ -63,7 +63,7 @@ export const ARMS = {
   "W-mix": { label: "Gated workflow (/orchestrate), shipped models", script: "orchestrate.sh", env: { ORCH_AGENT: "none", ...DEFAULT_STYLE }, copyClaude: true, extraAllowed: ["Workflow"], recordWorkflow: true, prompt: (p) => `/orchestrate ${JSON.stringify({ task: p, code: true, baseRefHead: true })}` },
   SDK: { label: "SDK pipeline (orchestrate mode)", launcher: "sdk", env: {}, copyClaude: false, snapshots: false },
   "O-mix-plugin": { label: "Orchestrator, current plugin build (--plugin-dir dist/plugin)", launcher: "plugin", pluginRef: null, env: PLUGIN_ENV, copyClaude: false },
-  "O-mix-030": { label: "Orchestrator, 0.3.0 plugin (dist/plugin at 4b5c780, --plugin-dir)", launcher: "plugin", pluginRef: BASELINE_030_REF, env: PLUGIN_ENV, copyClaude: false },
+  "O-mix-030": { label: "Orchestrator, 0.3.0 plugin (dist/plugin at d207cb8, --plugin-dir)", launcher: "plugin", pluginRef: BASELINE_030_REF, env: PLUGIN_ENV, copyClaude: false },
   "all-haiku": { label: "Orchestrator, researcher rewritten to haiku (ORCH_ALLOW_HAIKU=1), other agents unchanged", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", ...ALLOW_HAIKU }, copyClaude: true, agentModels: HAIKU_RESEARCHER },
   "all-sonnet": { label: "Orchestrator, every subagent forced to sonnet (CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", CLAUDE_CODE_SUBAGENT_MODEL_FORCE: "1", CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" }, copyClaude: true },
   routed: { label: "Orchestrator, read router on (ORCH_READ_ROUTER=on), shipped models (researcher on sonnet)", script: "orchestrate.sh", env: { ORCH_AGENT: "orchestrator", ORCH_READ_ROUTER: "on" }, copyClaude: true },

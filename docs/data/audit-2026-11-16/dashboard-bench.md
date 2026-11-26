@@ -1,4 +1,4 @@
-# Audit 2026-11-16 (HEAD bc1dce8): dashboard, status lines, benchmark and evals
+# Audit 2026-11-16 (HEAD a853b8c): dashboard, status lines, benchmark and evals
 
 Slice `audit-dash-bench`. A read-only audit. Every reproduction ran under the session scratch folder
 `<scratch>/audit/audit-dash-bench/`,

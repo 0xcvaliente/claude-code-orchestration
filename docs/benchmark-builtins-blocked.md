@@ -1,6 +1,6 @@
 # Benchmark: orchestrator vs plain sessions, built-in subagents blocked
 
-Date: 2026-10-15. Campaign `k2-cap10-nobuiltins`, repository commit `6f5bbcc`, Claude Code 2.1.299, plugin 0.1.6.
+Date: 2026-10-15. Campaign `k2-cap10-nobuiltins`, repository commit `6b2428a`, Claude Code 2.1.299, plugin 0.1.6.
 
 One hard, splittable task (twelve modules, 1,762 hidden tests) under a 10-minute wall-clock cap, four setups, two runs each. **Claude Code's six built-in subagents (`general-purpose`, `claude`, `Explore`, `Plan`, `claude-code-guide`, `statusline-setup`) were blocked in every arm**, so a plain session could not delegate and the orchestrator could only use this repository's own agents.
 
@@ -92,7 +92,7 @@ The gates did not prevent this: the O-mix reviewers passed `tomlparse` with `imp
 
 ## The same task with built-in subagents allowed
 
-The earlier `cap10` cell in [benchmarks.md](benchmarks.md) used the same task and cap, with the built-ins allowed (campaign `sweeps`, commit `2863d1c`, plugin 0.1.5, 2 runs per arm).
+The earlier `cap10` cell in [benchmarks.md](benchmarks.md) used the same task and cap, with the built-ins allowed (campaign `sweeps`, commit `2aa817c`, plugin 0.1.5, 2 runs per arm).
 
 | Condition | Setup | Strict score (median) | Tokens | Wall time | Subagents |
 |---|---|---|---|---|---|

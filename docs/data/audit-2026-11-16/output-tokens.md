@@ -1,4 +1,4 @@
-# Audit: output tokens and visible text (2026-11-16, HEAD bc1dce8)
+# Audit: output tokens and visible text (2026-11-16, HEAD a853b8c)
 
 Slice `audit-output`. Goal (owner): after a prompt, "just simple bullet points or keywords rather than long text that uses much token".
 

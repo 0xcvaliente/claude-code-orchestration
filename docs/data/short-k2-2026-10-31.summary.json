@@ -29,7 +29,7 @@
           ]
         },
         "seed": 11,
-        "repo_sha": "9d2bb895988bc7741d64fb7ffadb42a0cffda122",
+        "repo_sha": "0976275fd465efc42b4b943b7a72041e433f0e7d",
         "claude_version": "2.1.314 (Claude Code)",
         "plugin_version": "0.3.0",
         "node_version": "v26.13.0",
