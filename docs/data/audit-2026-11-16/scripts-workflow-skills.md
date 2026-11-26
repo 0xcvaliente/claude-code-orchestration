@@ -1,4 +1,4 @@
-# Audit 2026-11-16: scripts, gated workflow, skill hooks, build and CI (HEAD 16e0627)
+# Audit 2026-11-16: scripts, gated workflow, skill hooks, build and CI (HEAD bc1dce8)
 
 Slice `audit-scripts-skills`. Read-only audit: nothing in the repository was changed except this file. Every run used a
 scratch folder, `$S` below:

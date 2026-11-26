@@ -1,6 +1,6 @@
 # Probes 2.0.1: the gate soak
 
-Date: 2026-11-18. Claude Code 2.1.327 installed, repo at `4ecf82f` (2.0.0) plus the uncommitted slices s1, s2 and s6.
+Date: 2026-11-18. Claude Code 2.1.327 installed, repo at `8cb5b1e` (2.0.0) plus the uncommitted slices s1, s2 and s6.
 Asked for: "a test to see if there are more bugs appearing ... not longer than 1 hour".
 
 ## What the soak is

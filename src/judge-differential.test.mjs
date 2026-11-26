@@ -1,5 +1,5 @@
 // Differential test of the Bash judge against the 1.4.0 release. src/fixtures/judge-core-1.4.0.mjs is a byte-for-byte
-// copy of .claude/hooks/judge-core.mjs at release 1.4.0 (git show 5ab9175:.claude/hooks/judge-core.mjs); never edit it.
+// copy of .claude/hooks/judge-core.mjs at release 1.4.0 (git show 1874522:.claude/hooks/judge-core.mjs); never edit it.
 // Pure classification only: no model, no hook process.
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";

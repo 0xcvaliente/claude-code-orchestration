@@ -209,7 +209,7 @@ Hook input keys: `session_id, transcript_path, cwd, prompt_id, hook_event_name, 
 
 **Answer: yes, once, in one manual run.** Recorded for the compare-040 write-up ([../benchmark-compare-040.md](../benchmark-compare-040.md)), where no benchmark run launched a researcher.
 
-Setup: a scratch git repo with this repo's `.claude/` copied in (at 56ec956) and `src/fixtures/files/scanned.pdf` copied as `scanned.pdf`. Command, from the scratch repo:
+Setup: a scratch git repo with this repo's `.claude/` copied in (at 053044f) and `src/fixtures/files/scanned.pdf` copied as `scanned.pdf`. Command, from the scratch repo:
 
     ORCH_READ_ROUTER=on claude -p "..." --model sonnet --allowedTools=Agent
 

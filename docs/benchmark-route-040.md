@@ -10,7 +10,7 @@ Two runs per arm of one reading task, `d3-reader`, built so that the read router
   - `reader-haiku`: the researcher as shipped (haiku).
   - `reader-sonnet`: every subagent forced to sonnet (`CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`, `CLAUDE_CODE_SUBAGENT_MODEL=sonnet`). The only subagents are researchers.
   - `reader-routed`: the read router on (`ORCH_READ_ROUTER=on`).
-- Versions: Claude Code 2.1.316, plugin 0.4.0, repo at 17fe23b.
+- Versions: Claude Code 2.1.316, plugin 0.4.0, repo at 13bbc9f.
 - Duration. The matrix estimated 20 minutes in the worst case. The runs took about 2 minutes. From `manifest.json` and `runs.jsonl` (UTC; local time is UTC+1):
   - The campaign started at 21:04:18.
   - Block 1 (r1) ran from 21:04:19 to 21:05:31 (last end 21:05:30.958).
@@ -92,7 +92,7 @@ Counts are right answers over 2 runs, from the final grade's `by_cat` in `grades
 - Model and notes are confounded in `reader-routed` (above). An arm with the notes but no model raise would separate them, and no such arm exists yet.
 - The task was built so that the router runs: one researcher per question, each brief with `SOURCES:` and `READ: extract`. It says nothing about how often the orchestrator launches researchers on real tasks. compare-040 showed that the orchestrator can take the light path and launch none ([benchmark-compare-040.md](benchmark-compare-040.md)).
 - The main session runs on sonnet in every arm. Its tokens are in the total-token columns, not in the researcher tokens.
-- The runs used the build at 17fe23b, before the 0.4.0 run-split fix (a plain session has no planned run, so that fix does not touch these runs).
+- The runs used the build at 13bbc9f, before the 0.4.0 run-split fix (a plain session has no planned run, so that fix does not touch these runs).
 
 ## How to reproduce
 

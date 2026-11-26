@@ -1,4 +1,4 @@
-# Audit: test gate and read-only guards (2026-11-16, HEAD 16e0627)
+# Audit: test gate and read-only guards (2026-11-16, HEAD bc1dce8)
 
 ## Summary
 

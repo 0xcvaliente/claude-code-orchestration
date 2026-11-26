@@ -1,6 +1,6 @@
 # Probes 2.1.0: the test suite on macOS (slice s0)
 
-Machine: 10-core Mac (Darwin 27.2, `availableParallelism()` 10), Node v24.22.2, tsx 4.23.15. Not idle: other projects' Playwright browsers and a Next.js server ran throughout, load average 20 to 33. Tree: `b5f51a8` plus this slice's changes.
+Machine: 10-core Mac (Darwin 27.2, `availableParallelism()` 10), Node v24.22.2, tsx 4.23.15. Not idle: other projects' Playwright browsers and a Next.js server ran throughout, load average 20 to 33. Tree: `7b213e7` plus this slice's changes.
 
 ## Failures: cause and fix
 
