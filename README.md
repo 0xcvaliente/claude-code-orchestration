@@ -20,7 +20,7 @@ Terms are defined once, in the [glossary](docs/glossary.md). Every page is liste
 2. Start a new chat. At session start the plugin's nudge points Claude to the `orchestration:route` skill before any non-trivial task.
 3. A plugin installed or updated from your shell loads in the next session. In a session that is already open, run `/reload-plugins`.
 
-Added this way, the marketplace follows `main`. To stay on one release, add it at its tag, for example `0xcvaliente/claude-code-orchestration#v2.2.0` ([Stable or latest](docs/marketplace.md#stable-or-latest)).
+Added this way, the marketplace follows `main`. To stay on one release, add it at its tag, for example `0xcvaliente/claude-code-orchestration#v2.2.1` ([Stable or latest](docs/marketplace.md#stable-or-latest)).
 
 A plugin cannot set the two settings below ([what the plugin ships](docs/marketplace.md#what-the-plugin-ships-and-why)). Add them to `.claude/settings.json` in your project or to `~/.claude/settings.json`:
 

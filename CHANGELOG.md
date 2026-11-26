@@ -2,6 +2,21 @@
 
 All notable changes to this project are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-11-26
+
+2.2.1 is a patch release of documentation and references: cleaner READMEs and commit hashes that name the commits as they are now. No gate, hook behaviour, setting or workflow changes. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update` (`-- --fix` updates an installed copy whose version differs). Nothing else asks anything new of a person.
+
+### Changed
+
+- **Cleaner READMEs** (`README.md`, `bench/README.md`, `docs/README.md`, `plugin-assets/README.md`, shipped as `dist/plugin/README.md`). `README.md` is shorter: it keeps full notes for versions 2.2 and 2.1 only, with one paragraph on earlier versions and a link to this changelog. `bench/README.md` is shorter too. `docs/README.md` was regrouped, with new sections for safety and limits, benchmarks and maintainers, and one line per page saying what it is for. `plugin-assets/README.md` names the three routes, the two settings a plugin cannot set and a link to this changelog. `docs/native-vs-plugin.md` now links the benchmark results in `bench/RESULTS.md`. The example tag in `README.md` is `#v2.2.1`.
+- **Commit hashes updated** to the commits they name now: those cited in `CHANGELOG.md` (released entries included), the docs (`docs/`, `docs/data/`), the bench (`bench/HYPOTHESES.md`, `bench/README.md`, the 0.3.0 baseline ref in `bench/arms.mjs` and `bench/lib/plugin-launch.sh`) and the tests (`src/guards.test.mjs`, `src/judge-differential.test.mjs`, `src/orchestrate-sh.test.mjs`, `bench/analyze.test.mjs`, `bench/eval-graders.test.mjs`). Only the hashes changed, not what the tests check.
+- **2.2.0 labels** (`.claude/hooks/journal.mjs`, shipped as `dist/plugin/hooks/journal.mjs`). A comment on the reviewer's `kind` and `model` fields now names 2.2.0 instead of 2.1.x; the hook's code is unchanged. The headers of `src/journal-review-kind.test.mjs` and `src/report-phase.test.mjs` say 2.2.0 too, and the caps test in `src/contracts.test.ts` also checks that any cap the nudge states matches `.claude/hooks/limits.mjs`.
+- Version 2.2.1 in `package.json`, `package-lock.json` and both plugin manifests.
+
+### Limits
+
+[docs/limits.md](docs/limits.md) gains no entry in 2.2.1; what earlier releases do not do, in sections A to L, holds for 2.2.1.
+
 ## [2.2.0] - 2026-11-26
 
 2.2.0 shows where a run's tokens go and trims what every session loads. `npm run report` gains a cost table by phase (with the main sessions' own tokens), a table per slice whose latest review passed and a table of review outcomes by kind and model, fed by fields the journal now writes: `kind` and `model` on reviewer stop records and `run` on implementer and reviewer launch records. The orchestrator answers a small read-only question itself. The nudge's session-start text is cut to a third, which fixes a text that, since 2.1.2, was over Claude Code's cap on hook context, and `CLAUDE.md` is cut to about a third, its release history moved to `docs/maintainer-notes.md`. It also removes the main status line, a personal script the plugin never shipped. No gate decision, setting or workflow changes: journal records gain fields, telemetry keeps two path fields whole instead of cutting them, and the nudge's text is shorter; records written before 2.2.0 fold as before. Upgrading: pull, `npm run build-plugin` if you load the plugin from this checkout, then `npm run claude-update` (`-- --fix` updates an installed copy whose version differs), and start a new session or run `/reload-plugins` so the shorter nudge loads. Nothing else asks anything new of a person.
@@ -762,6 +777,7 @@ Installed plugin copies pick up the new version after a `/plugin` update or a re
 - 0.2.0 (4274464): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
 - 0.1.1–0.1.13 (df586ba to 10dfae7): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
+[2.2.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.2.1
 [2.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.2.0
 [2.1.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.2
 [2.1.1]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.1
