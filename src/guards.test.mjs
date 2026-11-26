@@ -172,7 +172,7 @@ test("researcher guard: everything else is denied with a reason", () => {
   }
 });
 
-// The decision the guard gave each command at commit 525e464, before its denial messages gained hints. Literal values,
+// The decision the guard gave each command at commit e6724da, before its denial messages gained hints. Literal values,
 // so a change to the messages (or to the lists above) cannot move what is allowed or denied without failing here.
 // Every command the tests in this file use, plus forms researchers were refused in real use.
 const DECISIONS = /** @type {[string, "allow" | "deny"][]} */ ([
@@ -1218,7 +1218,7 @@ test("compact-context: no state at all → silent; the context is capped", () =>
   assert.ok(ctx.endsWith("Every slice still needs a passing review before the final report."));
 });
 
-// The runContext of commit b13b2ca (before b4), kept to compare against: it cut the whole text from the end.
+// The runContext of commit 6ade45d (before b4), kept to compare against: it cut the whole text from the end.
 const REMINDER = "Every slice still needs a passing review before the final report.";
 /** @param {any} run */
 function oldRunContext(run) {

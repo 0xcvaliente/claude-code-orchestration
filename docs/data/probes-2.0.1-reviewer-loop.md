@@ -1,6 +1,6 @@
 # Probes 2.0.1: the reviewer that goes on after its report
 
-Date: 2026-11-18. Claude Code 2.1.326, repo at `4ecf82f` (2.0.0). Symptom reported by the person: "the reviewer is
+Date: 2026-11-18. Claude Code 2.1.326, repo at `8cb5b1e` (2.0.0). Symptom reported by the person: "the reviewer is
 looping when it already delivered the results to the orchestrator ... bugs or loops that is not responding".
 
 Sources read (data, counts and timestamps only; no report or brief text is copied here beyond short quoted lines):
@@ -102,7 +102,7 @@ implementer of this probe (session 7850a6d4, still running). No delivered review
 `background_tasks` (0 cases). `gates.jsonl` has 282 `review`/`agents_running` allows in 11 streaks; the longest is 165
 in a row from 2026-11-17 19:40 to 2026-11-18 08:49 (790 min), with gaps of at most 29 min between records. Each is the
 orchestrator ending a turn while workers run (`source: background_tasks`, agents such as `["reviewer"]` 37 times,
-`["implementer"]` 22 times). This is the normal wait, not a stuck reviewer; `review-gate.mjs:109-114` (at `4ecf82f`; the `background_tasks`
+`["implementer"]` 22 times). This is the normal wait, not a stuck reviewer; `review-gate.mjs:109-114` (at `8cb5b1e`; the `background_tasks`
 branch of `running()`) allows it with no age cutoff, which did not matter here.
 
 ### Q5. Did the orchestrator act on the first stop before the second arrived?

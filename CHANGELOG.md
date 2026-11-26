@@ -199,7 +199,7 @@ Soak findings ([soak page](docs/data/probes-2.0.1-soak.md); each test in `src/so
 - S9: a NUL byte in `gates.jsonl` (a torn write) made grep treat the log as binary and count 0, resetting the cap of a stop with no agent id. Both grep counts now use `-a`. "S9 test gate".
 
 CI ([ci page](docs/data/probes-2.0.1-ci.md)):
-- `src/test-gate-records.test.mjs`, "the hand-back's block names what failed ...", failed on CI at `4ecf82f` and on pull request #31 with `store` `recent_change`: the test made `.claude/state` after its 700 ms wait, so the watched `.claude` folder was the newest listed entry, and a hook that reached its L0 listing within 300 ms refused the store. The test now makes the folder before the wait and asserts that no listed entry changed within the guard; its assertions are unchanged and no hook changed.
+- `src/test-gate-records.test.mjs`, "the hand-back's block names what failed ...", failed on CI at `8cb5b1e` and on pull request #31 with `store` `recent_change`: the test made `.claude/state` after its 700 ms wait, so the watched `.claude` folder was the newest listed entry, and a hook that reached its L0 listing within 300 ms refused the store. The test now makes the folder before the wait and asserts that no listed entry changed within the guard; its assertions are unchanged and no hook changed.
 
 ### Limits
 
@@ -707,13 +707,13 @@ Tests and comments:
 
 ### Fixed
 
-- A slice is final only when its escalation rule is met: its latest review passed and it has no doubt signal, or a passing opus review came after its latest attempt. A run no longer closes on a sonnet pass that still needs an opus review, so that review and any further launch of the slice join the same run (ea62c55; [README, The gates](README.md#the-gates), [docs/brief-grammar.md, Run model](docs/brief-grammar.md#run-model)).
+- A slice is final only when its escalation rule is met: its latest review passed and it has no doubt signal, or a passing opus review came after its latest attempt. A run no longer closes on a sonnet pass that still needs an opus review, so that review and any further launch of the slice join the same run (7fb2139; [README, The gates](README.md#the-gates), [docs/brief-grammar.md, Run model](docs/brief-grammar.md#run-model)).
 
 ### Added
 
-- `ORCH_SESSION_PERSISTENCE=1` keeps session and subagent transcripts in headless runs (`npm run native`, `npm run auto`, the bench), so telemetry records per-agent tokens, turns and models. Unset, headless runs behave as before (ec46ad9; [README, Telemetry and the read log](README.md#telemetry-and-the-read-log)).
-- The `d3-reader` bench task (twelve questions over seven documents), the `reader-haiku`, `reader-sonnet` and `reader-routed` arms, and the route-040 benchmark of the read router (17fe23b, 69535bb). Results at n = 2 runs per arm, one task, direction only: the routed arm scored higher than the other two with fewer researcher tokens than `reader-sonnet`, but the model raise and the converted-text notes are confounded, and H14 is not called supported ([docs/benchmark-route-040.md](docs/benchmark-route-040.md)).
-- A live probe of the `agent.spawn` mod hook for workflow agents: it runs under `claude -p`, fires for workflow agents and can rewrite their model and prompt. Routing workflow agents this way is feasible but not implemented (724d66f, 9ff6199; [docs/data/live-checks-workflow.md](docs/data/live-checks-workflow.md)).
+- `ORCH_SESSION_PERSISTENCE=1` keeps session and subagent transcripts in headless runs (`npm run native`, `npm run auto`, the bench), so telemetry records per-agent tokens, turns and models. Unset, headless runs behave as before (89bd243; [README, Telemetry and the read log](README.md#telemetry-and-the-read-log)).
+- The `d3-reader` bench task (twelve questions over seven documents), the `reader-haiku`, `reader-sonnet` and `reader-routed` arms, and the route-040 benchmark of the read router (13bbc9f, 158095d). Results at n = 2 runs per arm, one task, direction only: the routed arm scored higher than the other two with fewer researcher tokens than `reader-sonnet`, but the model raise and the converted-text notes are confounded, and H14 is not called supported ([docs/benchmark-route-040.md](docs/benchmark-route-040.md)).
+- A live probe of the `agent.spawn` mod hook for workflow agents: it runs under `claude -p`, fires for workflow agents and can rewrite their model and prompt. Routing workflow agents this way is feasible but not implemented (4e0c5e3, 5e06865; [docs/data/live-checks-workflow.md](docs/data/live-checks-workflow.md)).
 
 ### What 0.4.0 brought
 
@@ -753,14 +753,14 @@ Known limitations are listed in [README, Known limitations](README.md#known-limi
 
 ### Upgrading
 
-Installed plugin copies pick up the new version after a `/plugin` update or a reinstall, then `/reload-plugins`. No `userConfig` key or default changed after the 0.4.0 release commit (fc7360e), so there is nothing to migrate in settings. `ORCH_SESSION_PERSISTENCE` is a new environment variable for headless runs, not a `userConfig` key, and leaving it unset keeps the earlier behaviour. The one behaviour change is the finality rule above: a run waiting for a slice's opus review now stays open until that review runs or the run goes stale.
+Installed plugin copies pick up the new version after a `/plugin` update or a reinstall, then `/reload-plugins`. No `userConfig` key or default changed after the 0.4.0 release commit (89a8ed8), so there is nothing to migrate in settings. `ORCH_SESSION_PERSISTENCE` is a new environment variable for headless runs, not a `userConfig` key, and leaving it unset keeps the earlier behaviour. The one behaviour change is the finality rule above: a run waiting for a slice's opus review now stays open until that review runs or the run goes stale.
 
 ## Earlier versions (not tagged)
 
-- 0.4.0 (56ec956 set the version; fc7360e completed the release with the README): see What 0.4.0 brought above.
-- 0.3.0 (b193fdf): the gated workflow shipped in the plugin, the deny-only native Bash judge hook (opt-in), the plugin eval suite, native-workflow bench arms, and a plan-check fix for legacy records.
-- 0.2.0 (e08d4ca): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
-- 0.1.1–0.1.13 (8c561fc to b287d2d): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
+- 0.4.0 (053044f set the version; 89a8ed8 completed the release with the README): see What 0.4.0 brought above.
+- 0.3.0 (9d2bb89): the gated workflow shipped in the plugin, the deny-only native Bash judge hook (opt-in), the plugin eval suite, native-workflow bench arms, and a plan-check fix for legacy records.
+- 0.2.0 (4c7eb1f): the review gate waits for running agents, run-scoped plan checks with plan conformance, the constraints ledger and opus escalation, and one parser for briefs.
+- 0.1.1–0.1.13 (8c561fc to 87e6ac8): plugin packaging with the session nudge, a handback-aware review gate, runner detection, the per-implementer review loop guard, no double hook runs, plugin state outside user repos, and the dashboard pane.
 
 [2.2.0]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.2.0
 [2.1.2]: https://github.com/0xcvaliente/claude-code-orchestration/releases/tag/v2.1.2

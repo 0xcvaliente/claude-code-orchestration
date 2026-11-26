@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launcher for the plugin arms (O-mix-plugin, O-mix-030 in bench/arms.mjs): the orchestrator from a plugin folder loaded with
-# --plugin-dir, so a run can use a plugin build other than the installed one (the 0.3.0 baseline is dist/plugin at ef62288).
+# --plugin-dir, so a run can use a plugin build other than the installed one (the 0.3.0 baseline is dist/plugin at 4b5c780).
 # Usage: plugin-launch.sh <root> "prompt" <repo> <plugin dir>
 # Asks scripts/orchestrate.sh for its claude arguments (ORCH_DRY_RUN=1, same ORCH_* environment; the arm sets
 # ORCH_AGENT_PREFIX=orchestration: so the agent is orchestration:orchestrator without a plugin check), puts

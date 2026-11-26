@@ -1,4 +1,4 @@
-# Audit 2026-11-16: Bash judge and SDK pipeline (HEAD 16e0627)
+# Audit 2026-11-16: Bash judge and SDK pipeline (HEAD bc1dce8)
 
 Slice `audit-judge-sdk`. Read-only audit: nothing in the repository was changed except this file. How the
 reproductions were run (scratch folder `$S`, tools, shells) is under "Method", after the coverage list.

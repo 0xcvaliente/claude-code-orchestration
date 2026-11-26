@@ -5,7 +5,7 @@ One run per arm. This run shows direction only and decides no hypothesis that ne
 ## Setup
 
 - Task: `k2-stdlib-toolkit-xl` (twelve Python standard-library modules, 1,762 hidden tests), 10-minute cap (cell `cap10`), matrix `bench/matrix/short-k2.json`, seed 11, one rep per arm, all three arms started together.
-- Versions: Claude Code 2.1.314, plugin 0.3.0, repo at b193fdf. Started 2026-10-31 05:43 UTC.
+- Versions: Claude Code 2.1.314, plugin 0.3.0, repo at 9d2bb89. Started 2026-10-31 05:43 UTC.
 - Arms:
   - `O-mix`: this plugin's orchestrator with the shipped models (opus orchestrator, sonnet workers).
   - `N-UC`: native workflow orchestration with the plugin disabled, opted in by a direct request in the prompt (opus only).
