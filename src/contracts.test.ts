@@ -503,13 +503,14 @@ test("the orchestrator, the route skill and the nudge state the caps of limits.m
   assert.match(step2, new RegExp(`\\(at most ${PLAN_SLICE_CAP} slices\\)`), `${ORCH} step 2 caps slices`);
   assert.match(orch, new RegExp(`Wave: at most ${WAVE_CAP_DEFAULT} implementers run at a time`), `${ORCH} step 3 states the wave cap`);
   assert.match(orch, new RegExp(`launch ${WAVE_CAP_DEFAULT} and start the next ready slice`), `${ORCH} launches a full wave, then the next ready slice`);
-  // 2.2.0: the nudge points to the route skill for the caps.
-  const texts: [string, string][] = [[ORCH, orch], [SKILL, read(SKILL)]];
+  // 2.2.0: the nudge points to the route skill for the caps, so it need not state them; any it states must match.
+  const texts: [string, string][] = [[ORCH, orch], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
   for (const [file, text] of texts) {
     // Every cap a text states matches limits.mjs; no other number stands where a cap does.
     for (const m of text.matchAll(/at most (\d+) (?:narrow |researcher )?questions/g)) assert.equal(Number(m[1]), RESEARCH_QUESTION_CAP, `${file} states ${m[0]}`);
     for (const m of text.matchAll(/at most (\d+) slices/g)) assert.equal(Number(m[1]), PLAN_SLICE_CAP, `${file} states ${m[0]}`);
     for (const m of text.matchAll(/at most (\d+) implementers run at a time/g)) assert.equal(Number(m[1]), WAVE_CAP_DEFAULT, `${file} states ${m[0]}`);
+    if (file === NUDGE) continue;
     assert.match(text, new RegExp(`at most ${RESEARCH_QUESTION_CAP} (?:narrow |researcher )?questions`, "i"), `${file} caps researcher questions`);
     assert.match(text, new RegExp(`at most ${PLAN_SLICE_CAP} slices`), `${file} caps slices`);
     assert.match(text, new RegExp(`at most ${WAVE_CAP_DEFAULT} implementers run at a time`), `${file} caps implementers at once`);

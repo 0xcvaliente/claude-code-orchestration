@@ -1,4 +1,4 @@
-// 2.1.x: a reviewer's stop record in journal.jsonl carries `kind` (plan, validate or review) and `model` (from its
+// 2.2.0: a reviewer's stop record in journal.jsonl carries `kind` (plan, validate or review) and `model` (from its
 // launch record), added fields only: no gate reads them and records with and without them fold alike. The report counts
 // review outcomes by kind and model, and splits build from retries per session, run and slice. Spec: docs/logs.md.
 import "./test-tmp.mjs";
