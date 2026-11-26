@@ -5,13 +5,16 @@
 //     implementer, reviewer, researcher or integrator: agent_id (from the tool response, else null), bare agent_type,
 //     slice (a brief starting with PLAN REVIEW is slice "plan"), the parsed header, the reviewer model, isPlanReview,
 //     replan and, for PLAN REVIEW briefs, the parsed plan; for this plugin's implementer also reviews_needed (2 for a
-//     RISKY brief, else 1; left out with the maintainer switch ORCH_SECOND_REVIEW=off, read from this hook's environment).
+//     RISKY brief, else 1; left out with the maintainer switch ORCH_SECOND_REVIEW=off, read from this hook's environment);
+//     for an implementer or reviewer also run (2.2.0, launchRunOf below: the run at launch, left out when none or on
+//     any error; no gate reads it, and a slice carried into a later run is re-homed by the fold afterwards).
 //   SubagentStop of an implementer or reviewer -> journal.jsonl: a stop record (brief.mjs stopRecord): slice, status
 //     (parseStatus: any STATUS: fail line fails, else the first STATUS line decides, blockquotes ignored), answers,
 //     open and run (the run foldRuns gives the slice at write time), and draft ({ name, branch } of a skill slice's
 //     DRAFT: <name> <branch> line; left out when the reply has none), skills_used and skills_skipped (the skill names
 //     of the SKILLS-USED and SKILLS-SKIPPED lines, at most 8 each; each left out when empty, so a reply without them
-//     gives the record it gave before); for implementers also files_touched and
+//     gives the record it gave before); for reviewers also kind ("plan", "validate" or "review") and model (brief.mjs
+//     reviewFields, from the launch record; each left out when unknown); for implementers also files_touched and
 //     files_source (filesTouched below: "tools" in the shared tree, "tools+git" in an isolated worktree, "git" there
 //     without a transcript), left out when unknown or on
 //     any error.
@@ -30,8 +33,8 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { launchRecord, parseStatus, sliceOfBrief, stopRecord } from "./brief.mjs";
-import { readJsonl, sessionRuns } from "./run.mjs";
+import { foldRuns, launchRecord, parseStatus, reviewFields, sliceOfBrief, staleMinutes, stopRecord } from "./brief.mjs";
+import { loadRecords, readJsonl, sessionRuns } from "./run.mjs";
 import { duplicate, ensureStateDir, HANDBACK_LOG, HANDBACK_REFUSALS, latestHandbackId, stateDir } from "./state.mjs";
 
 const chunks = [];
@@ -82,16 +85,46 @@ const runOf = (slice) => {
     return null;
   }
 };
+/**
+ * The run at launch (2.2.0): the id foldRuns gives this launch with it included, from the records on disk plus `rec` in
+ * memory (the fold's onLaunch, matched by identity), as sessionRuns would fold them. null when the fold places it in no
+ * run, for a launch with no slice, or on any error. No gate reads it. @param {Record<string, unknown>} rec
+ */
+const launchRunOf = (rec) => {
+  try {
+    if (typeof rec.slice !== "string" || !rec.slice) return null;
+    const launches = readJsonl(stateDir, "journal-launches.jsonl", sessionId);
+    const records = loadRecords(sessionId, stateDir, { "journal-launches.jsonl": [...launches, rec] });
+    /** @type {unknown} */
+    let id = null;
+    foldRuns(records, {
+      now: Date.now(),
+      staleMin: staleMinutes(process.env),
+      sessionId,
+      env: process.env,
+      onLaunch: (l, run) => {
+        if (l === rec) id = run?.id ?? null;
+      },
+    });
+    return typeof id === "number" && Number.isInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+};
 
 if (p.hook_event_name === "PostToolUse") {
   const role = bare(p.tool_input?.subagent_type);
   if (!LAUNCH_ROLES.includes(role)) process.exit(0);
   const agentId = agentIdOf(p.tool_response);
   const rec = launchRecord(p.tool_input, { sessionId, agentId, projectDir: process.env.CLAUDE_PROJECT_DIR || p.cwd || null, pluginRoot: process.env.CLAUDE_PLUGIN_ROOT || null, env: process.env });
+  if (STOP_ROLES.includes(role)) {
+    const run = launchRunOf(rec);
+    if (run !== null) rec.run = run;
+  }
   append("journal-launches.jsonl", rec);
   if (agentId && rec.slice && STOP_ROLES.includes(role)) {
     const waiting = readJsonl(stateDir, "journal-pending.jsonl").filter((e) => e.agent_id === agentId).pop();
-    if (waiting) append("journal.jsonl", { ...waiting, session_id: sessionId, role, slice: rec.slice, run: runOf(rec.slice) });
+    if (waiting) append("journal.jsonl", { ...waiting, session_id: sessionId, role, slice: rec.slice, run: runOf(rec.slice), ...(role === "reviewer" ? reviewFields(rec) : {}) });
   }
   process.exit(0);
 }
@@ -311,6 +344,17 @@ if (handback) {
   const fields = { status: handback.status === "pass" || handback.status === "fail" ? handback.status : null };
   for (const k of ["answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"]) if (k in handback) fields[k] = handback[k];
   rec = /** @type {typeof rec} */ ({ ...rec, ...fields });
+}
+// A reviewer's kind (plan, validate or review) and model (2.1.x, added fields; no gate reads them): from its launch
+// record in this session (the one the fold reads, so the fold's model is the same), else kind from the brief in the
+// transcript; each left out when unknown.
+if (role === "reviewer") {
+  try {
+    const own = launch && (launch.session_id ?? "") === sessionId ? launch : undefined;
+    rec = /** @type {typeof rec} */ ({ ...rec, ...reviewFields(own, own ? undefined : textOf(entries.find((e) => e.type === "user")?.message?.content)) });
+  } catch {
+    // fields left out
+  }
 }
 // The same turn going on after a stop hook (stop_hook_active true: the stop after a forced hand-back, or after a test-gate
 // block) with an earlier stop record of this agent: `continues: true` (G-8, audit 2026-11-16). The fold lets a reviewer's
