@@ -483,7 +483,8 @@ const reviewTimeSection = `\n<h2>Review time</h2><h3>Wall time by role and model
 // selection and pricing (costOf, one model) as the cost table above, so the subagent phases plus "unassigned" cover
 // the same agents and tokens. Each is placed by its latest launch record in journal-launches.jsonl (same session and
 // agent id): plan review (slice `plan` or isPlanReview), explore (researcher), build (an implementer's first launch for
-// a slice in a run of a session, the run from the agent's journal stop records; with no run known, in the session),
+// a slice in a run of a session, the run from the agent's journal stop records, else from its launch record's `run`,
+// 2.2.0; with no run known, in the session),
 // retries (its later launches), review (other reviewers), integrate (integrator); an agent with
 // no launch record is unassigned. The "main sessions" row is the main thread of every session that launched a
 // subagent, orchestrator or not: each distinct `transcript_path` the telemetry
@@ -501,11 +502,22 @@ const isPlanLaunch = (l) => l.slice === "plan" || l.isPlanReview === true;
 const launchOf = new Map();
 /** @type {Map<string, string>} session + agent id -> phase, for implementers by launch order */
 const implPhase = new Map();
-/** @type {Map<string, unknown>} session + agent id -> the run of its journal stop records (launch records carry none) */
+/**
+ * @type {Map<string, unknown>} session + agent id -> its run: the run of its journal stop records, else (2.2.0) the `run`
+ * of its latest launch record (the run at launch); an agent with neither is placed by the older rules below.
+ */
 const runOfAgent = new Map();
 for (const r of skillLogs.journal.rows) {
   if (r && typeof r === "object" && typeof r.agent_id === "string" && r.agent_id && r.run !== undefined && r.run !== null) runOfAgent.set(`${r.session_id ?? ""}\n${r.agent_id}`, r.run);
 }
+/** Agents whose run came from a journal stop record (the journal is then one of the logs this section read). */
+const stopRunAgents = runOfAgent.size;
+/** @type {Map<string, number>} session + agent id -> the run of its latest launch record that carries one */
+const launchRunOf = new Map();
+for (const l of launches) {
+  if (typeof l.run === "number" && Number.isInteger(l.run) && l.run > 0) launchRunOf.set(`${l.session_id ?? ""}\n${l.agent_id}`, l.run);
+}
+for (const [key, run] of launchRunOf) if (!runOfAgent.has(key)) runOfAgent.set(key, run);
 /** @type {Set<string>} session + slice with an implementer launch seen */
 const builtSlices = new Set();
 /** @type {Set<string>} session + run + slice with an implementer launch seen */
@@ -517,7 +529,8 @@ for (const l of launches) {
   launchOf.set(key, l);
   if (bareType(l.agent_type) !== "implementer" || implPhase.has(key)) continue;
   // Build versus retries is decided per session, run and slice, so a later run that reuses a slice id starts with a
-  // build; an implementer with no known run (no journal record with one) is decided per session and slice. A
+  // build; an implementer with no known run (no journal record and no launch record with one) is decided per session
+  // and slice. A
   // known-run launch is a retry too when a no-known-run launch of the same session and slice (one that stopped at its
   // turn limit has no journal record) came before it with no known-run launch between them: only the first known-run
   // launch after it, so a later run that reuses the slice id still starts with a build.
@@ -645,8 +658,8 @@ const phaseSection = (() => {
   if (!subagents && !orchestrator.agents) return `${head}<p>No token data yet: no stop record with tokens in <code>telemetry.jsonl</code> and no readable main-session transcript.</p>${skippedNote}${unreadableNote}`;
   if (launches.length) {
     launchLog.note();
-    // Implementers are placed in build or retries by the run of their journal stop records.
-    if (runOfAgent.size) skillLogs.journal.note();
+    // Implementers are placed in build or retries by the run of their journal stop records, else their launch records'.
+    if (stopRunAgents) skillLogs.journal.note();
   }
   /** @param {string} name @param {Bucket} b */
   const row = (name, b) => [name, b.agents, formatTokens(b.input), formatTokens(b.output), formatTokens(b.cache_read), formatTokens(b.cache_write), formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced];
@@ -659,7 +672,7 @@ const phaseSection = (() => {
   const mains = orchestrator.agents;
   const noLaunches = launches.length ? "" : "<p>No launch records (<code>journal-launches.jsonl</code>), so every subagent is unassigned.</p>";
   const noTokensNote = noTokens ? `<p>${noTokens} agent${noTokens === 1 ? "" : "s"} with no token data on the last stop record left out.</p>` : "";
-  return `${head}${table(["Phase", "Agents", "Input", "Output", "Cache read", "Cache write", "Total tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>${subagents} subagent${subagents === 1 ? "" : "s"} at ${esc(formatUsd(subCost))} and ${mains} main-session transcript${mains === 1 ? "" : "s"}: ${esc(formatTokens(sumTokens(all)))} tokens and ${esc(formatUsd(all.cost))} in all, at list prices as of ${PRICES_AS_OF}: an estimate for comparing phases, not a bill (a subscription is not billed per token). The main sessions row covers the main thread of every session that launched a subagent, orchestrator or not (each transcript the telemetry names), not only orchestrator sessions. "Not priced" counts agents (for the main sessions, models in their transcripts) with several models or no listed price: their tokens count, their cost does not. Build and retries count implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record, so its tokens count with that agent's first launch, under build when that was the first.</p>${noLaunches}${noTokensNote}${skippedNote}${unreadableNote}`;
+  return `${head}${table(["Phase", "Agents", "Input", "Output", "Cache read", "Cache write", "Total tokens", "Est. cost (list prices)", "Not priced"], rows)}<p>${subagents} subagent${subagents === 1 ? "" : "s"} at ${esc(formatUsd(subCost))} and ${mains} main-session transcript${mains === 1 ? "" : "s"}: ${esc(formatTokens(sumTokens(all)))} tokens and ${esc(formatUsd(all.cost))} in all, at list prices as of ${PRICES_AS_OF}: an estimate for comparing phases, not a bill (a subscription is not billed per token). The main sessions row covers the main thread of every session that launched a subagent, orchestrator or not (each transcript the telemetry names), not only orchestrator sessions. "Not priced" counts agents (for the main sessions, models in their transcripts) with several models or no listed price: their tokens count, their cost does not. Build and retries count implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record, so its tokens count with that agent's first launch, under build when that was the first. An implementer's run is the run on its stop records in the journal, else the run its launch record carries (the run at launch, written since 2.2.0); only one with neither, such as any from before 2.2.0 that wrote no stop record, is placed by the older per-session rules.</p>${noLaunches}${noTokensNote}${skippedNote}${unreadableNote}`;
 })();
 
 // Tokens and estimated cost per slice whose latest review passed: a slice (session, run, slice) whose latest reviewer
@@ -668,7 +681,7 @@ const phaseSection = (() => {
 // cutoff can count as a pass), and the report does not repeat the gates' fold: a row marks a failing review recorded
 // after the start of the slice's latest attempt (the later of its latest implementer launch and its latest implementer
 // stop record before the passing review), so a disagreement shows. An agent's run is the run of its own journal
-// record. When that run is not among these slices (a slice carried into a later run is reviewed under the new run id
+// record, else (2.2.0) the run its launch record carries (runOfAgent). When that run is not among these slices (a slice carried into a later run is reviewed under the new run id
 // while its earlier agents keep the old one), the agent goes to the first passed run of its session and slice id after
 // its own only when its own run recorded no reviewer stop record for the slice (the slice left it unreviewed), so an
 // earlier run that finished the slice (passed or failed) adds nothing. An agent with no known run goes to the passed
@@ -807,7 +820,7 @@ const passedSection = (() => {
       return [p.session.slice(0, 8), p.run, p.slice, p.attempts, p.impl.size, p.rev.size, formatTokens(sumTokens(b)), formatUsd(b.cost), b.unpriced, failedAfter.has(k) ? "yes" : "no"];
     });
   if (!rows.length) return `${head}<p>No slice whose latest review passed and with an implementer launch yet.</p>`;
-  return `${head}${table(["Session", "Run", "Slice", "Attempts", "Implementers", "Reviewers", "Tokens", "Est. cost (list prices)", "Not priced", "Failing review after latest attempt"], rows)}<p>Slices whose latest reviewer stop record in the journal is pass. This can differ from the gates' verdict for a slice with several reviews of one attempt (a risky slice fails on any counted fail, a superseded review counts as nothing, a fail whose gaps are all below the cutoff can count as a pass): "Failing review after latest attempt" is yes when a failing review was recorded after the start of the slice's latest attempt: the later of its latest implementer launch record and its latest implementer stop record before the passing review (a resumed implementer writes no launch record, but a new stop record). Tokens and cost of each slice's implementers and reviewers, from their last stop records with tokens, at list prices as of ${PRICES_AS_OF}: an estimate, not a bill. Attempts counts implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record and is not counted. Slices whose latest review did not pass, and slices with no implementer launch, are left out. An agent of an earlier run counts for a later run's slice of the same id only when its own run recorded no review of that slice (the slice was carried); an agent with no known run (no journal stop record) counts only when one run alone has records for that slice id.</p>${leftOut.size ? `<p>${leftOut.size} agent${leftOut.size === 1 ? "" : "s"} left out because ${leftOut.size === 1 ? "its run is" : "their runs are"} unknown and several runs have records for ${leftOut.size === 1 ? "its" : "their"} slice id.</p>` : ""}`;
+  return `${head}${table(["Session", "Run", "Slice", "Attempts", "Implementers", "Reviewers", "Tokens", "Est. cost (list prices)", "Not priced", "Failing review after latest attempt"], rows)}<p>Slices whose latest reviewer stop record in the journal is pass. This can differ from the gates' verdict for a slice with several reviews of one attempt (a risky slice fails on any counted fail, a superseded review counts as nothing, a fail whose gaps are all below the cutoff can count as a pass): "Failing review after latest attempt" is yes when a failing review was recorded after the start of the slice's latest attempt: the later of its latest implementer launch record and its latest implementer stop record before the passing review (a resumed implementer writes no launch record, but a new stop record). Tokens and cost of each slice's implementers and reviewers, from their last stop records with tokens, at list prices as of ${PRICES_AS_OF}: an estimate, not a bill. Attempts counts implementer launch records: an attempt that resumes the same agent (a SendMessage resume) writes no launch record and is not counted. Slices whose latest review did not pass, and slices with no implementer launch, are left out. An agent of an earlier run counts for a later run's slice of the same id only when its own run recorded no review of that slice (the slice was carried); an agent with no known run (no journal stop record and no run on its launch record) counts only when one run alone has records for that slice id. An agent's run is the run on its stop records in the journal, else the run its launch record carries (the run at launch, written since 2.2.0); only an agent with neither, such as one from before 2.2.0 that wrote no stop record, is placed by the older rules.</p>${leftOut.size ? `<p>${leftOut.size} agent${leftOut.size === 1 ? "" : "s"} left out because ${leftOut.size === 1 ? "its run is" : "their runs are"} unknown and several runs have records for ${leftOut.size === 1 ? "its" : "their"} slice id.</p>` : ""}`;
 })();
 
 // Where each log came from: "<dir> (runs.jsonl, routes.jsonl); <dir> (telemetry.jsonl, gates.jsonl)".

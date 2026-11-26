@@ -549,3 +549,95 @@ test("report finding H3: the main-session row is named for what it covers, and a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// 2.2.0: launch records carry `run` (the run at launch). An agent's run is its stop records' run, else its launch
+// record's; only an agent with neither is placed by the older rules.
+
+test("report launch run: an implementer with a launch run and no stop record lands in its own run's row and nowhere else", () => {
+  // Run 1: d1 hits its turn limit (no stop record; its launch carries run 1), the review passes. Run 2 reuses slice id x
+  // with its own implementer and a passing review. Without the launch run d1 was left out (two runs have records for x).
+  const { dir } = state3({
+    tel: [tstop("d1", "implementer"), tstop("ra", "reviewer"), tstop("i2", "implementer"), tstop("rb", "reviewer")],
+    launches: [
+      tlaunch("d1", "implementer", "x", "2026-11-20T10:00:00Z", { run: 1 }),
+      tlaunch("ra", "reviewer", "x", "2026-11-20T10:20:00Z", { run: 1 }),
+      tlaunch("i2", "implementer", "x", "2026-11-20T12:00:00Z", { run: 2 }),
+      tlaunch("rb", "reviewer", "x", "2026-11-20T12:10:00Z", { run: 2 }),
+    ],
+    journal: [
+      tjr("ra", "reviewer", "x", 1, "pass", "2026-11-20T10:25:00Z"),
+      tjr("i2", "implementer", "x", 2, "pass", "2026-11-20T12:05:00Z"),
+      tjr("rb", "reviewer", "x", 2, "pass", "2026-11-20T12:15:00Z"),
+    ],
+  });
+  try {
+    const html = renderReport(dir);
+    const sec = passedAny(html);
+    assert.match(sec, /<tr><td>s1<\/td><td>1<\/td><td>x<\/td><td>1<\/td><td>1<\/td><td>1<\/td><td>200k<\/td>/, sec);
+    assert.match(sec, /<tr><td>s1<\/td><td>2<\/td><td>x<\/td><td>1<\/td><td>1<\/td><td>1<\/td><td>200k<\/td>/, sec);
+    assert.equal((sec.match(/<tr><td>s1<\/td>/g) ?? []).length, 2, "one row per run");
+    assert.doesNotMatch(sec, /run is unknown/, sec);
+    assert.match(sec, /else the run its launch record carries/, sec);
+    assert.match(sec, /before 2\.2\.0/, sec);
+    // A stop record's run wins over the launch record's (a slice carried into a later run is re-homed there).
+    const carried = state3({
+      tel: [tstop("i1", "implementer"), tstop("rc", "reviewer")],
+      launches: [tlaunch("i1", "implementer", "y", "2026-11-20T10:00:00Z", { run: 1 }), tlaunch("rc", "reviewer", "y", "2026-11-20T10:20:00Z", { run: 2 })],
+      journal: [tjr("i1", "implementer", "y", 2, "pass", "2026-11-20T10:05:00Z"), tjr("rc", "reviewer", "y", 2, "pass", "2026-11-20T10:25:00Z")],
+    });
+    try {
+      const c = passedAny(renderReport(carried.dir));
+      assert.match(c, /<tr><td>s1<\/td><td>2<\/td><td>y<\/td><td>1<\/td><td>1<\/td><td>1<\/td><td>200k<\/td>/, c);
+      assert.equal((c.match(/<tr><td>s1<\/td>/g) ?? []).length, 1);
+    } finally {
+      rmSync(carried.dir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report launch run: build versus retries uses the launch run, so a later run reusing a slice id starts with a build", () => {
+  // d1 (run 1) hit its turn limit: no stop record. i2 is the first implementer of run 2 for the same slice id. Before
+  // 2.2.0 the logs could not tell this from a retry of d1; with the launch runs it is a build.
+  const withRun = state3({
+    tel: [tstop("d1", "implementer"), tstop("i2", "implementer")],
+    launches: [tlaunch("d1", "implementer", "a", "2026-11-20T10:00:00Z", { run: 1 }), tlaunch("i2", "implementer", "a", "2026-11-20T11:00:00Z", { run: 2 })],
+    journal: [tjr("i2", "implementer", "a", 2, "pass", "2026-11-20T11:05:00Z")],
+  });
+  try {
+    const sec = phaseAny(renderReport(withRun.dir));
+    assert.match(sec, /<td>build<\/td><td>2<\/td>/, sec);
+    assert.doesNotMatch(sec, /<td>retries<\/td>/, sec);
+    assert.match(sec, /else the run its launch record carries/, sec);
+    assert.match(sec, /before 2\.2\.0/, sec);
+  } finally {
+    rmSync(withRun.dir, { recursive: true, force: true });
+  }
+  // A retry in the same run stays a retry: d1 and i2 both carry run 1.
+  const sameRun = state3({
+    tel: [tstop("d1", "implementer"), tstop("i2", "implementer")],
+    launches: [tlaunch("d1", "implementer", "a", "2026-11-20T10:00:00Z", { run: 1 }), tlaunch("i2", "implementer", "a", "2026-11-20T11:00:00Z", { run: 1 })],
+    journal: [tjr("i2", "implementer", "a", 1, "pass", "2026-11-20T11:05:00Z")],
+  });
+  try {
+    const sec = phaseAny(renderReport(sameRun.dir));
+    assert.match(sec, /<td>build<\/td><td>1<\/td>/, sec);
+    assert.match(sec, /<td>retries<\/td><td>1<\/td>/, sec);
+  } finally {
+    rmSync(sameRun.dir, { recursive: true, force: true });
+  }
+  // Records from before 2.2.0 (no launch run) keep the older rule: the same logs count i2 as a retry.
+  const old = state3({
+    tel: [tstop("d1", "implementer"), tstop("i2", "implementer")],
+    launches: [tlaunch("d1", "implementer", "a", "2026-11-20T10:00:00Z"), tlaunch("i2", "implementer", "a", "2026-11-20T11:00:00Z")],
+    journal: [tjr("i2", "implementer", "a", 2, "pass", "2026-11-20T11:05:00Z")],
+  });
+  try {
+    const sec = phaseAny(renderReport(old.dir));
+    assert.match(sec, /<td>build<\/td><td>1<\/td>/, sec);
+    assert.match(sec, /<td>retries<\/td><td>1<\/td>/, sec);
+  } finally {
+    rmSync(old.dir, { recursive: true, force: true });
+  }
+});

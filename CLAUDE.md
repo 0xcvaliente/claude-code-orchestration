@@ -30,14 +30,15 @@ Two orchestrators for the same job (split a task, build slices in parallel, gate
 Read `docs/maintainer-notes.md` (each release's rules, in full) before changing hooks, gates, the plugin build, the Bash judge, the headless scripts or the release process. Each line below names its section there.
 - After a Claude Code update run `npm run claude-update`; keep the SDK pipeline's Agent SDK patch number equal to the installed Claude Code's (0.3.N carries 2.1.N) (1.2.2).
 - Never name a built-in agent anywhere but `.claude/hooks/builtin-agents.mjs`; `npm run claude-update -- --write-source` adds new ones (1.2.2).
-- Workers and inner calls (the judge hook, the SDK judge, SDK workers) run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (1.2.2).
+- The judge hook, the SDK judge and SDK workers run with `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (`workerEnv` in `src/judge.ts`): Claude Code's auto memory is for a person's sessions, not for workers (1.2.2).
 - Name switches only in maintainer text, never in agent bodies, skills or the nudge's context; run implementer and reviewer Bash in Claude Code's sandbox with a network allowlist, since the guards are not a boundary (0.4.0: lines and gates).
 - `plan-check.mjs` is the only hook that ever returns an allow, and its allow never lowers a model (0.4.0: lines and gates; 0.4.0 addendum: skill selection).
 - No agent or hook pushes or installs a skill: `npm run skill-publish` is run by a person (1.4.0).
 - The `agent` setting lives in the project's `.claude/settings.json` only, never in the plugin, and the plugin ships no `settings.json` (1.4.4, 1.6.1).
 - Entry guards compare real paths of `process.argv[1]` and `import.meta.url` (1.4.4).
 - A new Bash judge denial goes into `src/judge.ts` and `judge-core.mjs` alike (1.4.5, 2.0.0).
-- The orchestrator, the route skill and the nudge carry the same rules (output rule, three-places rule, hand-off, direct opus review): change all three together (1.5.0, 2.0.1, 2.1.1, 2.1.2).
+- The orchestrator and the route skill carry the same rules (output rule, three-places rule, hand-off, direct opus review): change them together; the nudge carries the routing lines, the output rule, a pointer to the route skill for the orchestrate route and a short list of rules a session needs before or without the skill, and a rule leaves the nudge only once the skill carries it (1.5.0, 2.0.1, 2.1.1, 2.1.2, 2.2.0).
+- The nudge's SessionStart text must stay under Claude Code's 10,000-character hook context cap (longer output reaches the session only as a file path and a 2,000-character preview); `src/nudge-length.test.mjs` holds it at 9,000 (2.2.0).
 - Workers report once through `SubagentHandback` and leave no shell task behind (2.0.1).
 - Never use Claude Code's `disableWorkflows`: it removes the saved workflow too (1.6.0).
 - After any edit of `.claude/workflows/orchestrate.js` run `npm run build-plugin`, then `node --test src/workflow-guard.test.mjs`, and paste the two hashes it prints (1.6.1, 2.1.0).
