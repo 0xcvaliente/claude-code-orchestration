@@ -1,4 +1,4 @@
-// 2.1.x: the report's tokens and estimated cost by phase (with the orchestrator's own tokens from the main-session
+// 2.2.0: the report's tokens and estimated cost by phase (with the orchestrator's own tokens from the main-session
 // transcript) and per passed slice.
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";

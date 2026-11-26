@@ -345,7 +345,7 @@ if (handback) {
   for (const k of ["answers", "open", "gaps", "quotes", "draft", "skills_used", "skills_skipped"]) if (k in handback) fields[k] = handback[k];
   rec = /** @type {typeof rec} */ ({ ...rec, ...fields });
 }
-// A reviewer's kind (plan, validate or review) and model (2.1.x, added fields; no gate reads them): from its launch
+// A reviewer's kind (plan, validate or review) and model (2.2.0, added fields; no gate reads them): from its launch
 // record in this session (the one the fold reads, so the fold's model is the same), else kind from the brief in the
 // transcript; each left out when unknown.
 if (role === "reviewer") {
