@@ -291,7 +291,7 @@ npm run build-plugin      # rebuild dist/plugin and dist/dashboard from dashboar
 
 ## Status lines
 
-The mod draws the row of each worker under the prompt. The repo no longer ships a main status line: the script that used to be here was a personal one and was removed after 2.1.2 ([CHANGELOG.md](../CHANGELOG.md), Unreleased).
+The mod draws the row of each worker under the prompt. The repo no longer ships a main status line: the script that used to be here was a personal one and was removed after 2.1.2 ([CHANGELOG.md](../CHANGELOG.md), 2.2.0).
 
 ### The row of each worker
 

@@ -72,7 +72,7 @@ docs/                the documentation (index: docs/README.md), data/ (run data,
 
 ## Contributor rules
 
-The full rules are in `CLAUDE.md` and `.claude/rules/agents.md`. `CLAUDE.md` holds the commands and rules every session needs. `.claude/rules/agents.md` loads only when you touch agent, hook, settings or workflow files. In short:
+The full rules are in `CLAUDE.md`, `docs/maintainer-notes.md` and `.claude/rules/agents.md`. `CLAUDE.md` holds the commands and rules every session needs. `docs/maintainer-notes.md` holds the release-by-release rules. `.claude/rules/agents.md` loads only when you touch agent, hook, settings or workflow files. In short:
 
 **Models and agents.**
 - Change models, effort, turn limits and the triage thresholds in `src/config.ts`, the one source of truth. Then run `npm run sync-agents`; `npm run check-agents` fails on drift.

@@ -100,12 +100,19 @@ test("brief tokens appear in the orchestrator and the reviewer", () => {
   for (const t of ["SLICE:", "FOCUS:"]) assert.ok(reviewer.includes(t), `${REVIEWER} must mention ${t}`);
 });
 
-test("the route skill and nudge.mjs describe the same brief rules", () => {
-  for (const file of [SKILL, NUDGE]) {
+// 2.2.0: the nudge no longer carries the brief rules; it points to the route skill (asserted below), which holds them.
+test("the route skill describes the brief rules", () => {
+  for (const file of [SKILL]) {
     const text = read(file);
     for (const t of ["SLICE:", "FILES:", "DEPENDS:", "PATH: light", "PLAN REVIEW", "FOCUS:"]) assert.ok(text.includes(t), `${file} must mention ${t}`);
     assert.match(text, /implementer/, `${file} says the briefs are for implementers`);
     assert.match(text, /reviewer/, `${file} says reviewer briefs start with SLICE`);
+  }
+});
+
+test("the nudge sends the session to the route skill for the orchestrate route", () => {
+  for (const env of [{}, { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" }] as Record<string, string>[]) {
+    assert.match(nudgeContext(env), /^- orchestrate: follow the orchestrate route as the orchestration:route skill describes it\b/m, "the nudge names the route skill for the orchestrate route");
   }
 });
 
@@ -191,8 +198,8 @@ const nudgeContext = (env: Record<string, string> = {}) => {
   return JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
 };
 
-test("0.4.0 brief and reply lines appear in the orchestrator, the route skill and the nudge", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("0.4.0 brief and reply lines appear in the orchestrator and the route skill (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     for (const t of ["SOURCES:", "READ:", "KIND: bugfix", "VALIDATE: gaps", "GAP: <0-100> <text>", "QUOTE: <locator> | <verbatim text>", "replan_required"]) assert.ok(text.includes(t), `${file} must mention ${t}`);
     assert.match(text, /lookup\|extract\|judge/, `${file} names the READ modes`);
@@ -231,14 +238,14 @@ test("model-facing text names gate reasons but no environment switch", () => {
   assert.equal(refusal.decision, "block");
   assert.doesNotMatch(refusal.reason, switches, "the nudge's refusal names a switch");
   for (const reason of ["not_in_plan", "opus_review_required", "replan_required", "builtin_agent_in_run"]) assert.ok(read(ORCH).includes(reason), `${ORCH} keeps the reason ${reason}`);
-  const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md");
+  const maintainer = read(".claude/rules/agents.md") + read("CLAUDE.md") + read("docs/maintainer-notes.md");
   for (const s of ["ORCH_GAP_MIN", "ORCH_STALL_GATE", "ORCH_GUARDS", "ORCH_READ_ROUTER", "ORCH_QUOTE_CHECK", "ORCH_BASELINE", "ORCH_BUGFIX_CHECK", "ORCH_SKILL_HINTS", "ORCH_ALLOW_HAIKU", "ORCH_SKILL_CREATE", "ORCH_SKILLS_REPO_PRIVATE", "ORCH_SKILLS_REPO_PUBLIC", "ORCH_WORKFLOW_GUARD", "CLAUDE_PLUGIN_OPTION_"]) assert.ok(maintainer.includes(s), `maintainer text must name ${s}`);
   assert.match(read(NUDGE), /ORCH_ESCALATION=off[\s\S]*ORCH_ESCALATION=always/, "the nudge's maintainer comment names both escalation settings");
 });
 
 // --- Skill selection (0.4.0 addendum): the SKILLS line, the plan check's suggestions and the Skill tool. ---
-test("the orchestrator, the route skill and the nudge describe the SKILLS line the same way", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill describe the SKILLS line the same way (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.ok(text.includes("SKILLS: <comma-separated skill names>"), `${file} must give the SKILLS line`);
     assert.match(text, /clearly needs/, `${file} adds SKILLS only when a slice clearly needs a skill`);
@@ -273,8 +280,8 @@ test("the Skill tool goes to the orchestrator, the researcher and the reviewer, 
   for (const file of [ORCH, RESEARCHER, REVIEWER]) assert.match(read(file), /^tools: .*\bSkill\b/m, `${file} frontmatter lists Skill`);
 });
 
-test("the orchestrator, the route skill and the nudge cap plan-shaping skills at two and ask for a SKILLS decision on RISKY slices", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill cap plan-shaping skills at two and ask for a SKILLS decision on RISKY slices (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.match(text, /at most two installed skills that shape the plan itself \(domain rules, architecture, a threat model\)/, `${file} caps plan-shaping skills at two`);
     assert.match(text, /every other fitting skill (goes )?to the workers/i, `${file} sends other skills to the workers`);
@@ -286,8 +293,8 @@ test("the orchestrator, the route skill and the nudge cap plan-shaping skills at
 });
 
 // --- Two reviewers for a RISKY slice (2.1.0): the rule the review gate's `second_review_required` enforces. ---
-test("the orchestrator, the route skill and the nudge state the two-reviewer rule for RISKY slices the same way", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill state the two-reviewer rule for RISKY slices the same way (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.doesNotMatch(text, /RISKY slice with [^.]*opus"? from the start/, `${file} no longer reviews a RISKY slice with one opus reviewer`);
     assert.match(text, /RISKY slice gets two [^.;]*in one message with the same brief, one with `?model:? "?opus"?`? and one on the default model/, `${file} launches two reviewers at once`);
@@ -318,7 +325,7 @@ test("the plan reviewer checks each slice's skill choice", () => {
 });
 
 test("maintainer text describes the skill suggestions and the widened allow", () => {
-  for (const file of [".claude/rules/agents.md", "CLAUDE.md"]) {
+  for (const file of [".claude/rules/agents.md", "docs/maintainer-notes.md"]) {
     const text = read(file);
     for (const t of ["SKILLS:", "ORCH_SKILL_HINTS=off", "skill_hints", "at most 3", "anthropic-skills:<name>", "synced/<uuid>/<name>", ".claude/skills", "Workflow agents get no hints", "light_path", "never for built-ins or fork"]) {
       assert.ok(text.includes(t), `${file} must mention ${t}`);
@@ -332,6 +339,22 @@ test("maintainer text describes the skill suggestions and the widened allow", ()
 
 test("the orchestrator says once that an answer it writes itself is reviewed", () => {
   assert.equal(read(ORCH).match(/answer you write yourself/g)?.length, 1);
+});
+
+test("the orchestrator answers a small read-only question itself, with no researcher, and reviews it only when risky", () => {
+  const step = read(ORCH).split("\n").find((l) => l.startsWith("0. Size the task first"))!;
+  assert.match(step, /Small question: when the task is a question about the project or its files that changes nothing and that at most 5 of your own Read, Grep or Glob calls can settle, answer it yourself with a file and line reference for each fact and launch no researcher; send the answer to a `reviewer` only when a wrong answer is costly \(the risky list below\)\. It is not a run and needs no path line; when the reads show it needs more than that, continue with the paths below\./, `${ORCH} step 0 states the small-question rule`);
+  assert.match(read(ORCH), /^1\. Explore \(a small question of step 0 skips this step\):/m, `${ORCH} step 1 points back to step 0`);
+  assert.match(read(ORCH), /A small question of step 0 goes to a `reviewer` only when a wrong answer is costly\./, `${ORCH} step 5 points back to step 0`);
+});
+
+test("the route skill, the nudge and the maintainer rules carry the same small-question exception", () => {
+  const texts: [string, string][] = [[SKILL, read(SKILL)], [NUDGE, nudgeContext()], [".claude/rules/agents.md", read(".claude/rules/agents.md")]];
+  for (const [name, text] of texts) {
+    assert.match(text, /a question about the project that changes nothing and that at most 5 of (your|the session's) own Read, Grep or Glob calls can settle is answered directly/, `${name} bounds the small question at 5 own reads`);
+    assert.match(text, /answered directly, with (a file and line reference for each fact and )?no researcher/, `${name} launches no researcher for a small question`);
+    assert.match(text, /goes to (a )?`?(orchestration:)?reviewer`? only when a wrong answer is costly/, `${name} reviews a small question only when a wrong answer is costly`);
+  }
 });
 
 // --- Output to the person: keywords, not prose (the three-places rule). ---
@@ -355,6 +378,9 @@ test("the orchestrator, the route skill and the nudge end the final report with 
     assert.match(text, /`?handoff: <branch> at <commit>`? or `?handoff: none - <why>`?/, `${file} gives the hand-off line`);
     assert.match(text, /only the person starts `?\/ship`?/i, `${file} says only the person starts /ship`);
     assert.match(text, /never invoke `?\/ship`? or `?\/steward`?, or the `?ship`?, `?ship-local`? or `?steward`? skills/i, `${file} never invokes /ship, /steward or their skills`);
+  }
+  // 2.2.0: the nudge points to the route skill for the hand-off brief and the publishing rule.
+  for (const [file, text] of texts.slice(0, 2)) {
     assert.match(text, /HANDOFF/, `${file} names the HANDOFF brief`);
     assert.match(text, /a headless run denies it\), nothing (is|was) committed/, `${file} covers the headless hand-off`);
     assert.match(text, /only when the person asked for exactly that in their own words in this session/, `${file} leaves publishing to the person's own words`);
@@ -383,31 +409,31 @@ test("the orchestrator shows the plan once as summary lines and puts the full pl
   assert.match(orch, /Do not claim success without evidence/, `${ORCH} still requires evidence`);
 });
 
-test("the three texts name a test gate that gave up as a doubt signal where they list doubt signals", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill name a test gate that gave up as a doubt signal where they list doubt signals (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     const list = text.match(/doubt signal \(([^)]*\([^)]*\)[^)]*)\)/)?.[1] ?? "";
     assert.match(list, /a test gate that gave up on (its|the slice's) latest attempt/, `${file} lists a test gate that gave up among the doubt signals`);
   }
 });
 
-test("the three texts launch a non-RISKY slice's one review on opus directly when the opus review is certain", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill launch a non-RISKY slice's one review on opus directly when the opus review is certain (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.match(text, /For a slice that is not RISKY, when the opus review is certain before the review starts \((the slice is )?a retry after a failed review, or the slice has checked constraints \(a `?CHECKS:`? line\) and no command can prove any of them, so every answer will be `?\(read\)`?\), launch its one review on opus directly[^.;]*instead of a default-model review followed by an opus one; that review is the slice's review\./, `${file} launches a certain opus review directly`);
     assert.match(text, /When in doubt whether a command can prove a constraint, start on the default model\./, `${file} starts on the default model when in doubt`);
   }
 });
 
-test("the three texts start a slice with no checked constraints on the default model", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill start a slice with no checked constraints on the default model (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.match(text, /On its first review, a slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model;/, `${file} starts a slice with no checked constraints on the default model`);
   }
 });
 
-test("the three texts send a retry after a failed review to opus directly whether or not the slice has checked constraints", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the orchestrator and the route skill send a retry after a failed review to opus directly whether or not the slice has checked constraints (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.match(text, /a slice with no checked constraints \(no `?CHECKS:`? line\) starts on the default model; a retry after a failed review still goes to opus directly\./, `${file} exempts a retry from the no-checked-constraints sentence`);
   }
@@ -426,7 +452,8 @@ test("nudge warns about agent teams only when they are switched on", () => {
 
 // --- The acceptance check: the narrowest command, since the test gate already runs the whole suite. ---
 test("every place that states the acceptance check asks for the narrowest command and leaves the whole suite to the test gate", () => {
-  const texts: [string, string][] = [[IMPLEMENTER, read(IMPLEMENTER)], [ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  // 2.2.0: the nudge points to the route skill for the acceptance check.
+  const texts: [string, string][] = [[IMPLEMENTER, read(IMPLEMENTER)], [ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     assert.match(text, /narrowest command that proves the slice/, `${file} asks for the narrowest command that proves the slice`);
     assert.match(text, /tests of the files (it|you) owns?/, `${file} says that for code it is the tests of the files the slice owns`);
@@ -476,7 +503,8 @@ test("the orchestrator, the route skill and the nudge state the caps of limits.m
   assert.match(step2, new RegExp(`\\(at most ${PLAN_SLICE_CAP} slices\\)`), `${ORCH} step 2 caps slices`);
   assert.match(orch, new RegExp(`Wave: at most ${WAVE_CAP_DEFAULT} implementers run at a time`), `${ORCH} step 3 states the wave cap`);
   assert.match(orch, new RegExp(`launch ${WAVE_CAP_DEFAULT} and start the next ready slice`), `${ORCH} launches a full wave, then the next ready slice`);
-  const texts: [string, string][] = [[ORCH, orch], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+  // 2.2.0: the nudge points to the route skill for the caps.
+  const texts: [string, string][] = [[ORCH, orch], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     // Every cap a text states matches limits.mjs; no other number stands where a cap does.
     for (const m of text.matchAll(/at most (\d+) (?:narrow |researcher )?questions/g)) assert.equal(Number(m[1]), RESEARCH_QUESTION_CAP, `${file} states ${m[0]}`);
@@ -498,8 +526,8 @@ test("the plan reviewer checks the slice cap of limits.mjs", () => {
   for (const m of body.matchAll(/at most (\d+) slices/g)) assert.equal(Number(m[1]), PLAN_SLICE_CAP, `${REVIEWER} states ${m[0]}`);
 });
 
-test("the gap cutoff the three texts state equals the code's default", () => {
-  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)], [NUDGE, nudgeContext()]];
+test("the gap cutoff the orchestrator and the route skill state equals the code's default (the nudge points to the skill, 2.2.0)", () => {
+  const texts: [string, string][] = [[ORCH, read(ORCH)], [SKILL, read(SKILL)]];
   for (const [file, text] of texts) {
     const stated = [...text.matchAll(/gap (?:with|of) confidence (\d+) or more/g)].map((m) => Number(m[1]));
     assert.ok(stated.length > 0, `${file} states the gap cutoff`);
