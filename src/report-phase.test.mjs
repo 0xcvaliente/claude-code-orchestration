@@ -19,20 +19,29 @@ const renderReport = (dir) => {
   assert.equal(r.status, 0, r.stderr);
   return readFileSync(join(dir, ".claude", "state", "report.html"), "utf8");
 };
-/** @param {string} html */
-const phaseSection = (html) => html.slice(html.indexOf("<h2>Tokens and estimated cost by phase</h2>"), html.indexOf("<h3>Tokens and estimated cost per slice whose latest review passed</h3>"));
+/**
+ * The page from the first of `starts` found up to `end`; fails when no start or the end is missing, so a renamed
+ * heading cannot make a helper return nearly the whole page.
+ * @param {string} html @param {string[]} starts @param {string} end
+ */
+const between = (html, starts, end) => {
+  const at = starts.map((s) => html.indexOf(s)).find((i) => i >= 0) ?? -1;
+  assert.ok(at >= 0, `none of the headings ${starts.join(" | ")} is on the page`);
+  const to = html.indexOf(end, at);
+  assert.ok(to >= 0, `the end marker ${end} is not on the page after the section`);
+  return html.slice(at, to);
+};
 const PASSED_HEAD = "<h3>Tokens and estimated cost per slice whose latest review passed</h3>";
 /** @param {string} html */
-const passedSection = (html) => html.slice(html.indexOf(PASSED_HEAD), html.indexOf("<h2>Review time</h2>"));
+const phaseSection = (html) => between(html, ["<h2>Tokens and estimated cost by phase</h2>"], PASSED_HEAD);
+/** @param {string} html */
+const passedSection = (html) => between(html, [PASSED_HEAD], "<h2>Review time</h2>");
 /** The same section under either heading (the one before F1's rename too), for the finding tests. @param {string} html */
-const passedAny = (html) => {
-  const at = html.indexOf(PASSED_HEAD);
-  return html.slice(at >= 0 ? at : html.indexOf("<h3>Tokens and estimated cost per passed slice</h3>"), html.indexOf("<h2>Review time</h2>"));
-};
+const passedAny = (html) => between(html, [PASSED_HEAD, "<h3>Tokens and estimated cost per passed slice</h3>"], "<h2>Review time</h2>");
 /** @param {string} html */
-const phaseAny = (html) => html.slice(html.indexOf("<h2>Tokens and estimated cost by phase</h2>"), html.indexOf("<h3>Tokens and estimated cost per"));
+const phaseAny = (html) => between(html, ["<h2>Tokens and estimated cost by phase</h2>"], "<h3>Tokens and estimated cost per");
 /** @param {string} html */
-const kindAny = (html) => html.slice(html.indexOf("<h3>Review outcomes by kind and model</h3>"), html.indexOf("<h2>Reads by kind and role</h2>"));
+const kindAny = (html) => between(html, ["<h3>Review outcomes by kind and model</h3>"], "<h2>Reads by kind and role</h2>");
 /** A fresh state folder with the three logs. @param {{ tel?: unknown[], launches?: unknown[], journal?: unknown[] }} logs */
 const state3 = ({ tel = [], launches = [], journal = [] }) => {
   const dir = mkdtempSync(join(tmpdir(), "orch-report-find-"));
@@ -228,7 +237,7 @@ test("report finding F1: a slice whose latest review passed after a failing revi
     const html = renderReport(dir);
     const sec = passedAny(html);
     assert.ok(html.includes(PASSED_HEAD), "the table says what it shows");
-    assert.match(sec, /<th>Failing review after latest launch<\/th>/);
+    assert.match(sec, /<th>Failing review after latest (launch|attempt)<\/th>/);
     assert.match(sec, /<td>s1<\/td><td>1<\/td><td>a<\/td><td>1<\/td><td>1<\/td><td>2<\/td>(?:<td>[^<]*<\/td>){3}<td>yes<\/td><\/tr>/, sec);
     assert.match(sec, /<td>s1<\/td><td>1<\/td><td>b<\/td><td>2<\/td><td>2<\/td><td>2<\/td>(?:<td>[^<]*<\/td>){3}<td>no<\/td><\/tr>/, sec);
     assert.match(sec, /can differ from the gates' verdict/);
@@ -349,6 +358,92 @@ test("report finding F6: a log that exists but cannot be read is named near the 
     rmSync(join(state, "runs.jsonl"), { recursive: true });
     rmSync(join(state, "gates.jsonl"), { recursive: true });
     assert.doesNotMatch(renderReport(dir), /could not be read/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Findings of the second review of the new report sections (fix2). Each test reproduces one finding.
+
+test("report finding G1: a failing review before a resumed attempt of the same implementer carries no marker", () => {
+  // i1 launched at 10:00, stops at 10:05; the review fails at 10:10; i1 is resumed (no new launch record) and stops
+  // again at 10:20; the review passes at 10:30. The fail came before the latest attempt.
+  const { dir } = state3({
+    tel: [tstop("i1", "implementer"), tstop("rf", "reviewer"), tstop("rp", "reviewer")],
+    launches: [
+      tlaunch("i1", "implementer", "a", "2026-11-20T10:00:00Z"),
+      tlaunch("rf", "reviewer", "a", "2026-11-20T10:06:00Z"),
+      tlaunch("rp", "reviewer", "a", "2026-11-20T10:21:00Z"),
+    ],
+    journal: [
+      tjr("i1", "implementer", "a", 1, "pass", "2026-11-20T10:05:00Z"),
+      tjr("rf", "reviewer", "a", 1, "fail", "2026-11-20T10:10:00Z"),
+      tjr("i1", "implementer", "a", 1, "pass", "2026-11-20T10:20:00Z"),
+      tjr("rp", "reviewer", "a", 1, "pass", "2026-11-20T10:30:00Z"),
+    ],
+  });
+  try {
+    const sec = passedAny(renderReport(dir));
+    assert.match(sec, /<th>Failing review after latest attempt<\/th>/);
+    assert.match(sec, /<td>s1<\/td><td>1<\/td><td>a<\/td><td>1<\/td><td>1<\/td><td>2<\/td>(?:<td>[^<]*<\/td>){3}<td>no<\/td><\/tr>/, sec);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report finding G2: a message id in two main-session transcripts (a fork or resume) counts once", () => {
+  const { dir, state } = state3({});
+  const a = join(dir, "a.jsonl");
+  const b = join(dir, "b.jsonl");
+  /** @param {string} id @param {number} out */
+  const msg = (id, out) => ({ type: "assistant", message: { id, model: "claude-sonnet-5-5", usage: { input_tokens: 0, output_tokens: out } } });
+  writeJsonl(a, [msg("m1", 100000), msg("m2", 100000)]);
+  writeJsonl(b, [msg("m1", 100000), msg("m2", 150000), msg("m3", 100000)]); // the same history, then one more message
+  writeJsonl(join(state, "telemetry.jsonl"), [
+    { ts: "t", session_id: "s1", hook_event_name: "SubagentStart", agent_id: "x", agent_type: "reviewer", transcript_path: a },
+    { ts: "t", session_id: "s2", hook_event_name: "SubagentStart", agent_id: "y", agent_type: "reviewer", transcript_path: b },
+  ]);
+  try {
+    const sec = phaseAny(renderReport(dir));
+    // m1 100k, m2 150k (its largest value), m3 100k: 350k at $10 per M output.
+    assert.match(sec, /<td>orchestrator<\/td><td>2<\/td><td>0<\/td><td>350k<\/td><td>0<\/td><td>0<\/td><td>350k<\/td><td>\$3\.50<\/td><td>0<\/td>/, sec);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report finding G3: an implementer launch with no known run makes only the next known-run launch a retry", () => {
+  // i1 has no journal record (turn limit), i2 is run 1's retry, i3 is the first implementer of run 2 (same slice id).
+  const { dir } = state3({
+    tel: [tstop("i1", "implementer"), tstop("i2", "implementer"), tstop("i3", "implementer")],
+    launches: [
+      tlaunch("i1", "implementer", "a", "2026-11-20T10:00:00Z"),
+      tlaunch("i2", "implementer", "a", "2026-11-20T10:20:00Z"),
+      tlaunch("i3", "implementer", "a", "2026-11-20T11:00:00Z"),
+    ],
+    journal: [tjr("i2", "implementer", "a", 1, "pass", "2026-11-20T10:25:00Z"), tjr("i3", "implementer", "a", 2, "pass", "2026-11-20T11:05:00Z")],
+  });
+  try {
+    const sec = phaseAny(renderReport(dir));
+    assert.match(sec, /<td>build<\/td><td>2<\/td>/, sec);
+    assert.match(sec, /<td>retries<\/td><td>1<\/td>/, sec);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report finding G4: the State line names the logs the new sections read, even with no token data", () => {
+  const { dir } = state3({
+    launches: [tlaunch("r1", "reviewer", "a", "2026-11-20T10:00:00Z", { model: "opus" })],
+    journal: [tjr("r1", "reviewer", "a", 1, "pass", "2026-11-20T10:05:00Z", { kind: "review" })],
+  });
+  try {
+    const html = renderReport(dir);
+    assert.ok(kindAny(html).includes("<td>opus</td>"), "the kind table used the launch record");
+    const state = /<p>State: (.*?)<\/p>/.exec(html)?.[1] ?? "";
+    assert.match(state, /journal\.jsonl/, state);
+    assert.match(state, /journal-launches\.jsonl/, state);
+    assert.equal((state.match(/journal\.jsonl/g) ?? []).length, 1, "each log named once");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
