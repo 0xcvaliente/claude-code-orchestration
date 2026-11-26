@@ -3,7 +3,7 @@
 import "./test-tmp.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -141,13 +141,13 @@ test("report phase: tokens and estimated cost per phase, the orchestrator from t
     assert.match(sec, row("integrate", 1, "100k", "1\\.00"));
     assert.match(sec, row("unassigned", 1, "100k", "1\\.00")); // u1; its background_tasks add nothing
     // Main session: m1 on opus (100k out, $2) and m2 on sonnet (100k out, $1).
-    assert.match(sec, row("orchestrator", 1, "200k", "3\\.00"));
+    assert.match(sec, row("main sessions", 1, "200k", "3\\.00"));
     assert.match(sec, /9 subagents at \$10\.00 and 1 main-session transcript: 1\.20M tokens and \$13\.00 in all, at list prices as of \d{4}-\d{2}-\d{2}: an estimate for comparing phases, not a bill/);
     assert.match(sec, /1 main-session transcript was missing or unreadable and skipped/);
     assert.match(sec, /1 agent with no token data on the last stop record left out\./);
 
     // The subagent phases add up to the cost table's agents and total.
-    const phaseRows = [...sec.matchAll(/<tr><td>([a-z ]+)<\/td><td>(\d+)<\/td>(?:<td>[^<]*<\/td>){5}<td>\$([\d.]+)<\/td>/g)].filter((m) => m[1] !== "orchestrator");
+    const phaseRows = [...sec.matchAll(/<tr><td>([a-z ]+)<\/td><td>(\d+)<\/td>(?:<td>[^<]*<\/td>){5}<td>\$([\d.]+)<\/td>/g)].filter((m) => m[1] !== "main sessions");
     assert.equal(phaseRows.reduce((a, m) => a + Number(m[2]), 0), 9);
     const phaseCost = phaseRows.reduce((a, m) => a + Number(m[3]), 0);
     const costTotal = Number(/Total \$([\d.]+) at list prices/.exec(html)?.[1]);
@@ -406,7 +406,7 @@ test("report finding G2: a message id in two main-session transcripts (a fork or
   try {
     const sec = phaseAny(renderReport(dir));
     // m1 100k, m2 150k (its largest value), m3 100k: 350k at $10 per M output.
-    assert.match(sec, /<td>orchestrator<\/td><td>2<\/td><td>0<\/td><td>350k<\/td><td>0<\/td><td>0<\/td><td>350k<\/td><td>\$3\.50<\/td><td>0<\/td>/, sec);
+    assert.match(sec, /<td>main sessions<\/td><td>2<\/td><td>0<\/td><td>350k<\/td><td>0<\/td><td>0<\/td><td>350k<\/td><td>\$3\.50<\/td><td>0<\/td>/, sec);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -444,6 +444,107 @@ test("report finding G4: the State line names the logs the new sections read, ev
     assert.match(state, /journal\.jsonl/, state);
     assert.match(state, /journal-launches\.jsonl/, state);
     assert.equal((state.match(/journal\.jsonl/g) ?? []).length, 1, "each log named once");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Findings of the third review of the new report sections (fix3). Each test reproduces one finding.
+
+test("report finding H1: a carried slice keeps its first-run implementer when the later run launches a fresh one", () => {
+  // Run 1: i1 builds slice a, no review of a in run 1. Run 2 (the slice carried by a new plan review): a review fails,
+  // a fresh implementer i2 is launched, the next review passes. The row of (run 2, a) holds i1 and i2.
+  const { dir } = state3({
+    tel: [tstop("i1", "implementer"), tstop("p2", "reviewer"), tstop("ra", "reviewer"), tstop("i2", "implementer"), tstop("rb", "reviewer")],
+    launches: [
+      tlaunch("i1", "implementer", "a", "2026-11-20T10:00:00Z"),
+      tlaunch("p2", "reviewer", "plan", "2026-11-20T10:10:00Z", { isPlanReview: true }),
+      tlaunch("ra", "reviewer", "a", "2026-11-20T10:20:00Z"),
+      tlaunch("i2", "implementer", "a", "2026-11-20T10:30:00Z"),
+      tlaunch("rb", "reviewer", "a", "2026-11-20T10:40:00Z"),
+    ],
+    journal: [
+      tjr("i1", "implementer", "a", 1, "pass", "2026-11-20T10:05:00Z"),
+      tjr("p2", "reviewer", "plan", 2, "pass", "2026-11-20T10:15:00Z"),
+      tjr("ra", "reviewer", "a", 2, "fail", "2026-11-20T10:25:00Z"),
+      tjr("i2", "implementer", "a", 2, "pass", "2026-11-20T10:35:00Z"),
+      tjr("rb", "reviewer", "a", 2, "pass", "2026-11-20T10:45:00Z"),
+    ],
+  });
+  try {
+    const sec = passedAny(renderReport(dir));
+    // Attempts 2, implementers 2, reviewers 2: 400k; the fail came before the latest attempt.
+    assert.match(sec, /<td>s1<\/td><td>2<\/td><td>a<\/td><td>2<\/td><td>2<\/td><td>2<\/td><td>400k<\/td>(?:<td>[^<]*<\/td>){2}<td>no<\/td><\/tr>/, sec);
+    assert.equal((sec.match(/<tr><td>s1<\/td>/g) ?? []).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report finding H2: an agent with no known run joins a passed slice only when one run has records for that slice id", () => {
+  // One session, three tasks that each name their slice x. Task 1: d1 has no stop record (turn limit), i1 is built and
+  // its review fails. Task 3: i3 is built and passes. d1 cannot be placed: two runs have records for x.
+  const { dir } = state3({
+    tel: [tstop("d1", "implementer"), tstop("i1", "implementer"), tstop("ra", "reviewer"), tstop("i3", "implementer"), tstop("rc", "reviewer")],
+    launches: [
+      tlaunch("d1", "implementer", "x", "2026-11-20T10:00:00Z"),
+      tlaunch("i1", "implementer", "x", "2026-11-20T10:10:00Z"),
+      tlaunch("ra", "reviewer", "x", "2026-11-20T10:20:00Z"),
+      tlaunch("i3", "implementer", "x", "2026-11-20T12:00:00Z"),
+      tlaunch("rc", "reviewer", "x", "2026-11-20T12:10:00Z"),
+    ],
+    journal: [
+      tjr("i1", "implementer", "x", 1, "pass", "2026-11-20T10:15:00Z"),
+      tjr("ra", "reviewer", "x", 1, "fail", "2026-11-20T10:25:00Z"),
+      tjr("i3", "implementer", "x", 3, "pass", "2026-11-20T12:05:00Z"),
+      tjr("rc", "reviewer", "x", 3, "pass", "2026-11-20T12:15:00Z"),
+    ],
+  });
+  try {
+    const sec = passedAny(renderReport(dir));
+    assert.match(sec, /<td>s1<\/td><td>3<\/td><td>x<\/td><td>1<\/td><td>1<\/td><td>1<\/td><td>200k<\/td>/, sec);
+    assert.match(sec, /1 agent left out because its run is unknown/, sec);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // With only one run that has records for the slice id, the unknown-run agent is attached (and no note).
+  const one = state3({
+    tel: [tstop("d1", "implementer"), tstop("i3", "implementer"), tstop("rc", "reviewer")],
+    launches: [
+      tlaunch("d1", "implementer", "x", "2026-11-20T10:00:00Z"),
+      tlaunch("i3", "implementer", "x", "2026-11-20T12:00:00Z"),
+      tlaunch("rc", "reviewer", "x", "2026-11-20T12:10:00Z"),
+    ],
+    journal: [tjr("i3", "implementer", "x", 3, "pass", "2026-11-20T12:05:00Z"), tjr("rc", "reviewer", "x", 3, "pass", "2026-11-20T12:15:00Z")],
+  });
+  try {
+    const sec = passedAny(renderReport(one.dir));
+    assert.match(sec, /<td>s1<\/td><td>3<\/td><td>x<\/td><td>2<\/td><td>2<\/td><td>1<\/td><td>300k<\/td>/, sec);
+    assert.doesNotMatch(sec, /run is unknown/);
+  } finally {
+    rmSync(one.dir, { recursive: true, force: true });
+  }
+});
+
+test("report finding H3: the main-session row is named for what it covers, and a too-large transcript is said to be too large", () => {
+  const { dir, state } = state3({});
+  const main = join(dir, "main.jsonl");
+  const big = join(dir, "big.jsonl");
+  writeJsonl(main, [{ type: "assistant", message: { id: "m1", model: "claude-sonnet-5-5", usage: { input_tokens: 0, output_tokens: 100000 } } }]);
+  // A sparse file past the longest string Node can make: readable, but too large to read in one piece.
+  writeFileSync(big, "");
+  truncateSync(big, 600 * M);
+  writeJsonl(join(state, "telemetry.jsonl"), [
+    { ts: "t", session_id: "s1", hook_event_name: "SubagentStart", agent_id: "x", agent_type: "reviewer", transcript_path: main },
+    { ts: "t", session_id: "s2", hook_event_name: "SubagentStart", agent_id: "y", agent_type: "reviewer", transcript_path: big },
+  ]);
+  try {
+    const sec = phaseAny(renderReport(dir));
+    assert.match(sec, /<td>main sessions<\/td><td>1<\/td><td>0<\/td><td>100k<\/td>/, sec);
+    assert.doesNotMatch(sec, /<td>orchestrator<\/td>/);
+    assert.match(sec, /main thread of every session that launched a subagent, orchestrator or not/, sec);
+    assert.match(sec, /1 main-session transcript was too large to read/, sec);
+    assert.doesNotMatch(sec, /missing or unreadable/, sec);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
