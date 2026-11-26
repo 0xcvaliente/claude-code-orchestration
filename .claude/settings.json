@@ -1,4 +1,5 @@
 {
+  "attribution": { "commit": "", "pr": "", "sessionUrl": false },
   "agent": "orchestrator",
   "worktree": { "baseRef": "head" },
   "permissions": {
